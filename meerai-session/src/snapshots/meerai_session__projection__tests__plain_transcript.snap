@@ -1,0 +1,56 @@
+---
+source: meerai-session/src/projection.rs
+expression: render(&messages)
+---
+[
+  {
+    "role": "System",
+    "content": [
+      {
+        "Text": "you are meerai\n\nfollow the rules"
+      }
+    ]
+  },
+  {
+    "role": "User",
+    "content": [
+      {
+        "Text": "read a then answer"
+      }
+    ]
+  },
+  {
+    "role": "Assistant",
+    "content": [
+      {
+        "ToolCall": {
+          "call_id": "call-1",
+          "fn_name": "code-read_file",
+          "fn_arguments": {
+            "path": "a"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "role": "Tool",
+    "content": [
+      {
+        "ToolResponse": {
+          "call_id": "call-1",
+          "fn_name": "code-read_file",
+          "content": "alpha\n"
+        }
+      }
+    ]
+  },
+  {
+    "role": "Assistant",
+    "content": [
+      {
+        "Text": "done"
+      }
+    ]
+  }
+]

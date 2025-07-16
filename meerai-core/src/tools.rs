@@ -60,6 +60,153 @@ impl std::fmt::Display for ToolOutput {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectClass {
+    Read,
+    Write,
+    Execute,
+    External,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationStatus {
+    Success,
+    Error,
+    Refused,
+    Stopped,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct ToolObservation {
+    pub status: ObservationStatus,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub hint: Option<String>,
+}
+
+impl ToolObservation {
+    pub fn success(stdout: impl Into<String>) -> Self {
+        Self {
+            status: ObservationStatus::Success,
+            exit_code: None,
+            stdout: stdout.into(),
+            stderr: String::new(),
+            hint: None,
+        }
+    }
+
+    pub fn error(stderr: impl Into<String>) -> Self {
+        Self {
+            status: ObservationStatus::Error,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: stderr.into(),
+            hint: None,
+        }
+    }
+
+    pub fn refused(reason: impl Into<String>) -> Self {
+        Self {
+            status: ObservationStatus::Refused,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: reason.into(),
+            hint: None,
+        }
+    }
+
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        match self.status {
+            ObservationStatus::Success => out.push_str(&self.stdout),
+            ObservationStatus::Stopped => {
+                out.push_str("Stop: ");
+                out.push_str(&self.stdout);
+            }
+            ObservationStatus::Error => {
+                out.push_str("Failure: ");
+                out.push_str(&self.stderr);
+            }
+            ObservationStatus::Refused => {
+                out.push_str("Refused: ");
+                out.push_str(&self.stderr);
+            }
+        }
+        if let Some(code) = self.exit_code
+            && code != 0
+        {
+            out.push_str(&format!(" (exit code {code})"));
+        }
+        if let Some(hint) = &self.hint {
+            out.push_str("\nHint: ");
+            out.push_str(hint);
+        }
+        out
+    }
+}
+
+impl From<ToolOutput> for ToolObservation {
+    fn from(output: ToolOutput) -> Self {
+        match output {
+            ToolOutput::Text(text) => ToolObservation::success(text),
+            ToolOutput::Fail(text) => ToolObservation::error(text),
+            ToolOutput::Stop(reason) => Self {
+                status: ObservationStatus::Stopped,
+                exit_code: None,
+                stdout: reason,
+                stderr: String::new(),
+                hint: None,
+            },
+        }
+    }
+}
+
+impl From<ToolObservation> for ToolOutput {
+    fn from(observation: ToolObservation) -> Self {
+        match observation.status {
+            ObservationStatus::Success => ToolOutput::Text(observation.stdout),
+            ObservationStatus::Stopped => ToolOutput::Stop(observation.stdout),
+            ObservationStatus::Error => ToolOutput::Fail(observation.render()),
+            ObservationStatus::Refused => ToolOutput::Fail(observation.render()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileChangeKind {
+    Added,
+    Modified,
+    Deleted,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct FileDiff {
+    pub path: String,
+    pub kind: FileChangeKind,
+    pub unified_diff: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolRun {
+    pub output: ToolOutput,
+    pub observation: ToolObservation,
+    pub file_changes: Vec<FileDiff>,
+}
+
+impl ToolRun {
+    pub fn from_output(output: ToolOutput) -> Self {
+        Self {
+            observation: ToolObservation::from(output.clone()),
+            output,
+            file_changes: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ToolDefinition {
     pub r#type: String,
@@ -69,26 +216,38 @@ pub struct ToolDefinition {
 }
 
 impl ToolDefinition {
-    pub fn to_openai(&self) -> Result<async_openai::types::ChatCompletionTool> {
-        let function = serde_json::to_string(self)?;
-        let function_object: async_openai::types::FunctionObject = serde_json::from_str(&function)?;
-        let chat_completion_tool = async_openai::types::ChatCompletionToolArgs::default()
-            .r#type(async_openai::types::ChatCompletionToolType::Function)
-            .function(function_object)
-            .build()?;
-        Ok(chat_completion_tool)
+    pub fn to_genai(&self) -> genai::chat::Tool {
+        genai::chat::Tool::new(self.name.clone())
+            .with_description(self.description.clone())
+            .with_schema(self.parameters.clone())
+    }
+}
+
+impl From<&ToolDefinition> for genai::chat::Tool {
+    fn from(def: &ToolDefinition) -> Self {
+        def.to_genai()
     }
 }
 
 #[async_trait]
-pub trait Toolset {
+pub trait Toolset: Send + Sync {
     fn name(&self) -> String;
 
     fn definition(&self) -> Vec<ToolDefinition>;
 
     fn contain(&self, fn_name: &str) -> bool;
 
+    fn effect_of(&self, fn_name: &str) -> EffectClass {
+        let _ = fn_name;
+        EffectClass::Read
+    }
+
     async fn invoke(&self, fn_name: &str, args: &str) -> Result<ToolOutput, ToolError>;
+
+    async fn invoke_structured(&self, fn_name: &str, args: &str) -> Result<ToolRun, ToolError> {
+        let output = self.invoke(fn_name, args).await?;
+        Ok(ToolRun::from_output(output))
+    }
 }
 
 impl Debug for dyn Toolset {
@@ -97,11 +256,21 @@ impl Debug for dyn Toolset {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ToolCall {
-    // pub id: String,
+    pub id: String,
     pub name: String,
     pub args: String,
+}
+
+impl From<&genai::chat::ToolCall> for ToolCall {
+    fn from(call: &genai::chat::ToolCall) -> Self {
+        Self {
+            id: call.call_id.clone(),
+            name: call.fn_name.clone(),
+            args: call.fn_arguments.to_string(),
+        }
+    }
 }
 
 #[cfg(test)]

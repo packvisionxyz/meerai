@@ -1,0 +1,22 @@
+---
+source: meerai-session/src/projection.rs
+expression: render(&messages)
+---
+[
+  {
+    "role": "User",
+    "content": [
+      {
+        "Text": "[compacted-history]\n\n## Summary\nGoal: ship the parser.\nCompleted: first turn.\n\n## Goal\n\n## Completed progress\n\n## Modified files\n\n## Key decisions\n\n## Open blockers\n"
+      }
+    ]
+  },
+  {
+    "role": "User",
+    "content": [
+      {
+        "Text": "second request"
+      }
+    ]
+  }
+]

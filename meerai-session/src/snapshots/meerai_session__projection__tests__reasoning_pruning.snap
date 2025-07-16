@@ -1,0 +1,14 @@
+---
+source: meerai-session/src/projection.rs
+expression: render(&messages)
+---
+[
+  {
+    "role": "Assistant",
+    "content": [
+      {
+        "Text": "public answer"
+      }
+    ]
+  }
+]

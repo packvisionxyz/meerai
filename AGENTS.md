@@ -1,0 +1,121 @@
+# AGENTS.md
+
+Rust workspace for Pack Vision's terminal coding-agent harness: eight crates plus the `meerai` binary (built by `meerai-tui`). Milestones M1–M5 of `docs/harness-spec.md` are landed: session log, `AgentEvent` v2 item protocol, coding tools, policy engine, context engine, and prompt composition. Project-root config discovery, TUI session replay, configurable session retention (`sessions.auto_prune_days`), tool-output redaction, and M12 agents/skills discovery are also landed. The repo is distribution-hardened: Apache-2.0 license, CI on push/PR, tag-driven release builds, and GitHub Pages. The security backlog (OS sandbox, dependency audit, signing, threat model, injection screening, keychain) is **M11** in the spec (§9.6).
+
+## Commands
+
+```sh
+cargo fmt --all                                # rustfmt: edition 2024, max_width 100
+cargo clippy --workspace --all-targets         # rust-analyzer checks with clippy
+cargo test --workspace
+cargo test -p meerai-macros --test derive_toolset_pass   # single integration test file
+cargo test -p meerai-macros test_snapshot                # single test by name
+make verify                                    # fmt --check + clippy + test (alias: make ci)
+```
+
+- Verify order: `fmt -> clippy -> test`. CI (`.github/workflows/ci.yml`) runs the same gate on `ubuntu-24.04` for pushes and pull requests to `main`.
+- CI has no Windows runner: `cmd /C` and Windows session-id rules are unit-tested, not exercised on a Windows host.
+- Toolchain is pinned to Rust 1.100.0 (`rust-toolchain.toml`), edition 2024, `rust-version = "1.100"`; rustup installs it automatically.
+- `release.yml` re-runs the gate before building five targets. It rejects a `v*` tag that does not match `[workspace.package] version`.
+- `cargo clippy` reports two accepted warnings: `assert!(true)` in `meerai-core/src/tools.rs` (tests) and a redundant `&` in `meerai-macros/src/test_utils.rs`.
+- `meerai-macros` snapshots update with `cargo insta review` or `INSTA_UPDATE=always cargo test -p meerai-macros`.
+
+## Workspace layout
+
+Dependency spine: `core -> macros`, `core -> session -> policy -> agents -> tui`, `core -> meerai-tools -> tui`, `common -> tui` (`x -> y` means `y` depends on `x`). Target layout is in `docs/architecture.md`.
+
+- `meerai-core` — `Toolset` trait (`effect_of`, `invoke_structured`), `ToolOutput::{Text,Fail,Stop}`, `ToolError`, `EffectClass`, `ToolObservation`, `ToolRun`, `FileDiff`; re-exports `genai`, `async_trait`, `schemars::JsonSchema`. `doctest = false`.
+- `meerai-macros` — proc-macros `#[tool]` and `#[derive(Toolset)]` (darling + syn + quote; test-only deps are dev-dependencies).
+- `meerai-session` — append-only `SessionEvent` log (`session.v<N>.jsonl` sealed to `.jsonl.zstd`), `meta.json`, crash recovery, `derive_messages`, fork/revert, blob store, spill, compaction primitives, session listing/deletion/pruning.
+- `meerai-policy` — `PolicyEngine`: ordered action/resource/effect rules (globset, last match wins), `ApprovalMode`, grants, YAML parsing.
+- `meerai-tools` — `code` module: `CodeTools` with `read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `shell`; path guards, unified diffs, `ToolRun` observations, secret env scrub.
+- `meerai-common` — `AppSettings` (`settings.yml`), project-root discovery (`find_project_root`) plus project settings load/merge (`load_project_settings`, `merge_project_settings`), markdown agent/skill discovery (`definitions`: `load_definitions`, `AgentDefinition`, `SkillDefinition`, `DefinitionSource`), provider catalog + `genai` client factory (`providers.yml`), `auth.json` secret store.
+- `meerai-agents` — `MultiTurnAgent`, `AgentHarness`/`HarnessConfig`, `AgentEvent` v2, `prompt::{BASE_SYSTEM_PROMPT, compose_system_prompt}`, `spawn_worker`, and tool-output redaction (`redact.rs`).
+- `meerai-tui` — modal TUI with transcript replay, `/agent`/`/skill`, the `@` Mentions popup, headless runner, `auth`/`sessions` subcommands, and the `meerai` binary.
+
+## Tool macro conventions (non-obvious)
+
+- `#[derive(Toolset)]` on a struct requires you to hand-write `impl <Struct>Invoke for <Struct>` with `async fn <snake_case_tool>(&self, args: &<Params>) -> Result<ToolOutput, ToolError>` per tool declared in the `#[toolset(...)]` attribute. The generated `Invoke` trait is private to the expansion site — impl it in the same module.
+- `CodeTools` (`meerai-tools`) does **not** use `#[derive(Toolset)]`; it hand-writes `impl Toolset` with `definition`, `contain`, `effect_of`, `invoke`, and `invoke_structured`.
+- Generated code references `meerai_core`, `schemars`, and `serde_json` by absolute path: consuming crates need all three as direct dependencies.
+- Runtime tool-call names are `"<toolset_snake>-<tool_snake>"`, e.g. `MyToolset` + "Get Weather" -> `my_toolset-get_weather`. `Toolset::name()` is the snake_case toolset name.
+- `#[tool(name = "Get Weather", ...)]` on a free async fn generates a `<PascalName>Toolset` unit struct wrapping `#[derive(Toolset)]` (e.g. `get_weather` fn -> `GetWeatherToolset`, runtime name `get_weather-get_weather`).
+- The `#[tool]` attribute infers params from the fn's first argument type, not from the attribute (`get_weather` takes `args: &GetWeatherArgs` without declaring `params`).
+- Params types must derive `JsonSchema` from **schemars 1.x** (workspace `schemars = "1"`, locked at `1.2.3`) — not schemars 0.8. Use `#[derive(schemars::JsonSchema)]`; there is no schema derive in `meerai-macros`.
+- Tool schemas are generated with `schemars::generate::SchemaSettings::draft07()` (`meerai-tools/src/code/mod.rs::definition_for`), not through the macro.
+- Macro expansion is snapshot-tested with insta (`meerai-macros/src/tool/snapshots/`), output pretty-printed via prettyplease.
+
+## Config & environment
+
+- Runtime config is `settings.yml` (active provider/model, `approval_mode`, `permissions`, `context`, `sessions`) plus `providers.yml` overrides in the config dir: `$XDG_CONFIG_HOME/meerai` or `~/.config/meerai` (`meerai_common::settings::default_config_dir`).
+- Project config is `<project-root>/.meerai/settings.yml`. `find_project_root` walks up from the process CWD to the nearest directory holding `.git` (directory or file) or `.meerai/settings.yml`; if none match, the CWD is used. The file is merged over the user settings by `load_project_settings` + `merge_project_settings` in `meerai-tui/src/main.rs`. Tools and sessions still use the CWD as the workspace, so a run from a subdirectory applies the repository-root policy. Only `permissions` and `context` apply; `active_provider`, `active_model`, `providers`, `approval_mode`, and `sessions` are ignored with a warning. Project `permissions` merge as `ask` rules → user rules → `deny` rules; `allow` is dropped with a warning. `context` overrides field by field, and `max_session_tokens`/`max_turn_secs` are clamped against user values (a project cannot raise a cap or disable the turn clock). A malformed file prints a warning and is ignored.
+- `sessions.auto_prune_days` (user config only) opts into startup pruning; `sessions.keep` (default 0) spares the newest N sessions and the active session is always spared. Pruning prints `Pruned N sessions (older than N days)` on stderr; errors warn and never abort. Without `auto_prune_days`, retention is manual (`sessions prune`). A project `sessions` block is ignored with a warning.
+- Agent/skill discovery is read-only and starts at the project root: `.agents/agents/*.md` then `.claude/agents/*.md`; `.agents/skills/*/SKILL.md` then `.claude/skills/*/SKILL.md`. `.agents` wins a duplicate id (warning names both paths); output is sorted by id. `.meerai` is config, sessions, and instructions only: never scan or create `.meerai/agents` or `.meerai/skills`, and never copy definitions. Frontmatter is `name`, `description`, `model`, `steps`, `mode`; `tools`/`permissions`/`allowed-tools` warn and are not applied; invalid frontmatter warns and skips. A missing frontmatter uses the file name (agent) or directory name (skill) and the body. Only `SKILL.md` text is used. Definitions are untrusted prompt text: they grant no tools or permissions.
+- `context.summarizer_model` (optional, full `provider:model` spec) selects the compaction-summary model; the default is the session model. Summarizer usage counts toward `context.max_session_tokens`.
+- API keys live in `auth.json` in the data dir: `$XDG_DATA_HOME/meerai` or `~/.local/share/meerai`. `meerai auth login|logout` writes it; legacy `auth.yml` is still read. `auth.json` is `0600` on Unix.
+- Key resolution order: stored `auth.json` → configured `api_key` → the provider's `env_vars` from the bundled `meerai-common/providers.yml` (for example `OPENROUTER_API_KEY`/`OPEN_ROUTER_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`). No API-key assert exists; a missing required key fails in the genai auth resolver.
+- `settings.yml` secrets support `${VAR|default}` and `{env:VAR}` expansion (`settings::expand_config_secret`).
+- Sessions default to `<dirs::data_dir()>/meerai/sessions/<id>/` (on macOS `~/Library/Application Support/meerai/sessions`); `MEERAI_SESSION_DIR` overrides the root. `SessionConfig { project_local: true }` uses `<workspace>/.meerai/sessions` instead and writes a `.gitignore`. `meerai-tui/src/main.rs` uses the global root.
+- Session directories are `0700` and session files are `0600` on Unix; `meta.json` records cwd, git branch/SHA, title, model, and created/updated times. `meerai sessions list|rm|prune` manages them; `--continue` picks the most recently updated session. `--continue`/`--resume <ID>` work with or without `--prompt`: with `--prompt` they run headless, without it they start the TUI and replay the transcript.
+- Headless non-`--json` runs print `tokens: prompt=… completion=… total=…` on stderr after the turn. The counters are cumulative for the session and are seeded on resume from the last logged `UsageUpdated` entry.
+- The agent sets the session title from the first user prompt (first non-empty line, 80 chars) and skips a session that already has a user message.
+- `MEERAI_PROVIDER` / `MEERAI_MODEL` set default provider/model; CLI flags win.
+- `.env` loading is opt-in: `MEERAI_LOAD_DOTENV=1|true|yes` or `--env-file <PATH>`. Nothing loads implicitly. `.env` is gitignored.
+
+## Known traps
+
+- Project config is found at the **repository root**, not the CWD: `find_project_root` walks up to the nearest `.git` (directory or file) or `.meerai/settings.yml`. Tools, sessions, and prompt injection still use the CWD as the workspace, so a run from a subdirectory keeps `code-*` paths CWD-relative while the policy comes from the root. Do not "fix" this by resolving the workspace to the project root.
+- Agent/skill definitions are found at the **project root** too (`load_definitions(&project_root)` in `meerai-tui/src/main.rs`), not the CWD. `.agents` is the default source and beats `.claude` on a duplicate id; the warning names both paths. Output is sorted by id. There is **no** `.meerai/agents` or `.meerai/skills` discovery: `.meerai` is config, sessions, and instructions only. Do not add native definition directories, copy definitions into `.meerai`, or add an import lock.
+- Definition loading is read-only. `load_definitions` reads `.agents/agents/*.md`, `.agents/skills/*/SKILL.md`, `.claude/agents/*.md`, and `.claude/skills/*/SKILL.md`; it writes nothing and skips symlinks with a warning. Only `SKILL.md` text is used; supporting skill files are never read.
+- Frontmatter parsing: the file may start with `---`. A missing closing `---` or invalid YAML warns and skips the file. Missing frontmatter uses the file name (agent) or directory name (skill) as the id, and the whole body as the prompt. Fields are `name`, `description`, `model`, `steps`, `mode`. `tools`, `permissions`, and `allowed-tools` warn and are **not** applied. Unknown fields are ignored.
+- Applying definitions is prompt-only. Startup `--agent`/`--skill` append to the system prompt; `--agent` takes one id (repeating it is an error) and every named id must exist. An agent `model` applies only when it has no `:` (colon implies a provider change and is ignored with a warning); precedence is `--model` → `MEERAI_MODEL` → agent `model` → settings/provider default. `steps`/`mode` print a note and are not applied. TUI `/agent`/`/skill` send `AgentCommand::ApplyAgent`/`ApplySkill`, which log a System instruction at the next step boundary; they do not edit the system prompt or grant tools/permissions. Typing `@` opens the Mentions popup (agents first, then skills, then files): rows show `<id>|agent` (cyan) or `<id>|skill` (magenta) plus source/description, files show a path with no badge, and one id can appear as both kinds. Filter matches `@agent/<id>`, `@skill/<id>`, the bare id, and fuzzy prefixes; Up/Down or Ctrl-p/Ctrl-n move, Tab accepts, Enter accepts without submitting, Esc dismisses. Accepting inserts `@agent/<id> `, `@skill/<id> `, or `@path ` with one trailing space and stays in Insert; an exact agent/skill id keeps the popup open, an exact file path auto-dismisses. The composer renders a known accepted mention as `<id>` chip (bold cyan for agent, bold magenta for skill) while the raw `@agent/<id>`/`@skill/<id>` stays in the input buffer and submit detection; unknown ids and partial tokens render as typed. On submit, skills apply before the agent, mentions are stripped, repeats apply once, and an unknown mention stays as text; a mention-only prompt applies definitions without a turn. `/agents` and `/skills` do not exist. Unknown or missing `/agent`/`/skill` ids print a System error and send nothing.
+- `sessions prune` uses a strict `updated_at_ms < cutoff` test after skipping the newest `--keep N` sessions (default 0). Defaults are 30 days and keep 0; it prints `removed N sessions` and uses the global session root (`MEERAI_SESSION_DIR` aware). Automatic pruning is separate and opt-in: `sessions.auto_prune_days` with `sessions.keep` (default 0), excluding the active session, printing `Pruned N sessions (older than N days)`. A project `sessions` block is ignored; never let a project file control retention.
+- `events.rs` (`AgentEvent` v2, `SessionItem`, `ItemDelta`) and the `SessionEvent` vocabulary in `meerai-session` (plus its id newtypes) are frozen contracts: change them additively only. Renaming or removing a variant breaks the TUI fold, headless NDJSON, and persisted session logs.
+- Serde tagging pitfall: internally tagged enums (`tag = "type"` alone) cannot hold newtype variants with bare strings. `ItemDelta`/`AgentCommand`/`ContentBlock` use adjacent tagging (`tag = "type", content = "data"`); keep that shape when adding string-carrying variants.
+- `-p` is **provider**, not prompt. Headless prompt input is `--prompt` (alias `--print`); `--json` requires it.
+- Headless approvals: a tool-call approval fails fast with exit `2` plus a hint to use `--mode auto-edit|yolo` or the TUI. A Spend approval (session token cap) instead prints how to raise/unset `context.max_session_tokens`, declines, and exits `1` because the turn ends `Failed { Budget }`. Completed is `0`; other failures are `1`.
+- `plan` mode is hard read-only: writes, execute, and external effects are denied before rules and grants are consulted. `yolo` still honors explicit `deny` rules. Grant resources match literally; rule resources use globs.
+- `Approve { request_id, decision, scope }` carries an optional `GrantScope`. `AcceptForSession` always records a Session grant. The TUI sends `scope: None` for `y`/Enter and `scope: Some(Turn)` for `t`; `a` maps to `AcceptForSession`. Turn grants are cleared at turn end.
+- `AgentCommand` has **no** `Rewind` or `Fork` variant. TUI resume and transcript replay **do** exist: without `--prompt`, `--continue`/`--resume <ID>` open the session and replay it. `transcript_from_events` keeps user/steering messages, assistant text/reasoning, tool calls/results, and compaction markers; system and runtime events are skipped, and unmatched tool calls become `Cancelled`. `set_harness` and `session_usage_from_events` seed token counters from the last logged `UsageUpdated`.
+- Coding-tool runtime names are `code-<tool>` (`code-read_file`, `code-edit_file`, ...). `Toolset::contain`/`effect_of` match that prefix; permission checks in the agent strip `code-` or `code_` before mapping the tool name.
+- With a harness but no command channel (`MultiTurnAgent::prompt` / `prompt_streaming`), every `Decision::Ask` auto-declines: `await_decision` has no receiver and returns `Decline`. The TUI uses `spawn_worker`, which supplies the inbox.
+- When a harness is attached, requests come from `session.derive_messages(...)`, not `chat_history`; `chat_history` is still maintained as a mirror. Do not treat it as the source of truth.
+- `max_turn_secs` defaults to 1800 when a harness is attached; `0` disables it. Without a harness the deadline is `0`. Provider retries are 3 attempts total with 250/500 ms backoff and only for non-transient-marked errors; tool retries use a fixed 250 ms sleep and `max_retries` (default 3).
+- System prompt composition is not the same as the projection: `BASE_SYSTEM_PROMPT` + `--system` + root `AGENTS.md` + `.meerai/instructions.md` (32 KiB/file, 64 KiB block) are sent via `ChatRequest::with_system`, while scoped `AGENTS.md` files (16 KiB, max 8 per turn) are injected as `RuntimeContext` user messages once per turn. `--skill`/`--agent` append definition text to the same system prompt at startup; TUI apply commands use System-sourced user messages instead.
+- Project permissions merge as `ask` rules → user rules → `deny` rules. `allow` entries are dropped with a warning. A project `ask` cannot downgrade a user `deny`, even with a wildcard resource, because user rules match later; it tightens the mode default only where the user has no matching rule. A project `deny` always adds a denial after user rules. An invalid entry or non-list shape drops the whole project `permissions` block with a warning. Do not "fix" this by keeping `allow` or by appending project `ask` after user rules. `merge_max_session_tokens`/`merge_max_turn_secs` clamp project budgets; project `0` cannot disable the turn clock.
+- Tool-output redaction is best effort and runs in the agent after a tool run and before spill, session log, `ItemCompleted`, or model text: `redact_run` in `meerai-agents/src/redact.rs` rewrites observation stdout/stderr/hint, `ToolOutput` text, and `FileChange` unified diffs; dispatch failures are redacted with `redact_text`. The original secret is discarded; do not add a log-only copy. Paths are not redacted.
+- `context.summarizer_model` is used only for compaction summaries; it defaults to the session model and its usage still counts toward the session token cap.
+- Session titles come from the first user prompt (80 chars, single line). `new_session_title` skips when the session already has a title or any `InputSource::User` message.
+- On Windows the shell tool runs `cmd /C`; on Unix it runs `sh -c`. Known provider key variables and names ending in `_API_KEY`, `_API_TOKEN`, `_ACCESS_TOKEN`, `_SECRET`, `_SECRET_KEY`, or `_PRIVATE_KEY` are removed from the child environment. Tool output is pattern-redacted, not guaranteed secret-free.
+- **Security is not finished.** There is no OS sandbox: path guards are in-process checks. Redaction is best effort. CI has no dependency-audit step, release artifacts are unsigned, and there is no written threat model, prompt-injection screen, or OS keychain. These are the **M11** backlog in `docs/harness-spec.md` §9.6. Do not describe any of them as shipped.
+- M12 definitions are untrusted repository prompt text. They cannot run tools, map permissions, or imply a sandbox. `.agents`/`.claude` content reaches the model, so review it like code; do not describe definition loading as a security control.
+
+## Security backlog (M11)
+
+Landed: path guards, `plan` hard read-only, approval gates, headless fail-fast, provider-secret env scrub, best-effort output/diff/error redaction, session file permissions, configurable retention, session/turn token budgets. Also landed: read-only agent/skill discovery as untrusted instructions (M12), with no tool or permission mapping. Backlog — do not claim these:
+
+- OS sandbox (`ExecutionWorld`: macOS Seatbelt, Linux bubblewrap/Landlock, network denied by default).
+- Dependency audit in CI (`cargo audit`/`cargo deny`); `ci.yml` has no audit step.
+- Signed and notarized macOS/Windows artifacts; no signing secret or step exists.
+- Written threat model for repo instructions, model output, hooks, MCP, subagents.
+- Prompt-injection screening; the harness does not screen content.
+- OS keychain for `auth.json`.
+
+ACP integration (M13/M14) is planned, not shipped; design in `docs/acp.md`. An ACP backend is an external process. Its permission requests are advisory, and meerai's rules, path guards, and redaction do not apply to it. Never describe ACP as a safety boundary.
+
+## Commit rule
+
+- One commit, one line. Squash every change set into a single commit whose message is a single line: no body, no bullet list, no paragraphs.
+- Never add a second commit above the base, and never merge.
+- Never edit, stage, or commit `.opencode/` or `opencode.jsonc`; both are gitignored local tooling.
+
+## Code style
+
+- Default to **no comments** (including doc comments). Only add a comment when it is truly crucial — i.e. changing that code without knowing the invariant would break the application.
+
+## Communication
+
+- Respond to the user in ASD-STE100 Simplified Technical English: short sentences, one idea per sentence, active voice, no idioms.
+- Use BLUF (Bottom Line Up Front): state the result or decision first, then the support.
+- Use SBAR (Situation, Background, Assessment, Recommendation) for handovers and status updates.
+- These rules do not apply to code, generated files, commit/PR messages, or when the user asks otherwise.

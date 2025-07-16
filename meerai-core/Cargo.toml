@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 
 [lib]
 name = "meerai_core"
@@ -11,24 +16,13 @@ path = "src/lib.rs"
 doctest = false
 
 [features]
-worker = []
+default = []
 
 [dependencies]
 anyhow = { workspace = true }
-async-openai = "0.28"
 async-trait = { workspace = true }
-derive_builder = { workspace = true }
-futures = "0.3"
-reqwest = { version = "0.12", default-features = false, features = [
-  "json",
-  "stream",
-  "multipart",
-] }
+genai = { workspace = true }
 schemars = { workspace = true }
-secrecy = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-
-[dev-dependencies]
-serde_path_to_error = "0.1"

@@ -1,0 +1,47 @@
+name: Pages
+
+run-name: Deploy site (${{ github.ref_name }})
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/scripts/compose_installers.py'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy installer site to GitHub Pages
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v6
+
+      - name: Compose installer requirements
+        run: python3 .github/scripts/compose_installers.py --out-dir _site
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

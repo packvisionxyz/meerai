@@ -1,4 +1,9 @@
 .aider*
 .env
 
+# local tooling
+.opencode/
+opencode.jsonc
+
 target/
+dist/

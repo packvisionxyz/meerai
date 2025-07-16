@@ -1,0 +1,72 @@
+providers:
+  - id: opencode-go
+    display_name: "OpenCode Go"
+    adapter: opencode_go
+    base_url: "https://opencode.ai/zen/go/v1/"
+    env_vars:
+      - OPENCODE_GO_API_KEY
+      - OPENCODE_API_KEY
+    requires_api_key: true
+  - id: opencode
+    display_name: "OpenCode Zen"
+    adapter: openai
+    base_url: "https://opencode.ai/zen/v1/"
+    env_vars:
+      - OPENCODE_API_KEY
+    requires_api_key: true
+  - id: openrouter
+    display_name: "OpenRouter"
+    adapter: open_router
+    env_vars:
+      - OPEN_ROUTER_API_KEY
+      - OPENROUTER_API_KEY
+    requires_api_key: true
+  - id: alibaba-token-plan
+    display_name: "Alibaba Token Plan (DashScope)"
+    adapter: aliyun
+    base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/"
+    env_vars:
+      - ALIYUN_API_KEY
+      - DASHSCOPE_API_KEY
+    requires_api_key: true
+  - id: gemini
+    display_name: "Google Gemini"
+    adapter: gemini
+    env_vars:
+      - GEMINI_API_KEY
+    requires_api_key: true
+  - id: openai
+    display_name: "OpenAI"
+    adapter: openai
+    env_vars:
+      - OPENAI_API_KEY
+    requires_api_key: true
+  - id: anthropic
+    display_name: "Anthropic"
+    adapter: anthropic
+    env_vars:
+      - ANTHROPIC_API_KEY
+    requires_api_key: true
+  - id: deepseek
+    display_name: "DeepSeek"
+    adapter: deepseek
+    env_vars:
+      - DEEPSEEK_API_KEY
+    requires_api_key: true
+  - id: groq
+    display_name: "Groq"
+    adapter: groq
+    env_vars:
+      - GROQ_API_KEY
+    requires_api_key: true
+  - id: xai
+    display_name: "xAI"
+    adapter: xai
+    env_vars:
+      - XAI_API_KEY
+    requires_api_key: true
+  - id: ollama
+    display_name: "Ollama (Local)"
+    adapter: ollama
+    env_vars: []
+    requires_api_key: false

@@ -1,0 +1,26 @@
+[package]
+name = "meerai-session"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+meerai-core = { path = "../meerai-core/" }
+
+anyhow = { workspace = true }
+dirs = { workspace = true }
+genai = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+zstd = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }

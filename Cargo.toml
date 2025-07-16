@@ -5,16 +5,47 @@ resolver = "2"
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
-authors = ["Polymeer Core Dev <dev@polymeer.xyz>"]
-description = "Polymeer's AI agents"
+rust-version = "1.100"
+authors = ["Pack Vision Core Dev"]
+description = "Pack Vision's AI coding agent harness"
+license = "Apache-2.0"
+repository = "https://github.com/packvisionxyz/meerai"
+homepage = "https://meerai.packvision.xyz"
+publish = false
 
 [workspace.dependencies]
-anyhow = "1"
+# AI / LLM
+genai = "0.7"
+
+# Async & Runtime
 async-trait = "0.1"
-derive_builder = "0.20"
-regex = "1"
-schemars = "1.0.0-alpha.17"
+futures = "0.3"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+
+# Error Handling
+anyhow = "1"
+thiserror = "2"
+
+# Serialization & Schema
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-thiserror = "2"
+
+# Terminal UI
+crossterm = { version = "0.29", features = ["event-stream"] }
+ratatui = "0.30"
+
+# Utilities & Config
+dirs = "7"
+dotenvy = "0.15"
+globset = "0.4"
+grep-matcher = "0.1"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+ignore = "0.4"
+insta = "1.42"
+regex = "1"
+similar = "2"
+zstd = "0.13"

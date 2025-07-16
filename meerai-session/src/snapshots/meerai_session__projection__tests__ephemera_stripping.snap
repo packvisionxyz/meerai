@@ -1,0 +1,30 @@
+---
+source: meerai-session/src/projection.rs
+expression: render(&messages)
+---
+[
+  {
+    "role": "System",
+    "content": [
+      {
+        "Text": "base rules"
+      }
+    ]
+  },
+  {
+    "role": "User",
+    "content": [
+      {
+        "Text": "go"
+      }
+    ]
+  },
+  {
+    "role": "Assistant",
+    "content": [
+      {
+        "Text": "ok"
+      }
+    ]
+  }
+]
