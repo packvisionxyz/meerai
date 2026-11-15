@@ -1,39 +1,90 @@
 const SAFE_PROGRAMS: &[&str] = &[
     "bat", "cat", "cd", "cmp", "cut", "date", "df", "diff", "du", "echo", "false", "file", "find",
-    "grep", "head", "jq", "ls", "printf", "pwd", "rg", "sort", "stat", "tail", "tree", "true",
-    "uname", "uniq", "wc", "which", "whoami",
+    "grep", "head", "jq", "ls", "printf", "pwd", "rg", "sed", "sort", "stat", "tail", "tree",
+    "true", "uname", "uniq", "wc", "which", "whoami",
 ];
 
-const UNSAFE_SHELL_CHARS: &[&str] = &[">", "<", "&", "`", "$(", "${", "\n", "\r"];
-
 pub fn command_is_safe(command: &str) -> bool {
-    let trimmed = command.trim();
-    if trimmed.is_empty() || trimmed.contains("||") {
+    let Some(segments) = split_segments(command.trim()) else {
+        return false;
+    };
+    if segments.is_empty() {
         return false;
     }
-    let mut saw_segment = false;
-    for and_part in trimmed.split("&&") {
-        for semi_part in and_part.split(';') {
-            for pipe_part in semi_part.split('|') {
-                let segment = pipe_part.trim();
-                if segment.is_empty() {
-                    return false;
+    segments
+        .iter()
+        .all(|segment| single_command_is_safe(segment.trim()))
+}
+
+/// Split on unquoted `|`, `;`, and `&&`. Returns `None` for unquoted shell
+/// operators that can write, background, or substitute (`>`, `<`, `&`, `||`,
+/// backticks, `$(`, `${`), or for unbalanced quotes.
+fn split_segments(command: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = command.chars().collect();
+    let mut segments = vec![String::new()];
+    let mut quote: Option<char> = None;
+    let mut escape = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        if escape {
+            segments.last_mut()?.push(c);
+            escape = false;
+            i += 1;
+            continue;
+        }
+        if c == '\\' && quote != Some('\'') {
+            escape = true;
+            segments.last_mut()?.push(c);
+            i += 1;
+            continue;
+        }
+        if let Some(q) = quote {
+            if q == '"' && c == '$' && matches!(next, Some('(') | Some('{')) {
+                return None;
+            }
+            segments.last_mut()?.push(c);
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '\'' | '"' => {
+                quote = Some(c);
+                segments.last_mut()?.push(c);
+            }
+            '$' if matches!(next, Some('(') | Some('{')) => return None,
+            '|' => {
+                if next == Some('|') {
+                    return None;
                 }
-                saw_segment = true;
-                if !single_command_is_safe(segment) {
-                    return false;
+                segments.push(String::new());
+            }
+            ';' => segments.push(String::new()),
+            '&' => {
+                if next == Some('&') {
+                    segments.push(String::new());
+                    i += 1;
+                } else {
+                    return None;
                 }
             }
+            '>' | '<' | '`' | '\n' | '\r' => return None,
+            _ => segments.last_mut()?.push(c),
         }
+        i += 1;
     }
-    saw_segment
+    if quote.is_some() {
+        return None;
+    }
+    Some(segments)
 }
 
 fn single_command_is_safe(trimmed: &str) -> bool {
-    if UNSAFE_SHELL_CHARS
-        .iter()
-        .any(|needle| trimmed.contains(needle))
-    {
+    if trimmed.is_empty() {
         return false;
     }
     let mut tokens = trimmed.split_whitespace();
@@ -72,8 +123,45 @@ fn single_command_is_safe(trimmed: &str) -> bool {
         "date" => !args
             .iter()
             .any(|arg| arg.starts_with("-s") || arg.starts_with("--set")),
+        "sed" => sed_is_safe(&args),
         _ => true,
     }
+}
+
+fn sed_is_safe(args: &[&str]) -> bool {
+    if args.iter().any(|arg| {
+        arg.starts_with("-i")
+            || arg.starts_with("--in-place")
+            || *arg == "-f"
+            || arg.starts_with("--file")
+    }) {
+        return false;
+    }
+    let mut script = String::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if *arg == "-e" || arg.starts_with("--expression") {
+            if let Some(value) = iter.next() {
+                script.push_str(value);
+                script.push('\n');
+            }
+        } else if !arg.starts_with('-') {
+            script.push_str(arg);
+            script.push('\n');
+        }
+    }
+    !script.lines().any(|line| {
+        let line = line.trim();
+        line == "e"
+            || line == "w"
+            || line == "W"
+            || line.starts_with("e ")
+            || line.starts_with("w ")
+            || line.starts_with("W ")
+            || line.contains("/e")
+            || line.contains("/w")
+            || line.contains("/W")
+    })
 }
 
 fn git_is_safe(args: &[&str]) -> bool {
@@ -117,6 +205,10 @@ mod tests {
             "cd src && ls",
             "rg retry src | head -20",
             "git log --oneline -5; git status",
+            "sed -n '1,20p' src/main.rs",
+            "sed 's/a/b/' file.txt",
+            "grep -n \"render_active_modal\\|Revert\\|click for actions\" meerai-tui/src/ui.rs | head -30; sed -n '95,140p' meerai-tui/src/ui.rs",
+            "grep -n 'a|b' src | head -5",
         ] {
             assert!(command_is_safe(command), "expected safe: {command}");
         }

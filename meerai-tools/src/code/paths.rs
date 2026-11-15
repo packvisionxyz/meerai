@@ -595,3 +595,35 @@ mod outside_root_tests {
         assert!(text.contains("outside"));
     }
 }
+
+#[cfg(test)]
+mod lenient_read_tests {
+    use std::fs;
+
+    use meerai_core::{ObservationStatus, ToolOutput, Toolset};
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn read_file_accepts_numeric_strings_for_offset_and_limit() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.txt"), "alpha\nbeta\ngamma\ndelta\n").unwrap();
+        let tools = CodeTools::new(dir.path());
+        let run = tools
+            .invoke_structured(
+                "code-read_file",
+                r#"{"path":"a.txt","offset":"2","limit":"2"}"#,
+            )
+            .await
+            .unwrap();
+        assert_eq!(run.observation.status, ObservationStatus::Success);
+        let text = match &run.output {
+            ToolOutput::Text(text) | ToolOutput::Fail(text) => text,
+            ToolOutput::Stop(reason) => reason,
+        };
+        assert!(text.contains("beta"), "{text}");
+        assert!(text.contains("gamma"), "{text}");
+        assert!(!text.contains("delta"), "{text}");
+    }
+}

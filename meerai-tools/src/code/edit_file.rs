@@ -19,6 +19,7 @@ pub(crate) struct EditFileArgs {
     new_string: String,
 
     #[schemars(description = "Replace every occurrence instead of requiring a unique match.")]
+    #[serde(default, deserialize_with = "meerai_core::lenient::option_bool_value")]
     replace_all: Option<bool>,
 }
 
@@ -127,4 +128,18 @@ fn occurrence_lines(content: &str, needle: &str) -> Vec<usize> {
     }
 
     lines
+}
+
+#[cfg(test)]
+mod lenient_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_string_booleans_for_replace_all() {
+        let args: EditFileArgs = serde_json::from_str(
+            r#"{"path":"a.rs","old_string":"a","new_string":"b","replace_all":"true"}"#,
+        )
+        .unwrap();
+        assert_eq!(args.replace_all, Some(true));
+    }
 }

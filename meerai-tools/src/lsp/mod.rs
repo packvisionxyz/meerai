@@ -53,8 +53,10 @@ struct GoToDefinitionArgs {
     )]
     path: String,
     #[schemars(description = "1-based line number.")]
+    #[serde(deserialize_with = "meerai_core::lenient::u32_value")]
     line: u32,
     #[schemars(description = "1-based character (column) offset.")]
+    #[serde(deserialize_with = "meerai_core::lenient::u32_value")]
     character: u32,
 }
 
@@ -65,10 +67,13 @@ struct FindReferencesArgs {
     )]
     path: String,
     #[schemars(description = "1-based line number.")]
+    #[serde(deserialize_with = "meerai_core::lenient::u32_value")]
     line: u32,
     #[schemars(description = "1-based character (column) offset.")]
+    #[serde(deserialize_with = "meerai_core::lenient::u32_value")]
     character: u32,
     #[schemars(description = "Include the declaration itself in references (defaults to true).")]
+    #[serde(default, deserialize_with = "meerai_core::lenient::option_bool_value")]
     include_declaration: Option<bool>,
 }
 
@@ -496,6 +501,25 @@ impl Toolset for LspToolset {
             TOOL_GET_DIAGNOSTICS => Ok(self.get_diagnostics(parse_args(args)?).await),
             _ => Err(ToolError::InvalidFunctionName(fn_name.to_string())),
         }
+    }
+}
+
+#[cfg(test)]
+mod lenient_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_numeric_strings_for_positions() {
+        let args: GoToDefinitionArgs =
+            serde_json::from_str(r#"{"path":"a.rs","line":"12","character":"3"}"#).unwrap();
+        assert_eq!(args.line, 12);
+        assert_eq!(args.character, 3);
+
+        let args: FindReferencesArgs = serde_json::from_str(
+            r#"{"path":"a.rs","line":12,"character":3,"include_declaration":"false"}"#,
+        )
+        .unwrap();
+        assert_eq!(args.include_declaration, Some(false));
     }
 }
 

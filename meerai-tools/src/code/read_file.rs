@@ -12,9 +12,11 @@ pub(crate) struct ReadFileArgs {
     path: String,
 
     #[schemars(description = "1-based line number to start reading from. Defaults to 1.")]
+    #[serde(default, deserialize_with = "meerai_core::lenient::option_usize_value")]
     offset: Option<usize>,
 
     #[schemars(description = "Maximum number of lines to return. Defaults to 2000.")]
+    #[serde(default, deserialize_with = "meerai_core::lenient::option_usize_value")]
     limit: Option<usize>,
 }
 

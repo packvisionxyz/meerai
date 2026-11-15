@@ -133,7 +133,7 @@ tokio::task_local! {
 struct SubagentRunArgs {
     agent: String,
     task: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "meerai_core::lenient::option_bool_value")]
     fork_session: Option<bool>,
 }
 
@@ -723,5 +723,18 @@ fn handle_child_event(
             *turn_end_reason = Some(reason);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod lenient_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_string_booleans_for_fork_session() {
+        let args: SubagentRunArgs =
+            serde_json::from_str(r#"{"agent":"explore","task":"x","fork_session":"true"}"#)
+                .unwrap();
+        assert_eq!(args.fork_session, Some(true));
     }
 }

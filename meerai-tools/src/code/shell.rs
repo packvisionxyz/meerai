@@ -64,6 +64,7 @@ pub(crate) struct ShellArgs {
     command: String,
 
     #[schemars(description = "Timeout in milliseconds. Defaults to 120000.")]
+    #[serde(default, deserialize_with = "meerai_core::lenient::option_u64_value")]
     timeout_ms: Option<u64>,
 }
 

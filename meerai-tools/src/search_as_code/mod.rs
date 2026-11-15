@@ -89,6 +89,7 @@ struct RunScriptArgs {
     #[schemars(description = "Script source code to execute in the workspace root.")]
     script: String,
     #[schemars(description = "Timeout in milliseconds (default 15000, max 60000).")]
+    #[serde(default, deserialize_with = "meerai_core::lenient::option_u64_value")]
     timeout_ms: Option<u64>,
 }
 

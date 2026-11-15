@@ -1,4 +1,4 @@
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -90,6 +90,29 @@ pub fn restore_terminal() {
         LeaveAlternateScreen,
         Show
     );
+    let _ = io::stdout().write_all(b"\x1b]0;\x07");
+    let _ = io::stdout().flush();
+}
+
+/// Ring the bell and flag the terminal (title + OSC 9) while an approval waits.
+pub fn notify_approval() {
+    if std::env::var("MEERAI_NO_NOTIFY")
+        .ok()
+        .is_some_and(|v| matches!(v.trim(), "1" | "true" | "yes"))
+    {
+        return;
+    }
+    let mut out = io::stdout();
+    let _ = out.write_all(b"\x07");
+    let _ = out.write_all(b"\x1b]0;meerai: approval needed\x07");
+    let _ = out.write_all(b"\x1b]9;meerai needs your approval\x07");
+    let _ = out.flush();
+}
+
+pub fn clear_notification() {
+    let mut out = io::stdout();
+    let _ = out.write_all(b"\x1b]0;meerai\x07");
+    let _ = out.flush();
 }
 
 fn install_panic_hook() {

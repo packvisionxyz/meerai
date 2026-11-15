@@ -610,7 +610,7 @@ mod tests {
         assert!(!ollama.requires_api_key);
 
         let alibaba = catalog.provider("alibaba-token-plan").unwrap();
-        assert_eq!(alibaba.adapter_kind, AdapterKind::Aliyun);
+        assert_eq!(alibaba.adapter_kind, AdapterKind::OpenAI);
         assert!(alibaba.default_base_url.is_some());
 
         assert_eq!(

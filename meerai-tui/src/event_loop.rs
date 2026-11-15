@@ -337,6 +337,13 @@ fn handle_loop_msg(
 ) -> bool {
     match msg {
         LoopMsg::Agent { tab_id, event } => {
+            match &event {
+                AgentEvent::ApprovalRequested { .. } => crate::terminal::notify_approval(),
+                AgentEvent::ApprovalResolved { .. } | AgentEvent::TurnCompleted { .. } => {
+                    crate::terminal::clear_notification();
+                }
+                _ => {}
+            }
             let touches = event_touches_workspace(&event);
             app.handle_tab_agent_event(tab_id, event);
             touches
