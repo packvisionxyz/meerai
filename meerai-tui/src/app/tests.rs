@@ -886,15 +886,6 @@ fn agent_event_streaming_updates_transcript_and_status() {
         }]
     );
 
-    assert!(app.toggle_latest_thinking());
-    assert!(matches!(
-        app.tab().transcript.first(),
-        Some(TranscriptEntry::Assistant {
-            reasoning_expanded: true,
-            ..
-        })
-    ));
-
     let tool_item_id = ItemId::from_raw("item-tool");
     let call_id = meerai_agents::CallId::from_raw("c1");
     app.handle_agent_event(AgentEvent::ItemStarted {
@@ -997,14 +988,6 @@ fn agent_event_streaming_updates_transcript_and_status() {
         Some(&TranscriptEntry::Error {
             text: "provider error: boom".to_string(),
             expanded: false,
-        })
-    );
-    assert!(app.toggle_latest_thinking());
-    assert_eq!(
-        app.tab().transcript.last(),
-        Some(&TranscriptEntry::Error {
-            text: "provider error: boom".to_string(),
-            expanded: true,
         })
     );
 }

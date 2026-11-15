@@ -129,7 +129,8 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   switcher modal, provider and model pickers, sidebar with file changes, subagent
   items, diff and search views, approval overlay, `/compact`, `/mode`,
   `/agent`/`/skill`, a `@` Mentions popup for agents, skills, and files, and a
-  `Ctrl-p` command palette that shows each action's shortcut;
+  `Ctrl-p` command palette with sectioned actions and a right-hand shortcut
+  column;
   one-shot headless turns with a token summary on stderr, NDJSON event stream,
   `sessions list|rm|prune|fork` management, `--fork <ID>`, startup cleanup of
   unused sessions, and opt-in startup retention (`sessions.auto_prune_days`).

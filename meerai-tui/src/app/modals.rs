@@ -966,9 +966,6 @@ impl AppState {
             PaletteAction::PreviousTab => {
                 self.prev_tab();
             }
-            PaletteAction::ToggleThinking => {
-                self.toggle_latest_thinking();
-            }
         }
     }
 

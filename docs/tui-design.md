@@ -69,7 +69,6 @@ opencode dark theme and is overridable through the `theme` block in
 | `j` / `k` / `Down` / `Up` | Scroll the transcript |
 | `Ctrl-d` / `Ctrl-u` | Half-page down / up |
 | `gg` / `G` | Top / bottom |
-| `t` or `Ctrl-t` | Toggle the latest thinking block |
 | `Ctrl-p` | Open the command palette |
 | `y` | Yank the latest assistant (or error/system) text to the clipboard |
 | `/` or `Ctrl-f` | Open the workspace file/search modal |
@@ -97,9 +96,12 @@ no keyboard Select mode.
   sent when the turn ends, in order.
 - `Ctrl-g` sends now: it steers the oldest queued message (or the current draft
   when the queue is empty) at the next step boundary.
+- Click the thought header to expand or collapse it. There is no keyboard
+  toggle.
 - `Ctrl-p` (or `Ctrl-Shift-p`) opens the command palette when the completion
-  popup is closed. The palette lists actions with their shortcut in a right-hand
-  column, filters as you type, and runs the highlighted row with `Enter`.
+  popup is closed. The palette groups actions into sections, shows each
+  shortcut in a right-hand column, filters as you type, and runs the
+  highlighted row with `Enter`.
 
 ### 3. Slash commands — current
 

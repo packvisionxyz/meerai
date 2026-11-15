@@ -565,27 +565,6 @@ impl AppState {
         }
     }
 
-    pub fn toggle_latest_thinking(&mut self) -> bool {
-        for entry in self.tab_mut().transcript.iter_mut().rev() {
-            match entry {
-                TranscriptEntry::Assistant {
-                    reasoning,
-                    reasoning_expanded,
-                    ..
-                } if !reasoning.is_empty() => {
-                    *reasoning_expanded = !*reasoning_expanded;
-                    return true;
-                }
-                TranscriptEntry::Error { expanded, .. } => {
-                    *expanded = !*expanded;
-                    return true;
-                }
-                _ => {}
-            }
-        }
-        false
-    }
-
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
             return false;
@@ -606,9 +585,6 @@ impl AppState {
 
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
-                KeyCode::Char('t') => {
-                    return self.toggle_latest_thinking();
-                }
                 KeyCode::Char('b') => {
                     self.toggle_sidebar();
                     return true;
@@ -878,9 +854,6 @@ impl AppState {
             }
             KeyCode::Char('G') => {
                 self.scroll_to_bottom();
-            }
-            KeyCode::Char('t') if !has_ctrl => {
-                return self.toggle_latest_thinking();
             }
             KeyCode::Char('y') if !has_ctrl => {
                 return self.copy_latest_reply();

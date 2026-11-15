@@ -608,12 +608,111 @@ fn assistant_line_style(line: &str, in_code_block: &mut bool) -> Style {
     Style::default().fg(theme::p().text)
 }
 
+#[derive(Default)]
+struct TurnDigest {
+    commands: usize,
+    edits: usize,
+    reads: usize,
+    agents: usize,
+    thoughts: usize,
+}
+
+impl TurnDigest {
+    fn record_tool(&mut self, name: &str) {
+        match name {
+            "code-shell" | "sac-run_script" => self.commands += 1,
+            "code-write_file" | "code-edit_file" => self.edits += 1,
+            "subagent-run" => self.agents += 1,
+            _ => self.reads += 1,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.commands + self.edits + self.reads + self.agents + self.thoughts == 0
+    }
+
+    fn summary(&self) -> String {
+        fn part(count: usize, singular: &str, plural: &str) -> Option<String> {
+            match count {
+                0 => None,
+                1 => Some(format!("1 {singular}")),
+                n => Some(format!("{n} {plural}")),
+            }
+        }
+        [
+            part(self.commands, "command", "commands"),
+            part(self.edits, "edit", "edits"),
+            part(self.reads, "read", "reads"),
+            part(self.agents, "agent", "agents"),
+            part(self.thoughts, "thought", "thoughts"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+    }
+}
+
+fn turn_digests(transcript: &[TranscriptEntry]) -> (Vec<Option<TurnDigest>>, Option<usize>) {
+    let mut digests: Vec<Option<TurnDigest>> = (0..transcript.len()).map(|_| None).collect();
+    let mut last_user = None;
+    let mut current: Option<usize> = None;
+    let mut digest = TurnDigest::default();
+
+    for (idx, entry) in transcript.iter().enumerate() {
+        if matches!(entry, TranscriptEntry::User { .. }) {
+            if let Some(start) = current {
+                digests[start] = Some(std::mem::take(&mut digest));
+            }
+            current = Some(idx);
+            last_user = Some(idx);
+            digest = TurnDigest::default();
+        }
+        match entry {
+            TranscriptEntry::Assistant { reasoning, .. } if !reasoning.is_empty() => {
+                digest.thoughts += 1;
+            }
+            TranscriptEntry::ToolCall(call) => digest.record_tool(&call.name),
+            TranscriptEntry::Subagent(_) => digest.agents += 1,
+            _ => {}
+        }
+    }
+
+    if let Some(start) = current {
+        digests[start] = Some(digest);
+    }
+    (digests, last_user)
+}
+
+fn digest_line(digest: &TurnDigest, running: bool, spinner: &str) -> Option<Line<'static>> {
+    if digest.is_empty() {
+        return None;
+    }
+    let marker = if running {
+        format!("  {spinner} ")
+    } else {
+        "  · ".to_string()
+    };
+    let marker_style = if running {
+        Style::default().fg(theme::p().warning)
+    } else {
+        Style::default().fg(theme::p().faint)
+    };
+    Some(Line::from(vec![
+        Span::styled(marker, marker_style),
+        Span::styled(digest.summary(), Style::default().fg(theme::p().faint)),
+    ]))
+}
+
 fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
     let mut lines = build_header_lines(app);
     let transcript = &app.tab().transcript;
     if transcript.is_empty() {
         return lines;
     }
+
+    let (digests, last_user) = turn_digests(transcript);
+    let spinner = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
 
     lines.push(tagged_line(Line::default(), None, 0));
     for (idx, entry) in transcript.iter().enumerate() {
@@ -642,6 +741,12 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                         2,
                     ));
                 }
+                if let Some(digest) = digests.get(idx).and_then(|d| d.as_ref()) {
+                    let running = app.tab().is_running && last_user == Some(idx);
+                    if let Some(line) = digest_line(digest, running, spinner) {
+                        lines.push(tagged_line(line, None, 2));
+                    }
+                }
             }
             TranscriptEntry::Assistant {
                 text,
@@ -651,12 +756,16 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
             } => {
                 if !reasoning.is_empty() {
                     let line_count = reasoning.lines().count().max(1);
+                    let label = if *streaming { "Thinking" } else { "Thought" };
+                    let count = if line_count == 1 {
+                        "1 line".to_string()
+                    } else {
+                        format!("{line_count} lines")
+                    };
                     if *reasoning_expanded {
                         lines.push(tagged_line(
                             Line::from(Span::styled(
-                                format!(
-                                    "  ▾ Thinking ({line_count} lines)  [click or Ctrl-t to hide]"
-                                ),
+                                format!("  ▾ {label} ({count})  [click to hide]"),
                                 Style::default()
                                     .fg(theme::p().muted)
                                     .add_modifier(Modifier::ITALIC),
@@ -682,7 +791,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     } else {
                         lines.push(tagged_line(
                             Line::from(Span::styled(
-                                format!("  ▸ Thinking ({line_count} lines)  [click or Ctrl-t]"),
+                                format!("  ▸ {label} ({count})  [click to expand]"),
                                 Style::default()
                                     .fg(theme::p().muted)
                                     .add_modifier(Modifier::ITALIC),
@@ -1672,7 +1781,12 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             );
         }
         ActiveModal::CommandPalette { filter, selected } => {
-            let popup = centered_rect(area, 64, 62, 54, 10);
+            let popup = centered_rect(area, 50, 62, 46, 12);
+            let popup = Rect {
+                x: popup.x + popup.width.saturating_sub(58) / 2,
+                width: popup.width.min(58),
+                ..popup
+            };
             let block = theme::dialog(" Commands (Ctrl-p) ");
             let inner = block.inner(popup);
             frame.render_widget(Clear, popup);
@@ -1688,10 +1802,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             let filter_line = Line::from(vec![
                 Span::styled("> ", Style::default().fg(theme::p().interactive)),
                 if filter.is_empty() {
-                    Span::styled(
-                        "type to filter commands",
-                        Style::default().fg(theme::p().faint),
-                    )
+                    Span::styled("filter commands", Style::default().fg(theme::p().faint))
                 } else {
                     Span::styled(filter.clone(), Style::default().fg(theme::p().text))
                 },
@@ -1700,36 +1811,52 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
 
             let commands = crate::app::filtered_commands(filter);
             let width = rows[1].width as usize;
-            let list_items: Vec<ListItem<'_>> = commands
-                .iter()
-                .map(|command| {
-                    let label_len = command.label.chars().count();
-                    let hint_len = command.hint.chars().count();
-                    let gap = width.saturating_sub(label_len + hint_len + 1);
-                    ListItem::new(Line::from(vec![
-                        Span::styled(command.label, Style::default().fg(theme::p().text)),
-                        Span::raw(" ".repeat(gap)),
-                        Span::styled(command.hint, Style::default().fg(theme::p().muted)),
-                    ]))
-                })
-                .collect();
+            let mut items: Vec<ListItem<'_>> = Vec::new();
+            let mut command_rows: Vec<usize> = Vec::new();
+            let mut section = "";
+            for command in &commands {
+                if command.section != section {
+                    section = command.section;
+                    items.push(ListItem::new(Line::from(Span::styled(
+                        format!(" {} ", section.to_uppercase()),
+                        Style::default()
+                            .fg(theme::p().faint)
+                            .add_modifier(Modifier::BOLD),
+                    ))));
+                }
+                command_rows.push(items.len());
+                let label = format!(" {}", command.label);
+                let label_len = label.chars().count();
+                let hint_len = command.hint.chars().count();
+                let gap = width.saturating_sub(label_len + hint_len + 1).max(1);
+                let hint_style = if command.hint.starts_with('/') {
+                    Style::default().fg(theme::p().faint)
+                } else {
+                    Style::default().fg(theme::p().muted)
+                };
+                items.push(ListItem::new(Line::from(vec![
+                    Span::styled(label, Style::default().fg(theme::p().text)),
+                    Span::raw(" ".repeat(gap)),
+                    Span::styled(command.hint, hint_style),
+                ])));
+            }
 
             let mut state = ListState::default();
             if !commands.is_empty() {
-                state.select(Some((*selected).min(commands.len() - 1)));
+                let idx = (*selected).min(commands.len() - 1);
+                state.select(Some(command_rows[idx]));
             }
-            let list = List::new(list_items).highlight_style(
+            let list = List::new(items).highlight_style(
                 Style::default()
                     .bg(theme::p().surface_high)
-                    .fg(theme::p().text)
                     .add_modifier(Modifier::BOLD),
             );
             frame.render_stateful_widget(list, rows[1], &mut state);
 
             let footer = if commands.is_empty() {
-                "No matching commands · Esc close"
+                "No matches · Esc close"
             } else {
-                "Enter run · Up/Down move · type filter · Esc close"
+                "Enter run · ↑↓ move · Esc close"
             };
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
@@ -2150,7 +2277,7 @@ fn render_statusline(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                     if app.completion.is_active() {
                         " · Tab/Enter accept · Esc dismiss"
                     } else {
-                        " · Ctrl-p commands · Ctrl-b side · Ctrl-t think · Esc normal"
+                        " · Ctrl-p commands · Ctrl-b side · Esc normal"
                     }
                 }
                 InputMode::Normal => " · Ctrl-p commands · i insert · / search · q quit",
@@ -2655,10 +2782,48 @@ mod tests {
         });
         let rendered = render_to_string(&mut app);
         assert!(rendered.contains("Commands (Ctrl-p)"));
+        assert!(rendered.contains(" SESSION "));
         assert!(rendered.contains("New session tab"));
         assert!(rendered.contains("/new"));
-        assert!(rendered.contains("type to filter commands"));
+        assert!(rendered.contains("filter commands"));
         assert!(rendered.contains("Enter run"));
+    }
+
+    #[test]
+    fn renders_turn_digest_grouping_tools_and_thoughts() {
+        let mut app = test_app();
+        app.tab_mut().transcript.push(TranscriptEntry::User {
+            text: "do the work".to_string(),
+        });
+        app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+            text: String::new(),
+            reasoning: "plan the edit".to_string(),
+            streaming: false,
+            reasoning_expanded: false,
+        });
+        for (name, status) in [
+            ("code-shell", ToolCallStatus::Succeeded),
+            ("code-read_file", ToolCallStatus::Succeeded),
+            ("code-edit_file", ToolCallStatus::Succeeded),
+        ] {
+            app.tab_mut()
+                .transcript
+                .push(TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
+                    call_id: format!("call-{name}"),
+                    name: name.to_string(),
+                    args: "{}".to_string(),
+                    status,
+                    output: None,
+                }));
+        }
+
+        let rendered = render_to_string(&mut app);
+        assert!(
+            rendered.contains("1 command · 1 edit · 1 read · 1 thought"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("▸ Thought (1 line)"));
+        assert!(rendered.contains("[click to expand]"));
     }
 
     #[test]
@@ -3017,6 +3182,7 @@ mod tests {
 
         let collapsed = render_to_string(&mut app);
         assert!(collapsed.contains("▸ Thinking (2 lines)"));
+        assert!(collapsed.contains("[click to expand]"));
         assert!(!collapsed.contains("secret thought step 1"));
         assert!(collapsed.contains("File Changes (1)"));
         assert!(collapsed.contains("meerai-tui/src/ui.rs"));
@@ -3251,7 +3417,7 @@ mod tests {
         assert!(rendered.contains("▌ Inspect Cargo.toml"));
         assert!(rendered.contains("▸ [tool] code-read_file [ok]"));
         assert!(rendered.contains("↳ [workspace] members = []"));
-        assert!(rendered.contains("▾ Thinking (1 lines)"));
+        assert!(rendered.contains("▾ Thought (1 line)"));
         assert!(rendered.contains("● Response"));
         assert!(rendered.contains("# Summary"));
         assert!(rendered.contains("name = \"meerai\""));
