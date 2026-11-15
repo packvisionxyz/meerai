@@ -2,12 +2,14 @@ mod commands;
 mod events;
 mod input;
 mod modals;
+mod palette;
 #[cfg(test)]
 mod tests;
 
 pub(crate) use commands::{MentionKind, mention_is_known, parse_mention_token};
 pub use events::{session_usage_from_events, transcript_from_events};
 pub use input::{clamp_pos_to_bounds, normalize_selection_in_bounds};
+pub(crate) use palette::{PaletteAction, filtered_commands};
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -88,6 +90,10 @@ pub enum ActiveModal {
         sessions: Vec<SessionSummary>,
         loading: bool,
         error: Option<String>,
+    },
+    CommandPalette {
+        filter: String,
+        selected: usize,
     },
 }
 

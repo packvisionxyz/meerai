@@ -80,6 +80,10 @@ impl AppState {
                             filter.push_str(&clean);
                             *selected = 0;
                         }
+                        ActiveModal::CommandPalette { filter, selected } => {
+                            filter.push_str(&clean);
+                            *selected = 0;
+                        }
                     }
                     return true;
                 }
@@ -617,6 +621,10 @@ impl AppState {
                     self.close_active_tab();
                     return true;
                 }
+                KeyCode::Char('p') | KeyCode::Char('P') if !self.completion.is_active() => {
+                    self.open_command_palette();
+                    return true;
+                }
                 KeyCode::PageUp => {
                     self.prev_tab();
                     return true;
@@ -875,37 +883,7 @@ impl AppState {
                 return self.toggle_latest_thinking();
             }
             KeyCode::Char('y') if !has_ctrl => {
-                let text = self
-                    .tab()
-                    .transcript
-                    .iter()
-                    .rev()
-                    .find_map(|entry| match entry {
-                        TranscriptEntry::Assistant { text, .. } if !text.is_empty() => {
-                            Some(text.clone())
-                        }
-                        _ => None,
-                    })
-                    .or_else(|| {
-                        self.tab()
-                            .transcript
-                            .iter()
-                            .rev()
-                            .find_map(|entry| match entry {
-                                TranscriptEntry::Error { text, .. }
-                                | TranscriptEntry::System { text }
-                                    if !text.is_empty() =>
-                                {
-                                    Some(text.clone())
-                                }
-                                _ => None,
-                            })
-                    });
-                if let Some(content) = text {
-                    self.copy_text_to_clipboard(&content);
-                    return true;
-                }
-                return false;
+                return self.copy_latest_reply();
             }
             KeyCode::Char('/') if !has_ctrl => {
                 self.open_search_modal(SearchMode::Files, "");
@@ -925,6 +903,37 @@ impl AppState {
         }
 
         true
+    }
+
+    pub(super) fn copy_latest_reply(&mut self) -> bool {
+        let text = self
+            .tab()
+            .transcript
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                TranscriptEntry::Assistant { text, .. } if !text.is_empty() => Some(text.clone()),
+                _ => None,
+            })
+            .or_else(|| {
+                self.tab()
+                    .transcript
+                    .iter()
+                    .rev()
+                    .find_map(|entry| match entry {
+                        TranscriptEntry::Error { text, .. } | TranscriptEntry::System { text }
+                            if !text.is_empty() =>
+                        {
+                            Some(text.clone())
+                        }
+                        _ => None,
+                    })
+            });
+        if let Some(content) = text {
+            self.copy_text_to_clipboard(&content);
+            return true;
+        }
+        false
     }
 
     pub(super) fn update_completion(&mut self) {

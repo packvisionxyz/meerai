@@ -889,9 +889,87 @@ impl AppState {
                     }
                 }
             }
+            ActiveModal::CommandPalette {
+                mut filter,
+                mut selected,
+            } => {
+                let commands = filtered_commands(&filter);
+                match key.code {
+                    KeyCode::Esc => {
+                        self.modal = None;
+                    }
+                    KeyCode::Up | KeyCode::Char('p') if key.code == KeyCode::Up || has_ctrl => {
+                        if !commands.is_empty() {
+                            selected = if selected == 0 {
+                                commands.len() - 1
+                            } else {
+                                selected - 1
+                            };
+                        }
+                        self.modal = Some(ActiveModal::CommandPalette { filter, selected });
+                    }
+                    KeyCode::Down | KeyCode::Char('n') if key.code == KeyCode::Down || has_ctrl => {
+                        if !commands.is_empty() {
+                            selected = (selected + 1) % commands.len();
+                        }
+                        self.modal = Some(ActiveModal::CommandPalette { filter, selected });
+                    }
+                    KeyCode::Backspace => {
+                        filter.pop();
+                        selected = 0;
+                        self.modal = Some(ActiveModal::CommandPalette { filter, selected });
+                    }
+                    KeyCode::Enter => {
+                        if let Some(command) = commands.get(selected) {
+                            let action = command.action;
+                            self.modal = None;
+                            self.run_palette_action(action);
+                        } else {
+                            self.modal = Some(ActiveModal::CommandPalette { filter, selected });
+                        }
+                    }
+                    KeyCode::Char(c) if !has_ctrl && !has_alt => {
+                        filter.push(c);
+                        selected = 0;
+                        self.modal = Some(ActiveModal::CommandPalette { filter, selected });
+                    }
+                    _ => {
+                        self.modal = Some(ActiveModal::CommandPalette { filter, selected });
+                    }
+                }
+            }
         }
 
         true
+    }
+
+    pub(super) fn open_command_palette(&mut self) {
+        self.modal = Some(ActiveModal::CommandPalette {
+            filter: String::new(),
+            selected: 0,
+        });
+    }
+
+    fn run_palette_action(&mut self, action: PaletteAction) {
+        match action {
+            PaletteAction::Slash(command) => {
+                self.handle_slash_command(command);
+            }
+            PaletteAction::CopyReply => {
+                if !self.copy_latest_reply() {
+                    self.status_notice = Some("Nothing to copy".to_string());
+                }
+            }
+            PaletteAction::NextTab => {
+                self.next_tab();
+            }
+            PaletteAction::PreviousTab => {
+                self.prev_tab();
+            }
+            PaletteAction::ToggleThinking => {
+                self.toggle_latest_thinking();
+            }
+        }
     }
 
     pub(super) fn toggle_sidebar(&mut self) {

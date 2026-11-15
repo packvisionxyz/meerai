@@ -2512,3 +2512,60 @@ fn ctrl_g_sends_queued_message_now_as_steering() {
         Some(TranscriptEntry::User { text }) if text == "urgent"
     ));
 }
+
+#[test]
+fn ctrl_p_opens_the_command_palette_and_esc_closes_it() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.handle_key_event(key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::CommandPalette { .. })
+    ));
+
+    app.handle_key_event(key(KeyCode::Esc));
+    assert!(app.modal.is_none());
+}
+
+#[test]
+fn command_palette_filters_and_runs_the_selected_command() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.handle_key_event(key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    assert!(!app.tab().is_running);
+
+    type_text(&mut app, "sidebar");
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert!(app.modal.is_none());
+    assert!(!app.show_sidebar);
+}
+
+#[test]
+fn ctrl_p_moves_the_mention_popup_instead_of_opening_the_palette() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.agents = vec![
+        test_agent_definition("reviewer"),
+        test_agent_definition("planner"),
+    ];
+    type_text(&mut app, "@");
+    assert!(app.completion.is_active());
+    let before = app.completion.selected();
+
+    app.handle_key_event(key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL));
+
+    assert!(app.modal.is_none());
+    assert!(app.completion.is_active());
+    assert_ne!(app.completion.selected(), before);
+}
+
+fn test_agent_definition(id: &str) -> AgentDefinition {
+    AgentDefinition {
+        id: id.to_string(),
+        source: DefinitionSource::Agents,
+        description: None,
+        model: None,
+        steps: None,
+        mode: None,
+        prompt: String::new(),
+        path: PathBuf::from(format!(".agents/agents/{id}.md")),
+    }
+}

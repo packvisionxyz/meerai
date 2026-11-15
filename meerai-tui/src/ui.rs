@@ -1671,6 +1671,74 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 layout[2],
             );
         }
+        ActiveModal::CommandPalette { filter, selected } => {
+            let popup = centered_rect(area, 64, 62, 54, 10);
+            let block = theme::dialog(" Commands (Ctrl-p) ");
+            let inner = block.inner(popup);
+            frame.render_widget(Clear, popup);
+            frame.render_widget(block, popup);
+
+            let rows = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+
+            let filter_line = Line::from(vec![
+                Span::styled("> ", Style::default().fg(theme::p().interactive)),
+                if filter.is_empty() {
+                    Span::styled(
+                        "type to filter commands",
+                        Style::default().fg(theme::p().faint),
+                    )
+                } else {
+                    Span::styled(filter.clone(), Style::default().fg(theme::p().text))
+                },
+            ]);
+            frame.render_widget(Paragraph::new(filter_line), rows[0]);
+
+            let commands = crate::app::filtered_commands(filter);
+            let width = rows[1].width as usize;
+            let list_items: Vec<ListItem<'_>> = commands
+                .iter()
+                .map(|command| {
+                    let label_len = command.label.chars().count();
+                    let hint_len = command.hint.chars().count();
+                    let gap = width.saturating_sub(label_len + hint_len + 1);
+                    ListItem::new(Line::from(vec![
+                        Span::styled(command.label, Style::default().fg(theme::p().text)),
+                        Span::raw(" ".repeat(gap)),
+                        Span::styled(command.hint, Style::default().fg(theme::p().muted)),
+                    ]))
+                })
+                .collect();
+
+            let mut state = ListState::default();
+            if !commands.is_empty() {
+                state.select(Some((*selected).min(commands.len() - 1)));
+            }
+            let list = List::new(list_items).highlight_style(
+                Style::default()
+                    .bg(theme::p().surface_high)
+                    .fg(theme::p().text)
+                    .add_modifier(Modifier::BOLD),
+            );
+            frame.render_stateful_widget(list, rows[1], &mut state);
+
+            let footer = if commands.is_empty() {
+                "No matching commands · Esc close"
+            } else {
+                "Enter run · Up/Down move · type filter · Esc close"
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    footer,
+                    Style::default().fg(theme::p().faint),
+                ))),
+                rows[2],
+            );
+        }
         ActiveModal::Approval {
             queue,
             reason,
@@ -2072,9 +2140,9 @@ fn render_statusline(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     } else {
         let hint = if tab.is_running {
             if tab.queued.is_empty() {
-                " · Ctrl-c cancel · Ctrl-g send now"
+                " · Ctrl-c cancel · Ctrl-g send now · Ctrl-p commands"
             } else {
-                " · Ctrl-c cancel · Ctrl-g send queued"
+                " · Ctrl-c cancel · Ctrl-g send queued · Ctrl-p commands"
             }
         } else {
             match app.mode {
@@ -2082,10 +2150,10 @@ fn render_statusline(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                     if app.completion.is_active() {
                         " · Tab/Enter accept · Esc dismiss"
                     } else {
-                        " · Ctrl-f search · Ctrl-t think · Ctrl-b side · Esc normal"
+                        " · Ctrl-p commands · Ctrl-b side · Ctrl-t think · Esc normal"
                     }
                 }
-                InputMode::Normal => " · i insert · / search · t think · Ctrl-b side · q quit",
+                InputMode::Normal => " · Ctrl-p commands · i insert · / search · q quit",
             }
         };
         spans.push(Span::styled(hint, Style::default().fg(theme::p().faint)));
@@ -2576,6 +2644,21 @@ mod tests {
         assert!(!narrow.contains("File Changes (1)"));
         assert_eq!(app.visible_file_change_rows, 0);
         assert_eq!(app.sidebar_changes_inner_area, Rect::default());
+    }
+
+    #[test]
+    fn renders_command_palette_with_shortcuts() {
+        let mut app = test_app();
+        app.modal = Some(ActiveModal::CommandPalette {
+            filter: String::new(),
+            selected: 0,
+        });
+        let rendered = render_to_string(&mut app);
+        assert!(rendered.contains("Commands (Ctrl-p)"));
+        assert!(rendered.contains("New session tab"));
+        assert!(rendered.contains("/new"));
+        assert!(rendered.contains("type to filter commands"));
+        assert!(rendered.contains("Enter run"));
     }
 
     #[test]
