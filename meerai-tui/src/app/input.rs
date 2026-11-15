@@ -115,6 +115,15 @@ impl AppState {
             self.last_mouse_pos = Some(pos);
         }
 
+        if mouse.kind == MouseEventKind::Moved {
+            let hovered = self.hovered_entry_at(pos);
+            if hovered != self.hovered_entry {
+                self.hovered_entry = hovered;
+                return true;
+            }
+            return false;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.modal.is_none() && self.click_tab_at(mouse.column, mouse.row) {
@@ -524,6 +533,36 @@ impl AppState {
                 true
             }
         }
+    }
+
+    pub fn hovered_entry_at(&self, pos: ScreenPos) -> Option<usize> {
+        if self.modal.is_some() {
+            return None;
+        }
+        self.hovered_zone_at(self.transcript_inner_area, self.effective_scroll(), pos)
+    }
+
+    pub(crate) fn hovered_entry_at_screen(&self, area: Rect, scroll: usize) -> Option<usize> {
+        if self.modal.is_some() {
+            return None;
+        }
+        self.hovered_zone_at(area, scroll, self.last_mouse_pos?)
+    }
+
+    fn hovered_zone_at(&self, area: Rect, scroll: usize, pos: ScreenPos) -> Option<usize> {
+        if area.width == 0
+            || pos.col < area.x
+            || pos.col >= area.x + area.width
+            || pos.row < area.y
+            || pos.row >= area.y + area.height
+        {
+            return None;
+        }
+        let row = scroll.saturating_add((pos.row - area.y) as usize);
+        self.hover_zones
+            .iter()
+            .find(|zone| row >= zone.start_line && row < zone.end_line)
+            .map(|zone| zone.entry_idx)
     }
 
     pub fn toggle_thinking_at(&mut self, column: u16, row: u16) -> bool {

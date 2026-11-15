@@ -15,8 +15,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use regex::Regex;
 
 use crate::app::{
-    ActiveModal, AppState, DocPos, InputMode, MentionKind, TabHitKind, TabHitZone, ThinkingHitZone,
-    ToolCallStatus, TranscriptEntry, TranscriptWrappedLine, mention_is_known,
+    ActiveModal, AppState, DocPos, HoverZone, InputMode, MentionKind, TabHitKind, TabHitZone,
+    ThinkingHitZone, ToolCallStatus, TranscriptEntry, TranscriptWrappedLine, mention_is_known,
     normalize_selection_in_bounds, parse_mention_token,
 };
 use crate::completion::{CompletionItemKind, CompletionKind};
@@ -209,7 +209,7 @@ fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     };
 
     let raw_lines = build_transcript_lines(app);
-    let wrapped = if inner.width > 0 {
+    let mut wrapped = if inner.width > 0 {
         wrap_tagged_lines(raw_lines, inner.width as usize)
     } else {
         WrappedTranscript {
@@ -217,19 +217,19 @@ fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
             hit_zones: Vec::new(),
             doc_lines: Vec::new(),
             bands: Vec::new(),
+            code_bands: Vec::new(),
+            hover_zones: Vec::new(),
         }
     };
-    let wrapped_lines = wrapped.lines;
-    let bands = wrapped.bands;
 
     app.transcript_inner_area = inner;
-    app.thinking_hit_zones = wrapped.hit_zones;
-    app.transcript_wrapped_lines = wrapped.doc_lines;
+    app.thinking_hit_zones = std::mem::take(&mut wrapped.hit_zones);
+    app.transcript_wrapped_lines = std::mem::take(&mut wrapped.doc_lines);
 
     let scroll_y = {
         let tab = app.tab_mut();
         tab.viewport_height = inner.height as usize;
-        tab.total_lines = wrapped_lines.len();
+        tab.total_lines = wrapped.lines.len();
         let max_scroll = tab.max_scroll();
         if tab.auto_follow {
             tab.scroll_offset = max_scroll;
@@ -239,7 +239,18 @@ fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
         tab.scroll_offset.min(u16::MAX as usize) as u16
     };
 
-    let paragraph = Paragraph::new(wrapped_lines).scroll((scroll_y, 0));
+    let hovered = app.hovered_entry_at_screen(inner, scroll_y as usize);
+    app.hovered_entry = hovered;
+    let hover_zones = std::mem::take(&mut wrapped.hover_zones);
+    let hover_range = hovered.and_then(|idx| {
+        hover_zones
+            .iter()
+            .find(|zone| zone.entry_idx == idx)
+            .map(|zone| (zone.start_line, zone.end_line))
+    });
+    app.hover_zones = hover_zones;
+
+    let paragraph = Paragraph::new(wrapped.lines).scroll((scroll_y, 0));
     frame.render_widget(paragraph, inner);
 
     if inner.width == 0 || inner.height == 0 {
@@ -247,22 +258,30 @@ fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     }
     let first_visible = scroll_y as usize;
     let last_visible = first_visible + inner.height as usize;
-    let band_bg = theme::p().surface;
-    for (start, end) in bands {
-        if end <= first_visible || start >= last_visible {
-            continue;
-        }
-        let from = start.max(first_visible);
-        let to = end.min(last_visible);
-        let buf = frame.buffer_mut();
-        for row in from..to {
-            let y = inner.y + (row - first_visible) as u16;
-            for col in inner.x..inner.x + inner.width {
-                if let Some(cell) = buf.cell_mut((col, y)) {
-                    cell.set_bg(band_bg);
+
+    let mut paint = |bands: &[(usize, usize)], color: ratatui::style::Color| {
+        for &(start, end) in bands {
+            if end <= first_visible || start >= last_visible {
+                continue;
+            }
+            let from = start.max(first_visible);
+            let to = end.min(last_visible);
+            let buf = frame.buffer_mut();
+            for row in from..to {
+                let y = inner.y + (row - first_visible) as u16;
+                for col in inner.x..inner.x + inner.width {
+                    if let Some(cell) = buf.cell_mut((col, y)) {
+                        cell.set_bg(color);
+                    }
                 }
             }
         }
+    };
+
+    paint(&wrapped.code_bands, theme::p().surface_high);
+    paint(&wrapped.bands, theme::p().surface);
+    if let Some(range) = hover_range {
+        paint(&[range], theme::p().surface_high);
     }
 }
 
@@ -508,6 +527,8 @@ struct TaggedTranscriptLine {
     entry_tag: Option<usize>,
     gutter_len: usize,
     band: bool,
+    code_band: bool,
+    hover_tag: Option<usize>,
 }
 
 fn tagged_line(
@@ -520,6 +541,8 @@ fn tagged_line(
         entry_tag,
         gutter_len,
         band: false,
+        code_band: false,
+        hover_tag: None,
     }
 }
 
@@ -533,7 +556,19 @@ fn banded_line(
         entry_tag,
         gutter_len,
         band: true,
+        code_band: false,
+        hover_tag: None,
     }
+}
+
+fn code_line(mut tagged: TaggedTranscriptLine) -> TaggedTranscriptLine {
+    tagged.code_band = true;
+    tagged
+}
+
+fn with_hover(mut tagged: TaggedTranscriptLine, entry_idx: usize) -> TaggedTranscriptLine {
+    tagged.hover_tag = Some(entry_idx);
+    tagged
 }
 
 fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
@@ -580,32 +615,6 @@ fn tool_status_badge(status: &ToolCallStatus) -> (&'static str, Color) {
         ToolCallStatus::Stopped => ("stop", theme::p().muted),
         ToolCallStatus::Cancelled => ("cancelled", theme::p().muted),
     }
-}
-
-fn assistant_line_style(line: &str, in_code_block: &mut bool) -> Style {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with("```") {
-        *in_code_block = !*in_code_block;
-        return Style::default().fg(theme::p().faint).bg(theme::p().surface);
-    }
-    if *in_code_block {
-        return Style::default().fg(theme::p().text).bg(theme::p().surface);
-    }
-    if trimmed.starts_with("# ")
-        || trimmed.starts_with("## ")
-        || trimmed.starts_with("### ")
-        || trimmed.starts_with("#### ")
-    {
-        return Style::default()
-            .fg(theme::p().text)
-            .add_modifier(Modifier::BOLD);
-    }
-    if trimmed.starts_with("> ") {
-        return Style::default()
-            .fg(theme::p().muted)
-            .add_modifier(Modifier::ITALIC);
-    }
-    Style::default().fg(theme::p().text)
 }
 
 #[derive(Default)]
@@ -721,24 +730,33 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
         }
         match entry {
             TranscriptEntry::User { text } => {
-                lines.push(banded_line(
-                    Line::from(Span::styled(
-                        "▌ you",
-                        Style::default()
-                            .fg(theme::p().accent)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                    None,
-                    2,
-                ));
-                for line in text.split('\n') {
-                    lines.push(banded_line(
-                        Line::from(vec![
-                            Span::styled("▌ ", Style::default().fg(theme::p().accent)),
-                            Span::styled(line.to_string(), Style::default().fg(theme::p().text)),
-                        ]),
+                lines.push(with_hover(
+                    banded_line(
+                        Line::from(Span::styled(
+                            "▌ you",
+                            Style::default()
+                                .fg(theme::p().accent)
+                                .add_modifier(Modifier::BOLD),
+                        )),
                         None,
                         2,
+                    ),
+                    idx,
+                ));
+                for line in text.split('\n') {
+                    lines.push(with_hover(
+                        banded_line(
+                            Line::from(vec![
+                                Span::styled("▌ ", Style::default().fg(theme::p().accent)),
+                                Span::styled(
+                                    line.to_string(),
+                                    Style::default().fg(theme::p().text),
+                                ),
+                            ]),
+                            None,
+                            2,
+                        ),
+                        idx,
                     ));
                 }
                 if let Some(digest) = digests.get(idx).and_then(|d| d.as_ref()) {
@@ -763,41 +781,50 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                         format!("{line_count} lines")
                     };
                     if *reasoning_expanded {
-                        lines.push(tagged_line(
-                            Line::from(Span::styled(
-                                format!("  ▾ {label} ({count})  [click to hide]"),
-                                Style::default()
-                                    .fg(theme::p().muted)
-                                    .add_modifier(Modifier::ITALIC),
-                            )),
-                            Some(idx),
-                            2,
+                        lines.push(with_hover(
+                            tagged_line(
+                                Line::from(Span::styled(
+                                    format!("  ▾ {label} ({count})  [click to hide]"),
+                                    Style::default()
+                                        .fg(theme::p().muted)
+                                        .add_modifier(Modifier::ITALIC),
+                                )),
+                                Some(idx),
+                                2,
+                            ),
+                            idx,
                         ));
                         for line in reasoning.split('\n') {
-                            lines.push(tagged_line(
-                                Line::from(vec![
-                                    Span::styled("  │ ", Style::default().fg(theme::p().faint)),
-                                    Span::styled(
-                                        line.to_string(),
-                                        Style::default()
-                                            .fg(theme::p().muted)
-                                            .add_modifier(Modifier::ITALIC),
-                                    ),
-                                ]),
-                                Some(idx),
-                                4,
+                            lines.push(with_hover(
+                                tagged_line(
+                                    Line::from(vec![
+                                        Span::styled("  │ ", Style::default().fg(theme::p().faint)),
+                                        Span::styled(
+                                            line.to_string(),
+                                            Style::default()
+                                                .fg(theme::p().muted)
+                                                .add_modifier(Modifier::ITALIC),
+                                        ),
+                                    ]),
+                                    Some(idx),
+                                    4,
+                                ),
+                                idx,
                             ));
                         }
                     } else {
-                        lines.push(tagged_line(
-                            Line::from(Span::styled(
-                                format!("  ▸ {label} ({count})  [click to expand]"),
-                                Style::default()
-                                    .fg(theme::p().muted)
-                                    .add_modifier(Modifier::ITALIC),
-                            )),
-                            Some(idx),
-                            2,
+                        lines.push(with_hover(
+                            tagged_line(
+                                Line::from(Span::styled(
+                                    format!("  ▸ {label} ({count})  [click to expand]"),
+                                    Style::default()
+                                        .fg(theme::p().muted)
+                                        .add_modifier(Modifier::ITALIC),
+                                )),
+                                Some(idx),
+                                2,
+                            ),
+                            idx,
                         ));
                     }
                 }
@@ -818,17 +845,11 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     lines.push(tagged_line(Line::from(header_spans), None, 2));
                 }
                 if !text.is_empty() {
-                    let mut in_code_block = false;
-                    for line in text.split('\n') {
-                        let line_style = assistant_line_style(line, &mut in_code_block);
-                        lines.push(tagged_line(
-                            Line::from(vec![
-                                Span::styled("  ", Style::default()),
-                                Span::styled(line.to_string(), line_style),
-                            ]),
-                            None,
-                            2,
-                        ));
+                    for line in crate::markdown::render(text) {
+                        let mut spans = vec![Span::styled("  ", Style::default())];
+                        spans.extend(line.spans);
+                        let tagged = tagged_line(Line::from(spans), None, 2);
+                        lines.push(if line.code { code_line(tagged) } else { tagged });
                     }
                 }
             }
@@ -878,21 +899,27 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                         Span::styled(format!(" {args_preview}"), args_style)
                     },
                 ]);
-                lines.push(if active {
-                    banded_line(line, None, 2)
-                } else {
-                    tagged_line(line, None, 2)
-                });
+                lines.push(with_hover(
+                    if active {
+                        banded_line(line, None, 2)
+                    } else {
+                        tagged_line(line, None, 2)
+                    },
+                    idx,
+                ));
                 if let Some(output) = &tc.output {
                     let preview = truncate_single_line(output, 120);
                     if !preview.is_empty() {
-                        lines.push(tagged_line(
-                            Line::from(vec![
-                                Span::styled("  ↳ ", Style::default().fg(theme::p().faint)),
-                                Span::styled(preview, Style::default().fg(theme::p().faint)),
-                            ]),
-                            None,
-                            4,
+                        lines.push(with_hover(
+                            tagged_line(
+                                Line::from(vec![
+                                    Span::styled("  ↳ ", Style::default().fg(theme::p().faint)),
+                                    Span::styled(preview, Style::default().fg(theme::p().faint)),
+                                ]),
+                                None,
+                                4,
+                            ),
+                            idx,
                         ));
                     }
                 }
@@ -929,21 +956,27 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     Span::styled(" ", Style::default()),
                     Span::styled(format!("[{badge}]"), badge_style),
                 ]);
-                lines.push(if active {
-                    banded_line(line, None, 2)
-                } else {
-                    tagged_line(line, None, 2)
-                });
+                lines.push(with_hover(
+                    if active {
+                        banded_line(line, None, 2)
+                    } else {
+                        tagged_line(line, None, 2)
+                    },
+                    idx,
+                ));
                 if let Some(report) = &sub.report {
                     let preview = truncate_single_line(report, 120);
                     if !preview.is_empty() {
-                        lines.push(tagged_line(
-                            Line::from(vec![
-                                Span::styled("  ↳ ", Style::default().fg(theme::p().faint)),
-                                Span::styled(preview, Style::default().fg(theme::p().faint)),
-                            ]),
-                            None,
-                            4,
+                        lines.push(with_hover(
+                            tagged_line(
+                                Line::from(vec![
+                                    Span::styled("  ↳ ", Style::default().fg(theme::p().faint)),
+                                    Span::styled(preview, Style::default().fg(theme::p().faint)),
+                                ]),
+                                None,
+                                4,
+                            ),
+                            idx,
                         ));
                     }
                 }
@@ -2586,6 +2619,8 @@ struct WrappedTranscript {
     hit_zones: Vec<ThinkingHitZone>,
     doc_lines: Vec<TranscriptWrappedLine>,
     bands: Vec<(usize, usize)>,
+    code_bands: Vec<(usize, usize)>,
+    hover_zones: Vec<HoverZone>,
 }
 
 fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedTranscript {
@@ -2595,6 +2630,8 @@ fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedT
             hit_zones: Vec::new(),
             doc_lines: Vec::new(),
             bands: Vec::new(),
+            code_bands: Vec::new(),
+            hover_zones: Vec::new(),
         };
     }
 
@@ -2602,6 +2639,9 @@ fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedT
     let mut doc_lines = Vec::with_capacity(lines.len());
     let mut hit_zones: Vec<ThinkingHitZone> = Vec::new();
     let mut bands: Vec<(usize, usize)> = Vec::new();
+    let mut code_bands: Vec<(usize, usize)> = Vec::new();
+    let mut hover_zones: Vec<HoverZone> = Vec::new();
+    let mut hover_active: Option<(usize, usize)> = None;
     let mut active_zone: Option<(usize, usize)> = None;
 
     for tagged in lines {
@@ -2610,6 +2650,8 @@ fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedT
             entry_tag,
             gutter_len,
             band,
+            code_band,
+            hover_tag,
         } = tagged;
         let line_style = line.style;
         let line_start = out.len();
@@ -2668,6 +2710,27 @@ fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedT
                 _ => bands.push((line_start, out.len())),
             }
         }
+        if code_band {
+            match code_bands.last_mut() {
+                Some((_, end)) if *end == line_start => *end = out.len(),
+                _ => code_bands.push((line_start, out.len())),
+            }
+        }
+        match (hover_active, hover_tag) {
+            (Some((idx, start)), Some(tag)) if idx == tag => {
+                hover_active = Some((idx, start));
+            }
+            (Some((idx, start)), _) => {
+                hover_zones.push(HoverZone {
+                    entry_idx: idx,
+                    start_line: start,
+                    end_line: line_start,
+                });
+                hover_active = hover_tag.map(|tag| (tag, line_start));
+            }
+            (None, Some(tag)) => hover_active = Some((tag, line_start)),
+            (None, None) => {}
+        }
         match (active_zone, entry_tag) {
             (Some((cur_idx, _start)), Some(idx)) if cur_idx == idx => {}
             (Some((cur_idx, start)), Some(idx)) => {
@@ -2701,11 +2764,21 @@ fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedT
         });
     }
 
+    if let Some((idx, start)) = hover_active {
+        hover_zones.push(HoverZone {
+            entry_idx: idx,
+            start_line: start,
+            end_line: out.len(),
+        });
+    }
+
     WrappedTranscript {
         lines: out,
         hit_zones,
         doc_lines,
         bands,
+        code_bands,
+        hover_zones,
     }
 }
 
@@ -2826,6 +2899,66 @@ mod tests {
         assert!(rendered.contains("/new"));
         assert!(rendered.contains("filter commands"));
         assert!(rendered.contains("Enter run"));
+    }
+
+    #[test]
+    fn hover_highlights_the_row_under_the_pointer() {
+        let mut app = test_app();
+        app.tab_mut().transcript.push(TranscriptEntry::User {
+            text: "inspect the file".to_string(),
+        });
+        app.tab_mut()
+            .transcript
+            .push(TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
+                call_id: "call-1".to_string(),
+                name: "code-read_file".to_string(),
+                args: "{}".to_string(),
+                status: ToolCallStatus::Succeeded,
+                output: None,
+            }));
+
+        let _ = render_to_string(&mut app);
+        let tool_row = (0..28)
+            .find(|y| {
+                app.screen_lines
+                    .get(*y as usize)
+                    .is_some_and(|line| line.join("").contains("code-read_file"))
+            })
+            .expect("tool row");
+
+        let pos = crate::app::ScreenPos {
+            col: 10,
+            row: tool_row,
+        };
+        assert_eq!(app.hovered_entry_at(pos), Some(1));
+
+        let moved = app.handle_mouse_event(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: pos.col,
+            row: pos.row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(moved);
+        assert_eq!(app.hovered_entry, Some(1));
+
+        let backend = TestBackend::new(120, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        assert_eq!(
+            buffer[(80, tool_row)].bg,
+            crate::theme::Palette::default().surface_high,
+            "hovered row uses the raised hover background"
+        );
+
+        let left = app.handle_mouse_event(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: 10,
+            row: 0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(left);
+        assert_eq!(app.hovered_entry, None);
     }
 
     #[test]
@@ -3517,7 +3650,8 @@ mod tests {
         assert!(rendered.contains("↳ [workspace] members = []"));
         assert!(rendered.contains("▾ Thought (1 line)"));
         assert!(rendered.contains("● Response"));
-        assert!(rendered.contains("# Summary"));
+        assert!(rendered.contains("Summary"));
         assert!(rendered.contains("name = \"meerai\""));
+        assert!(!rendered.contains("```toml"));
     }
 }

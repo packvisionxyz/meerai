@@ -112,6 +112,13 @@ pub enum TabHitKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HoverZone {
+    pub entry_idx: usize,
+    pub start_line: usize,
+    pub end_line: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TabHitZone {
     pub rect: Rect,
     pub kind: TabHitKind,
@@ -408,6 +415,8 @@ pub struct AppState {
     pub sidebar_changes_inner_area: Rect,
     pub visible_file_change_rows: usize,
     pub thinking_hit_zones: Vec<ThinkingHitZone>,
+    pub hover_zones: Vec<HoverZone>,
+    pub hovered_entry: Option<usize>,
     pub selection: Option<TextSelection>,
     pub doc_selection: Option<DocSelection>,
     pub last_transcript_anchor: Option<DocPos>,
@@ -513,6 +522,8 @@ impl AppState {
             sidebar_changes_inner_area: Rect::default(),
             visible_file_change_rows: 0,
             thinking_hit_zones: Vec::new(),
+            hover_zones: Vec::new(),
+            hovered_entry: None,
             selection: None,
             doc_selection: None,
             last_transcript_anchor: None,

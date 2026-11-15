@@ -16,16 +16,18 @@ pub mod app;
 pub mod completion;
 pub mod diff;
 pub mod event_loop;
+pub mod markdown;
 pub mod search;
 pub mod terminal;
 pub mod theme;
 pub mod ui;
 
 pub use app::{
-    ActiveModal, AppState, FileChangeEntry, InputMode, MIN_SIDEBAR_WIDTH, PendingSessionAction,
-    ScreenPos, SessionTab, TabHitKind, TabHitZone, TextSelection, ThinkingHitZone, ToolCallEntry,
-    ToolCallStatus, TranscriptEntry, TurnMetrics, UsageStats, approval_mode_badge,
-    approval_mode_label, parse_approval_mode, session_usage_from_events, transcript_from_events,
+    ActiveModal, AppState, FileChangeEntry, HoverZone, InputMode, MIN_SIDEBAR_WIDTH,
+    PendingSessionAction, ScreenPos, SessionTab, TabHitKind, TabHitZone, TextSelection,
+    ThinkingHitZone, ToolCallEntry, ToolCallStatus, TranscriptEntry, TurnMetrics, UsageStats,
+    approval_mode_badge, approval_mode_label, parse_approval_mode, session_usage_from_events,
+    transcript_from_events,
 };
 pub use completion::{CompletionEngine, CompletionItem, CompletionItemKind, CompletionKind};
 pub use diff::{DiffCell, DiffRow, DiffRowKind, FileDiffView};

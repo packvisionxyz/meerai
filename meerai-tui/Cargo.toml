@@ -24,6 +24,7 @@ crossterm = { workspace = true }
 futures = { workspace = true }
 git2 = { workspace = true }
 ratatui = { workspace = true }
+comrak = { workspace = true }
 regex = { workspace = true }
 similar = { workspace = true }
 tokio = { workspace = true }

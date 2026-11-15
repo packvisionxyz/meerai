@@ -43,6 +43,9 @@ serde_yaml = "0.9"
 crossterm = { version = "0.29", features = ["event-stream"] }
 ratatui = "0.30"
 
+# Markdown
+comrak = { version = "0.39", default-features = false }
+
 # Utilities & Config
 dirs = "7"
 dotenvy = "0.15"
