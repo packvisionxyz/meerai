@@ -11,6 +11,13 @@ const SKIPPED_DIRS: &[&str] = &[".git", "target", "node_modules"];
 
 pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
     ("/help", "Show available commands and keybindings", false),
+    (
+        "/sessions",
+        "Switch to another session (or /sessions <id>)",
+        false,
+    ),
+    ("/new", "Open a new session tab", false),
+    ("/close", "Close the current session tab", false),
     ("/auth", "Show active credential sources", false),
     ("/connect", "Configure provider API key and model", false),
     ("/provider", "Switch or configure AI provider", false),

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rust workspace for Pack Vision's terminal coding-agent harness: nine library crates plus the `meerai` binary (built by `meerai-cli`). Milestones M1–M5, M8–M10, and M12 of `docs/harness-spec.md` are landed: session log, `AgentEvent` v2 item protocol, coding & retrieval tools (`repo_map`, `lsp`, `search_as_code`), policy engine, context engine, prompt composition, subagent runtime (`subagent-run` + built-in/custom child sessions), CLI session forking (`--fork`, `sessions fork`), project-root config discovery, TUI session replay, configurable session retention (`sessions.auto_prune_days`), tool-output redaction, and agents/skills discovery. The repo is distribution-hardened: Apache-2.0 license, CI on push/PR, tag-driven release builds, and GitHub Pages. Checkpoints (M6), hooks (M7), and the security backlog (OS sandbox, dependency audit, signing, threat model, injection screening, keychain — **M11** in §9.6) remain unimplemented.
+Rust workspace for Pack Vision's terminal coding-agent harness: nine library crates plus the `meerai` binary (built by `meerai-cli`). Milestones M1–M5 and M8–M12 of `docs/harness-spec.md` are landed: session log, `AgentEvent` v2 item protocol, coding & retrieval tools (`repo_map`, `lsp`, `search_as_code`), policy engine (with default sensitive-file denials), context engine, prompt composition, subagent runtime (`subagent-run` + built-in/custom child sessions), CLI session forking (`--fork`, `sessions fork`), project-root config discovery, TUI session replay, configurable session retention (`sessions.auto_prune_days`), tool-output redaction, OS sandbox (`ExecutionWorld`), heuristic injection screening, OS keychain fallback store, `cargo-deny` CI audit, conditional release signing, [docs/threat-model.md](docs/threat-model.md), and agents/skills discovery. Checkpoints (M6) and hooks (M7) remain unimplemented.
 
 ## Commands
 
@@ -17,7 +17,6 @@ make verify                                    # fmt --check + clippy + test (al
 - CI has no Windows runner: `cmd /C` and Windows session-id rules are unit-tested, not exercised on a Windows host.
 - Toolchain is pinned to Rust 1.100.0 (`rust-toolchain.toml`), edition 2024, `rust-version = "1.100"`; rustup installs it automatically.
 - `release.yml` re-runs the gate before building five targets. It rejects a `v*` tag that does not match `[workspace.package] version`.
-- `cargo clippy` reports two accepted warnings: `assert!(true)` in `meerai-core/src/tools.rs` (tests) and a redundant `&` in `meerai-macros/src/test_utils.rs`.
 - `meerai-macros` snapshots update with `cargo insta review` or `INSTA_UPDATE=always cargo test -p meerai-macros`.
 
 ## Workspace layout
@@ -89,19 +88,12 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`, `core ->
 - `context.summarizer_model` is used only for compaction summaries; it defaults to the session model and its usage still counts toward the session token cap.
 - Session titles come from the first user prompt (80 chars, single line). `new_session_title` skips when the session already has a title or any `InputSource::User` message.
 - On Windows the shell tool runs `cmd /C`; on Unix it runs `sh -c`. Known provider key variables and names ending in `_API_KEY`, `_API_TOKEN`, `_ACCESS_TOKEN`, `_SECRET`, `_SECRET_KEY`, or `_PRIVATE_KEY` are removed from the child environment. Tool output is pattern-redacted, not guaranteed secret-free.
-- **Security is not finished.** There is no OS sandbox: path guards are in-process checks. Redaction is best effort. CI has no dependency-audit step, release artifacts are unsigned, and there is no written threat model, prompt-injection screen, or OS keychain. These are the **M11** backlog in `docs/harness-spec.md` §9.6. Do not describe any of them as shipped.
+- **Security posture (M11 landed with explicit caveats).** `ExecutionWorld` runs macOS Seatbelt and Linux bubblewrap when available, falling back with a startup warning to Phase-1 path guards on Windows or nested/restricted hosts. `CodeTools` (`read_file`/`write_file`/`edit_file`/`grep`/`glob`/`list_dir`) and `PolicyEngine::default_sensitive_rules` block `.env*`, key, secret config, and credential files. `KeychainSecretStore` prefers native OS keychains (`security` / `secret-tool`) with `0600` `auth.json` fallback. `redact_run` and `screen_run` are best-effort regex/heuristic layers, not guarantees. `ci.yml` and `release.yml` run `cargo-deny` (`deny.toml`); release signing steps in `release.yml` are conditional on repository signing secrets (`APPLE_CERTIFICATE` / `WINDOWS_CERTIFICATE`) and remain unsigned until those secrets exist. Threat model lives in [docs/threat-model.md](docs/threat-model.md).
 - M12 definitions are untrusted repository prompt text. They cannot run tools, map permissions, or imply a sandbox. `.agents`/`.claude` content reaches the model, so review it like code; do not describe definition loading as a security control.
 
-## Security backlog (M11)
+## Security summary (M11)
 
-Landed: path guards, `plan` hard read-only, approval gates, headless fail-fast, provider-secret env scrub, best-effort output/diff/error redaction, session file permissions, configurable retention, session/turn token budgets. Also landed: read-only agent/skill discovery as untrusted instructions (M12), with no tool or permission mapping. Backlog — do not claim these:
-
-- OS sandbox (`ExecutionWorld`: macOS Seatbelt, Linux bubblewrap/Landlock, network denied by default).
-- Dependency audit in CI (`cargo audit`/`cargo deny`); `ci.yml` has no audit step.
-- Signed and notarized macOS/Windows artifacts; no signing secret or step exists.
-- Written threat model for repo instructions, model output, hooks, MCP, subagents.
-- Prompt-injection screening; the harness does not screen content.
-- OS keychain for `auth.json`.
+Landed: path guards, sensitive-file path & policy denies, `plan` hard read-only, approval gates, headless fail-fast, provider-secret env scrub, best-effort output/diff/error redaction, heuristic prompt-injection screening (`screen_run`/`screen_untrusted_text`), session file permissions, configurable retention, session/turn token budgets, `ExecutionWorld` OS sandbox (`SeatbeltWorld` / `BubblewrapWorld` with `HostWorld` fallback warning), native OS keychain (`KeychainSecretStore`) with `auth.json` fallback, `cargo-deny` CI audit (`deny.toml`), conditional signing steps in `release.yml`, and [docs/threat-model.md](docs/threat-model.md). Also landed: read-only agent/skill discovery as untrusted instructions (M12). Remaining gap until configured: macOS/Windows release signing certificates/secrets are not populated in GitHub Actions, and Windows `ExecutionWorld` uses Phase-1 host guards.
 
 ACP integration (M13/M14) is planned, not shipped; design in `docs/acp.md`. An ACP backend is an external process. Its permission requests are advisory, and meerai's rules, path guards, and redaction do not apply to it. Never describe ACP as a safety boundary.
 

@@ -5,13 +5,13 @@ autonomous and interactive software engineering in the terminal with a
 selection-first, modal TUI and a scriptable headless CLI.
 
 **Status:** early-stage, distribution-hardened. The workspace has nine library
-crates plus the `meerai` binary (built by `meerai-cli`). Milestones M1–M5,
-**M8** (subagent runtime), **M9** (`meerai-cli` + session fork), **M10**
-(retrieval v2/v3: `repo_map`, LSP tools, search-as-code), and **M12** (agents
-and skills discovery) of the [harness specification](docs/harness-spec.md) have
-landed. CI, tag-driven release builds, installers, and an Apache-2.0 license are
-in place. Checkpoints (M6), hooks (M7), `meerai export`, and an OS sandbox do
-not exist yet; the security backlog is tracked as **M11** in the spec (see
+crates plus the `meerai` binary (built by `meerai-cli`). Milestones M1–M5 and
+**M8–M12** (subagent runtime, `meerai-cli` + session fork, retrieval v2/v3,
+security & supply chain M11, and agents/skills discovery) of the
+[harness specification](docs/harness-spec.md) have landed. CI (`cargo-deny` +
+test gate), tag-driven release builds, installers, [the threat
+model](docs/threat-model.md), and an Apache-2.0 license are in place.
+Checkpoints (M6), hooks (M7), and `meerai export` do not exist yet (see
 [Security roadmap](#security-roadmap)).
 
 ## Install
@@ -121,13 +121,14 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   (`sac-run_script` running `python3 -I` or `node -e` with env scrubbing and
   `EffectClass::Execute` policy gating).
 - **Modal TUI (`meerai-tui`) and CLI/headless runner (`meerai-cli`):** modal
-  transcript (including a session replayed by `--continue`/`--resume`/`--fork`),
-  provider and model pickers, sidebar with file changes, subagent items, diff
-  and search views, approval overlay, `/compact`, `/mode`, `/agent`/`/skill`,
-  and a `@` Mentions popup for agents, skills, and files; one-shot headless
-  turns with a token summary on stderr, NDJSON event stream, `sessions
-  list|rm|prune|fork` management, `--fork <ID>`, and opt-in startup retention
-  (`sessions.auto_prune_days`).
+  transcript (including sessions replayed by `--continue`/`--resume`/`--fork`),
+  multi-session tabs (`/new`, `/close`, `[ + ]`, `Alt-1..9`, `gt`/`gT`), `/sessions`
+  switcher modal, provider and model pickers, sidebar with file changes, subagent
+  items, diff and search views, approval overlay, `/compact`, `/mode`,
+  `/agent`/`/skill`, and a `@` Mentions popup for agents, skills, and files;
+  one-shot headless turns with a token summary on stderr, NDJSON event stream,
+  `sessions list|rm|prune|fork` management, `--fork <ID>`, and opt-in startup
+  retention (`sessions.auto_prune_days`).
 - **Config (`meerai-common`) and providers (`meerai-providers`):** a `genai`
   0.7 client factory over a provider catalog (bundled `providers.yml` plus user
   overrides), `auth.json` storage, `settings.yml` plus a project
@@ -150,12 +151,13 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 - Projection caching and frozen messages; per-model context windows.
 - USD cost and pricing: the harness reports token counts only, and
   `est_cost_usd` is always `None`. Pricing-data collection is the blocker.
-- Progressive tool disclosure and an OS keychain.
+- Progressive tool disclosure.
 - ACP integration (M13 client, M14 agent). Design in [docs/acp.md](docs/acp.md).
   An ACP backend runs an external agent with its own tools; meerai policy does
   not apply to it.
-- Dependency audit in CI, signed/notarized release artifacts, and a written
-  threat model (M11).
+- Repository signing secrets (`APPLE_CERTIFICATE` / `WINDOWS_CERTIFICATE`) for
+  non-empty signed/notarized GitHub Release binaries (conditional steps exist in
+  `release.yml`).
 
 ## Crates
 
@@ -540,35 +542,34 @@ for example `OPENROUTER_API_KEY` (also `OPEN_ROUTER_API_KEY`) and
   repository-controlled content that reaches the model as instructions. They
   cannot run tools, map permissions, or change the sandbox. Review them like
   code.
-- **Treat model and tool output as untrusted.** The base prompt says so, but
-  the harness does not screen prompt injection.
-- **Release binaries are unsigned.** macOS Gatekeeper and Windows SmartScreen
-  may warn. Verify the published SHA256 checksum.
+- **Treat model and tool output as untrusted.** `BASE_SYSTEM_PROMPT` instructs
+  this and heuristic injection screening (`screen_run`) wraps flagged content,
+  but screening is pattern-based and not a guarantee.
+- **Release binaries remain unsigned unless signing secrets are set.** macOS
+  Gatekeeper and Windows SmartScreen may warn when publishing without
+  certificates; verify the published `SHA256SUMS.txt`.
 
 ### Security roadmap
 
-Security is a staged milestone (M11 in
-[docs/harness-spec.md](docs/harness-spec.md)). In the tree now: path guards,
-`plan` as hard read-only, approval gates, headless fail-fast, provider-secret
-environment scrubbing, best-effort output/diff/error redaction, session file
-permissions, configurable retention, and session/turn token budgets. The
-backlog is:
-
-1. **OS sandbox** for `shell` through an `ExecutionWorld` seam: macOS Seatbelt,
-   Linux bubblewrap/Landlock, network denied by default.
-2. **Dependency audit in CI** (`cargo audit` or `cargo deny`). No audit step
-   exists today.
-3. **Signed and notarized** macOS and Windows artifacts. No signing secret or
-   workflow step exists today.
-4. **Written threat model** for repository instructions, model output, hooks,
-   MCP servers, and subagents.
-5. **Prompt-injection screening.** The harness states the risk but does not
-   screen content.
-6. **OS keychain** for `auth.json`, which is a plain `0600` file today.
+Security is tracked as M11 in
+[docs/harness-spec.md](docs/harness-spec.md) and
+[docs/threat-model.md](docs/threat-model.md). Landed in the tree: path guards,
+sensitive-file blocks (`is_sensitive_path` and `PolicyEngine::default_sensitive_rules`),
+`plan` hard read-only, approval gates, headless fail-fast, provider-secret
+environment scrubbing, best-effort output/diff/error redaction, heuristic
+prompt-injection screening (`screen_run`), session file permissions, configurable
+retention, session/turn token budgets, `ExecutionWorld` OS sandbox (macOS
+Seatbelt and Linux bubblewrap with Phase-1 fallback warning), OS keychain
+storage (`KeychainSecretStore`) with `auth.json` fallback, `cargo-deny` CI
+audit (`deny.toml`), conditional signing steps in `release.yml`, and the
+written threat model. Pending operational configuration: GitHub repository
+signing certificates/secrets for macOS notarization and Windows signing, plus
+OS sandboxing on Windows hosts.
 
 ## Documentation
 
 - [docs/harness-spec.md](docs/harness-spec.md) — unified harness specification: event-sourced session log, typed item protocol, context engine, permissions/sandboxing, hooks, checkpoints, subagents, and retrieval strategy
+- [docs/threat-model.md](docs/threat-model.md) — M11 security threat model, trust boundaries, controls, and residual risks
 - [docs/architecture.md](docs/architecture.md) — current implementation notes, target harness architecture, protocol/loop design, and migration plan
 - [docs/tui-design.md](docs/tui-design.md) — modal TUI design, keybindings, pickers, diff review, and async Rust rendering architecture
 - [docs/acp.md](docs/acp.md) — planned Agent Client Protocol integration: external harnesses (M13) and `meerai acp` for editors (M14), with the trust boundary

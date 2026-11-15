@@ -35,23 +35,24 @@ One job, `verify`, on `ubuntu-24.04`:
 
 `make verify` (alias of `make ci`) runs the same three commands locally.
 
-CI runs on `ubuntu-24.04` only. The Windows `cmd /C` shell path and the Windows session-id rules
-are unit-tested but are not exercised on a Windows runner, so Windows-only behavior is not covered
-by CI. There is **no dependency-audit step** (`cargo audit` or `cargo deny`) anywhere in CI or
-release; adding one is an M11 backlog item.
+CI runs on `ubuntu-24.04` only, executing `verify` (fmt check, clippy, workspace tests) and `audit`
+(`EmbarkStudios/cargo-deny-action@v2` checking advisories, licenses, bans, and sources via `deny.toml`).
+The Windows `cmd /C` shell path and Windows session-id rules are unit-tested but are not exercised
+on a Windows runner, so Windows-only behavior is not covered by CI.
 
 ## Release (`release.yml`)
 
 Triggers: push of a `v*` tag, or `workflow_dispatch` with `tag` and `prerelease` inputs.
 Permissions are `contents: read` at workflow level; `publish` raises `contents: write`.
 
-Jobs run in order `verify -> version -> build -> publish`:
+Jobs run `verify`, `audit`, and `version` before `build -> publish`:
 
 | Job | Runner | Content |
 | :--- | :--- | :--- |
 | `verify` | `ubuntu-24.04` | Same toolchain/cache setup as CI: fmt check, clippy, workspace tests. |
+| `audit` | `ubuntu-24.04` | `EmbarkStudios/cargo-deny-action@v2` (`deny.toml` advisories, licenses, bans, sources). |
 | `version` | `ubuntu-24.04` | `needs: verify`. Runs `.github/scripts/verify_release_version.sh` to resolve the release tag and compare it with the workspace version. Runs before the matrix, so a tag/version mismatch costs one short job instead of five builds. |
-| `build` | matrix | `needs: [verify, version]`. `cargo build --release --locked -p meerai-tui --target <triple>`, archive plus `.sha256`, `actions/upload-artifact` (1-day retention) |
+| `build` | matrix | `needs: [verify, audit, version]`. `cargo build --release --locked -p meerai-cli --target <triple>`, conditional macOS `codesign`/`notarytool` (when `APPLE_CERTIFICATE` + Apple credentials exist) and Windows `signtool` (when `WINDOWS_CERTIFICATE` exists), archive plus `.sha256`, `actions/upload-artifact` (1-day retention) |
 | `publish` | `ubuntu-24.04` | `needs: build`. Checkout, download artifacts, build `SHA256SUMS.txt`, re-run the same tag/version script (defense in depth, also resolves `tag`/`prerelease` outputs), create the GitHub Release |
 
 Build matrix — five published targets:
@@ -95,34 +96,19 @@ checksum, and install into a user bin directory.
 
 ## Gaps
 
-- **No codesigning or notarization.** macOS archives are unsigned and un-notarized; Windows
-  archives are unsigned. No signing secrets exist and no workflow step performs signing, so users
-  may hit Gatekeeper or SmartScreen warnings. Do not add signing secrets without an owner decision.
-- **No dependency audit.** Neither `ci.yml` nor `release.yml` runs `cargo audit` or `cargo deny`.
-  Supply-chain scanning is an M11 backlog item.
-- **No written threat model.** Repository instructions (`AGENTS.md`,
-  `.meerai/instructions.md`), model output, hooks, MCP servers, and subagents are treated as
-  untrusted input by policy but are not modelled or screened. Prompt-injection screening does not
-  exist.
+- **Signing secrets not yet provisioned.** `.github/workflows/release.yml` includes conditional macOS `codesign` + `xcrun notarytool` (`APPLE_CERTIFICATE`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`) and Windows `signtool.exe` (`WINDOWS_CERTIFICATE`) steps, but archives remain unsigned until those repository secrets are added.
 - No Terraform, Dockerfiles, or self-hosted runners. All jobs use GitHub-hosted runners.
-- Product gaps: checkpoints/rewind, hooks, the subagent runtime (M8), an OS sandbox, USD pricing,
-  and per-model context metadata. TUI session resume/transcript replay, headless
-  `--continue`/`--resume <ID>`, project-root config discovery, `sessions prune`, opt-in
-  `sessions.auto_prune_days`, and M12 `.agents`/`.claude` agent and skill discovery already ship.
-  M12 applies definitions as untrusted prompt text only: there is no subagent runtime, no
-  MCP/tool/permission mapping, and no supporting-skill-file loading. Tracked in `README.md` and
-  `docs/harness-spec.md` §15.1 (security items in §9.6).
+- Remaining security and host-coverage limits: `ExecutionWorld` runs `SeatbeltWorld` (macOS) and `BubblewrapWorld` (Linux), falling back to `HostWorld` on Windows or when sandboxing is disabled/unavailable (`MEERAI_DISABLE_SANDBOX`); `LspToolset` scrubs env vars without OS sandboxing; injection screening (`screen_run` / `screen_untrusted_text`) and secret redaction (`redact_run`) are heuristic/regex best-effort controls (documented in `docs/threat-model.md`).
+- Product gaps: checkpoints/rewind (M6), hooks (M7), ACP external backends (M13/M14), USD pricing, and per-model context metadata. Landed in M8–M12: subagent runtime (`subagent-run`), TUI session replay, headless `--continue`/`--resume`/`--fork`, project-root config discovery, `sessions prune` + `sessions.auto_prune_days`, `.agents`/`.claude` definition discovery, OS sandbox (`ExecutionWorld`), CI `cargo-deny` audit (`deny.toml`), `docs/threat-model.md`, heuristic injection screening, and OS keychain credential storage (`KeychainSecretStore` with `auth.json` fallback). Tracked in `README.md` and `docs/harness-spec.md`.
 
 ## Environments & secrets
 
-CI, release, and Pages need no repository secrets; they use the default `GITHUB_TOKEN` with the
-per-workflow permissions listed above.
+CI, release, and Pages work without repository secrets by default (release signing steps are conditional on `APPLE_CERTIFICATE` and `WINDOWS_CERTIFICATE`).
 
 Provider API keys are runtime configuration, not CI secrets. Resolution order per provider is
-stored `auth.json` → configured `api_key` → provider environment variables.
+credential store (native OS keychain via `KeychainSecretStore`, falling back to `auth.json`) → configured `api_key` → provider environment variables.
 
-- `auth.json` in the app data dir, written by `meerai auth login`; owner-only permissions (`0600`
-  on Unix). No OS keychain or keyring integration exists.
+- Native OS keychain (macOS `/usr/bin/security`, Linux `secret-tool`, disabled via `MEERAI_DISABLE_KEYCHAIN`), or `auth.json` (`0600` on Unix) in the app data dir as fallback.
 - Environment variables from the bundled `meerai-common/providers.yml`, for example
   `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`.
 - `MEERAI_PROVIDER` / `MEERAI_MODEL` select defaults; `MEERAI_SESSION_DIR` overrides the session

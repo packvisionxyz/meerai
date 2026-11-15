@@ -3,6 +3,7 @@ use std::path::Path;
 use ignore::WalkBuilder;
 use meerai_core::ToolDefinition;
 
+use crate::code::paths::is_sensitive_path;
 use crate::code::{CodeTools, ToolRun, failure_run, success_run};
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -33,8 +34,10 @@ impl CodeTools {
             }
         }
 
+        let allow_sensitive = self.allow_sensitive_files();
         let task_root = target.clone();
-        let result = tokio::task::spawn_blocking(move || collect_entries(&task_root)).await;
+        let result =
+            tokio::task::spawn_blocking(move || collect_entries(&task_root, allow_sensitive)).await;
 
         match result {
             Ok(Ok(entries)) => success_run(render(entries)),
@@ -44,7 +47,7 @@ impl CodeTools {
     }
 }
 
-fn collect_entries(root: &Path) -> Result<Vec<(String, bool, u64)>, String> {
+fn collect_entries(root: &Path, allow_sensitive: bool) -> Result<Vec<(String, bool, u64)>, String> {
     let mut entries = Vec::new();
 
     for entry in WalkBuilder::new(root)
@@ -55,6 +58,10 @@ fn collect_entries(root: &Path) -> Result<Vec<(String, bool, u64)>, String> {
     {
         let entry = entry.map_err(|error| format!("cannot walk {}: {error}", root.display()))?;
         if entry.depth() == 0 {
+            continue;
+        }
+
+        if !allow_sensitive && is_sensitive_path(entry.path()) {
             continue;
         }
 

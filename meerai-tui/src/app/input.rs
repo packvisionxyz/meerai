@@ -74,6 +74,12 @@ impl AppState {
                                 preview,
                             );
                         }
+                        ActiveModal::SessionSelect {
+                            filter, selected, ..
+                        } => {
+                            filter.push_str(&clean);
+                            *selected = 0;
+                        }
                     }
                     return true;
                 }
@@ -94,16 +100,60 @@ impl AppState {
     }
 
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) -> bool {
+        let pos = ScreenPos {
+            col: mouse.column,
+            row: mouse.row,
+        };
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Down(_) | MouseEventKind::Drag(_) | MouseEventKind::Moved
+        ) {
+            self.last_mouse_pos = Some(pos);
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.modal.is_none() && self.click_file_change_at(mouse.column, mouse.row) {
+                if self.modal.is_none() && self.click_tab_at(mouse.column, mouse.row) {
                     self.selection = None;
+                    self.doc_selection = None;
                     return true;
                 }
-                let pos = ScreenPos {
-                    col: mouse.column,
-                    row: mouse.row,
-                };
+                if self.modal.is_none() && self.click_file_change_at(mouse.column, mouse.row) {
+                    self.selection = None;
+                    self.doc_selection = None;
+                    return true;
+                }
+
+                if let Some(doc_pos) = self.screen_to_doc_pos_exact(mouse.column, mouse.row) {
+                    self.selection = None;
+                    if mouse.modifiers.contains(KeyModifiers::SHIFT)
+                        && let Some(anchor) = self.last_transcript_anchor
+                    {
+                        let sel = DocSelection {
+                            anchor,
+                            head: doc_pos,
+                            active: false,
+                        };
+                        let text = self.extract_doc_selected_text(sel);
+                        if !text.is_empty() {
+                            self.copy_text_to_clipboard(&text);
+                        }
+                        self.doc_selection = Some(sel);
+                        return true;
+                    }
+                    self.last_transcript_anchor = Some(doc_pos);
+                    self.doc_selection = Some(DocSelection {
+                        anchor: doc_pos,
+                        head: doc_pos,
+                        active: true,
+                    });
+                    if self.modal.is_none() {
+                        let _ = self.toggle_thinking_at(mouse.column, mouse.row);
+                    }
+                    return true;
+                }
+
+                self.doc_selection = None;
                 self.selection = Some(TextSelection {
                     anchor: pos,
                     head: pos,
@@ -115,21 +165,47 @@ impl AppState {
                 return true;
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(mut sel) = self.doc_selection
+                    && sel.active
+                {
+                    let inner = self.transcript_inner_area;
+                    if inner.height > 0 {
+                        if mouse.row < inner.y {
+                            self.scroll_up(1);
+                        } else if mouse.row >= inner.y + inner.height {
+                            self.scroll_down(1);
+                        }
+                    }
+                    if let Some(head) = self.screen_to_doc_pos_clamped(mouse.column, mouse.row) {
+                        sel.head = head;
+                    }
+                    self.doc_selection = Some(sel);
+                    return true;
+                }
                 if let Some(sel) = &mut self.selection {
-                    sel.head = ScreenPos {
-                        col: mouse.column,
-                        row: mouse.row,
-                    };
+                    sel.head = pos;
                     sel.active = true;
                     return true;
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(mut sel) = self.doc_selection.take()
+                    && sel.active
+                {
+                    if let Some(head) = self.screen_to_doc_pos_clamped(mouse.column, mouse.row) {
+                        sel.head = head;
+                    }
+                    sel.active = false;
+                    if sel.anchor != sel.head {
+                        let text = self.extract_doc_selected_text(sel);
+                        if !text.is_empty() {
+                            self.copy_text_to_clipboard(&text);
+                        }
+                    }
+                    return true;
+                }
                 if let Some(mut sel) = self.selection.take() {
-                    sel.head = ScreenPos {
-                        col: mouse.column,
-                        row: mouse.row,
-                    };
+                    sel.head = pos;
                     sel.active = false;
                     if sel.anchor != sel.head {
                         let text = self.extract_selected_text(sel);
@@ -163,14 +239,145 @@ impl AppState {
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.scroll_up(3);
+                self.refresh_active_doc_selection_head();
                 true
             }
             MouseEventKind::ScrollDown => {
                 self.scroll_down(3);
+                self.refresh_active_doc_selection_head();
                 true
             }
             _ => false,
         }
+    }
+
+    fn refresh_active_doc_selection_head(&mut self) {
+        let Some(mut sel) = self.doc_selection else {
+            return;
+        };
+        if !sel.active {
+            return;
+        }
+        if let Some(pos) = self.last_mouse_pos
+            && let Some(head) = self.screen_to_doc_pos_clamped(pos.col, pos.row)
+        {
+            sel.head = head;
+            self.doc_selection = Some(sel);
+        }
+    }
+
+    pub fn screen_to_doc_pos_exact(&self, column: u16, row: u16) -> Option<DocPos> {
+        let inner = self.transcript_inner_area;
+        if self.modal.is_some()
+            || self.transcript_wrapped_lines.is_empty()
+            || inner.width == 0
+            || inner.height == 0
+            || column < inner.x
+            || column >= inner.x + inner.width
+            || row < inner.y
+            || row >= inner.y + inner.height
+        {
+            return None;
+        }
+        self.screen_to_doc_pos_clamped(column, row)
+    }
+
+    fn screen_to_doc_pos_clamped(&self, column: u16, row: u16) -> Option<DocPos> {
+        let inner = self.transcript_inner_area;
+        if self.transcript_wrapped_lines.is_empty() || inner.width == 0 || inner.height == 0 {
+            return None;
+        }
+        let max_line = self.transcript_wrapped_lines.len() - 1;
+        let max_row = inner.y + inner.height - 1;
+        let max_col = inner.x + inner.width - 1;
+        let doc_line = if row < inner.y {
+            self.tab().scroll_offset.min(max_line)
+        } else if row > max_row {
+            (self.tab().scroll_offset + (inner.height as usize - 1)).min(max_line)
+        } else {
+            (self.tab().scroll_offset + (row - inner.y) as usize).min(max_line)
+        };
+        let doc_col = if row < inner.y || column < inner.x {
+            0
+        } else if row > max_row || column > max_col {
+            inner.width as usize - 1
+        } else {
+            (column - inner.x) as usize
+        };
+        Some(DocPos {
+            line: doc_line,
+            col: doc_col,
+        })
+    }
+
+    pub fn extract_doc_selected_text(&self, sel: DocSelection) -> String {
+        if self.transcript_wrapped_lines.is_empty() {
+            return String::new();
+        }
+        let max_line = self.transcript_wrapped_lines.len() - 1;
+        let a = DocPos {
+            line: sel.anchor.line.min(max_line),
+            col: sel.anchor.col,
+        };
+        let b = DocPos {
+            line: sel.head.line.min(max_line),
+            col: sel.head.col,
+        };
+        let (start, end) = if (a.line, a.col) <= (b.line, b.col) {
+            (a, b)
+        } else {
+            (b, a)
+        };
+
+        let mut out = String::new();
+        let max_width_col = self.transcript_inner_area.width.saturating_sub(1) as usize;
+        let mut prev_joined_soft = false;
+
+        for (line_idx, row) in self
+            .transcript_wrapped_lines
+            .iter()
+            .enumerate()
+            .take(end.line + 1)
+            .skip(start.line)
+        {
+            let chars: Vec<char> = row.text.chars().collect();
+            let c_start = if line_idx == start.line {
+                start.col
+            } else {
+                0
+            };
+            let c_end = if line_idx == end.line {
+                end.col
+            } else {
+                max_width_col.max(chars.len().saturating_sub(1))
+            };
+            let effective_start = if c_start <= row.gutter_len {
+                row.gutter_len
+            } else {
+                c_start
+            };
+            let slice_str = if effective_start < chars.len() && effective_start <= c_end {
+                let clamped_end = c_end.min(chars.len() - 1);
+                let raw: String = chars[effective_start..=clamped_end].iter().collect();
+                if row.soft_wrapped_next && line_idx < end.line && clamped_end == chars.len() - 1 {
+                    raw
+                } else {
+                    raw.trim_end().to_string()
+                }
+            } else {
+                String::new()
+            };
+
+            if line_idx > start.line && !prev_joined_soft {
+                out.push('\n');
+            }
+            out.push_str(&slice_str);
+            prev_joined_soft = row.soft_wrapped_next
+                && line_idx < end.line
+                && (chars.is_empty() || c_end >= chars.len().saturating_sub(1));
+        }
+
+        out.trim_matches('\n').to_string()
     }
 
     pub fn selection_bounds(&self, anchor: ScreenPos) -> Rect {
@@ -282,6 +489,43 @@ impl AppState {
         true
     }
 
+    pub fn click_tab_at(&mut self, column: u16, row: u16) -> bool {
+        let Some(kind) = self
+            .tab_hit_zones
+            .iter()
+            .find(|zone| {
+                let r = zone.rect;
+                r.width > 0
+                    && r.height > 0
+                    && column >= r.x
+                    && column < r.x + r.width
+                    && row >= r.y
+                    && row < r.y + r.height
+            })
+            .map(|zone| zone.kind)
+        else {
+            return false;
+        };
+
+        match kind {
+            TabHitKind::Tab(index) => {
+                let _ = self.switch_to_tab(index);
+                true
+            }
+            TabHitKind::NewTab => {
+                if self.session_opener.is_some() {
+                    self.status_notice = Some("Opening new session tab...".to_string());
+                    self.pending_session_actions
+                        .push(PendingSessionAction::CreateNewTab);
+                } else {
+                    self.status_notice =
+                        Some("Session switching is not available in this context".to_string());
+                }
+                true
+            }
+        }
+    }
+
     pub fn toggle_thinking_at(&mut self, column: u16, row: u16) -> bool {
         let area = self.transcript_inner_area;
         if area.width == 0
@@ -304,7 +548,7 @@ impl AppState {
         else {
             return false;
         };
-        match self.transcript.get_mut(entry_idx) {
+        match self.tab_mut().transcript.get_mut(entry_idx) {
             Some(TranscriptEntry::Assistant {
                 reasoning,
                 reasoning_expanded,
@@ -322,7 +566,7 @@ impl AppState {
     }
 
     pub fn toggle_latest_thinking(&mut self) -> bool {
-        for entry in self.transcript.iter_mut().rev() {
+        for entry in self.tab_mut().transcript.iter_mut().rev() {
             match entry {
                 TranscriptEntry::Assistant {
                     reasoning,
@@ -373,6 +617,39 @@ impl AppState {
                     self.open_search_modal(SearchMode::Files, "");
                     return true;
                 }
+                KeyCode::Char('w') => {
+                    self.close_active_tab();
+                    return true;
+                }
+                KeyCode::PageUp => {
+                    self.prev_tab();
+                    return true;
+                }
+                KeyCode::PageDown => {
+                    self.next_tab();
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            match key.code {
+                KeyCode::Left => {
+                    self.prev_tab();
+                    return true;
+                }
+                KeyCode::Right => {
+                    self.next_tab();
+                    return true;
+                }
+                KeyCode::Char(c @ '1'..='9') => {
+                    let target = (c as usize) - ('1' as usize);
+                    if target < self.tabs.len() {
+                        self.switch_to_tab(target);
+                        return true;
+                    }
+                }
                 _ => {}
             }
         }
@@ -384,8 +661,8 @@ impl AppState {
     }
 
     pub(super) fn handle_ctrl_c(&mut self) {
-        if self.is_running {
-            let _ = self.cmd_tx.send(AgentCommand::Cancel);
+        if self.tab().is_running {
+            let _ = self.tab().cmd_tx.send(AgentCommand::Cancel);
             self.status_notice = Some("Cancelling turn...".to_string());
             self.last_ctrl_c = None;
             return;
@@ -431,12 +708,13 @@ impl AppState {
                 }
                 KeyCode::Enter if !has_shift_or_alt && !has_ctrl => {
                     let is_slash = self.completion.kind() == Some(CompletionKind::SlashCommand);
-                    if self.completion.selected_is_noop(&self.input) {
+                    let noop = self.completion.selected_is_noop(&self.tab().input);
+                    if noop {
                         self.completion.reset();
                         self.submit_input();
                     } else {
                         self.accept_completion();
-                        if is_slash && !self.input.ends_with(' ') {
+                        if is_slash && !self.tab().input.ends_with(' ') {
                             self.submit_input();
                         }
                     }
@@ -454,12 +732,21 @@ impl AppState {
             KeyCode::Esc => {
                 self.mode = InputMode::Normal;
             }
-            KeyCode::Enter if has_shift_or_alt => {
+            KeyCode::Enter if has_shift_or_alt || has_ctrl => {
                 self.insert_char('\n');
                 self.update_completion();
             }
-            KeyCode::Enter if !has_ctrl => {
-                self.submit_input();
+            KeyCode::Char('j') if has_ctrl => {
+                self.insert_char('\n');
+                self.update_completion();
+            }
+            KeyCode::Enter => {
+                if self.consume_line_continuation_backslash() {
+                    self.insert_char('\n');
+                    self.update_completion();
+                } else {
+                    self.submit_input();
+                }
             }
             KeyCode::Backspace => {
                 self.backspace();
@@ -498,14 +785,15 @@ impl AppState {
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
-                if self.input == "/search" || self.input == "/grep" {
-                    let mode = if self.input == "/grep" {
-                        SearchMode::Content
-                    } else {
-                        SearchMode::Files
-                    };
-                    self.input.clear();
-                    self.cursor = 0;
+                let quick_search = match self.tab().input.as_str() {
+                    "/search" => Some(SearchMode::Files),
+                    "/grep" => Some(SearchMode::Content),
+                    _ => None,
+                };
+                if let Some(mode) = quick_search {
+                    let tab = self.tab_mut();
+                    tab.input.clear();
+                    tab.cursor = 0;
                     self.completion.reset();
                     self.open_search_modal(mode, "");
                     return true;
@@ -529,12 +817,29 @@ impl AppState {
 
     pub(super) fn handle_normal_key(&mut self, key: KeyEvent) -> bool {
         let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let had_pending_g = self.pending_g;
 
         if key.code != KeyCode::Char('g') || has_ctrl {
             self.pending_g = false;
         }
 
         match key.code {
+            KeyCode::Char('t') if had_pending_g && !has_ctrl => {
+                self.next_tab();
+                return true;
+            }
+            KeyCode::Char('T') if had_pending_g && !has_ctrl => {
+                self.prev_tab();
+                return true;
+            }
+            KeyCode::Char('[') if !has_ctrl => {
+                self.prev_tab();
+                return true;
+            }
+            KeyCode::Char(']') if !has_ctrl => {
+                self.next_tab();
+                return true;
+            }
             KeyCode::Char('i') | KeyCode::Char('a') if !has_ctrl => {
                 self.mode = InputMode::Insert;
             }
@@ -557,7 +862,7 @@ impl AppState {
                 self.scroll_half_page_up();
             }
             KeyCode::Char('g') if !has_ctrl => {
-                if self.pending_g {
+                if had_pending_g {
                     self.pending_g = false;
                     self.scroll_to_top();
                 } else {
@@ -572,6 +877,7 @@ impl AppState {
             }
             KeyCode::Char('y') if !has_ctrl => {
                 let text = self
+                    .tab()
                     .transcript
                     .iter()
                     .rev()
@@ -582,15 +888,19 @@ impl AppState {
                         _ => None,
                     })
                     .or_else(|| {
-                        self.transcript.iter().rev().find_map(|entry| match entry {
-                            TranscriptEntry::Error { text, .. }
-                            | TranscriptEntry::System { text }
-                                if !text.is_empty() =>
-                            {
-                                Some(text.clone())
-                            }
-                            _ => None,
-                        })
+                        self.tab()
+                            .transcript
+                            .iter()
+                            .rev()
+                            .find_map(|entry| match entry {
+                                TranscriptEntry::Error { text, .. }
+                                | TranscriptEntry::System { text }
+                                    if !text.is_empty() =>
+                                {
+                                    Some(text.clone())
+                                }
+                                _ => None,
+                            })
                     });
                 if let Some(content) = text {
                     self.copy_text_to_clipboard(&content);
@@ -605,9 +915,11 @@ impl AppState {
                 self.quit();
             }
             KeyCode::Esc => {
-                if self.is_running {
-                    let _ = self.cmd_tx.send(AgentCommand::Cancel);
+                if self.tab().is_running {
+                    let _ = self.tab().cmd_tx.send(AgentCommand::Cancel);
                     self.status_notice = Some("Cancelling turn...".to_string());
+                } else {
+                    self.doc_selection = None;
                 }
             }
             _ => return false,
@@ -617,52 +929,62 @@ impl AppState {
     }
 
     pub(super) fn update_completion(&mut self) {
-        if self.input.contains('@') {
+        let tab = &self.tabs[self.active_tab];
+        if tab.input.contains('@') {
             self.completion.set_definitions(&self.agents, &self.skills);
         }
-        self.completion.update(&self.input, self.cursor);
+        self.completion.update(&tab.input, tab.cursor);
     }
 
     pub(super) fn accept_completion(&mut self) {
-        if let Some((new_input, new_cursor)) = self.completion.accept(&self.input, self.cursor) {
-            self.input = new_input;
-            self.cursor = new_cursor;
+        let accepted = {
+            let tab = &self.tabs[self.active_tab];
+            self.completion.accept(&tab.input, tab.cursor)
+        };
+        if let Some((new_input, new_cursor)) = accepted {
+            let tab = self.tab_mut();
+            tab.input = new_input;
+            tab.cursor = new_cursor;
             self.update_completion();
         }
     }
 
     pub(super) fn submit_input(&mut self) {
-        let trimmed = self.input.trim();
+        let (trimmed, raw_input) = {
+            let tab = self.tab();
+            (tab.input.trim().to_string(), tab.input.clone())
+        };
         if trimmed.is_empty() {
             return;
         }
 
         if trimmed.starts_with('/') {
-            let owned = trimmed.to_string();
-            self.input.clear();
-            self.cursor = 0;
+            let tab = self.tab_mut();
+            tab.input.clear();
+            tab.cursor = 0;
             self.completion.reset();
-            self.handle_slash_command(&owned);
+            self.handle_slash_command(&trimmed);
             return;
         }
 
-        let plan = parse_mentions(&self.input, &self.agents, &self.skills);
+        let plan = parse_mentions(&raw_input, &self.agents, &self.skills);
         let remaining = plan
             .text
             .clone()
-            .unwrap_or_else(|| self.input.trim_end().to_string());
+            .unwrap_or_else(|| raw_input.trim_end().to_string());
 
         if remaining.is_empty() {
             self.apply_mentions(&plan);
             self.acknowledge_mentions(&plan);
-            self.input.clear();
-            self.cursor = 0;
+            let tab = self.tab_mut();
+            tab.input.clear();
+            tab.cursor = 0;
             self.completion.reset();
-            self.auto_follow = true;
+            self.tab_mut().auto_follow = true;
             return;
         }
 
-        if !self.is_running && self.model.trim().is_empty() {
+        if !self.tab().is_running && self.tab().model.trim().is_empty() {
             self.status_notice = Some("Set a model first (/model)".to_string());
             self.open_model_input();
             return;
@@ -670,97 +992,126 @@ impl AppState {
 
         self.apply_mentions(&plan);
 
-        if self.is_running {
-            self.input.clear();
-            self.cursor = 0;
-            self.completion.reset();
-            self.auto_follow = true;
-            self.transcript.push(TranscriptEntry::User {
+        if self.tab().is_running {
+            let tab = self.tab_mut();
+            tab.input.clear();
+            tab.cursor = 0;
+            tab.auto_follow = true;
+            tab.transcript.push(TranscriptEntry::User {
                 text: remaining.clone(),
             });
-            let _ = self.cmd_tx.send(AgentCommand::Steer(remaining));
+            let _ = tab.cmd_tx.send(AgentCommand::Steer(remaining));
+            self.completion.reset();
             return;
         }
 
-        self.input.clear();
-        self.cursor = 0;
+        {
+            let tab = self.tab_mut();
+            if tab.title.is_none() {
+                tab.title = normalize_tab_title(remaining.clone());
+            }
+            tab.input.clear();
+            tab.cursor = 0;
+            tab.auto_follow = true;
+            tab.is_running = true;
+            tab.transcript.push(TranscriptEntry::User {
+                text: remaining.clone(),
+            });
+            let _ = tab.cmd_tx.send(AgentCommand::SubmitPrompt(remaining));
+        }
         self.completion.reset();
-        self.auto_follow = true;
-        self.is_running = true;
-        self.transcript.push(TranscriptEntry::User {
-            text: remaining.clone(),
-        });
-        let _ = self.cmd_tx.send(AgentCommand::SubmitPrompt(remaining));
     }
 
     fn insert_char(&mut self, c: char) {
-        self.input.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
+        let tab = self.tab_mut();
+        tab.input.insert(tab.cursor, c);
+        tab.cursor += c.len_utf8();
+    }
+
+    fn consume_line_continuation_backslash(&mut self) -> bool {
+        let tab = self.tab_mut();
+        let before = &tab.input[..tab.cursor.min(tab.input.len())];
+        if before.ends_with('\\') && !before.ends_with("\\\\") {
+            let new_cursor = tab.cursor - 1;
+            tab.input.drain(new_cursor..tab.cursor);
+            tab.cursor = new_cursor;
+            true
+        } else {
+            false
+        }
     }
 
     pub(super) fn insert_str(&mut self, text: &str) {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        self.input.insert_str(self.cursor, &normalized);
-        self.cursor += normalized.len();
+        let tab = self.tab_mut();
+        tab.input.insert_str(tab.cursor, &normalized);
+        tab.cursor += normalized.len();
     }
 
     fn backspace(&mut self) {
-        if self.cursor == 0 {
+        let tab = self.tab_mut();
+        if tab.cursor == 0 {
             return;
         }
         let prev = floor_char_boundary(
-            &self.input,
-            self.cursor.min(self.input.len()).saturating_sub(1),
+            &tab.input,
+            tab.cursor.min(tab.input.len()).saturating_sub(1),
         );
-        self.input.drain(prev..self.cursor);
-        self.cursor = prev;
+        tab.input.drain(prev..tab.cursor);
+        tab.cursor = prev;
     }
 
     fn delete_forward(&mut self) {
-        if self.cursor >= self.input.len() {
+        let tab = self.tab_mut();
+        if tab.cursor >= tab.input.len() {
             return;
         }
         let next = ceil_char_boundary(
-            &self.input,
-            self.cursor.saturating_add(1).min(self.input.len()),
+            &tab.input,
+            tab.cursor.saturating_add(1).min(tab.input.len()),
         );
-        self.input.drain(self.cursor..next);
+        tab.input.drain(tab.cursor..next);
     }
 
     fn move_left(&mut self) {
-        if self.cursor > 0 {
-            self.cursor = floor_char_boundary(
-                &self.input,
-                self.cursor.min(self.input.len()).saturating_sub(1),
+        let tab = self.tab_mut();
+        if tab.cursor > 0 {
+            tab.cursor = floor_char_boundary(
+                &tab.input,
+                tab.cursor.min(tab.input.len()).saturating_sub(1),
             );
         }
     }
 
     fn move_right(&mut self) {
-        if self.cursor < self.input.len() {
-            self.cursor = ceil_char_boundary(
-                &self.input,
-                self.cursor.saturating_add(1).min(self.input.len()),
+        let tab = self.tab_mut();
+        if tab.cursor < tab.input.len() {
+            tab.cursor = ceil_char_boundary(
+                &tab.input,
+                tab.cursor.saturating_add(1).min(tab.input.len()),
             );
         }
     }
 
     fn move_home(&mut self) {
-        let before = &self.input[..self.cursor];
-        self.cursor = before.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+        let tab = self.tab_mut();
+        let before = &tab.input[..tab.cursor];
+        tab.cursor = before.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
     }
 
     fn move_end(&mut self) {
-        let after = &self.input[self.cursor..];
+        let tab = self.tab_mut();
+        let after = &tab.input[tab.cursor..];
         if let Some(rel) = after.find('\n') {
-            self.cursor += rel;
+            tab.cursor += rel;
         } else {
-            self.cursor = self.input.len();
+            tab.cursor = tab.input.len();
         }
     }
 
     fn move_up(&mut self) {
-        let before = &self.input[..self.cursor];
+        let tab = self.tab_mut();
+        let before = &tab.input[..tab.cursor];
         let Some(cur_line_break) = before.rfind('\n') else {
             return;
         };
@@ -769,24 +1120,25 @@ impl AppState {
             .rfind('\n')
             .map(|idx| idx + 1)
             .unwrap_or(0);
-        let prev_line = &self.input[prev_line_start..cur_line_break];
-        self.cursor = prev_line_start + char_col_to_byte_idx(prev_line, col_chars);
+        let prev_line = &tab.input[prev_line_start..cur_line_break];
+        tab.cursor = prev_line_start + char_col_to_byte_idx(prev_line, col_chars);
     }
 
     fn move_down(&mut self) {
-        let before = &self.input[..self.cursor];
+        let tab = self.tab_mut();
+        let before = &tab.input[..tab.cursor];
         let cur_line_start = before.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
         let col_chars = before[cur_line_start..].chars().count();
-        let Some(rel_next_break) = self.input[self.cursor..].find('\n') else {
+        let Some(rel_next_break) = tab.input[tab.cursor..].find('\n') else {
             return;
         };
-        let next_line_start = self.cursor + rel_next_break + 1;
-        let next_line_end = self.input[next_line_start..]
+        let next_line_start = tab.cursor + rel_next_break + 1;
+        let next_line_end = tab.input[next_line_start..]
             .find('\n')
             .map(|rel| next_line_start + rel)
-            .unwrap_or(self.input.len());
-        let next_line = &self.input[next_line_start..next_line_end];
-        self.cursor = next_line_start + char_col_to_byte_idx(next_line, col_chars);
+            .unwrap_or(tab.input.len());
+        let next_line = &tab.input[next_line_start..next_line_end];
+        tab.cursor = next_line_start + char_col_to_byte_idx(next_line, col_chars);
     }
 }
 

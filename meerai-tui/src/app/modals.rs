@@ -378,10 +378,11 @@ impl AppState {
                                 self.select_provider_and_model(&target_provider, &target_model);
                                 self.modal = None;
                             }
-                        } else if let Some(existing) =
-                            self.current_or_default_model(&self.active_provider)
-                        {
-                            let provider = self.active_provider.clone();
+                        } else if let Some(existing) = {
+                            let provider = self.tab().active_provider.clone();
+                            self.current_or_default_model(&provider)
+                        } {
+                            let provider = self.tab().active_provider.clone();
                             self.select_provider_and_model(&provider, &existing);
                             self.modal = None;
                         } else {
@@ -440,7 +441,7 @@ impl AppState {
                     KeyCode::PageDown | KeyCode::Char('d')
                         if key.code == KeyCode::PageDown || has_ctrl =>
                     {
-                        let step = (self.viewport_height / 2).max(5);
+                        let step = (self.tab().viewport_height / 2).max(5);
                         scroll = (scroll + step).min(max_scroll);
                         self.modal = Some(ActiveModal::DiffView {
                             file_index,
@@ -451,7 +452,7 @@ impl AppState {
                     KeyCode::PageUp | KeyCode::Char('u')
                         if key.code == KeyCode::PageUp || has_ctrl =>
                     {
-                        let step = (self.viewport_height / 2).max(5);
+                        let step = (self.tab().viewport_height / 2).max(5);
                         scroll = scroll.saturating_sub(step);
                         self.modal = Some(ActiveModal::DiffView {
                             file_index,
@@ -587,7 +588,7 @@ impl AppState {
                     if key.code == KeyCode::PageDown || has_ctrl =>
                 {
                     if let Some(prev) = preview.as_mut() {
-                        let step = (self.viewport_height / 2).max(5);
+                        let step = (self.tab().viewport_height / 2).max(5);
                         let max_scroll = prev.lines.len().saturating_sub(6);
                         prev.scroll = prev.scroll.saturating_add(step).min(max_scroll);
                     }
@@ -602,7 +603,7 @@ impl AppState {
                 }
                 KeyCode::PageUp => {
                     if let Some(prev) = preview.as_mut() {
-                        let step = (self.viewport_height / 2).max(5);
+                        let step = (self.tab().viewport_height / 2).max(5);
                         prev.scroll = prev.scroll.saturating_sub(step);
                     }
                     self.modal = Some(ActiveModal::Search {
@@ -726,7 +727,7 @@ impl AppState {
                                 } else {
                                     ApprovalDecision::DeclineWithReason(text)
                                 };
-                                let _ = self.cmd_tx.send(AgentCommand::Approve {
+                                let _ = self.tab().cmd_tx.send(AgentCommand::Approve {
                                     request_id,
                                     decision,
                                     scope: None,
@@ -764,7 +765,7 @@ impl AppState {
                     if let Some((decision, scope)) = action
                         && let Some(request_id) = request_id
                     {
-                        let _ = self.cmd_tx.send(AgentCommand::Approve {
+                        let _ = self.tab().cmd_tx.send(AgentCommand::Approve {
                             request_id,
                             decision,
                             scope,
@@ -776,6 +777,116 @@ impl AppState {
                     reason,
                     editing_reason,
                 });
+            }
+            ActiveModal::SessionSelect {
+                mut filter,
+                mut selected,
+                sessions,
+                loading,
+                error,
+            } => {
+                let filtered_ids: Vec<(meerai_session::SessionId, Option<usize>)> =
+                    filter_session_summaries(&sessions, &filter)
+                        .into_iter()
+                        .map(|summary| {
+                            let open_tab = self.tab_index_for_session(&summary.id);
+                            (summary.id.clone(), open_tab)
+                        })
+                        .collect();
+
+                match key.code {
+                    KeyCode::Esc => {
+                        self.modal = None;
+                    }
+                    KeyCode::Up | KeyCode::Char('p') if key.code == KeyCode::Up || has_ctrl => {
+                        if !filtered_ids.is_empty() {
+                            selected = if selected == 0 {
+                                filtered_ids.len() - 1
+                            } else {
+                                selected - 1
+                            };
+                        }
+                        self.modal = Some(ActiveModal::SessionSelect {
+                            filter,
+                            selected,
+                            sessions,
+                            loading,
+                            error,
+                        });
+                    }
+                    KeyCode::Down | KeyCode::Char('n') if key.code == KeyCode::Down || has_ctrl => {
+                        if !filtered_ids.is_empty() {
+                            selected = (selected + 1) % filtered_ids.len();
+                        }
+                        self.modal = Some(ActiveModal::SessionSelect {
+                            filter,
+                            selected,
+                            sessions,
+                            loading,
+                            error,
+                        });
+                    }
+                    KeyCode::Backspace => {
+                        filter.pop();
+                        selected = 0;
+                        self.modal = Some(ActiveModal::SessionSelect {
+                            filter,
+                            selected,
+                            sessions,
+                            loading,
+                            error,
+                        });
+                    }
+                    KeyCode::Enter => {
+                        if let Some((session_id, open_tab)) = filtered_ids.get(selected).cloned() {
+                            self.modal = None;
+                            if let Some(tab_idx) = open_tab {
+                                self.switch_to_tab(tab_idx);
+                                self.status_notice =
+                                    Some(format!("Switched to tab {}", tab_idx + 1));
+                            } else if self.session_opener.is_some() {
+                                self.status_notice =
+                                    Some(format!("Opening session {session_id}..."));
+                                self.pending_session_actions
+                                    .push(PendingSessionAction::OpenSessionId(session_id));
+                            } else {
+                                self.tab_mut().transcript.push(TranscriptEntry::Error {
+                                    text: "Session switching is not available in this context."
+                                        .to_string(),
+                                    expanded: false,
+                                });
+                            }
+                        } else {
+                            self.modal = Some(ActiveModal::SessionSelect {
+                                filter,
+                                selected,
+                                sessions,
+                                loading,
+                                error,
+                            });
+                        }
+                    }
+                    KeyCode::Char(c) if !has_ctrl && !has_alt => {
+                        filter.push(c);
+                        selected = 0;
+                        self.modal = Some(ActiveModal::SessionSelect {
+                            filter,
+                            selected,
+                            sessions,
+                            loading,
+                            error,
+                        });
+                    }
+                    _ => {
+                        self.modal = Some(ActiveModal::SessionSelect {
+                            filter,
+                            selected,
+                            sessions,
+                            loading,
+                            error,
+                        });
+                    }
+                }
             }
         }
 
@@ -793,8 +904,9 @@ impl AppState {
 
     pub(super) fn activate_provider_only(&mut self, provider_id: &str) {
         let canonical = canonical_provider_id(provider_id);
-        let switching_provider = self.active_provider != canonical;
-        self.active_provider = canonical.clone();
+        let current_model = self.tab().model.clone();
+        let switching_provider = self.tab().active_provider != canonical;
+        self.tab_mut().active_provider = canonical.clone();
         self.settings.active_provider = Some(canonical.clone());
 
         let (spec, next_model) = {
@@ -807,8 +919,8 @@ impl AppState {
                 .map(str::to_string)
                 .or_else(|| rt.catalog.default_model_for_provider(&canonical))
                 .or_else(|| {
-                    (!switching_provider && !self.model.trim().is_empty())
-                        .then(|| self.model.clone())
+                    (!switching_provider && !current_model.trim().is_empty())
+                        .then_some(current_model)
                 })
                 .unwrap_or_default();
 
@@ -817,20 +929,20 @@ impl AppState {
             (spec, candidate)
         };
 
-        self.model = next_model.clone();
+        self.tab_mut().model = next_model.clone();
         self.settings.active_model = (!next_model.is_empty()).then_some(next_model);
         self.sync_completion_models();
         self.persist_settings();
         if let Some(spec) = spec {
-            let _ = self.cmd_tx.send(AgentCommand::SetModel(spec));
+            let _ = self.tab().cmd_tx.send(AgentCommand::SetModel(spec));
         }
     }
 
     pub(super) fn select_provider_and_model(&mut self, provider_id: &str, model_id: &str) {
         let canonical = canonical_provider_id(provider_id);
         let clean_model = model_id.trim().to_string();
-        self.active_provider = canonical.clone();
-        self.model = clean_model.clone();
+        self.tab_mut().active_provider = canonical.clone();
+        self.tab_mut().model = clean_model.clone();
         self.settings
             .record_provider_model(&canonical, &clean_model);
 
@@ -842,8 +954,8 @@ impl AppState {
 
         self.sync_completion_models();
         self.persist_settings();
-        let _ = self.cmd_tx.send(AgentCommand::SetModel(spec));
-        self.transcript.push(TranscriptEntry::System {
+        let _ = self.tab().cmd_tx.send(AgentCommand::SetModel(spec));
+        self.tab_mut().transcript.push(TranscriptEntry::System {
             text: format!("Active model: {canonical}/{clean_model}"),
         });
     }
@@ -857,12 +969,13 @@ impl AppState {
     }
 
     pub(super) fn open_provider_select(&mut self) {
+        let active_provider = self.tab().active_provider.clone();
         let selected = {
             let rt = self.runtime.read().unwrap();
             rt.catalog
                 .providers()
                 .iter()
-                .position(|p| p.id == self.active_provider)
+                .position(|p| p.id == active_provider)
                 .unwrap_or(0)
         };
         self.modal = Some(ActiveModal::ProviderSelect {

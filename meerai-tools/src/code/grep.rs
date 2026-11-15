@@ -4,7 +4,7 @@ use globset::{Glob, GlobMatcher};
 use ignore::WalkBuilder;
 use meerai_core::ToolDefinition;
 
-use crate::code::paths::{display_path, relative_path};
+use crate::code::paths::{display_path, is_sensitive_path, relative_path};
 use crate::code::{CodeTools, ToolRun, failure_run, success_run};
 use crate::workspace_search::{build_searcher, build_smart_matcher, search_file_with_matcher};
 
@@ -48,11 +48,18 @@ impl CodeTools {
         let workspace = self.canonical_workspace_root().await;
         let pattern = args.pattern.clone();
         let include = args.include.clone();
+        let allow_sensitive = self.allow_sensitive_files();
         let task_workspace = workspace.clone();
         let task_root = root.clone();
 
         let result = tokio::task::spawn_blocking(move || {
-            search(&task_workspace, &task_root, &pattern, include.as_deref())
+            search(
+                &task_workspace,
+                &task_root,
+                &pattern,
+                include.as_deref(),
+                allow_sensitive,
+            )
         })
         .await;
 
@@ -69,6 +76,7 @@ fn search(
     root: &Path,
     pattern: &str,
     include: Option<&str>,
+    allow_sensitive: bool,
 ) -> Result<String, String> {
     let matcher = build_smart_matcher(pattern, false)?;
 
@@ -80,7 +88,7 @@ fn search(
         })
         .transpose()?;
 
-    let files = collect_files(root);
+    let files = collect_files(root, allow_sensitive);
     let mut searcher = build_searcher();
 
     let mut matches: Vec<String> = Vec::new();
@@ -146,8 +154,11 @@ fn search(
     Ok(output)
 }
 
-fn collect_files(root: &Path) -> Vec<PathBuf> {
+fn collect_files(root: &Path, allow_sensitive: bool) -> Vec<PathBuf> {
     if root.is_file() {
+        if !allow_sensitive && is_sensitive_path(root) {
+            return Vec::new();
+        }
         return vec![root.to_path_buf()];
     }
 
@@ -160,6 +171,7 @@ fn collect_files(root: &Path) -> Vec<PathBuf> {
             entry
                 .file_type()
                 .is_some_and(|file_type| file_type.is_file())
+                && (allow_sensitive || !is_sensitive_path(entry.path()))
         })
         .map(|entry| entry.into_path())
         .collect();

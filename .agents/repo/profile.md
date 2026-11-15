@@ -16,9 +16,9 @@
   license, CI, tag-driven releases, Pages site) and includes project-root config discovery, TUI
   transcript replay, opt-in automatic session retention, best-effort tool-output redaction,
   subagent child sessions (`subagent-run`), CLI session forking, retrieval v2/v3 tools
-  (`repo_map`, `lsp`, `search_as_code`), and read-only agent/skill discovery from
-  `.agents`/`.claude` (**M12**). Checkpoints (**M6**), hooks (**M7**), and the security backlog
-  (**M11** in `docs/harness-spec.md` §9.6) remain unimplemented.
+  `repo_map`, `lsp`, `search_as_code`), security & supply-chain controls (**M11**),
+  and read-only agent/skill discovery from `.agents`/`.claude` (**M12**). Checkpoints
+  (**M6**) and hooks (**M7**) remain unimplemented.
 - **Clients:** `meerai-tui` provides the modal terminal UI library (including replay of an
   existing session selected by `--continue`/`--resume <ID>`/`--fork <ID>` and subagent items);
   `meerai-cli` builds the `meerai` binary with CLI flag parsing, headless one-shot runner
@@ -88,9 +88,8 @@ Notes:
 - Two clippy warnings are accepted pre-existing noise: `assert!(true)` in `meerai-core/src/tools.rs`
   (tests) and the redundant `&` in `meerai-macros/src/test_utils.rs`. Do not treat them as new
   breakage.
-- There is no codesigning or notarization; release archives are unsigned. Do not add signing
-  secrets without an owner decision.
-- CI has no dependency-audit step (`cargo audit`/`cargo deny`) and no Windows runner.
+- CI has a `cargo-deny` dependency-audit job (`deny.toml`), and no Windows runner.
+- Release workflows include secret-gated signing steps (`APPLE_CERTIFICATE` / `WINDOWS_CERTIFICATE`); without configured secrets, archives publish unsigned.
 
 ## 4. Invariants
 
@@ -161,14 +160,15 @@ Notes:
     compaction markers); runtime/system events are skipped and unmatched tool calls become
     `Cancelled`. `set_harness` and `session_usage_from_events` seed token counters from the last
     logged `UsageUpdated`. `AgentCommand` still has no `Rewind`/`Fork` variant.
-20. **Security roadmap (M11):** landed — path guards, `plan` hard read-only, approval gates,
-    headless fail-fast, provider-secret env scrub, best-effort output/diff/error redaction, session
-    file permissions, configurable retention, session/turn token budgets. Backlog — OS sandbox
-    (`ExecutionWorld`: macOS Seatbelt, Linux bubblewrap/Landlock, network denied by default),
-    dependency audit in CI (`cargo audit`/`cargo deny`), signed/notarized artifacts, a written
-    threat model (repo instructions, model output, hooks, MCP, subagents), prompt-injection
-    screening, OS keychain. Never describe a backlog item as shipped (see
-    `docs/harness-spec.md` §9.6).
+20. **Security roadmap (M11):** landed — path guards, sensitive-file blocks (`is_sensitive_path` and
+    `PolicyEngine::default_sensitive_rules`), `plan` hard read-only, approval gates, headless
+    fail-fast, provider-secret env scrub, best-effort output/diff/error redaction, heuristic
+    prompt-injection screening (`screen_run`/`screen_untrusted_text`), session file permissions,
+    configurable retention, session/turn token budgets, `ExecutionWorld` OS sandbox (`SeatbeltWorld` /
+    `BubblewrapWorld` with `HostWorld` fallback warning), native OS keychain (`KeychainSecretStore` +
+    `auth.json` fallback), `cargo-deny` CI audit (`deny.toml`), conditional release signing steps,
+    and `docs/threat-model.md`. Caveats: signing secrets are operator-configured, and Windows uses
+    Phase-1 `HostWorld` guards (see `docs/harness-spec.md` §9.6 and `docs/threat-model.md`).
 21. **Agent/skill definitions are prompt-only and untrusted (M12):** discovery is read-only and
     starts at the project root. `.agents/agents/*.md` and `.agents/skills/*/SKILL.md` load before
     `.claude/...`; a duplicate id keeps `.agents` and the warning names both paths; the catalog is
@@ -264,9 +264,8 @@ Detail in [`infra.md`](infra.md). Summary:
 - **Site:** `.github/workflows/pages.yml` deploys `site/` (installers and landing page) to GitHub
   Pages at `meerai.packvision.xyz`.
 - **Local:** all checks are also runnable with the pinned Rust `1.100.0` toolchain via `make verify`.
-- **No IaC, containers, or self-hosted runners.** No repository secrets are required; signing and
-  notarization are absent. CI has no dependency-audit step. Both are M11 backlog items
-  (`docs/harness-spec.md` §9.6).
+- **No IaC, containers, or self-hosted runners.** Signing secrets are not pre-configured in GitHub
+  Actions (release signing steps are secret-gated); CI and release run `cargo-deny` (`deny.toml`).
 
 ## 10. Domain, personas, and gating
 

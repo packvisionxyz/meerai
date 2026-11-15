@@ -9,12 +9,15 @@ pub(crate) mod shell;
 mod write_file;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub(crate) use meerai_core::text::truncate_middle;
 use meerai_core::{
     EffectClass, PermissionAction, ToolDefinition, ToolError, ToolObservation, ToolOutput,
     ToolPermissionSpec, ToolRun, Toolset, async_trait,
 };
+
+use crate::world::{ExecutionWorld, HostWorld};
 
 pub const TOOL_NAMES: [&str; 7] = [
     "read_file",
@@ -35,6 +38,8 @@ pub struct CodeTools {
     readable_roots: Vec<PathBuf>,
     sensitive_env_vars: Vec<String>,
     allowed_tools: Option<Vec<&'static str>>,
+    allow_sensitive_files: bool,
+    execution_world: Arc<dyn ExecutionWorld>,
 }
 
 impl CodeTools {
@@ -45,6 +50,8 @@ impl CodeTools {
             readable_roots: Vec::new(),
             sensitive_env_vars: Vec::new(),
             allowed_tools: None,
+            allow_sensitive_files: false,
+            execution_world: Arc::new(HostWorld::new()),
         }
     }
 
@@ -72,6 +79,16 @@ impl CodeTools {
         self
     }
 
+    pub fn with_allow_sensitive_files(mut self, allow: bool) -> Self {
+        self.allow_sensitive_files = allow;
+        self
+    }
+
+    pub fn with_execution_world(mut self, world: Arc<dyn ExecutionWorld>) -> Self {
+        self.execution_world = world;
+        self
+    }
+
     fn is_allowed(&self, tool: &str) -> bool {
         self.allowed_tools
             .as_ref()
@@ -88,6 +105,14 @@ impl CodeTools {
 
     pub fn readable_roots(&self) -> &[PathBuf] {
         &self.readable_roots
+    }
+
+    pub fn allow_sensitive_files(&self) -> bool {
+        self.allow_sensitive_files
+    }
+
+    pub fn execution_world(&self) -> &Arc<dyn ExecutionWorld> {
+        &self.execution_world
     }
 
     pub(crate) fn sensitive_env_vars(&self) -> &[String] {

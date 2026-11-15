@@ -1,19 +1,23 @@
 use std::io::{self, Stdout};
 use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use crossterm::cursor::Show;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Frame, Terminal};
 
 static PANIC_HOOK_ONCE: Once = Once::new();
+static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
 
 pub struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<Stdout>>,
@@ -62,10 +66,22 @@ fn setup_screen() -> Result<()> {
         EnableBracketedPaste,
         EnableMouseCapture
     )?;
+    if matches!(supports_keyboard_enhancement(), Ok(true))
+        && execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )
+        .is_ok()
+    {
+        KEYBOARD_ENHANCED.store(true, Ordering::Relaxed);
+    }
     Ok(())
 }
 
 pub fn restore_terminal() {
+    if KEYBOARD_ENHANCED.swap(false, Ordering::Relaxed) {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
     let _ = disable_raw_mode();
     let _ = execute!(
         io::stdout(),

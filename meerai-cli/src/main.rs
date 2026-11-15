@@ -6,7 +6,7 @@ mod sessions_cmd;
 mod tests;
 
 use std::io::{self, IsTerminal};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Result, bail};
@@ -15,19 +15,24 @@ use meerai_agents::{
 };
 use meerai_common::definitions::{AgentDefinition, SkillDefinition, load_definitions};
 use meerai_common::settings::{
-    default_config_dir, default_data_dir, find_project_root, load_project_settings,
+    AppSettings, default_config_dir, default_data_dir, find_project_root, load_project_settings,
     load_settings_from, merge_project_settings,
 };
-use meerai_core::Toolset;
+use meerai_core::{Toolset, async_trait};
 use meerai_policy::{ApprovalMode, PolicyEngine, parse_approval_mode, rules_from_yaml};
 use meerai_providers::providers::{
     ProviderCatalog, RuntimeProviderState, build_genai_client, canonical_provider_id,
     first_configured_provider,
 };
 use meerai_providers::secrets::{auth_file_path, default_secret_store};
-use meerai_session::{Session, SessionConfig, SessionId, default_sessions_root};
-use meerai_tools::{CodeTools, LspToolset, RepoMapToolset, SearchAsCodeToolset};
-use meerai_tui::{TuiLaunchConfig, transcript_from_events};
+use meerai_session::{
+    Session, SessionConfig, SessionId, SessionSummary, default_sessions_root, list_sessions,
+};
+use meerai_tools::{
+    CodeTools, ExecutionWorld, LspToolset, RepoMapToolset, SearchAsCodeToolset,
+    detect_execution_world,
+};
+use meerai_tui::{OpenedSession, SessionOpener, TuiLaunchConfig, transcript_from_events};
 
 use auth_cmd::run_auth;
 use cli::{CliSubcommand, HELP_TEXT, parse_args};
@@ -327,11 +332,6 @@ async fn main() -> Result<()> {
     user_settings.active_provider = Some(active_provider.clone());
     user_settings.active_model = (!active_model.trim().is_empty()).then(|| active_model.clone());
 
-    let model_spec = if active_model.trim().is_empty() {
-        String::new()
-    } else {
-        catalog.format_genai_spec(&active_provider, &active_model)
-    };
     let sensitive_env_vars = catalog.sensitive_env_vars();
     let runtime = Arc::new(RwLock::new(RuntimeProviderState::from_settings(
         &settings, catalog,
@@ -367,55 +367,49 @@ async fn main() -> Result<()> {
         session.set_model(&active_model).await?;
     }
     auto_prune_sessions(&settings, session.id()).await;
-    let initial_events = if cli.prompt.is_none() {
-        session.events()
-    } else {
-        Vec::new()
-    };
-    let initial_transcript = transcript_from_events(&initial_events);
-    let mut readable_roots = vec![workspace_root.clone()];
-    if let Some(dir) = session.dir() {
-        readable_roots.push(dir.to_path_buf());
-    }
-    let code_tools = CodeTools::new(workspace_root.clone())
-        .with_writable_roots(vec![workspace_root.clone()])
-        .with_readable_roots(readable_roots.clone())
-        .with_sensitive_env_vars(sensitive_env_vars.clone());
-    let repo_map =
-        RepoMapToolset::new(workspace_root.clone()).with_readable_roots(readable_roots.clone());
-    let lsp = LspToolset::new(workspace_root.clone()).with_readable_roots(readable_roots);
-    let sac = SearchAsCodeToolset::new(workspace_root.clone())
-        .with_sensitive_env_vars(sensitive_env_vars);
-    let initial_tools = build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, false);
-    let subagent_factory: SubagentToolFactory = Arc::new(move |read_only| {
-        build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, read_only)
-    });
 
-    let system = compose_definition_prompt(
-        meerai_agents::compose_system_prompt(&cli.system, &workspace_root).await,
-        &selected_skills,
-        selected_agent,
-    );
-    let mut agent = MultiTurnAgent::new(client, model_spec, initial_tools, system);
-    let subagent_tool = SubagentToolset::from_agent(&agent, subagent_factory)
-        .with_custom_agents(definitions.agents.clone());
-    agent.add_tool(subagent_tool);
-    agent.set_harness(AgentHarness {
-        session,
-        policy,
-        config: HarnessConfig::from_context_settings(settings.context.as_ref()),
+    let execution_world = detect_execution_world(true).await;
+    if let Some(warning) = execution_world.warning() {
+        eprintln!("Warning: {warning}");
+    }
+
+    let base_system = meerai_agents::compose_system_prompt(&cli.system, &workspace_root).await;
+    let initial_system =
+        compose_definition_prompt(base_system.clone(), &selected_skills, selected_agent);
+
+    let host = Arc::new(CliSessionHost {
+        workspace_root: workspace_root.clone(),
+        session_config,
+        runtime: runtime.clone(),
+        settings: settings.clone(),
+        client,
+        approval_mode,
+        execution_world,
+        sensitive_env_vars,
+        custom_agents: definitions.agents.clone(),
+        base_system,
+        default_provider: active_provider.clone(),
+        default_model: active_model.clone(),
     });
 
     if let Some(prompt) = cli.prompt {
+        let agent = host.build_agent(session, &active_provider, &active_model, initial_system)?;
         let exit_code = run_headless(agent, prompt, cli.json).await?;
         std::process::exit(exit_code);
     }
 
+    let initial_meta = session.meta();
+    let initial_events = session.events();
+    let initial_transcript = transcript_from_events(&initial_events);
+    let agent = host.build_agent(session, &active_provider, &active_model, initial_system)?;
     let (cmd_tx, event_rx) = spawn_worker(agent);
+
     meerai_tui::run_tui(
         cmd_tx,
         event_rx,
         TuiLaunchConfig {
+            initial_session_id: initial_meta.id,
+            initial_session_title: initial_meta.title,
             initial_provider: active_provider,
             initial_model: active_model,
             workspace_root,
@@ -428,7 +422,168 @@ async fn main() -> Result<()> {
             initial_events,
             agents: definitions.agents,
             skills: definitions.skills,
+            session_opener: Some(host),
         },
     )
     .await
+}
+
+struct CliSessionHost {
+    workspace_root: PathBuf,
+    session_config: SessionConfig,
+    runtime: Arc<RwLock<RuntimeProviderState>>,
+    settings: AppSettings,
+    client: meerai_core::genai::Client,
+    approval_mode: ApprovalMode,
+    execution_world: Arc<dyn ExecutionWorld>,
+    sensitive_env_vars: Vec<String>,
+    custom_agents: Vec<AgentDefinition>,
+    base_system: String,
+    default_provider: String,
+    default_model: String,
+}
+
+impl CliSessionHost {
+    fn resolve_session_provider_model(&self, meta_model: Option<&str>) -> (String, String) {
+        let current_provider = self
+            .runtime
+            .read()
+            .map(|rt| rt.active_provider.clone())
+            .unwrap_or_else(|_| self.default_provider.clone());
+        if let Some(raw) = meta_model.map(str::trim).filter(|m| !m.is_empty()) {
+            if let Some((provider, model)) = raw.split_once("::") {
+                return (canonical_provider_id(provider), model.trim().to_string());
+            }
+            return (current_provider, raw.to_string());
+        }
+        let fallback_model = if current_provider == self.default_provider {
+            self.default_model.clone()
+        } else {
+            self.settings
+                .provider_model(&current_provider)
+                .map(str::to_string)
+                .or_else(|| {
+                    self.runtime
+                        .read()
+                        .ok()
+                        .and_then(|rt| rt.catalog.default_model_for_provider(&current_provider))
+                })
+                .unwrap_or_else(|| self.default_model.clone())
+        };
+        (current_provider, fallback_model)
+    }
+
+    fn build_agent(
+        &self,
+        session: Session,
+        provider: &str,
+        model: &str,
+        system: String,
+    ) -> Result<MultiTurnAgent> {
+        let policy = build_policy(
+            self.approval_mode,
+            self.settings.permissions.as_ref(),
+            &self.workspace_root,
+        )?;
+
+        let mut readable_roots = vec![self.workspace_root.clone()];
+        if let Some(dir) = session.dir() {
+            readable_roots.push(dir.to_path_buf());
+        }
+
+        let code_tools = CodeTools::new(self.workspace_root.clone())
+            .with_writable_roots(vec![self.workspace_root.clone()])
+            .with_readable_roots(readable_roots.clone())
+            .with_sensitive_env_vars(self.sensitive_env_vars.clone())
+            .with_execution_world(self.execution_world.clone());
+        let repo_map = RepoMapToolset::new(self.workspace_root.clone())
+            .with_readable_roots(readable_roots.clone());
+        let lsp = LspToolset::new(self.workspace_root.clone()).with_readable_roots(readable_roots);
+        let sac = SearchAsCodeToolset::new(self.workspace_root.clone())
+            .with_sensitive_env_vars(self.sensitive_env_vars.clone())
+            .with_execution_world(self.execution_world.clone());
+        let initial_tools = build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, false);
+        let subagent_factory: SubagentToolFactory = Arc::new(move |read_only| {
+            build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, read_only)
+        });
+
+        let model_spec = if model.trim().is_empty() {
+            String::new()
+        } else {
+            self.runtime
+                .read()
+                .unwrap()
+                .catalog
+                .format_genai_spec(provider, model)
+        };
+
+        let mut agent = MultiTurnAgent::new(self.client.clone(), model_spec, initial_tools, system);
+        let subagent_tool = SubagentToolset::from_agent(&agent, subagent_factory)
+            .with_custom_agents(self.custom_agents.clone());
+        agent.add_tool(subagent_tool);
+        agent.set_harness(AgentHarness {
+            session,
+            policy,
+            config: HarnessConfig::from_context_settings(self.settings.context.as_ref()),
+        });
+        Ok(agent)
+    }
+
+    fn build_opened_session(
+        &self,
+        session: Session,
+        provider: String,
+        model: String,
+    ) -> Result<OpenedSession> {
+        let meta = session.meta();
+        let events = session.events();
+        let transcript = transcript_from_events(&events);
+        let agent = self.build_agent(session, &provider, &model, self.base_system.clone())?;
+        let (cmd_tx, event_rx) = spawn_worker(agent);
+        Ok(OpenedSession {
+            session_id: meta.id,
+            title: meta.title,
+            provider,
+            model,
+            approval_mode: self.approval_mode,
+            transcript,
+            events,
+            cmd_tx,
+            event_rx,
+        })
+    }
+}
+
+#[async_trait]
+impl SessionOpener for CliSessionHost {
+    async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
+        let root = self.session_config.root.clone();
+        sessions_cmd::run_blocking(move || list_sessions(&root)).await
+    }
+
+    async fn open_session(&self, id: &SessionId) -> Result<OpenedSession> {
+        let session = Session::open(
+            &self.session_config,
+            id.clone(),
+            self.workspace_root.clone(),
+        )
+        .await?;
+        let meta = session.meta();
+        let (provider, model) = self.resolve_session_provider_model(meta.model.as_deref());
+        self.build_opened_session(session, provider, model)
+    }
+
+    async fn create_session(&self) -> Result<OpenedSession> {
+        let session = Session::open_or_create(
+            &self.session_config,
+            SessionId::new(),
+            self.workspace_root.clone(),
+        )
+        .await?;
+        let (provider, model) = self.resolve_session_provider_model(None);
+        if !model.trim().is_empty() {
+            session.set_model(&model).await?;
+        }
+        self.build_opened_session(session, provider, model)
+    }
 }

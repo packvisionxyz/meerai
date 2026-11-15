@@ -110,12 +110,69 @@ impl CompiledGrant {
     }
 }
 
+const SENSITIVE_FILE_PATTERNS: &[&str] = &[
+    ".env",
+    ".env.*",
+    "*.env",
+    ".envrc",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.jks",
+    "*.keystore",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    ".netrc",
+    "_netrc",
+    ".npmrc",
+    ".pypirc",
+    "auth.json",
+    "auth.yml",
+    "credentials.json",
+    "**/.aws/credentials",
+    "**/.docker/config.json",
+    "**/.kube/config",
+    "*secret*.json",
+    "*secret*.yml",
+    "*secret*.yaml",
+    "*secret*.toml",
+    "*secret*.txt",
+    "*credential*.json",
+    "*credential*.yml",
+    "*credential*.yaml",
+    "*credential*.toml",
+];
+
+pub fn default_sensitive_rules() -> Vec<PermissionRule> {
+    let mut rules = Vec::with_capacity(SENSITIVE_FILE_PATTERNS.len() * 2 + 1);
+    for pattern in SENSITIVE_FILE_PATTERNS {
+        for action in [PermissionAction::Read, PermissionAction::Edit] {
+            rules.push(PermissionRule {
+                action: ActionSelector::Action(action),
+                resource: (*pattern).to_string(),
+                effect: Effect::Deny,
+            });
+        }
+    }
+    rules.push(PermissionRule {
+        action: ActionSelector::Action(PermissionAction::Read),
+        resource: ".env.example".to_string(),
+        effect: Effect::Allow,
+    });
+    rules
+}
+
 #[derive(Debug)]
 pub struct PolicyEngine {
     mode: ApprovalMode,
     workspace_root: PathBuf,
+    default_rules: Vec<PermissionRule>,
     rules: Vec<PermissionRule>,
     agent_rules: Vec<PermissionRule>,
+    compiled_default_rules: Vec<CompiledRule>,
     compiled_rules: Vec<CompiledRule>,
     compiled_agent_rules: Vec<CompiledRule>,
     grants: RwLock<Vec<CompiledGrant>>,
@@ -124,16 +181,30 @@ pub struct PolicyEngine {
 
 impl PolicyEngine {
     pub fn new(mode: ApprovalMode) -> Self {
-        Self {
+        let mut engine = Self {
             mode,
             workspace_root: PathBuf::from("."),
+            default_rules: default_sensitive_rules(),
             rules: Vec::new(),
             agent_rules: Vec::new(),
+            compiled_default_rules: Vec::new(),
             compiled_rules: Vec::new(),
             compiled_agent_rules: Vec::new(),
             grants: RwLock::new(Vec::new()),
             warnings: RwLock::new(Vec::new()),
-        }
+        };
+        engine.recompile();
+        engine
+    }
+
+    pub fn with_default_sensitive_rules(mut self, enabled: bool) -> Self {
+        self.default_rules = if enabled {
+            default_sensitive_rules()
+        } else {
+            Vec::new()
+        };
+        self.recompile();
+        self
     }
 
     pub fn with_rules(mut self, rules: Vec<PermissionRule>) -> Self {
@@ -238,6 +309,12 @@ impl PolicyEngine {
 
     fn recompile(&mut self) {
         let mut warnings = Vec::new();
+        self.compiled_default_rules = compile_rules(
+            &self.workspace_root,
+            &self.default_rules,
+            "default permission rule",
+            &mut warnings,
+        );
         self.compiled_rules = compile_rules(
             &self.workspace_root,
             &self.rules,
@@ -260,8 +337,9 @@ impl PolicyEngine {
     }
 
     fn last_matching_rule(&self, candidate: &Candidate<'_>) -> Option<Effect> {
-        self.compiled_rules
+        self.compiled_default_rules
             .iter()
+            .chain(self.compiled_rules.iter())
             .chain(self.compiled_agent_rules.iter())
             .rfind(|rule| rule.matches(candidate))
             .map(|rule| rule.effect)
@@ -1529,5 +1607,126 @@ read:
         assert_eq!(String::from(external), "external_directory");
 
         assert!(serde_yaml::from_str::<ActionSelector>("\"bogus\"").is_err());
+    }
+
+    #[test]
+    fn default_sensitive_rules_deny_reads_and_edits_in_ask_and_yolo() {
+        let sensitive_paths = [
+            ".env",
+            "config/.env.local",
+            "prod.env",
+            ".envrc",
+            "private.pem",
+            "certs/server.key",
+            "cert.p12",
+            "cert.pfx",
+            "store.jks",
+            "app.keystore",
+            "id_rsa",
+            "id_dsa",
+            "id_ecdsa",
+            ".ssh/id_ed25519",
+            ".netrc",
+            "_netrc",
+            ".npmrc",
+            ".pypirc",
+            "auth.json",
+            "auth.yml",
+            "credentials.json",
+            ".aws/credentials",
+            "/home/user/.aws/credentials",
+            ".docker/config.json",
+            ".kube/config",
+            "secrets.json",
+            "secrets.yml",
+            "app-secret.yaml",
+            "secret.toml",
+            "secrets.txt",
+            "credentials.yml",
+            "db-credential.yaml",
+            "credentials.toml",
+        ];
+
+        for mode in [
+            ApprovalMode::Ask,
+            ApprovalMode::Yolo,
+            ApprovalMode::AutoEdit,
+        ] {
+            let engine = PolicyEngine::new(mode);
+            assert!(engine.rules().is_empty());
+            assert!(engine.warnings().is_empty());
+
+            for path in sensitive_paths {
+                assert_eq!(
+                    engine.decide(&check(PermissionAction::Read, path, EffectClass::Read)),
+                    deny(),
+                    "mode {mode:?} read {path}"
+                );
+                assert_eq!(
+                    engine.decide(&check(PermissionAction::Edit, path, EffectClass::Write)),
+                    deny(),
+                    "mode {mode:?} edit {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_sensitive_rules_allow_source_files_and_env_example_read() {
+        let allowed_reads = [
+            "src/secrets.rs",
+            "src/credentials.rs",
+            ".env.example",
+            "config/.env.example",
+            "src/auth.rs",
+        ];
+
+        for mode in [
+            ApprovalMode::Plan,
+            ApprovalMode::Ask,
+            ApprovalMode::AutoEdit,
+            ApprovalMode::Yolo,
+        ] {
+            let engine = PolicyEngine::new(mode);
+            for path in allowed_reads {
+                assert_eq!(
+                    engine.decide(&check(PermissionAction::Read, path, EffectClass::Read)),
+                    Decision::Allow,
+                    "mode {mode:?} read {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_user_rule_can_override_default_sensitive_rules() {
+        let engine = PolicyEngine::new(ApprovalMode::Ask).with_rules(vec![rule(
+            read_any(),
+            ".env",
+            Effect::Allow,
+        )]);
+
+        assert_eq!(
+            engine.decide(&check(PermissionAction::Read, ".env", EffectClass::Read)),
+            Decision::Allow
+        );
+        assert_eq!(
+            engine.decide(&check(PermissionAction::Edit, ".env", EffectClass::Write)),
+            deny()
+        );
+        assert_eq!(engine.rules().len(), 1);
+    }
+
+    #[test]
+    fn default_sensitive_rules_can_be_disabled() {
+        let engine = PolicyEngine::new(ApprovalMode::Ask).with_default_sensitive_rules(false);
+        assert_eq!(
+            engine.decide(&check(PermissionAction::Read, ".env", EffectClass::Read)),
+            Decision::Allow
+        );
+        assert_eq!(
+            engine.decide(&check(PermissionAction::Edit, ".env", EffectClass::Write)),
+            Decision::Ask
+        );
     }
 }

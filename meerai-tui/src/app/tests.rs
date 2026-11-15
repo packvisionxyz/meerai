@@ -117,8 +117,8 @@ fn connect_flow_saves_key_deletes_and_selects_model() {
     type_text(&mut app, "glm-5.3");
     app.handle_key_event(key(KeyCode::Enter));
     assert!(app.modal.is_none());
-    assert_eq!(app.active_provider, "opencode-go");
-    assert_eq!(app.model, "glm-5.3");
+    assert_eq!(app.tab().active_provider, "opencode-go");
+    assert_eq!(app.tab().model, "glm-5.3");
     assert_eq!(
         rx.try_recv().unwrap(),
         AgentCommand::SetModel("opencode_go::glm-5.3".to_string())
@@ -143,7 +143,7 @@ fn model_input_accepts_manual_and_recent_models() {
     type_text(&mut app, "custom-gemini-model");
     app.handle_key_event(key(KeyCode::Enter));
     assert!(app.modal.is_none());
-    assert_eq!(app.model, "custom-gemini-model");
+    assert_eq!(app.tab().model, "custom-gemini-model");
     assert_eq!(
         rx.try_recv().unwrap(),
         AgentCommand::SetModel("gemini::custom-gemini-model".to_string())
@@ -185,7 +185,7 @@ fn opens_model_input_on_startup_when_model_empty_and_blocks_empty_submit() {
 
     type_text(&mut app, "hello");
     app.handle_key_event(key(KeyCode::Enter));
-    assert!(!app.is_running);
+    assert!(!app.tab().is_running);
     assert!(rx.try_recv().is_err());
     assert!(matches!(app.modal, Some(ActiveModal::ModelInput { .. })));
 }
@@ -198,7 +198,7 @@ fn modal_switching_and_editing() {
     type_text(&mut app, "hello");
     app.handle_key_event(key_mod(KeyCode::Enter, KeyModifiers::SHIFT));
     type_text(&mut app, "world");
-    assert_eq!(app.input, "hello\nworld");
+    assert_eq!(app.tab().input, "hello\nworld");
 
     app.handle_key_event(key(KeyCode::Esc));
     assert_eq!(app.mode, InputMode::Normal);
@@ -212,11 +212,11 @@ fn modal_switching_and_editing() {
     assert_eq!(app.mode, InputMode::Insert);
 
     app.handle_terminal_event(Event::Paste("!\r\nmore".to_string()));
-    assert_eq!(app.input, "hello\nworld!\nmore");
+    assert_eq!(app.tab().input, "hello\nworld!\nmore");
 
     app.handle_key_event(key(KeyCode::Enter));
-    assert!(app.input.is_empty());
-    assert!(app.is_running);
+    assert!(app.tab().input.is_empty());
+    assert!(app.tab().is_running);
     assert_eq!(
         rx.try_recv().unwrap(),
         AgentCommand::SubmitPrompt("hello\nworld!\nmore".to_string())
@@ -226,15 +226,15 @@ fn modal_switching_and_editing() {
 #[test]
 fn normal_mode_scrolling_and_quit_controls() {
     let (mut app, mut rx, _secrets) = test_app();
-    app.viewport_height = 10;
-    app.total_lines = 40;
-    app.auto_follow = true;
+    app.tab_mut().viewport_height = 10;
+    app.tab_mut().total_lines = 40;
+    app.tab_mut().auto_follow = true;
     app.mode = InputMode::Normal;
 
     assert_eq!(app.effective_scroll(), 30);
 
     app.handle_key_event(key(KeyCode::Char('k')));
-    assert!(!app.auto_follow);
+    assert!(!app.tab().auto_follow);
     assert_eq!(app.effective_scroll(), 29);
 
     app.handle_key_event(key_mod(KeyCode::Char('u'), KeyModifiers::CONTROL));
@@ -246,13 +246,13 @@ fn normal_mode_scrolling_and_quit_controls() {
     app.handle_key_event(key(KeyCode::Char('g')));
     app.handle_key_event(key(KeyCode::Char('g')));
     assert_eq!(app.effective_scroll(), 0);
-    assert!(!app.auto_follow);
+    assert!(!app.tab().auto_follow);
 
     app.handle_key_event(key(KeyCode::Char('G')));
     assert_eq!(app.effective_scroll(), 30);
-    assert!(app.auto_follow);
+    assert!(app.tab().auto_follow);
 
-    app.is_running = true;
+    app.tab_mut().is_running = true;
     app.handle_key_event(key(KeyCode::Esc));
     assert_eq!(rx.try_recv().unwrap(), AgentCommand::Cancel);
 
@@ -264,12 +264,12 @@ fn normal_mode_scrolling_and_quit_controls() {
 #[test]
 fn double_ctrl_c_exits_and_single_ctrl_c_cancels_when_running() {
     let (mut app, mut rx, _secrets) = test_app();
-    app.is_running = true;
+    app.tab_mut().is_running = true;
     app.handle_key_event(key_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert_eq!(rx.try_recv().unwrap(), AgentCommand::Cancel);
     assert!(!app.should_quit);
 
-    app.is_running = false;
+    app.tab_mut().is_running = false;
     app.handle_key_event(key_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert!(!app.should_quit);
     assert!(app.status_notice.is_some());
@@ -305,13 +305,13 @@ fn slash_command_handling() {
     type_text(&mut app, "/help");
     app.handle_key_event(key(KeyCode::Enter));
     assert!(matches!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(TranscriptEntry::System { text }) if text.contains("/connect")
     ));
 
     type_text(&mut app, "/model gemini-3.1-pro-preview");
     app.handle_key_event(key(KeyCode::Enter));
-    assert_eq!(app.model, "gemini-3.1-pro-preview");
+    assert_eq!(app.tab().model, "gemini-3.1-pro-preview");
     assert_eq!(
         rx.try_recv().unwrap(),
         AgentCommand::SetModel("gemini::gemini-3.1-pro-preview".to_string())
@@ -319,9 +319,9 @@ fn slash_command_handling() {
 
     type_text(&mut app, "/clear");
     app.handle_key_event(key(KeyCode::Enter));
-    assert!(app.transcript.is_empty());
+    assert!(app.tab().transcript.is_empty());
 
-    app.is_running = true;
+    app.tab_mut().is_running = true;
     type_text(&mut app, "/cancel");
     app.handle_key_event(key(KeyCode::Enter));
     assert_eq!(rx.try_recv().unwrap(), AgentCommand::Cancel);
@@ -329,7 +329,7 @@ fn slash_command_handling() {
     type_text(&mut app, "/reset");
     app.handle_key_event(key(KeyCode::Enter));
     assert_eq!(rx.try_recv().unwrap(), AgentCommand::Reset);
-    assert!(!app.is_running);
+    assert!(!app.tab().is_running);
 
     type_text(&mut app, "/quit");
     app.handle_key_event(key(KeyCode::Enter));
@@ -438,14 +438,14 @@ fn submitting_mention_applies_agent_then_prompt() {
             model: Some("gemini::gemini-3.1-pro-preview".to_string()),
         }
     );
-    assert_eq!(app.model, "gemini-3.1-pro-preview");
+    assert_eq!(app.tab().model, "gemini-3.1-pro-preview");
     assert_eq!(
         rx.try_recv().unwrap(),
         AgentCommand::SubmitPrompt("do the task".to_string())
     );
-    assert!(app.is_running);
+    assert!(app.tab().is_running);
     assert_eq!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(&TranscriptEntry::User {
             text: "do the task".to_string()
         })
@@ -484,9 +484,9 @@ fn mention_popup_arrows_and_tab_insert_without_submitting() {
     app.handle_key_event(key(KeyCode::Down));
     app.handle_key_event(key(KeyCode::Tab));
 
-    assert_eq!(app.input, "@skill/reviewer ");
+    assert_eq!(app.tab().input, "@skill/reviewer ");
     assert_eq!(app.mode, InputMode::Insert);
-    assert!(!app.is_running);
+    assert!(!app.tab().is_running);
     assert!(rx.try_recv().is_err());
 }
 
@@ -505,8 +505,8 @@ fn enter_accepts_mention_without_submitting() {
     assert!(app.completion.is_active());
     app.handle_key_event(key(KeyCode::Enter));
 
-    assert_eq!(app.input, "@agent/reviewer ");
-    assert!(!app.is_running);
+    assert_eq!(app.tab().input, "@agent/reviewer ");
+    assert!(!app.tab().is_running);
     assert!(rx.try_recv().is_err());
 
     app.handle_key_event(key(KeyCode::Enter));
@@ -519,10 +519,10 @@ fn enter_accepts_mention_without_submitting() {
         }
     );
     assert!(rx.try_recv().is_err());
-    assert!(!app.is_running);
-    assert!(app.input.is_empty());
+    assert!(!app.tab().is_running);
+    assert!(app.tab().input.is_empty());
     assert!(matches!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(TranscriptEntry::System { text })
             if text == "Applied agent reviewer (.agents)."
     ));
@@ -568,10 +568,10 @@ fn only_mentions_apply_without_starting_a_turn() {
         }
     );
     assert!(rx.try_recv().is_err());
-    assert!(!app.is_running);
-    assert!(app.input.is_empty());
+    assert!(!app.tab().is_running);
+    assert!(app.tab().input.is_empty());
     assert_eq!(
-        app.transcript,
+        app.tab().transcript,
         vec![
             TranscriptEntry::System {
                 text: "Applied skill explore (.agents).".to_string()
@@ -604,7 +604,7 @@ fn unknown_mention_stays_in_the_prompt() {
         AgentCommand::SubmitPrompt("@agent/nope do it".to_string())
     );
     assert!(matches!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(TranscriptEntry::User { text }) if text == "@agent/nope do it"
     ));
 }
@@ -660,8 +660,8 @@ fn mention_agent_model_with_provider_prefix_is_ignored() {
         rx.try_recv().unwrap(),
         AgentCommand::SubmitPrompt("go".to_string())
     );
-    assert_eq!(app.model, "gemini-3.8-flash");
-    assert!(app.transcript.iter().any(|entry| matches!(
+    assert_eq!(app.tab().model, "gemini-3.8-flash");
+    assert!(app.tab().transcript.iter().any(|entry| matches!(
         entry,
         TranscriptEntry::System { text } if text.contains("implies a provider change")
     )));
@@ -680,23 +680,23 @@ fn list_commands_are_removed_and_agent_shortcuts_remain() {
 
     submit(&mut app, "/agents");
     assert!(matches!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(TranscriptEntry::Error { text, .. })
             if text.contains("Unknown command: /agents")
     ));
 
-    app.transcript.clear();
+    app.tab_mut().transcript.clear();
     submit(&mut app, "/skills");
     assert!(matches!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(TranscriptEntry::Error { text, .. })
             if text.contains("Unknown command: /skills")
     ));
 
-    app.transcript.clear();
+    app.tab_mut().transcript.clear();
     submit(&mut app, "/help");
     assert!(matches!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(TranscriptEntry::System { text })
             if text.contains("/agent <id>")
                 && text.contains("@agent/<id>")
@@ -725,9 +725,9 @@ fn agent_command_sends_instructions_and_syncs_model() {
             model: Some("gemini::gemini-3.1-pro-preview".to_string()),
         }
     );
-    assert_eq!(app.model, "gemini-3.1-pro-preview");
+    assert_eq!(app.tab().model, "gemini-3.1-pro-preview");
     assert!(matches!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(TranscriptEntry::System { text })
             if text == "Applied agent reviewer (.agents)."
     ));
@@ -752,7 +752,7 @@ fn skill_command_sends_body() {
         }
     );
     assert!(matches!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(TranscriptEntry::System { text })
             if text == "Applied skill explore (.claude)."
     ));
@@ -778,7 +778,7 @@ fn unknown_definition_ids_error_and_send_nothing() {
     submit(&mut app, "/agent missing");
     assert!(rx.try_recv().is_err());
     assert!(matches!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(TranscriptEntry::System { text })
             if text.contains("Unknown agent: missing") && text.contains("reviewer")
     ));
@@ -786,7 +786,7 @@ fn unknown_definition_ids_error_and_send_nothing() {
     submit(&mut app, "/agent");
     assert!(rx.try_recv().is_err());
     assert!(matches!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(TranscriptEntry::System { text })
             if text.contains("Usage: /agent <id>") && text.contains("reviewer")
     ));
@@ -794,7 +794,7 @@ fn unknown_definition_ids_error_and_send_nothing() {
     submit(&mut app, "/skill missing");
     assert!(rx.try_recv().is_err());
     assert!(matches!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(TranscriptEntry::System { text })
             if text.contains("Unknown skill: missing") && text.contains("explore")
     ));
@@ -802,7 +802,7 @@ fn unknown_definition_ids_error_and_send_nothing() {
     submit(&mut app, "/skill");
     assert!(rx.try_recv().is_err());
     assert!(matches!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(TranscriptEntry::System { text })
             if text.contains("Usage: /skill <id>") && text.contains("explore")
     ));
@@ -828,8 +828,8 @@ fn agent_model_with_provider_prefix_is_not_applied() {
             model: None,
         }
     );
-    assert_eq!(app.model, "gemini-3.8-flash");
-    assert!(app.transcript.iter().any(|entry| matches!(
+    assert_eq!(app.tab().model, "gemini-3.8-flash");
+    assert!(app.tab().transcript.iter().any(|entry| matches!(
         entry,
         TranscriptEntry::System { text } if text.contains("implies a provider change")
     )));
@@ -844,9 +844,9 @@ fn agent_event_streaming_updates_transcript_and_status() {
         turn_id: turn_id.clone(),
         model: "openai::gpt-4o-mini".to_string(),
     });
-    assert!(app.is_running);
-    assert_eq!(app.model, "gpt-4o-mini");
-    assert_eq!(app.turn_id, Some(turn_id));
+    assert!(app.tab().is_running);
+    assert_eq!(app.tab().model, "gpt-4o-mini");
+    assert_eq!(app.tab().turn_id, Some(turn_id));
 
     let reasoning_id = ItemId::from_raw("item-reasoning");
     app.handle_agent_event(AgentEvent::ItemStarted {
@@ -877,7 +877,7 @@ fn agent_event_streaming_updates_transcript_and_status() {
     });
 
     assert_eq!(
-        app.transcript,
+        app.tab().transcript,
         vec![TranscriptEntry::Assistant {
             text: "Hello world!".to_string(),
             reasoning: "thinking...".to_string(),
@@ -888,7 +888,7 @@ fn agent_event_streaming_updates_transcript_and_status() {
 
     assert!(app.toggle_latest_thinking());
     assert!(matches!(
-        app.transcript.first(),
+        app.tab().transcript.first(),
         Some(TranscriptEntry::Assistant {
             reasoning_expanded: true,
             ..
@@ -908,14 +908,14 @@ fn agent_event_streaming_updates_transcript_and_status() {
             output: None,
         },
     });
-    assert_eq!(app.active_tool.as_deref(), Some("read_file"));
+    assert_eq!(app.tab().active_tool.as_deref(), Some("read_file"));
 
     app.handle_agent_event(AgentEvent::ItemDelta {
         item_id: tool_item_id.clone(),
         delta: ItemDelta::StatusChanged(ItemStatus::InProgress),
     });
     assert_eq!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(&TranscriptEntry::ToolCall(ToolCallEntry {
             call_id: "c1".to_string(),
             name: "read_file".to_string(),
@@ -936,9 +936,9 @@ fn agent_event_streaming_updates_transcript_and_status() {
             output: Some("ok".to_string()),
         },
     });
-    assert!(app.active_tool.is_none());
+    assert!(app.tab().active_tool.is_none());
     assert_eq!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(&TranscriptEntry::ToolCall(ToolCallEntry {
             call_id: "c1".to_string(),
             name: "read_file".to_string(),
@@ -963,8 +963,8 @@ fn agent_event_streaming_updates_transcript_and_status() {
         },
         est_cost_usd: None,
     });
-    assert_eq!(app.usage.total_tokens, Some(150));
-    assert_eq!(app.metrics.session_total_tokens, 150);
+    assert_eq!(app.tab().usage.total_tokens, Some(150));
+    assert_eq!(app.tab().metrics.session_total_tokens, 150);
 
     app.handle_agent_event(AgentEvent::ItemCompleted {
         item: SessionItem::AgentMessage {
@@ -976,10 +976,10 @@ fn agent_event_streaming_updates_transcript_and_status() {
         turn_id: TurnId::from_raw("turn-1"),
         reason: TurnEndReason::Completed,
     });
-    assert!(!app.is_running);
-    assert_eq!(app.metrics.turn_count, 1);
+    assert!(!app.tab().is_running);
+    assert_eq!(app.tab().metrics.turn_count, 1);
     assert_eq!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(&TranscriptEntry::Assistant {
             text: "Done".to_string(),
             reasoning: String::new(),
@@ -993,7 +993,7 @@ fn agent_event_streaming_updates_transcript_and_status() {
         message: "boom".to_string(),
     });
     assert_eq!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(&TranscriptEntry::Error {
             text: "provider error: boom".to_string(),
             expanded: false,
@@ -1001,7 +1001,7 @@ fn agent_event_streaming_updates_transcript_and_status() {
     );
     assert!(app.toggle_latest_thinking());
     assert_eq!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(&TranscriptEntry::Error {
             text: "provider error: boom".to_string(),
             expanded: true,
@@ -1035,7 +1035,7 @@ fn authoritative_agent_message_replaces_streamed_text() {
         },
     });
     assert_eq!(
-        app.transcript,
+        app.tab().transcript,
         vec![TranscriptEntry::Assistant {
             text: "final answer".to_string(),
             reasoning: String::new(),
@@ -1062,7 +1062,7 @@ fn authoritative_agent_message_replaces_streamed_text() {
         },
     });
     assert_eq!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(&TranscriptEntry::Assistant {
             text: "kept stream".to_string(),
             reasoning: String::new(),
@@ -1086,9 +1086,9 @@ fn aborted_and_failed_turns_render_terminal_entries() {
             cause: AbortCause::User,
         },
     });
-    assert!(!app.is_running);
+    assert!(!app.tab().is_running);
     assert_eq!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(&TranscriptEntry::System {
             text: "Turn cancelled.".to_string(),
         })
@@ -1108,11 +1108,11 @@ fn aborted_and_failed_turns_render_terminal_entries() {
             error: "Exceeded maximum number of cycles (16)".to_string(),
         },
     });
-    assert!(!app.is_running);
-    assert_eq!(app.metrics.turn_count, 2);
-    assert_eq!(app.transcript.len(), 2);
+    assert!(!app.tab().is_running);
+    assert_eq!(app.tab().metrics.turn_count, 2);
+    assert_eq!(app.tab().transcript.len(), 2);
     assert_eq!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(&TranscriptEntry::Error {
             text: "budget error: Exceeded maximum number of cycles (16)".to_string(),
             expanded: false,
@@ -1131,7 +1131,7 @@ fn compaction_items_render_system_entries() {
         },
     });
     assert_eq!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(&TranscriptEntry::System {
             text: "Compaction freed 2048 tokens".to_string(),
         })
@@ -1580,16 +1580,16 @@ fn compact_and_mode_commands_emit_agent_commands() {
     app.handle_key_event(key(KeyCode::Enter));
     assert_eq!(rx.try_recv().unwrap(), AgentCommand::Compact);
     assert!(matches!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(TranscriptEntry::System { text }) if text.contains("Compaction requested")
     ));
 
     type_text(&mut app, "/mode ");
     app.handle_key_event(key(KeyCode::Enter));
     assert!(rx.try_recv().is_err());
-    assert_eq!(app.approval_mode, ApprovalMode::Ask);
+    assert_eq!(app.tab().approval_mode, ApprovalMode::Ask);
     assert!(matches!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(TranscriptEntry::System { text }) if text == "Approval mode: ask"
     ));
 
@@ -1599,13 +1599,13 @@ fn compact_and_mode_commands_emit_agent_commands() {
         rx.try_recv().unwrap(),
         AgentCommand::SetPermissionMode(ApprovalMode::AutoEdit)
     );
-    assert_eq!(app.approval_mode, ApprovalMode::AutoEdit);
+    assert_eq!(app.tab().approval_mode, ApprovalMode::AutoEdit);
 
     type_text(&mut app, "/mode nonsense");
     app.handle_key_event(key(KeyCode::Enter));
     assert!(rx.try_recv().is_err());
     assert!(matches!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(TranscriptEntry::Error { text, .. }) if text.contains("Invalid mode")
     ));
 }
@@ -1613,8 +1613,8 @@ fn compact_and_mode_commands_emit_agent_commands() {
 #[test]
 fn steer_while_running_sends_steer_and_keeps_running() {
     let (mut app, mut rx, _secrets) = test_app();
-    app.is_running = true;
-    app.turn_id = Some(TurnId::from_raw("turn-steer"));
+    app.tab_mut().is_running = true;
+    app.tab_mut().turn_id = Some(TurnId::from_raw("turn-steer"));
 
     type_text(&mut app, "focus on tests");
     app.handle_key_event(key(KeyCode::Enter));
@@ -1623,11 +1623,11 @@ fn steer_while_running_sends_steer_and_keeps_running() {
         rx.try_recv().unwrap(),
         AgentCommand::Steer("focus on tests".to_string())
     );
-    assert!(app.is_running);
-    assert_eq!(app.turn_id, Some(TurnId::from_raw("turn-steer")));
-    assert!(app.input.is_empty());
+    assert!(app.tab().is_running);
+    assert_eq!(app.tab().turn_id, Some(TurnId::from_raw("turn-steer")));
+    assert!(app.tab().input.is_empty());
     assert!(matches!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(TranscriptEntry::User { text }) if text == "focus on tests"
     ));
 }
@@ -1648,7 +1648,7 @@ fn approval_request(id: &str, path: &str) -> ApprovalRequest {
 #[test]
 fn handles_mouse_thinking_toggle() {
     let (mut app, _rx, _secrets) = test_app();
-    app.transcript.push(TranscriptEntry::Assistant {
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
         text: "Hello!".to_string(),
         reasoning: "line 1\nline 2".to_string(),
         streaming: false,
@@ -1669,7 +1669,7 @@ fn handles_mouse_thinking_toggle() {
     };
     assert!(app.handle_mouse_event(click));
     assert!(matches!(
-        app.transcript.first(),
+        app.tab().transcript.first(),
         Some(TranscriptEntry::Assistant {
             reasoning_expanded: true,
             ..
@@ -1774,7 +1774,7 @@ fn clicking_file_change_opens_diff_modal_and_search_attaches_file() {
 
     app.handle_key_event(key(KeyCode::Enter));
     assert!(app.modal.is_none());
-    assert_eq!(app.input, "@src/demo.rs#L2 ");
+    assert_eq!(app.tab().input, "@src/demo.rs#L2 ");
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1792,7 +1792,7 @@ fn detached_search_opens_immediately_from_slash_space_and_normal_mode() {
             ..
         })
     ));
-    assert!(app.input.is_empty());
+    assert!(app.tab().input.is_empty());
 
     app.handle_key_event(key(KeyCode::Esc));
     assert!(app.modal.is_none());
@@ -1805,7 +1805,7 @@ fn detached_search_opens_immediately_from_slash_space_and_normal_mode() {
             ..
         })
     ));
-    assert!(app.input.is_empty());
+    assert!(app.tab().input.is_empty());
 
     app.handle_key_event(key(KeyCode::Esc));
     type_text(&mut app, "draft prompt");
@@ -1820,20 +1820,20 @@ fn detached_search_opens_immediately_from_slash_space_and_normal_mode() {
             ..
         })
     ));
-    assert_eq!(app.input, "draft prompt");
+    assert_eq!(app.tab().input, "draft prompt");
 }
 
 #[test]
 fn slash_auth_lists_configured_credential_sources() {
     let (mut app, _rx, secrets) = test_app();
     secrets.set_key("openai", "sk-stored-12345678").unwrap();
-    let before_len = app.transcript.len();
+    let before_len = app.tab().transcript.len();
 
     type_text(&mut app, "/auth");
     app.handle_key_event(key(KeyCode::Enter));
 
-    assert_eq!(app.transcript.len(), before_len + 1);
-    let Some(TranscriptEntry::System { text }) = app.transcript.last() else {
+    assert_eq!(app.tab().transcript.len(), before_len + 1);
+    let Some(TranscriptEntry::System { text }) = app.tab().transcript.last() else {
         panic!("expected system transcript entry for /auth");
     };
     assert!(text.contains("Credentials ("));
@@ -1892,7 +1892,7 @@ fn drag_selection_auto_copies_within_pane_and_normal_yank_works() {
             .is_some_and(|n| n.contains("Copied"))
     );
 
-    app.transcript.push(TranscriptEntry::Assistant {
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
         text: "Latest assistant answer".to_string(),
         reasoning: String::new(),
         streaming: false,
@@ -1931,7 +1931,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
         },
     });
     assert_eq!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(&TranscriptEntry::Subagent(SubagentEntry {
             id: "item-sub-1".to_string(),
             agent: "reviewer".to_string(),
@@ -1945,7 +1945,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
         delta: ItemDelta::StatusChanged(ItemStatus::InProgress),
     });
     assert_eq!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(&TranscriptEntry::Subagent(SubagentEntry {
             id: "item-sub-1".to_string(),
             agent: "reviewer".to_string(),
@@ -1963,7 +1963,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
         },
     });
     assert_eq!(
-        app.transcript.last(),
+        app.tab().transcript.last(),
         Some(&TranscriptEntry::Subagent(SubagentEntry {
             id: "item-sub-1".to_string(),
             agent: "reviewer".to_string(),
@@ -2010,7 +2010,7 @@ fn subagent_entry_finalizes_on_parent_turn_failure_and_abort() {
             cause: AbortCause::User,
         },
     });
-    assert!(app.transcript.iter().any(|entry| {
+    assert!(app.tab().transcript.iter().any(|entry| {
         matches!(
             entry,
             TranscriptEntry::Subagent(s) if s.id == "sub-abort" && s.status == ToolCallStatus::Cancelled
@@ -2035,10 +2035,428 @@ fn subagent_entry_finalizes_on_parent_turn_failure_and_abort() {
             error: "budget exceeded".to_string(),
         },
     });
-    assert!(app.transcript.iter().any(|entry| {
+    assert!(app.tab().transcript.iter().any(|entry| {
         matches!(
             entry,
             TranscriptEntry::Subagent(s) if s.id == "sub-fail" && s.status == ToolCallStatus::Failed
         )
     }));
+}
+
+struct DummySessionOpener;
+
+#[meerai_core::async_trait]
+impl SessionOpener for DummySessionOpener {
+    async fn list_sessions(&self) -> anyhow::Result<Vec<meerai_session::SessionSummary>> {
+        Ok(Vec::new())
+    }
+
+    async fn open_session(&self, id: &SessionId) -> anyhow::Result<OpenedSession> {
+        anyhow::bail!("unexpected open_session call for {id}")
+    }
+
+    async fn create_session(&self) -> anyhow::Result<OpenedSession> {
+        anyhow::bail!("unexpected create_session call")
+    }
+}
+
+fn make_opened_session(
+    id: &str,
+    title: Option<&str>,
+    transcript: Vec<TranscriptEntry>,
+) -> (OpenedSession, mpsc::UnboundedReceiver<AgentCommand>) {
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (_ev_tx, event_rx) = mpsc::unbounded_channel();
+    let opened = OpenedSession {
+        session_id: SessionId::from_raw(id),
+        title: title.map(str::to_string),
+        provider: "gemini".to_string(),
+        model: "gemini-3.8-flash".to_string(),
+        approval_mode: ApprovalMode::Ask,
+        transcript,
+        events: Vec::new(),
+        cmd_tx,
+        event_rx,
+    };
+    (opened, cmd_rx)
+}
+
+fn make_session_summary(
+    id: &str,
+    title: Option<&str>,
+    updated_at_ms: u64,
+    parent: Option<&str>,
+) -> meerai_session::SessionSummary {
+    meerai_session::SessionSummary {
+        id: SessionId::from_raw(id),
+        dir: PathBuf::from(format!("/tmp/{id}")),
+        title: title.map(str::to_string),
+        model: Some("gemini-3.8-flash".to_string()),
+        created_at_ms: updated_at_ms.saturating_sub(1_000),
+        updated_at_ms,
+        bytes: 128,
+        parent_session_id: parent.map(SessionId::from_raw),
+    }
+}
+
+#[test]
+fn session_tabs_open_replace_empty_dedup_switch_and_close() {
+    let (mut app, mut initial_rx, _secrets) = test_app();
+    assert_eq!(app.tabs().len(), 1);
+    assert!(app.should_replace_active_tab());
+
+    let (opened_first, _rx_first) = make_opened_session(
+        "sess-1",
+        Some("Refactor parser"),
+        vec![TranscriptEntry::User {
+            text: "Hello".to_string(),
+        }],
+    );
+    assert!(app.apply_opened_session(opened_first, true).is_some());
+    assert_eq!(initial_rx.try_recv().unwrap(), AgentCommand::Quit);
+    assert_eq!(app.tabs().len(), 1);
+    assert_eq!(app.active_tab_index(), 0);
+    assert_eq!(app.tab().session_id, SessionId::from_raw("sess-1"));
+    assert_eq!(app.tab().title.as_deref(), Some("Refactor parser"));
+
+    let (opened_second, _rx_second) = make_opened_session("sess-2", Some("Fix tests"), Vec::new());
+    assert!(app.apply_opened_session(opened_second, true).is_some());
+    assert_eq!(app.tabs().len(), 2);
+    assert_eq!(app.active_tab_index(), 1);
+    assert_eq!(app.tab().session_id, SessionId::from_raw("sess-2"));
+
+    let (dup_first, mut dup_rx) =
+        make_opened_session("sess-1", Some("Refactor parser"), Vec::new());
+    assert!(app.apply_opened_session(dup_first, false).is_none());
+    assert_eq!(dup_rx.try_recv().unwrap(), AgentCommand::Quit);
+    assert_eq!(app.tabs().len(), 2);
+    assert_eq!(app.active_tab_index(), 0);
+
+    assert!(app.next_tab());
+    assert_eq!(app.active_tab_index(), 1);
+    assert!(app.prev_tab());
+    assert_eq!(app.active_tab_index(), 0);
+
+    app.handle_key_event(key_mod(KeyCode::Char('2'), KeyModifiers::ALT));
+    assert_eq!(app.active_tab_index(), 1);
+
+    app.handle_key_event(key(KeyCode::Esc));
+    assert_eq!(app.mode, InputMode::Normal);
+    app.handle_key_event(key(KeyCode::Char('g')));
+    app.handle_key_event(key(KeyCode::Char('T')));
+    assert_eq!(app.active_tab_index(), 0);
+    app.handle_key_event(key(KeyCode::Char(']')));
+    assert_eq!(app.active_tab_index(), 1);
+    app.handle_key_event(key(KeyCode::Char('[')));
+    assert_eq!(app.active_tab_index(), 0);
+
+    app.handle_key_event(key_mod(KeyCode::Char('w'), KeyModifiers::CONTROL));
+    assert_eq!(app.tabs().len(), 1);
+    assert_eq!(app.tab().session_id, SessionId::from_raw("sess-2"));
+
+    app.handle_key_event(key(KeyCode::Char('i')));
+    assert_eq!(app.mode, InputMode::Insert);
+    type_text(&mut app, "/close");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(app.tabs().len(), 1);
+    assert_eq!(
+        app.status_notice.as_deref(),
+        Some("Cannot close the last tab (use /quit to exit)")
+    );
+}
+
+#[test]
+fn background_tab_events_track_unread_and_restore_pending_approvals() {
+    let (mut app, _rx1, _secrets) = test_app();
+    let tab1_id = app.tab().tab_id;
+
+    let (opened_second, mut rx2) = make_opened_session("sess-bg", Some("Background"), Vec::new());
+    let (tab2_id, _) = app.apply_opened_session(opened_second, false).unwrap();
+    assert_eq!(app.active_tab_index(), 1);
+
+    assert!(app.switch_to_tab(0));
+    assert_eq!(app.tab().tab_id, tab1_id);
+    assert!(!app.tabs()[1].has_unread);
+
+    app.handle_tab_agent_event(
+        tab2_id,
+        AgentEvent::TurnStarted {
+            turn_id: TurnId::from_raw("t-bg"),
+            model: "gemini::gemini-3.8-flash".to_string(),
+        },
+    );
+    app.handle_tab_agent_event(
+        tab2_id,
+        AgentEvent::ItemDelta {
+            item_id: ItemId::from_raw("item-bg"),
+            delta: ItemDelta::AgentText("Done in background".to_string()),
+        },
+    );
+    app.handle_tab_agent_event(
+        tab2_id,
+        AgentEvent::ItemCompleted {
+            item: SessionItem::AgentMessage {
+                id: ItemId::from_raw("item-bg"),
+                text: "Done in background".to_string(),
+            },
+        },
+    );
+    app.handle_tab_agent_event(
+        tab2_id,
+        AgentEvent::ApprovalRequested {
+            request: approval_request("req-bg-1", "src/lib.rs"),
+        },
+    );
+
+    assert!(app.tabs()[1].has_unread);
+    assert!(app.tabs()[1].is_running);
+    assert_eq!(app.tabs()[1].pending_approvals.len(), 1);
+    assert!(app.modal.is_none());
+
+    assert!(app.switch_to_tab(1));
+    assert!(!app.tabs()[1].has_unread);
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::Approval { ref queue, .. })
+            if queue.len() == 1 && queue[0].request_id == RequestId::from_raw("req-bg-1")
+    ));
+
+    app.handle_key_event(key(KeyCode::Char('y')));
+    assert_eq!(
+        rx2.try_recv().unwrap(),
+        AgentCommand::Approve {
+            request_id: RequestId::from_raw("req-bg-1"),
+            decision: ApprovalDecision::Accept,
+            scope: None,
+        }
+    );
+}
+
+#[test]
+fn sessions_command_and_modal_filter_select_and_new() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.session_opener = Some(Arc::new(DummySessionOpener));
+
+    type_text(&mut app, "/sessions");
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::SessionSelect { loading: true, .. })
+    ));
+    assert_eq!(
+        app.take_pending_session_actions(),
+        vec![PendingSessionAction::RefreshSessions]
+    );
+
+    app.apply_listed_sessions(Ok(vec![
+        make_session_summary("sess-alpha", Some("Alpha task"), 300, None),
+        make_session_summary("sess-child", Some("Subagent"), 250, Some("sess-alpha")),
+        make_session_summary("sess-beta", Some("Beta bugfix"), 200, None),
+    ]));
+
+    let filtered_len = match &app.modal {
+        Some(ActiveModal::SessionSelect {
+            filter, sessions, ..
+        }) => {
+            assert_eq!(sessions.len(), 3);
+            app.filtered_sessions(sessions, filter).len()
+        }
+        other => panic!("expected SessionSelect modal, got {other:?}"),
+    };
+    assert_eq!(filtered_len, 2);
+
+    type_text(&mut app, "beta");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(app.modal.is_none());
+    assert_eq!(
+        app.take_pending_session_actions(),
+        vec![PendingSessionAction::OpenSessionId(SessionId::from_raw(
+            "sess-beta"
+        ))]
+    );
+
+    type_text(&mut app, "/sessions alpha");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(
+        app.take_pending_session_actions(),
+        vec![PendingSessionAction::OpenSessionQuery("alpha".to_string())]
+    );
+
+    type_text(&mut app, "/new");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(
+        app.take_pending_session_actions(),
+        vec![PendingSessionAction::CreateNewTab]
+    );
+}
+
+#[test]
+fn tab_bar_mouse_clicks_switch_tabs_and_request_new_tab() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut app, _rx, _secrets) = test_app();
+    app.session_opener = Some(Arc::new(DummySessionOpener));
+    let (opened_second, _rx2) = make_opened_session("sess-2", Some("Second"), Vec::new());
+    app.apply_opened_session(opened_second, false);
+
+    let backend = TestBackend::new(120, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::ui::render(frame, &mut app))
+        .unwrap();
+
+    let tab1_zone = app
+        .tab_hit_zones
+        .iter()
+        .find(|zone| zone.kind == TabHitKind::Tab(0))
+        .copied()
+        .expect("tab 1 hit zone");
+    assert_eq!(app.active_tab_index(), 1);
+    assert!(app.click_tab_at(tab1_zone.rect.x, tab1_zone.rect.y));
+    assert_eq!(app.active_tab_index(), 0);
+
+    let new_zone = app
+        .tab_hit_zones
+        .iter()
+        .find(|zone| zone.kind == TabHitKind::NewTab)
+        .copied()
+        .expect("new tab hit zone");
+    assert!(app.click_tab_at(new_zone.rect.x, new_zone.rect.y));
+    assert_eq!(
+        app.take_pending_session_actions(),
+        vec![PendingSessionAction::CreateNewTab]
+    );
+}
+
+#[test]
+fn multiline_input_supports_ctrl_j_ctrl_enter_and_backslash_continuation() {
+    let (mut app, mut rx, _secrets) = test_app();
+
+    type_text(&mut app, "line1");
+    app.handle_key_event(key_mod(KeyCode::Char('j'), KeyModifiers::CONTROL));
+    type_text(&mut app, "line2");
+    app.handle_key_event(key_mod(KeyCode::Enter, KeyModifiers::CONTROL));
+    type_text(&mut app, "line3\\");
+    app.handle_key_event(key(KeyCode::Enter));
+    type_text(&mut app, "line4");
+    assert_eq!(app.tab().input, "line1\nline2\nline3\nline4");
+
+    app.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::SubmitPrompt("line1\nline2\nline3\nline4".to_string())
+    );
+}
+
+#[test]
+fn doc_selection_copies_while_scrolling_across_long_and_wrapped_content() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut app, _rx, _secrets) = test_app();
+    let long_sentence = "Alpha ".repeat(20) + "OMEGA_END";
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "Start marker".to_string(),
+    });
+    for i in 0..25 {
+        app.tab_mut().transcript.push(TranscriptEntry::System {
+            text: format!("Middle filler line {i}"),
+        });
+    }
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: long_sentence.clone(),
+        reasoning: String::new(),
+        streaming: false,
+        reasoning_expanded: false,
+    });
+
+    let backend = TestBackend::new(90, 14);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::ui::render(frame, &mut app))
+        .unwrap();
+
+    let inner = app.transcript_inner_area;
+    assert!(app.transcript_wrapped_lines.len() > inner.height as usize);
+    assert!(app.tab().scroll_offset > 0);
+
+    // Drag across top-most visible line and scroll up with wheel while holding Left button.
+    let initial_scroll = app.tab().scroll_offset;
+    assert!(app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: inner.x + 2,
+        row: inner.y + inner.height - 1,
+        modifiers: KeyModifiers::NONE,
+    }));
+    assert!(app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: inner.x + 2,
+        row: inner.y,
+        modifiers: KeyModifiers::NONE,
+    }));
+    assert!(app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: inner.x + 2,
+        row: inner.y,
+        modifiers: KeyModifiers::NONE,
+    }));
+    assert!(app.tab().scroll_offset < initial_scroll);
+    assert!(app.doc_selection.as_ref().is_some_and(|s| s.active));
+
+    assert!(app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: inner.x,
+        row: inner.y,
+        modifiers: KeyModifiers::NONE,
+    }));
+    assert!(app.doc_selection.is_none());
+    let wheel_copied = app.last_copied_text.as_deref().unwrap_or("");
+    assert!(!wheel_copied.is_empty());
+
+    // Now scroll to top, click at "Start marker", scroll back to bottom, and Shift+Click on OMEGA_END.
+    app.scroll_to_top();
+    terminal
+        .draw(|frame| crate::ui::render(frame, &mut app))
+        .unwrap();
+    let start_idx = app
+        .transcript_wrapped_lines
+        .iter()
+        .position(|line| line.text.contains("Start marker"))
+        .expect("start marker line");
+    let start_screen_row = inner.y + (start_idx - app.tab().scroll_offset) as u16;
+    assert!(app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: inner.x,
+        row: start_screen_row,
+        modifiers: KeyModifiers::NONE,
+    }));
+    assert!(app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: inner.x,
+        row: start_screen_row,
+        modifiers: KeyModifiers::NONE,
+    }));
+
+    app.scroll_to_bottom();
+    terminal
+        .draw(|frame| crate::ui::render(frame, &mut app))
+        .unwrap();
+    let end_idx = app
+        .transcript_wrapped_lines
+        .iter()
+        .position(|line| line.text.contains("OMEGA_END"))
+        .expect("end marker line");
+    let end_screen_row = inner.y + (end_idx - app.tab().scroll_offset) as u16;
+    assert!(app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: inner.x + inner.width - 1,
+        row: end_screen_row,
+        modifiers: KeyModifiers::SHIFT,
+    }));
+    let full_copied = app.last_copied_text.as_deref().unwrap_or("");
+    assert!(full_copied.contains("Start marker"));
+    assert!(full_copied.contains("Middle filler line 0"));
+    assert!(full_copied.contains(&long_sentence));
 }

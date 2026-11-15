@@ -608,16 +608,10 @@ context:
   removed from the child environment. There is **no** command deny list; use
   `action: shell` rules instead. This is policy, not a kernel boundary;
   documented as such.
-- **Phase 2:** OS-kernel sandbox for `shell` (tracked as **M11 Security &
-  supply chain**, §15.1; backlog):
-  - macOS: `sandbox-exec` (Seatbelt) profile — read-all, write only workspace
-    roots + `$TMPDIR`, network denied by default.
-  - Linux: `bubblewrap` (user namespaces; Landlock + seccomp inside) with the
-    same shape; fall back to phase-1 guards with a startup warning when
-    unavailable (Codex's degradation behavior).
-  - The sandbox is a **seam**: `trait ExecutionWorld { spawn(), fs() }` so a
-    remote/container world later moves shell, tests, and LSP together (dsh
-    capability-seam insight) without touching tools.
+- **Phase 2 (landed — M11):** OS-kernel sandbox for `shell` and `sac-run_script` (`meerai-tools/src/world.rs`, wired by `meerai-cli`):
+  - macOS: `SeatbeltWorld` via `/usr/bin/sandbox-exec` (`sandbox_profile`) — read-all, write only workspace roots + `$TMPDIR` (`/dev/null` only in `ReadOnly`), network denied by default.
+  - Linux: `BubblewrapWorld` via `bwrap` (`bwrap_args`) — read-only root bind, read-write workspace/writable roots, `--unshare-net` by default; falls back to `HostWorld` (Phase-1 guards) with a startup warning when unavailable (such as Windows or restricted hosts without user namespaces).
+  - The sandbox is a **seam**: `trait ExecutionWorld { kind(), is_sandboxed(), warning(), spawn_command() }` so a remote/container world can replace host execution without changing toolsets.
 - Sandbox escape requests surface as tier-3 approvals with the exact
   escalation reason (Codex `on-request` semantics).
 
@@ -705,9 +699,7 @@ Enforced by the budget gate in §5, all configurable per session:
   `[REDACTED:<kind>]`. The original secret is discarded; there is no log-only
   copy. Paths are not redacted. This is regex and pattern based with no entropy
   screen, so it is not a guarantee.
-- **Injection screening** (heuristic v1, not implemented): flag
-  instruction-shaped blocks in fetched web/log content with a persistent
-  "untrusted content" wrapper; documented as best-effort, not a guarantee.
+- **Injection screening** (heuristic v1, implemented — `meerai-agents/src/screen.rs`): flags instruction-override phrases and spoofed chat/role delimiters in tool outputs (`screen_run` after `redact_run`) and repository/definition instructions (`screen_untrusted_text`), wrapping flagged text with a persistent `[UNTRUSTED CONTENT WARNING...]` block; documented as best-effort, not a guarantee.
 - **Schema validation**: tool arguments validated against the `schemars`
   schema at the harness boundary before dispatch; invalid args return a
   structured error observation without executing (already partially enforced by
@@ -757,22 +749,18 @@ what the tree enforces today from what is backlog.
   clock, per-tool timeouts, and repeated-failure circuit breakers bound runaway
   spend and loops.
 
-**Backlog (M11):**
+- **OS sandbox.** `trait ExecutionWorld` (`SeatbeltWorld` on macOS, `BubblewrapWorld` on Linux, network denied by default) with `HostWorld` fallback and startup warning when unavailable (§8.3).
+- **Sensitive-file blocks.** `is_sensitive_path` in `meerai-tools/src/code/paths.rs` and `PolicyEngine::default_sensitive_rules` block reading/editing `.env*`, key, secret config, and credential files by default.
+- **Dependency audit in CI.** `deny.toml` + `EmbarkStudios/cargo-deny-action@v2` in `.github/workflows/ci.yml` and `release.yml`.
+- **Written threat model.** Published at [docs/threat-model.md](threat-model.md) covering repository instructions, model output, planned hooks/MCP/ACP, and subagents (M8).
+- **Prompt-injection screening.** Heuristic v1 (`meerai-agents/src/screen.rs`) wraps flagged tool output and repository/definition instructions; pattern-based, not a guarantee.
+- **OS keychain.** `KeychainSecretStore` (`NativeKeychainBackend` using macOS `security` and Linux `secret-tool`) migrates secrets out of plaintext `auth.json` when available, falling back cleanly to `0600` `auth.json`.
+- **Conditional artifact signing.** `.github/workflows/release.yml` contains secret-gated macOS `codesign`/`notarytool` and Windows `signtool` steps alongside `SHA256SUMS.txt`.
 
-- **OS sandbox.** `trait ExecutionWorld { spawn(), fs() }` with a macOS Seatbelt
-  profile and a Linux bubblewrap/Landlock profile; network denied by default;
-  fall back to phase-1 guards with a warning when unavailable (§8.3).
-- **Dependency audit in CI.** No `cargo audit` or `cargo deny` step exists in
-  `.github/workflows/ci.yml` or `release.yml` today.
-- **Signed and notarized artifacts.** macOS and Windows release archives are
-  unsigned. No signing secret or workflow step exists.
-- **Written threat model.** Cover repository instructions (`AGENTS.md`,
-  `.meerai/instructions.md`, `.agents`/`.claude` definitions), model output,
-  hooks (M7), MCP servers, and subagents (M8) as attacker-controlled input.
-- **Prompt-injection screening.** The heuristic of §9.5 is not implemented; the
-  base prompt states the risk but the harness does not screen content.
-- **OS keychain.** `auth.json` is a plain `0600` file; there is no keychain or
-  keyring integration.
+**Remaining / Operational:**
+
+- Release signing certificates and secrets (`APPLE_CERTIFICATE` / `WINDOWS_CERTIFICATE`) are not populated in the repository by default, so published archives remain unsigned until configured.
+- Windows `ExecutionWorld` runs on `HostWorld` (Phase-1 path guards).
 
 ---
 
@@ -861,11 +849,13 @@ Review the current changes. List findings by severity with file:line references.
   import command, no copy step, and no `.meerai` definition directory.
 - Security: definitions are untrusted repository prompt text. No tool
   execution, no permission or tool mapping, no scripts, no sandbox implication,
-  no MCP, and no supporting-file loading. The harness does not screen them for
-  prompt injection.
-- Future: subagent runtime (§10.2), tool/permission mapping, MCP servers, and
-  supporting skill files are backlog. Use `--agent`/`--skill` or the TUI to
-  apply a definition today.
+  no MCP, and no supporting-file loading. Definition text passes through
+  heuristic prompt-injection screening (`screen_untrusted_text`, §9.5), which is
+  best-effort regex wrapping rather than a hard security guarantee.
+- Runtime & future: M8 subagent execution (`subagent-run`) can launch a
+  definition via `--agent`/TUI mention or tool dispatch while forcing
+  repository-defined agents into `ApprovalMode::Plan`. Tool/permission mapping,
+  MCP servers, and supporting skill files remain backlog.
 
 ---
 
@@ -964,7 +954,7 @@ Extends the roadmap in [architecture.md](architecture.md); each milestone keeps
 | M8 | **Subagent runtime** | child sessions (`parent_session_id`), depth-1 isolation, built-ins (`build`/`plan`/`explore`/`general`), `subagent-run` tool, forwarded child approvals, usage rollup, `SubagentRun` items, read-only `Plan` execution for M12 custom definitions | `meerai-agents`, `meerai-session`, `meerai-tui` | landed (M8): child sessions and `SubagentToolset` landed; M12 frontmatter `tools`/`permissions` remain prompt-only |
 | M9 | **CLI + resume/fork** | `meerai-cli` crate: `--prompt`, `--json`, `--continue`, `--resume <id>`, `--fork <id>`, `sessions fork <id> [--turn <turn-id>]`, `auth`/`sessions`, config/env wiring | `meerai-cli`, `meerai-session` | landed (M9): `meerai-cli`, `sessions fork`, and `--fork` landed (`-p` stays `--provider`); `export` and TUI `/fork` are not built |
 | M10 | **Retrieval v2/v3** | `RepoMapToolset` (`retrieval-repo_map` via tree-sitter + PageRank), `LspToolset` (`lsp-go_to_definition`, `lsp-find_references`, `lsp-get_diagnostics`), `SearchAsCodeToolset` (`sac-run_script`) | `meerai-tools`, `meerai-cli` | landed (M10): repo map, LSP stdio tools, and search-as-code landed; automatic post-edit diagnostics waits on M7 hooks |
-| M11 | **Security & supply chain** | landed: path guards, `plan` hard read-only, approval gates with headless fail-fast, provider-secret env scrub, best-effort output/diff/error redaction, session file permissions, configurable retention, session/turn token budgets. Backlog (§9.6): OS sandbox (`ExecutionWorld`: macOS Seatbelt, Linux bubblewrap/Landlock, network denied by default), dependency audit in CI (`cargo audit`/`cargo deny`), signed and notarized macOS/Windows artifacts, a written threat model (repo instructions, model output, hooks, MCP, subagents), prompt-injection screening, OS keychain | `meerai-tools`, `meerai-policy`, `.github/workflows/`, TUI | partial: guards, approvals, redaction, permissions, retention, and budgets landed; sandbox, audit, signing, threat model, screening, and keychain are backlog |
+| M11 | **Security & supply chain** | landed: path guards, sensitive-file path + policy blocks, `plan` hard read-only, approval gates, provider-secret env scrub, best-effort redaction, heuristic injection screening (`screen_run`/`screen_untrusted_text`), session permissions, retention, budgets, `ExecutionWorld` (`SeatbeltWorld`/`BubblewrapWorld` + `HostWorld` fallback), OS keychain (`KeychainSecretStore`) with `auth.json` fallback, `cargo-deny` CI audit (`deny.toml`), conditional release signing, and [threat-model.md](threat-model.md) | `meerai-tools`, `meerai-policy`, `meerai-providers`, `meerai-agents`, `meerai-cli`, `.github/workflows/`, `docs/threat-model.md` | landed (M11): core runtime controls, CI audit, threat model, and conditional signing landed; repository signing secrets remain operator-configured and Windows uses `HostWorld` |
 | M12 | **Agents & skills discovery** | read-only markdown discovery: `.agents/agents/*.md` + `.agents/skills/*/SKILL.md` over `.claude/...`; duplicate ids resolve to `.agents`; frontmatter `name`/`description`/`model`/`steps`/`mode`; startup `--agent`/`--skill`; TUI `/agent`/`/skill`, the `@` Mentions popup, and composer chips | `meerai-common` (`definitions`), `meerai-tui`, `meerai-agents` (`ApplyAgent`/`ApplySkill`) | landed (R5): prompt instructions only. No subagent runtime (M8), no tool/permission mapping, no MCP, and no supporting skill files |
 | M13 | **ACP client (external harnesses)** | adapter presets in user config only; spawn via `AcpAgent`; `session/new`/`session/prompt`/`session/cancel`; map chunks, tool calls, plans, usage, and permission requests to `AgentEvent`; `--acp`/`/acp`; `acp doctor`. Target order: Antigravity (`agy acp`), then OpenCode (`opencode acp`), then Gemini/Claude/Codex. Design in [acp.md](acp.md) | new `meerai-acp` crate, `meerai-tui`, `meerai-session` (meta fields) | backlog (P0 spike first). External agents keep their own tools and policy: meerai rules, path guards, and redaction do not apply; permission requests are advisory |
 | M14 | **ACP agent (meerai in editors)** | `meerai acp` on stdio: `initialize`, `session/new`, `session/load`, `session/prompt`, `session/cancel`, `set_mode`; stream `AgentEvent` as `session/update`; approvals as `session/request_permission`; `session/load` reuses `transcript_from_events`. Design in [acp.md](acp.md) | `meerai-acp`, `meerai-agents`, `meerai-tui` | backlog. Gates on the ACP compatibility kit plus an editor smoke |
@@ -1103,10 +1093,12 @@ contention is normal, not a hang.
   stop tools are gone, and `meerai-core`'s `json_schema`/`errors` modules are
   gone. Unused dependencies were pruned and test-only macro dependencies moved
   to `[dev-dependencies]`.
-- **Security stance.** Redaction is best effort, not a guarantee; the OS sandbox,
-  dependency audit, artifact signing, threat model, injection screening, and OS
-  keychain are the M11 backlog (§9.6). Do not describe the in-process guards as a
-  sandbox.
+- **Security stance.** Redaction (`redact_run`) and prompt-injection screening
+  (`screen_run`) are best effort, not guarantees. `ExecutionWorld` provides
+  macOS Seatbelt / Linux bubblewrap isolation when available and degrades with a
+  startup warning to Phase-1 guards on unsupported/nested hosts (and Windows).
+  Release signing steps in `release.yml` remain inactive until repository signing
+  secrets are supplied; see [threat-model.md](threat-model.md).
 - **Prompt composition.** `BASE_SYSTEM_PROMPT` + `--system` + root `AGENTS.md` +
   `.meerai/instructions.md` (32 KiB/file, 64 KiB block) in the system prompt;
   scoped `AGENTS.md` injected once per turn as runtime context (16 KiB, max 8).

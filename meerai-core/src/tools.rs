@@ -327,6 +327,9 @@ mod tests {
             }
         }
 
-        assert!(true);
+        let tool = MyToolset;
+        assert_eq!(tool.name(), "my_tool");
+        assert!(tool.contain("my_tool"));
+        assert_eq!(tool.definition().len(), 1);
     }
 }

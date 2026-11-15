@@ -365,6 +365,7 @@ impl MultiTurnAgent {
                     Authorization::Allowed => match plan.outcome.take() {
                         Some(CallOutcome::Run(mut run)) => {
                             redact_run(&mut run);
+                            crate::screen::screen_run(&mut run);
                             run.observation = self
                                 .spill_observation(
                                     &tool_call.fn_name,
@@ -408,7 +409,10 @@ impl MultiTurnAgent {
                             )
                         }
                         Some(CallOutcome::Failed(error)) => {
-                            let text = redact_text(&format!("Tool error: {error:#}"));
+                            let text = crate::screen::screen_untrusted_text(
+                                "tool_output",
+                                &redact_text(&format!("Tool error: {error:#}")),
+                            );
                             (
                                 ItemStatus::Failed,
                                 text.clone(),
@@ -848,6 +852,7 @@ impl DecisionCtx<'_> {
         model: Option<String>,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) {
+        let text = crate::screen::screen_untrusted_text("definition_instructions", &text);
         log_harness_event(
             self.harness.as_ref(),
             event_tx,

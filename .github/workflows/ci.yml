@@ -42,3 +42,15 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+
+  audit:
+    name: Security & Dependency Audit
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Run cargo-deny audit
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --all-features check advisories licenses bans sources

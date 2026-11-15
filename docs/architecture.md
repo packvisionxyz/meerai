@@ -328,13 +328,15 @@ The enums are frozen additively; these are future variants, not current code.
 - **Definition mapping (M12 follow-ups):** map definition `tools`/`permissions`,
   load supporting skill files, and add MCP. Today definitions are prompt-only
   and custom subagent runs stay read-only.
-- **Security & supply chain (M11):** landed now — path guards, `plan` hard
-  read-only, approval gates, headless fail-fast, provider-secret env scrub,
-  best-effort redaction, session file permissions, configurable retention,
-  token/wall-clock budgets. Backlog — OS sandbox (`ExecutionWorld`: macOS
-  Seatbelt / Linux bubblewrap/Landlock, network denied by default), dependency
-  audit in CI (`cargo audit`/`cargo deny`), signed and notarized artifacts, a
-  written threat model, prompt-injection screening, and an OS keychain. See
+- **Security & supply chain (M11):** landed — path guards, sensitive-file
+  blocks (`is_sensitive_path` + `PolicyEngine::default_sensitive_rules`), `plan`
+  hard read-only, approval gates, headless fail-fast, provider-secret env scrub,
+  best-effort redaction, heuristic prompt-injection screening (`screen_run`),
+  session file permissions, configurable retention, token/wall-clock budgets,
+  `ExecutionWorld` (`SeatbeltWorld`/`BubblewrapWorld` with `HostWorld` fallback),
+  OS keychain (`KeychainSecretStore` + `auth.json` fallback), `cargo-deny` CI
+  audit (`deny.toml`), conditional signing in `release.yml` (inactive without
+  signing secrets), and [threat-model.md](threat-model.md). See
   `docs/harness-spec.md` §9.6.
 - **Context:** projection caching, frozen/shared messages, per-model context
   windows, and USD pricing (`est_cost_usd` is always `None` today; token counts
@@ -358,9 +360,10 @@ The enums are frozen additively; these are future variants, not current code.
    command mode, session picker, and transcript search are planned.
 7. **Later milestones** — session persistence, compaction, M12 discovery, M8
    subagent runtime (`SubagentToolset` + built-ins + child sessions), M9 CLI fork,
-   and M10 retrieval (`repo_map`, `lsp`, `search_as_code`) are shipped; checkpoints
-   (M6), hooks (M7), MCP client support, and M11 security backlog (`ExecutionWorld`
-   sandbox, audit, signing, threat model, screening, keychain) are not.
+   and M10 retrieval (`repo_map`, `lsp`, `search_as_code`), and M11 security &
+   supply chain (`ExecutionWorld`, sensitive-file blocks, CI audit, threat model,
+   heuristic screening, OS keychain, conditional signing) are shipped; checkpoints
+   (M6), hooks (M7), MCP client support, and repository signing secrets are not.
 
 ## Non-goals
 

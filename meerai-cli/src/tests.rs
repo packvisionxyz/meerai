@@ -1271,3 +1271,202 @@ fn build_workspace_toolsets_exposes_all_and_filters_read_only() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+#[test]
+fn build_policy_denies_sensitive_reads_and_allows_source_files_in_ask_and_yolo() {
+    use meerai_core::EffectClass;
+    use meerai_policy::{Decision, PermissionAction, PermissionCheck};
+
+    let root = std::env::temp_dir().join(format!("meerai-policy-{}", SessionId::new()));
+    std::fs::create_dir_all(&root).unwrap();
+    let minimal_rules: serde_yaml::Value = serde_yaml::from_str("[]").unwrap();
+
+    for permissions in [None, Some(&minimal_rules)] {
+        for mode in [ApprovalMode::Ask, ApprovalMode::Yolo] {
+            let policy = build_policy(mode, permissions, &root).unwrap();
+
+            for path in [".env", "secrets.yml", "credentials.json"] {
+                let decision = policy.decide(&PermissionCheck {
+                    action: PermissionAction::Read,
+                    resource: path.to_string(),
+                    effect: EffectClass::Read,
+                    tool_name: "code-read_file".to_string(),
+                });
+                assert!(
+                    matches!(decision, Decision::Deny { .. }),
+                    "expected deny for {path} in {mode:?}, got {decision:?}"
+                );
+            }
+
+            let source_decision = policy.decide(&PermissionCheck {
+                action: PermissionAction::Read,
+                resource: "src/main.rs".to_string(),
+                effect: EffectClass::Read,
+                tool_name: "code-read_file".to_string(),
+            });
+            assert_eq!(source_decision, Decision::Allow);
+        }
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test]
+async fn build_workspace_toolsets_blocks_sensitive_files_and_attaches_execution_world() {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use meerai_core::{ObservationStatus, async_trait};
+    use meerai_tools::{ExecutionWorld, SandboxPolicy, WorldCommand, WorldExecOutcome};
+
+    #[derive(Debug, Default)]
+    struct RecordingWorld {
+        programs: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ExecutionWorld for RecordingWorld {
+        fn kind(&self) -> &'static str {
+            "recording"
+        }
+
+        fn is_sandboxed(&self) -> bool {
+            true
+        }
+
+        async fn spawn_command(
+            &self,
+            command: &WorldCommand,
+            _policy: &SandboxPolicy,
+            _timeout: Duration,
+        ) -> std::io::Result<WorldExecOutcome> {
+            self.programs.lock().unwrap().push(command.program.clone());
+            Ok(WorldExecOutcome::TimedOut)
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!("meerai-world-toolsets-{}", SessionId::new()));
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join(".env"), "API_KEY=secret\n").unwrap();
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let world = Arc::new(RecordingWorld::default());
+    let world_dyn: Arc<dyn ExecutionWorld> = world.clone();
+    let code_tools = CodeTools::new(root.clone()).with_execution_world(world_dyn.clone());
+    let repo_map = RepoMapToolset::new(root.clone());
+    let lsp = LspToolset::new(root.clone());
+    let sac = SearchAsCodeToolset::new(root.clone()).with_execution_world(world_dyn.clone());
+
+    assert_eq!(code_tools.execution_world().kind(), "recording");
+    assert_eq!(sac.execution_world().kind(), "recording");
+
+    let toolsets = build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, false);
+    let code_toolset = toolsets
+        .iter()
+        .find(|toolset| toolset.contain("code-read_file"))
+        .expect("code toolset present");
+    let sac_toolset = toolsets
+        .iter()
+        .find(|toolset| toolset.contain("sac-run_script"))
+        .expect("sac toolset present");
+
+    let env_read = code_toolset
+        .invoke_structured(
+            "code-read_file",
+            &serde_json::json!({ "path": ".env" }).to_string(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(env_read.observation.status, ObservationStatus::Refused);
+
+    let src_read = code_toolset
+        .invoke_structured(
+            "code-read_file",
+            &serde_json::json!({ "path": "src/main.rs" }).to_string(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(src_read.observation.status, ObservationStatus::Success);
+
+    let _ = code_toolset
+        .invoke_structured(
+            "code-shell",
+            &serde_json::json!({ "command": "echo hi" }).to_string(),
+        )
+        .await
+        .unwrap();
+    let _ = sac_toolset
+        .invoke_structured(
+            "sac-run_script",
+            &serde_json::json!({ "language": "python", "script": "print('ok')" }).to_string(),
+        )
+        .await
+        .unwrap();
+
+    {
+        let programs = world.programs.lock().unwrap();
+        assert_eq!(programs.len(), 2);
+        assert_eq!(programs[1], "python3");
+    }
+
+    let detected = detect_execution_world(true).await;
+    assert!(!detected.kind().is_empty());
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test]
+async fn cli_session_host_lists_creates_and_opens_sessions() {
+    let root = std::env::temp_dir().join(format!("meerai-cli-host-{}", SessionId::new()));
+    let sessions_root = root.join("sessions");
+    let workspace_root = root.join("workspace");
+    std::fs::create_dir_all(&workspace_root).unwrap();
+
+    let settings = AppSettings::default();
+    let runtime = Arc::new(RwLock::new(RuntimeProviderState::from_settings(
+        &settings,
+        ProviderCatalog::new(),
+    )));
+    let expected_provider = runtime.read().unwrap().active_provider.clone();
+    let expected_model = "test-model".to_string();
+    let secrets: Arc<dyn meerai_providers::secrets::SecretStore> =
+        Arc::new(meerai_providers::secrets::MemorySecretStore::new());
+    let client = build_genai_client(runtime.clone(), secrets).unwrap();
+
+    let mut session_config = SessionConfig::new(workspace_root.clone());
+    session_config.root = sessions_root.clone();
+
+    let host = CliSessionHost {
+        workspace_root: workspace_root.clone(),
+        session_config,
+        runtime,
+        settings,
+        client,
+        approval_mode: ApprovalMode::Ask,
+        execution_world: Arc::new(meerai_tools::HostWorld::new()),
+        sensitive_env_vars: Vec::new(),
+        custom_agents: Vec::new(),
+        base_system: "Test system prompt".to_string(),
+        default_provider: expected_provider.clone(),
+        default_model: expected_model.clone(),
+    };
+
+    assert!(host.list_sessions().await.unwrap().is_empty());
+
+    let created = host.create_session().await.unwrap();
+    assert_eq!(created.provider, expected_provider);
+    assert_eq!(created.model, expected_model);
+    let _ = created.cmd_tx.send(AgentCommand::Quit);
+
+    let listed = host.list_sessions().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, created.session_id);
+
+    let reopened = host.open_session(&created.session_id).await.unwrap();
+    assert_eq!(reopened.session_id, created.session_id);
+    assert_eq!(reopened.provider, expected_provider);
+    assert_eq!(reopened.model, expected_model);
+    let _ = reopened.cmd_tx.send(AgentCommand::Quit);
+
+    std::fs::remove_dir_all(&root).ok();
+}

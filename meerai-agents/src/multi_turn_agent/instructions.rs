@@ -109,6 +109,7 @@ impl MultiTurnAgent {
         model: Option<String>,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) {
+        let text = crate::screen::screen_untrusted_text("definition_instructions", &text);
         self.log_event(
             event_tx,
             SessionEvent::UserMessage {
@@ -166,10 +167,9 @@ impl MultiTurnAgent {
             .unwrap_or(&directory)
             .to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/");
-        let content = format!(
-            "Project instructions from {relative}/AGENTS.md:\n\n{}",
-            capped_instructions(text)
-        );
+        let source = format!("{relative}/AGENTS.md");
+        let body = crate::screen::screen_untrusted_text(&source, &capped_instructions(text));
+        let content = format!("Project instructions from {source}:\n\n{body}");
         self.injected_instruction_dirs.insert(directory);
         self.log_event(
             event_tx,

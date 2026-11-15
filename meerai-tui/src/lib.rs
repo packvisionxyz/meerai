@@ -5,9 +5,11 @@ use anyhow::Result;
 use meerai_agents::{AgentCommand, AgentEvent};
 use meerai_common::definitions::{AgentDefinition, SkillDefinition};
 use meerai_common::settings::AppSettings;
+use meerai_core::async_trait;
+use meerai_policy::ApprovalMode;
 use meerai_providers::providers::RuntimeProviderState;
 use meerai_providers::secrets::SecretStore;
-use meerai_session::LoggedEvent;
+use meerai_session::{LoggedEvent, SessionId, SessionSummary};
 use tokio::sync::mpsc;
 
 pub mod app;
@@ -19,17 +21,38 @@ pub mod terminal;
 pub mod ui;
 
 pub use app::{
-    ActiveModal, AppState, FileChangeEntry, InputMode, MIN_SIDEBAR_WIDTH, ScreenPos, TextSelection,
-    ThinkingHitZone, ToolCallEntry, ToolCallStatus, TranscriptEntry, TurnMetrics, UsageStats,
-    approval_mode_badge, approval_mode_label, parse_approval_mode, session_usage_from_events,
-    transcript_from_events,
+    ActiveModal, AppState, FileChangeEntry, InputMode, MIN_SIDEBAR_WIDTH, PendingSessionAction,
+    ScreenPos, SessionTab, TabHitKind, TabHitZone, TextSelection, ThinkingHitZone, ToolCallEntry,
+    ToolCallStatus, TranscriptEntry, TurnMetrics, UsageStats, approval_mode_badge,
+    approval_mode_label, parse_approval_mode, session_usage_from_events, transcript_from_events,
 };
 pub use completion::{CompletionEngine, CompletionItem, CompletionItemKind, CompletionKind};
 pub use diff::{DiffCell, DiffRow, DiffRowKind, FileDiffView};
 pub use search::{SearchMatch, SearchMode, SearchPreview};
 pub use terminal::TerminalGuard;
 
+pub struct OpenedSession {
+    pub session_id: SessionId,
+    pub title: Option<String>,
+    pub provider: String,
+    pub model: String,
+    pub approval_mode: ApprovalMode,
+    pub transcript: Vec<TranscriptEntry>,
+    pub events: Vec<LoggedEvent>,
+    pub cmd_tx: mpsc::UnboundedSender<AgentCommand>,
+    pub event_rx: mpsc::UnboundedReceiver<AgentEvent>,
+}
+
+#[async_trait]
+pub trait SessionOpener: Send + Sync {
+    async fn list_sessions(&self) -> Result<Vec<SessionSummary>>;
+    async fn open_session(&self, id: &SessionId) -> Result<OpenedSession>;
+    async fn create_session(&self) -> Result<OpenedSession>;
+}
+
 pub struct TuiLaunchConfig {
+    pub initial_session_id: SessionId,
+    pub initial_session_title: Option<String>,
     pub initial_provider: String,
     pub initial_model: String,
     pub workspace_root: PathBuf,
@@ -37,11 +60,12 @@ pub struct TuiLaunchConfig {
     pub secrets: Arc<dyn SecretStore>,
     pub settings: AppSettings,
     pub config_dir: Option<PathBuf>,
-    pub approval_mode: meerai_policy::ApprovalMode,
+    pub approval_mode: ApprovalMode,
     pub initial_transcript: Vec<TranscriptEntry>,
     pub initial_events: Vec<LoggedEvent>,
     pub agents: Vec<AgentDefinition>,
     pub skills: Vec<SkillDefinition>,
+    pub session_opener: Option<Arc<dyn SessionOpener>>,
 }
 
 pub async fn run_tui(
@@ -60,20 +84,16 @@ pub async fn run_tui(
         config.settings,
         config.config_dir,
     );
-    app.approval_mode = config.approval_mode;
-    app.transcript = config.initial_transcript;
+    app.set_initial_session(
+        config.initial_session_id,
+        config.initial_session_title,
+        config.initial_transcript,
+        &config.initial_events,
+        config.approval_mode,
+    );
     app.agents = config.agents;
     app.skills = config.skills;
-    if let Some(usage) = session_usage_from_events(&config.initial_events) {
-        let prompt = usage.prompt_tokens.unwrap_or(0).max(0) as u64;
-        let completion = usage.completion_tokens.unwrap_or(0).max(0) as u64;
-        app.metrics.session_prompt_tokens = prompt;
-        app.metrics.session_completion_tokens = completion;
-        app.metrics.session_total_tokens = usage
-            .total_tokens
-            .map(|total| total.max(0) as u64)
-            .unwrap_or(prompt + completion);
-    }
+    app.session_opener = config.session_opener;
     let result = event_loop::run_event_loop(&mut terminal, &mut app, event_rx).await;
     app.quit();
     result

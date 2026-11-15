@@ -1,9 +1,11 @@
-use std::process::{Output, Stdio};
+use std::process::Output;
 use std::time::Duration;
 
 use meerai_core::{ObservationStatus, ToolDefinition, ToolObservation, ToolOutput, ToolRun};
 
+use crate::code::paths::canonicalize_or_keep;
 use crate::code::{CodeTools, failure_run, truncate_middle};
+use crate::world::{SandboxPolicy, WorldCommand, WorldExecOutcome};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_OUTPUT_BYTES: usize = 32 * 1024;
@@ -117,31 +119,34 @@ impl CodeTools {
 
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).max(1);
         let (program, argv) = shell_invocation(&args.command);
-        let mut child = tokio::process::Command::new(program);
-        child
-            .args(argv)
-            .current_dir(&cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-
-        scrub_command_env(&mut child, self.sensitive_env_vars());
-
-        let spawned = child.spawn();
-
-        let child = match spawned {
-            Ok(child) => child,
-            Err(error) => {
-                return failure_run(format!("cannot start {SHELL_PROGRAM} shell: {error}"));
-            }
+        let command = WorldCommand {
+            program: program.to_string(),
+            args: argv,
+            cwd: cwd.clone(),
+            removed_env_vars: self.sensitive_env_vars().to_vec(),
         };
 
-        let waited =
-            tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait_with_output()).await;
+        let mut writable_roots = Vec::with_capacity(self.writable_roots().len());
+        for root in self.writable_roots() {
+            writable_roots.push(canonicalize_or_keep(root).await);
+        }
+        let mut readable_roots = Vec::with_capacity(self.readable_roots().len());
+        for root in self.readable_roots() {
+            readable_roots.push(canonicalize_or_keep(root).await);
+        }
+        let policy = SandboxPolicy::WorkspaceWrite {
+            workspace_root: cwd,
+            writable_roots,
+            readable_roots,
+            allow_network: false,
+        };
 
-        match waited {
-            Err(_) => {
+        match self
+            .execution_world()
+            .spawn_command(&command, &policy, Duration::from_millis(timeout_ms))
+            .await
+        {
+            Ok(WorldExecOutcome::TimedOut) => {
                 let mut run = failure_run(format!(
                     "command timed out after {timeout_ms} ms and was killed: {}",
                     args.command
@@ -150,8 +155,8 @@ impl CodeTools {
                     Some("Narrow the command, or raise timeout_ms and retry.".to_string());
                 run
             }
-            Ok(Err(error)) => failure_run(format!("command failed: {error}")),
-            Ok(Ok(output)) => complete(output),
+            Ok(WorldExecOutcome::Output(output)) => complete(output),
+            Err(error) => failure_run(format!("cannot start {SHELL_PROGRAM} shell: {error}")),
         }
     }
 }
@@ -285,5 +290,88 @@ mod tests {
 
         assert_eq!(program, "sh");
         assert_eq!(argv, vec!["-c".to_string(), "echo hi".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn shell_delegates_to_configured_execution_world_with_workspace_write_policy() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::sync::{Arc, Mutex};
+
+        use meerai_core::async_trait;
+
+        use crate::world::{ExecutionWorld, SandboxPolicy, WorldCommand, WorldExecOutcome};
+
+        #[derive(Debug, Default)]
+        struct RecordingWorld {
+            recorded: Mutex<Vec<(WorldCommand, SandboxPolicy)>>,
+        }
+
+        #[async_trait]
+        impl ExecutionWorld for RecordingWorld {
+            fn kind(&self) -> &'static str {
+                "recording"
+            }
+
+            fn is_sandboxed(&self) -> bool {
+                true
+            }
+
+            async fn spawn_command(
+                &self,
+                command: &WorldCommand,
+                policy: &SandboxPolicy,
+                _timeout: Duration,
+            ) -> std::io::Result<WorldExecOutcome> {
+                self.recorded
+                    .lock()
+                    .unwrap()
+                    .push((command.clone(), policy.clone()));
+                Ok(WorldExecOutcome::Output(Output {
+                    status: std::process::ExitStatus::from_raw(0),
+                    stdout: b"from-world".to_vec(),
+                    stderr: Vec::new(),
+                }))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let extra_write = tempfile::tempdir().unwrap();
+        let world = Arc::new(RecordingWorld::default());
+        let tools = CodeTools::new(dir.path())
+            .with_writable_roots(vec![extra_write.path().to_path_buf()])
+            .with_sensitive_env_vars(vec!["CUSTOM_SECRET".to_string()])
+            .with_execution_world(world.clone());
+
+        let run = tools
+            .shell(ShellArgs {
+                command: "echo test".to_string(),
+                timeout_ms: Some(2500),
+            })
+            .await;
+        assert_eq!(run.observation.status, ObservationStatus::Success);
+        assert_eq!(run.observation.stdout, "from-world");
+
+        let calls = world.recorded.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].0.removed_env_vars,
+            vec!["CUSTOM_SECRET".to_string()]
+        );
+        match &calls[0].1 {
+            SandboxPolicy::WorkspaceWrite {
+                workspace_root,
+                writable_roots,
+                allow_network,
+                ..
+            } => {
+                assert_eq!(workspace_root, &dir.path().canonicalize().unwrap());
+                assert_eq!(
+                    writable_roots,
+                    &[extra_write.path().canonicalize().unwrap()]
+                );
+                assert!(!allow_network);
+            }
+            other => panic!("expected WorkspaceWrite policy, got {other:?}"),
+        }
     }
 }

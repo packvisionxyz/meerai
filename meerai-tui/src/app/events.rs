@@ -12,6 +12,70 @@ use super::*;
 
 impl AppState {
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
+        let tab_id = self.tab().tab_id;
+        self.handle_tab_agent_event(tab_id, event);
+    }
+
+    pub fn handle_tab_agent_event(&mut self, tab_id: u64, event: AgentEvent) {
+        let Some(tab_idx) = self.tab_index_by_id(tab_id) else {
+            return;
+        };
+        let is_active = tab_idx == self.active_tab;
+
+        match event {
+            AgentEvent::ApprovalRequested { request } => {
+                if is_active {
+                    match &mut self.modal {
+                        Some(ActiveModal::Approval { queue, .. }) => queue.push(request),
+                        None => {
+                            self.modal = Some(ActiveModal::Approval {
+                                queue: vec![request],
+                                reason: String::new(),
+                                editing_reason: false,
+                            });
+                        }
+                        Some(_) => {
+                            self.tabs[tab_idx].pending_approvals.push(request);
+                        }
+                    }
+                } else {
+                    self.tabs[tab_idx].pending_approvals.push(request);
+                }
+            }
+            AgentEvent::ApprovalResolved { request_id } => {
+                self.tabs[tab_idx]
+                    .pending_approvals
+                    .retain(|request| request.request_id != request_id);
+                if is_active {
+                    let mut close = false;
+                    if let Some(ActiveModal::Approval { queue, .. }) = &mut self.modal {
+                        queue.retain(|request| request.request_id != request_id);
+                        close = queue.is_empty();
+                    }
+                    if close {
+                        self.modal = None;
+                    }
+                }
+            }
+            other => {
+                let mark_unread = !is_active
+                    && matches!(
+                        other,
+                        AgentEvent::TurnCompleted { .. }
+                            | AgentEvent::Error { .. }
+                            | AgentEvent::ItemCompleted { .. }
+                    );
+                self.tabs[tab_idx].apply_agent_event(other);
+                if mark_unread {
+                    self.tabs[tab_idx].has_unread = true;
+                }
+            }
+        }
+    }
+}
+
+impl SessionTab {
+    pub(super) fn apply_agent_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::TurnStarted { turn_id, model } => {
                 self.is_running = true;
@@ -255,26 +319,7 @@ impl AppState {
                 }
                 _ => {}
             },
-            AgentEvent::ApprovalRequested { request } => match &mut self.modal {
-                Some(ActiveModal::Approval { queue, .. }) => queue.push(request),
-                _ => {
-                    self.modal = Some(ActiveModal::Approval {
-                        queue: vec![request],
-                        reason: String::new(),
-                        editing_reason: false,
-                    });
-                }
-            },
-            AgentEvent::ApprovalResolved { request_id } => {
-                let mut close = false;
-                if let Some(ActiveModal::Approval { queue, .. }) = &mut self.modal {
-                    queue.retain(|request| request.request_id != request_id);
-                    close = queue.is_empty();
-                }
-                if close {
-                    self.modal = None;
-                }
-            }
+            AgentEvent::ApprovalRequested { .. } | AgentEvent::ApprovalResolved { .. } => {}
             AgentEvent::UsageUpdated {
                 usage, cumulative, ..
             } => {

@@ -3,6 +3,7 @@ mod harness;
 mod multi_turn_agent;
 pub mod prompt;
 mod redact;
+pub mod screen;
 pub mod subagent;
 
 pub use events::{

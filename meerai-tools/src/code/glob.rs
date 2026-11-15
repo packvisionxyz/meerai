@@ -4,7 +4,7 @@ use globset::Glob;
 use ignore::WalkBuilder;
 use meerai_core::ToolDefinition;
 
-use crate::code::paths::{display_path, relative_path};
+use crate::code::paths::{display_path, is_sensitive_path, relative_path};
 use crate::code::{CodeTools, ToolRun, failure_run, success_run};
 
 const MAX_GLOB_RESULTS: usize = 500;
@@ -37,12 +37,13 @@ impl CodeTools {
 
         let workspace = self.canonical_workspace_root().await;
         let pattern = args.pattern.clone();
+        let allow_sensitive = self.allow_sensitive_files();
         let task_pattern = pattern.clone();
         let task_workspace = workspace.clone();
         let task_root = root.clone();
 
         let result = tokio::task::spawn_blocking(move || {
-            collect(&task_workspace, &task_root, &task_pattern)
+            collect(&task_workspace, &task_root, &task_pattern, allow_sensitive)
         })
         .await;
 
@@ -69,7 +70,12 @@ impl CodeTools {
     }
 }
 
-fn collect(workspace: &Path, root: &Path, pattern: &str) -> Result<(Vec<String>, bool), String> {
+fn collect(
+    workspace: &Path,
+    root: &Path,
+    pattern: &str,
+    allow_sensitive: bool,
+) -> Result<(Vec<String>, bool), String> {
     let matcher = Glob::new(pattern)
         .map_err(|error| format!("invalid glob pattern: {error}"))?
         .compile_matcher();
@@ -78,9 +84,11 @@ fn collect(workspace: &Path, root: &Path, pattern: &str) -> Result<(Vec<String>,
     let mut truncated = false;
 
     if root.is_file() {
-        let display = relative_path(workspace, root, root);
-        if matcher.is_match(&display) {
-            matches.push(display);
+        if allow_sensitive || !is_sensitive_path(root) {
+            let display = relative_path(workspace, root, root);
+            if matcher.is_match(&display) {
+                matches.push(display);
+            }
         }
         return Ok((matches, false));
     }
@@ -95,6 +103,10 @@ fn collect(workspace: &Path, root: &Path, pattern: &str) -> Result<(Vec<String>,
             .file_type()
             .is_some_and(|file_type| file_type.is_file())
         {
+            continue;
+        }
+
+        if !allow_sensitive && is_sensitive_path(entry.path()) {
             continue;
         }
 

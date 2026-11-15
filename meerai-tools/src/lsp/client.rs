@@ -55,6 +55,7 @@ impl LspClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        crate::code::shell::scrub_command_env(&mut cmd, &[]);
 
         let mut child = cmd.spawn().map_err(|err| {
             if err.kind() == ErrorKind::NotFound {

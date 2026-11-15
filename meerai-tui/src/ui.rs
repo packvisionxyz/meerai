@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 use meerai_agents::events::ApprovalKind;
 use meerai_common::definitions::{AgentDefinition, SkillDefinition};
 use meerai_core::EffectClass;
+use meerai_core::env::now_millis;
 use meerai_core::text::truncate_single_line;
 use meerai_policy::{ApprovalMode, approval_mode_badge};
 use meerai_providers::providers::KeyStatus;
@@ -14,8 +15,9 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use regex::Regex;
 
 use crate::app::{
-    ActiveModal, AppState, InputMode, MentionKind, ThinkingHitZone, ToolCallStatus,
-    TranscriptEntry, mention_is_known, normalize_selection_in_bounds, parse_mention_token,
+    ActiveModal, AppState, DocPos, InputMode, MentionKind, TabHitKind, TabHitZone, ThinkingHitZone,
+    ToolCallStatus, TranscriptEntry, TranscriptWrappedLine, mention_is_known,
+    normalize_selection_in_bounds, parse_mention_token,
 };
 use crate::completion::{CompletionItemKind, CompletionKind};
 use crate::diff::{DiffCell, DiffRowKind};
@@ -26,12 +28,20 @@ const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
     let area = frame.area();
     app.terminal_width = area.width;
-    let composer_lines = app.input.split('\n').count().clamp(1, 6) as u16;
+    let composer_lines = app.tab().input.split('\n').count().clamp(1, 6) as u16;
     let composer_height = composer_lines + 2;
 
-    let outer = Layout::vertical([Constraint::Min(6), Constraint::Length(1)]).split(area);
-    let main_area = outer[0];
-    let status_area = outer[1];
+    let outer = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(6),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    let tab_area = outer[0];
+    let main_area = outer[1];
+    let status_area = outer[2];
+
+    render_tab_bar(frame, app, tab_area);
 
     let (transcript_area, composer_area) = if app.is_sidebar_visible() {
         let sidebar_width = (main_area.width / 4).clamp(30, 38);
@@ -67,30 +77,152 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
     render_selection_highlight(frame, app);
 }
 
+fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
+    app.tab_hit_zones.clear();
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let width = area.width as usize;
+    let labels: Vec<(String, Style)> = app
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(idx, tab)| {
+            let is_active = idx == app.active_tab;
+            let indicator = if !tab.pending_approvals.is_empty() {
+                " [!]".to_string()
+            } else if tab.is_running {
+                let ch = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
+                format!(" {ch}")
+            } else if tab.has_unread {
+                " •".to_string()
+            } else {
+                String::new()
+            };
+            let title = truncate_single_line(&tab.display_title(), 18);
+            let label = format!(" {}: {}{} ", idx + 1, title, indicator);
+            let style = if is_active {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else if !tab.pending_approvals.is_empty() {
+                Style::default().fg(Color::LightRed).bg(Color::DarkGray)
+            } else if tab.is_running {
+                Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+            } else if tab.has_unread {
+                Style::default().fg(Color::Cyan).bg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::Gray).bg(Color::Black)
+            };
+            (label, style)
+        })
+        .collect();
+
+    let new_btn = " + ";
+    let mut start = 0;
+    let mut end = labels.len();
+    let total_tab_width = |s: usize, e: usize| -> usize {
+        labels[s..e]
+            .iter()
+            .map(|(l, _)| l.chars().count() + 1)
+            .sum::<usize>()
+    };
+    let budget = width.saturating_sub(new_btn.len() + 4);
+    while total_tab_width(start, end) > budget && end - start > 1 {
+        if app.active_tab > start && (end - app.active_tab) <= (app.active_tab - start) {
+            start += 1;
+        } else {
+            end -= 1;
+        }
+    }
+
+    let mut spans = Vec::new();
+    let mut col = area.x;
+    if start > 0 {
+        let marker = "« ";
+        spans.push(Span::styled(marker, Style::default().fg(Color::DarkGray)));
+        col = col.saturating_add(marker.chars().count() as u16);
+    }
+
+    for (idx, (label, style)) in labels.iter().enumerate().take(end).skip(start) {
+        let label_len = label.chars().count() as u16;
+        let zone_w = label_len.min(area.x + area.width - col);
+        if zone_w > 0 {
+            app.tab_hit_zones.push(TabHitZone {
+                rect: Rect::new(col, area.y, zone_w, 1),
+                kind: TabHitKind::Tab(idx),
+            });
+        }
+        spans.push(Span::styled(label.clone(), *style));
+        col = col.saturating_add(label_len);
+        spans.push(Span::styled(" ", Style::default().bg(Color::Black)));
+        col = col.saturating_add(1);
+    }
+
+    if end < labels.len() {
+        let marker = "» ";
+        spans.push(Span::styled(marker, Style::default().fg(Color::DarkGray)));
+        col = col.saturating_add(marker.chars().count() as u16);
+    }
+
+    let new_w = (new_btn.len() as u16).min((area.x + area.width).saturating_sub(col));
+    if new_w > 0 {
+        app.tab_hit_zones.push(TabHitZone {
+            rect: Rect::new(col, area.y, new_w, 1),
+            kind: TabHitKind::NewTab,
+        });
+        spans.push(Span::styled(
+            new_btn,
+            Style::default()
+                .fg(Color::Green)
+                .bg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ));
+        col = col.saturating_add(new_w);
+    }
+
+    let used = (col.saturating_sub(area.x)) as usize;
+    let hint = "/sessions · /new · Ctrl-w close";
+    if width.saturating_sub(used) >= hint.len() + 2 {
+        let pad = width - used - hint.len() - 1;
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
+    }
+
+    let bar = Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Black));
+    frame.render_widget(bar, area);
+}
+
 fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     let block = Block::default().borders(Borders::ALL).title(" Chat ");
     let inner = block.inner(area);
 
     let raw_lines = build_transcript_lines(app);
-    let (wrapped_lines, hit_zones) = if inner.width > 0 {
+    let (wrapped_lines, hit_zones, doc_lines) = if inner.width > 0 {
         wrap_tagged_lines(raw_lines, inner.width as usize)
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new())
     };
 
     app.transcript_inner_area = inner;
     app.thinking_hit_zones = hit_zones;
-    app.viewport_height = inner.height as usize;
-    app.total_lines = wrapped_lines.len();
+    app.transcript_wrapped_lines = doc_lines;
 
-    let max_scroll = app.max_scroll();
-    if app.auto_follow {
-        app.scroll_offset = max_scroll;
-    } else {
-        app.scroll_offset = app.scroll_offset.min(max_scroll);
-    }
+    let scroll_y = {
+        let tab = app.tab_mut();
+        tab.viewport_height = inner.height as usize;
+        tab.total_lines = wrapped_lines.len();
+        let max_scroll = tab.max_scroll();
+        if tab.auto_follow {
+            tab.scroll_offset = max_scroll;
+        } else {
+            tab.scroll_offset = tab.scroll_offset.min(max_scroll);
+        }
+        tab.scroll_offset.min(u16::MAX as usize) as u16
+    };
 
-    let scroll_y = app.scroll_offset.min(u16::MAX as usize) as u16;
     let paragraph = Paragraph::new(wrapped_lines)
         .block(block)
         .scroll((scroll_y, 0));
@@ -101,12 +233,13 @@ fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     let block = Block::default().borders(Borders::ALL).title(" Session ");
     let inner = block.inner(area);
     let width = inner.width as usize;
+    let tab = app.tab();
 
     let key_status = app.active_key_status();
     let (key_badge, key_color) = key_status_style(&key_status);
-    let state_span = if app.is_running {
+    let state_span = if tab.is_running {
         let ch = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
-        let label = match app.metrics.elapsed_ms() {
+        let label = match tab.metrics.elapsed_ms() {
             Some(ms) => format!("{ch} running ({})", format_compact_ms(ms)),
             None => format!("{ch} running"),
         };
@@ -117,7 +250,7 @@ fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )
     } else {
-        let label = match app.metrics.last_turn_ms {
+        let label = match tab.metrics.last_turn_ms {
             Some(ms) => format!("idle ({})", format_compact_ms(ms)),
             None => "idle".to_string(),
         };
@@ -125,13 +258,13 @@ fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     };
 
     let mut token_summary = format_usage_compact(app);
-    if app.metrics.turn_count > 1 && app.metrics.session_total_tokens > 0 {
+    if tab.metrics.turn_count > 1 && tab.metrics.session_total_tokens > 0 {
         token_summary.push_str(&format!(
             " · s:Σ{}",
-            format_compact_tokens(app.metrics.session_total_tokens)
+            format_compact_tokens(tab.metrics.session_total_tokens)
         ));
     }
-    let speed_summary = match (app.metrics.last_tokens_per_sec, app.metrics.last_ttft_ms) {
+    let speed_summary = match (tab.metrics.last_tokens_per_sec, tab.metrics.last_ttft_ms) {
         (Some(tps), Some(ttft)) => format!("{tps:.1} tok/s · {}", format_compact_ms(ttft)),
         (Some(tps), None) => format!("{tps:.1} tok/s"),
         (None, Some(ttft)) => format!("ttft {}", format_compact_ms(ttft)),
@@ -140,9 +273,16 @@ fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
 
     let mut lines = vec![
         Line::from(vec![
+            Span::styled("session  ", Style::default().fg(Color::DarkGray)),
+            Span::raw(truncate_single_line(
+                tab.session_id.as_str(),
+                width.saturating_sub(9),
+            )),
+        ]),
+        Line::from(vec![
             Span::styled("provider ", Style::default().fg(Color::DarkGray)),
             Span::raw(truncate_single_line(
-                &app.active_provider,
+                &tab.active_provider,
                 width.saturating_sub(9),
             )),
         ]),
@@ -219,7 +359,7 @@ fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         ),
         Span::styled("(1) ", Style::default().fg(Color::DarkGray)),
         Span::raw("main "),
-        if app.is_running {
+        if app.tab().is_running {
             Span::styled("[active]", Style::default().fg(Color::Yellow))
         } else {
             Span::styled("[ready]", Style::default().fg(Color::Green))
@@ -227,6 +367,7 @@ fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     ]));
 
     let recent_tools: Vec<_> = app
+        .tab()
         .transcript
         .iter()
         .filter_map(|e| match e {
@@ -336,17 +477,40 @@ fn render_sidebar_changes(frame: &mut Frame<'_>, app: &mut AppState, area: Rect)
 }
 
 const MINT_TEAL: Color = Color::Rgb(133, 191, 181);
-const USER_ROW_BG: Color = Color::Rgb(34, 38, 52);
-const TOOL_ROW_BG: Color = Color::Rgb(34, 42, 34);
+const USER_ROW_BG: Color = Color::Rgb(32, 39, 54);
+const TOOL_ROW_BG: Color = Color::Rgb(30, 41, 34);
+const THINK_ROW_BG: Color = Color::Rgb(41, 36, 48);
+const CODE_BLOCK_BG: Color = Color::Rgb(26, 30, 38);
+const THINK_ACCENT: Color = Color::Rgb(222, 184, 102);
+const ASSISTANT_ACCENT: Color = Color::Rgb(115, 198, 255);
+const TOOL_ACCENT: Color = Color::Rgb(122, 178, 255);
 const LOGO_M_ROWS: [&str; 4] = ["██      ██", "████  ████", "██  ██  ██", "██      ██"];
 
-fn build_header_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)> {
+struct TaggedTranscriptLine {
+    line: Line<'static>,
+    entry_tag: Option<usize>,
+    gutter_len: usize,
+}
+
+fn tagged_line(
+    line: Line<'static>,
+    entry_tag: Option<usize>,
+    gutter_len: usize,
+) -> TaggedTranscriptLine {
+    TaggedTranscriptLine {
+        line,
+        entry_tag,
+        gutter_len,
+    }
+}
+
+fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
     let key_status = app.active_key_status();
     let (badge, badge_color) = key_status_style(&key_status);
     let logo_style = Style::default().fg(MINT_TEAL).add_modifier(Modifier::BOLD);
 
     vec![
-        (
+        tagged_line(
             Line::from(vec![
                 Span::styled(LOGO_M_ROWS[0], logo_style),
                 Span::raw("  "),
@@ -358,35 +522,38 @@ fn build_header_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)> {
                 ),
                 Span::raw("  "),
                 Span::styled(
-                    format!("{} / {}", app.active_provider, display_model(app)),
+                    format!("{} / {}", app.tab().active_provider, display_model(app)),
                     Style::default().fg(Color::Cyan),
                 ),
                 Span::raw(" "),
                 Span::styled(format!("[{badge}]"), Style::default().fg(badge_color)),
             ]),
             None,
+            0,
         ),
-        (
+        tagged_line(
             Line::from(vec![
                 Span::styled(LOGO_M_ROWS[1], logo_style),
                 Span::styled(
-                    "  Commands: /connect, /models, /sidebar, /help, @ (files).",
+                    "  Commands: /sessions, /new, /connect, /models, /help, @ (files).",
                     Style::default().fg(Color::DarkGray),
                 ),
             ]),
             None,
+            0,
         ),
-        (
+        tagged_line(
             Line::from(vec![
                 Span::styled(LOGO_M_ROWS[2], logo_style),
                 Span::styled(
-                    "  Shortcuts: Ctrl-t think, Ctrl-b sidebar, click thinking.",
+                    "  Shortcuts: Ctrl-j/Shift+Enter newline, Ctrl-t think, Drag/Shift+Click copy.",
                     Style::default().fg(Color::DarkGray),
                 ),
             ]),
             None,
+            0,
         ),
-        (
+        tagged_line(
             Line::from(vec![
                 Span::styled(LOGO_M_ROWS[3], logo_style),
                 Span::styled(
@@ -395,6 +562,7 @@ fn build_header_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)> {
                 ),
             ]),
             None,
+            0,
         ),
     ]
 }
@@ -410,21 +578,74 @@ fn tool_status_badge(status: &ToolCallStatus) -> (&'static str, Color) {
     }
 }
 
-fn build_transcript_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)> {
+fn assistant_line_style(line: &str, in_code_block: &mut bool) -> Style {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("```") {
+        *in_code_block = !*in_code_block;
+        return Style::default()
+            .fg(MINT_TEAL)
+            .bg(CODE_BLOCK_BG)
+            .add_modifier(Modifier::BOLD);
+    }
+    if *in_code_block {
+        return Style::default()
+            .fg(Color::Rgb(215, 224, 236))
+            .bg(CODE_BLOCK_BG);
+    }
+    if trimmed.starts_with("# ")
+        || trimmed.starts_with("## ")
+        || trimmed.starts_with("### ")
+        || trimmed.starts_with("#### ")
+    {
+        return Style::default()
+            .fg(ASSISTANT_ACCENT)
+            .add_modifier(Modifier::BOLD);
+    }
+    if trimmed.starts_with("> ") {
+        return Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::ITALIC);
+    }
+    Style::default().fg(Color::Rgb(236, 240, 246))
+}
+
+fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
     let mut lines = build_header_lines(app);
-    if app.transcript.is_empty() {
+    let transcript = &app.tab().transcript;
+    if transcript.is_empty() {
         return lines;
     }
 
-    lines.push((Line::default(), None));
-    for (idx, entry) in app.transcript.iter().enumerate() {
+    lines.push(tagged_line(Line::default(), None, 0));
+    for (idx, entry) in transcript.iter().enumerate() {
         if idx > 0 {
-            lines.push((Line::default(), None));
+            lines.push(tagged_line(Line::default(), None, 0));
         }
         match entry {
             TranscriptEntry::User { text } => {
+                lines.push(tagged_line(
+                    Line::from(vec![
+                        Span::styled(
+                            "┃ ",
+                            Style::default()
+                                .fg(MINT_TEAL)
+                                .bg(USER_ROW_BG)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            "YOU",
+                            Style::default()
+                                .fg(MINT_TEAL)
+                                .bg(USER_ROW_BG)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ])
+                    .style(Style::default().bg(USER_ROW_BG)),
+                    None,
+                    2,
+                ));
                 for line in text.split('\n') {
-                    lines.push((
+                    lines.push(tagged_line(
                         Line::from(vec![
                             Span::styled(
                                 "┃ ",
@@ -440,6 +661,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)>
                         ])
                         .style(Style::default().bg(USER_ROW_BG)),
                         None,
+                        2,
                     ));
                 }
             }
@@ -452,68 +674,102 @@ fn build_transcript_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)>
                 if !reasoning.is_empty() {
                     let line_count = reasoning.lines().count().max(1);
                     if *reasoning_expanded {
-                        lines.push((
+                        lines.push(tagged_line(
                             Line::from(Span::styled(
-                                format!("  ▾ Thinking ({line_count} lines)  [click to hide]"),
+                                format!(
+                                    "  ▾ Thinking ({line_count} lines)  [click or Ctrl-t to hide]"
+                                ),
                                 Style::default()
-                                    .fg(Color::Yellow)
+                                    .fg(THINK_ACCENT)
+                                    .bg(THINK_ROW_BG)
                                     .add_modifier(Modifier::BOLD),
-                            )),
+                            ))
+                            .style(Style::default().bg(THINK_ROW_BG)),
                             Some(idx),
+                            2,
                         ));
                         for line in reasoning.split('\n') {
-                            lines.push((
+                            lines.push(tagged_line(
                                 Line::from(vec![
-                                    Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
+                                    Span::styled(
+                                        "  │ ",
+                                        Style::default().fg(THINK_ACCENT).bg(THINK_ROW_BG),
+                                    ),
                                     Span::styled(
                                         line.to_string(),
                                         Style::default()
-                                            .fg(Color::DarkGray)
+                                            .fg(Color::Rgb(208, 200, 184))
+                                            .bg(THINK_ROW_BG)
                                             .add_modifier(Modifier::ITALIC),
                                     ),
-                                ]),
+                                ])
+                                .style(Style::default().bg(THINK_ROW_BG)),
                                 Some(idx),
+                                4,
                             ));
                         }
                     } else {
-                        lines.push((
+                        lines.push(tagged_line(
                             Line::from(Span::styled(
                                 format!("  ▸ Thinking ({line_count} lines)  [click or Ctrl-t]"),
                                 Style::default()
-                                    .fg(Color::DarkGray)
+                                    .fg(THINK_ACCENT)
+                                    .bg(THINK_ROW_BG)
                                     .add_modifier(Modifier::ITALIC),
-                            )),
+                            ))
+                            .style(Style::default().bg(THINK_ROW_BG)),
                             Some(idx),
+                            2,
                         ));
                     }
                 }
-                if !text.is_empty() {
-                    for line in text.split('\n') {
-                        lines.push((Line::from(format!("  {line}")), None));
+                if !text.is_empty() || *streaming {
+                    let mut header_spans = vec![Span::styled(
+                        "  ● Response",
+                        Style::default()
+                            .fg(ASSISTANT_ACCENT)
+                            .add_modifier(Modifier::BOLD),
+                    )];
+                    if *streaming {
+                        let ch = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
+                        header_spans.push(Span::styled(
+                            format!(" {ch}"),
+                            Style::default().fg(ASSISTANT_ACCENT),
+                        ));
                     }
-                } else if *streaming && reasoning.is_empty() {
-                    let ch = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
-                    lines.push((
-                        Line::from(Span::styled(
-                            format!("  {ch} ..."),
-                            Style::default().fg(Color::DarkGray),
-                        )),
-                        None,
-                    ));
+                    lines.push(tagged_line(Line::from(header_spans), None, 2));
+                }
+                if !text.is_empty() {
+                    let mut in_code_block = false;
+                    for line in text.split('\n') {
+                        let line_style = assistant_line_style(line, &mut in_code_block);
+                        lines.push(tagged_line(
+                            Line::from(vec![
+                                Span::styled("  ", Style::default()),
+                                Span::styled(line.to_string(), line_style),
+                            ]),
+                            None,
+                            2,
+                        ));
+                    }
                 }
             }
             TranscriptEntry::ToolCall(tc) => {
                 let (badge, color) = tool_status_badge(&tc.status);
                 let args_preview = truncate_single_line(&tc.args, 60);
-                lines.push((
+                let lead = if tc.status == ToolCallStatus::Running {
+                    let ch = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
+                    format!("{ch} [tool] ")
+                } else {
+                    "▸ [tool] ".to_string()
+                };
+                lines.push(tagged_line(
                     Line::from(vec![
-                        Span::styled(
-                            "▸ [tool] ",
-                            Style::default().fg(Color::Blue).bg(TOOL_ROW_BG),
-                        ),
+                        Span::styled(lead, Style::default().fg(TOOL_ACCENT).bg(TOOL_ROW_BG)),
                         Span::styled(
                             tc.name.clone(),
                             Style::default()
+                                .fg(Color::White)
                                 .bg(TOOL_ROW_BG)
                                 .add_modifier(Modifier::BOLD),
                         ),
@@ -533,24 +789,34 @@ fn build_transcript_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)>
                     ])
                     .style(Style::default().bg(TOOL_ROW_BG)),
                     None,
+                    2,
                 ));
                 if let Some(output) = &tc.output {
                     let preview = truncate_single_line(output, 120);
                     if !preview.is_empty() {
-                        lines.push((
-                            Line::from(Span::styled(
-                                format!("  {preview}"),
-                                Style::default().fg(Color::Gray).bg(TOOL_ROW_BG),
-                            ))
+                        lines.push(tagged_line(
+                            Line::from(vec![
+                                Span::styled(
+                                    "  ↳ ",
+                                    Style::default().fg(TOOL_ACCENT).bg(TOOL_ROW_BG),
+                                ),
+                                Span::styled(
+                                    preview,
+                                    Style::default()
+                                        .fg(Color::Rgb(185, 194, 185))
+                                        .bg(TOOL_ROW_BG),
+                                ),
+                            ])
                             .style(Style::default().bg(TOOL_ROW_BG)),
                             None,
+                            4,
                         ));
                     }
                 }
             }
             TranscriptEntry::Subagent(sub) => {
                 let (badge, color) = tool_status_badge(&sub.status);
-                lines.push((
+                lines.push(tagged_line(
                     Line::from(vec![
                         Span::styled(
                             "▸ [subagent] ",
@@ -559,6 +825,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)>
                         Span::styled(
                             sub.agent.clone(),
                             Style::default()
+                                .fg(Color::White)
                                 .bg(TOOL_ROW_BG)
                                 .add_modifier(Modifier::BOLD),
                         ),
@@ -570,44 +837,56 @@ fn build_transcript_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)>
                     ])
                     .style(Style::default().bg(TOOL_ROW_BG)),
                     None,
+                    2,
                 ));
                 if let Some(report) = &sub.report {
                     let preview = truncate_single_line(report, 120);
                     if !preview.is_empty() {
-                        lines.push((
-                            Line::from(Span::styled(
-                                format!("  {preview}"),
-                                Style::default().fg(Color::Gray).bg(TOOL_ROW_BG),
-                            ))
+                        lines.push(tagged_line(
+                            Line::from(vec![
+                                Span::styled(
+                                    "  ↳ ",
+                                    Style::default().fg(Color::Cyan).bg(TOOL_ROW_BG),
+                                ),
+                                Span::styled(
+                                    preview,
+                                    Style::default()
+                                        .fg(Color::Rgb(185, 194, 185))
+                                        .bg(TOOL_ROW_BG),
+                                ),
+                            ])
                             .style(Style::default().bg(TOOL_ROW_BG)),
                             None,
+                            4,
                         ));
                     }
                 }
             }
             TranscriptEntry::System { text } => {
                 for line in text.split('\n') {
-                    lines.push((
+                    lines.push(tagged_line(
                         Line::from(Span::styled(
                             format!("[system] {line}"),
                             Style::default().fg(Color::Yellow),
                         )),
                         None,
+                        0,
                     ));
                 }
             }
             TranscriptEntry::Error { text, expanded } => {
                 if *expanded {
                     let line_count = text.lines().count().max(1);
-                    lines.push((
+                    lines.push(tagged_line(
                         Line::from(Span::styled(
                             format!("  ▾ [error] ({line_count} lines)  [click to hide]"),
                             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                         )),
                         Some(idx),
+                        2,
                     ));
                     for line in text.split('\n') {
-                        lines.push((
+                        lines.push(tagged_line(
                             Line::from(vec![
                                 Span::styled("  │ ", Style::default().fg(Color::Red)),
                                 Span::styled(
@@ -616,6 +895,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)>
                                 ),
                             ]),
                             Some(idx),
+                            4,
                         ));
                     }
                 } else {
@@ -626,7 +906,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)>
                     };
                     let max_summary = avail_width.saturating_sub(32).max(12);
                     let summary = summarize_error_line(text, max_summary);
-                    lines.push((
+                    lines.push(tagged_line(
                         Line::from(vec![
                             Span::styled(
                                 format!("  ▸ [error] {summary}"),
@@ -640,6 +920,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)>
                             ),
                         ]),
                         Some(idx),
+                        2,
                     ));
                 }
             }
@@ -652,11 +933,11 @@ fn build_transcript_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)>
 fn render_composer(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     let (title, border_style) = match app.mode {
         InputMode::Insert => (
-            " Prompt (Insert) — / commands, @ mentions, Ctrl-f search, Esc Normal ",
+            " Prompt (Insert) — / commands, @ mentions, Ctrl-j/Alt+Enter newline ",
             Style::default().fg(Color::Green),
         ),
         InputMode::Normal => (
-            " Prompt (Normal) — i/a edit, / search, j/k scroll, q quit ",
+            " Prompt (Normal) — i/a edit, Drag/Shift+Click copy, j/k scroll, q quit ",
             Style::default().fg(Color::Blue),
         ),
     };
@@ -667,18 +948,19 @@ fn render_composer(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         .title(title);
     let inner = block.inner(area);
 
-    let (cursor_row, cursor_col) = cursor_row_col(&app.input, app.cursor);
+    let tab = app.tab();
+    let (cursor_row, cursor_col) = cursor_row_col(&tab.input, tab.cursor);
     let visible_rows = inner.height.max(1) as usize;
     let scroll_y = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
 
     let mut cursor_display_col = cursor_col;
-    let content = if app.input.is_empty() {
+    let content = if tab.input.is_empty() {
         Paragraph::new(Line::from(Span::styled(
             "Ask meerai anything...",
             Style::default().fg(Color::DarkGray),
         )))
     } else {
-        let lines: Vec<Line<'_>> = app
+        let lines: Vec<Line<'_>> = tab
             .input
             .split('\n')
             .enumerate()
@@ -951,15 +1233,12 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             frame.render_widget(Paragraph::new(filter_line), rows[0]);
 
             let providers = app.filtered_providers(filter);
+            let active_provider = &app.tab().active_provider;
             let list_items: Vec<ListItem<'_>> = providers
                 .iter()
                 .map(|(p, status)| {
                     let (badge, color) = key_status_style(status);
-                    let active_mark = if p.id == app.active_provider {
-                        "*"
-                    } else {
-                        " "
-                    };
+                    let active_mark = if p.id == *active_provider { "*" } else { " " };
                     ListItem::new(Line::from(vec![
                         Span::raw(format!("{active_mark} ")),
                         Span::styled(
@@ -1087,6 +1366,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             selected_recent,
             error,
         } => {
+            let active_provider = &app.tab().active_provider;
+            let active_model = &app.tab().model;
             let recent = app.recent_models_for_active_provider();
             let height = if recent.is_empty() {
                 9
@@ -1094,7 +1375,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 (8 + recent.len().min(8)) as u16
             };
             let popup = centered_rect_fixed(area, 72, height);
-            let title = format!(" Set Model [{}] (/model) ", app.active_provider);
+            let title = format!(" Set Model [{active_provider}] (/model) ");
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan))
@@ -1111,7 +1392,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             .split(inner);
 
             let placeholder = app
-                .current_or_default_model(&app.active_provider)
+                .current_or_default_model(active_provider)
                 .map(|m| format!("(Enter keeps '{m}', or type model name)"))
                 .unwrap_or_else(|| "(type model name, e.g. gpt-4o)".to_string());
             let input_display = if input.is_empty() {
@@ -1145,7 +1426,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 let list_items: Vec<ListItem<'_>> = recent
                     .iter()
                     .map(|m| {
-                        let active_mark = if *m == app.model { "*" } else { " " };
+                        let active_mark = if m == active_model { "*" } else { " " };
                         ListItem::new(Line::from(vec![
                             Span::raw(format!("{active_mark} ")),
                             Span::styled(m.clone(), Style::default().add_modifier(Modifier::BOLD)),
@@ -1515,6 +1796,162 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             };
             frame.render_widget(Paragraph::new(footer), rows[2]);
         }
+        ActiveModal::SessionSelect {
+            filter,
+            selected,
+            sessions,
+            loading,
+            error,
+        } => {
+            let popup = centered_rect(area, 78, 72, 48, 12);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" Switch Session (/sessions) ");
+            let inner = block.inner(popup);
+            frame.render_widget(Clear, popup);
+            frame.render_widget(block, popup);
+
+            let rows = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+
+            let filter_line = Line::from(vec![
+                Span::styled("Filter: ", Style::default().fg(Color::Yellow)),
+                Span::raw(if filter.is_empty() {
+                    "(type to filter by id, title, or model)"
+                } else {
+                    filter.as_str()
+                }),
+            ]);
+            frame.render_widget(Paragraph::new(filter_line), rows[0]);
+
+            let filtered = app.filtered_sessions(sessions, filter);
+            if *loading && filtered.is_empty() {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        "Loading sessions...",
+                        Style::default().fg(Color::DarkGray),
+                    ))),
+                    rows[1],
+                );
+            } else if let Some(err) = error {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        format!("Failed to list sessions: {err}"),
+                        Style::default().fg(Color::Red),
+                    ))),
+                    rows[1],
+                );
+            } else if filtered.is_empty() {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        "No matching sessions.",
+                        Style::default().fg(Color::DarkGray),
+                    ))),
+                    rows[1],
+                );
+            } else {
+                let now = now_millis();
+                let max_title = (inner.width as usize).saturating_sub(36).max(16);
+                let list_items: Vec<ListItem<'_>> = filtered
+                    .iter()
+                    .map(|summary| {
+                        let open_idx = app.tab_index_for_session(&summary.id);
+                        let (tab_badge, badge_style) = match open_idx {
+                            Some(idx) if idx == app.active_tab => (
+                                format!("[tab {}*] ", idx + 1),
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Some(idx) => (
+                                format!("[tab {}] ", idx + 1),
+                                Style::default().fg(Color::Cyan),
+                            ),
+                            None => ("       ".to_string(), Style::default().fg(Color::DarkGray)),
+                        };
+                        let raw_title = summary
+                            .title
+                            .as_deref()
+                            .filter(|t| !t.trim().is_empty())
+                            .unwrap_or("(untitled)");
+                        let title_text = truncate_single_line(raw_title, max_title);
+                        let title_style = if summary
+                            .title
+                            .as_deref()
+                            .is_some_and(|t| !t.trim().is_empty())
+                        {
+                            Style::default().add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        };
+                        let mut item_spans = vec![
+                            Span::styled(tab_badge, badge_style),
+                            Span::styled(title_text, title_style),
+                            Span::styled(
+                                format!("  {}", summary.id),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ];
+                        if let Some(model) =
+                            summary.model.as_deref().filter(|m| !m.trim().is_empty())
+                        {
+                            item_spans.push(Span::styled(
+                                format!(" · {}", truncate_single_line(model, 22)),
+                                Style::default().fg(Color::Gray),
+                            ));
+                        }
+                        if summary.updated_at_ms > 0 {
+                            item_spans.push(Span::styled(
+                                format!(" · {}", format_relative_age(now, summary.updated_at_ms)),
+                                Style::default().fg(Color::DarkGray),
+                            ));
+                        }
+                        ListItem::new(Line::from(item_spans))
+                    })
+                    .collect();
+
+                let mut state = ListState::default();
+                state.select(Some((*selected).min(filtered.len() - 1)));
+                let list = List::new(list_items).highlight_style(
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                );
+                frame.render_stateful_widget(list, rows[1], &mut state);
+            }
+
+            let footer_text = if *loading {
+                "Refreshing...  Enter:switch  Up/Down:move  Esc:close"
+            } else {
+                "Enter:switch  Up/Down:move  Type:filter  Esc:close"
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    footer_text,
+                    Style::default().fg(Color::DarkGray),
+                ))),
+                rows[2],
+            );
+        }
+    }
+}
+
+fn format_relative_age(now_ms: u64, updated_ms: u64) -> String {
+    let diff_secs = now_ms.saturating_sub(updated_ms) / 1000;
+    if diff_secs < 60 {
+        "just now".to_string()
+    } else if diff_secs < 3600 {
+        format!("{}m ago", diff_secs / 60)
+    } else if diff_secs < 86_400 {
+        format!("{}h ago", diff_secs / 3600)
+    } else {
+        format!("{}d ago", diff_secs / 86_400)
     }
 }
 
@@ -1568,7 +2005,7 @@ fn format_diff_pane_line(
 }
 
 fn display_model(app: &AppState) -> &str {
-    let trimmed = app.model.trim();
+    let trimmed = app.tab().model.trim();
     if trimmed.is_empty() {
         "(not set)"
     } else {
@@ -1577,6 +2014,7 @@ fn display_model(app: &AppState) -> &str {
 }
 
 fn render_statusline(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
+    let tab = app.tab();
     let (badge_text, badge_bg) = match app.mode {
         InputMode::Insert => (" INS ", Color::Green),
         InputMode::Normal => (" NOR ", Color::Blue),
@@ -1590,14 +2028,14 @@ fn render_statusline(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             .add_modifier(Modifier::BOLD),
     )];
 
-    let mode_bg = match app.approval_mode {
+    let mode_bg = match tab.approval_mode {
         ApprovalMode::Plan => Color::Magenta,
         ApprovalMode::Ask => Color::Yellow,
         ApprovalMode::AutoEdit => Color::Cyan,
         ApprovalMode::Yolo => Color::LightRed,
     };
     spans.push(Span::styled(
-        format!("{} ", approval_mode_badge(app.approval_mode)),
+        format!("{} ", approval_mode_badge(tab.approval_mode)),
         Style::default()
             .fg(Color::Black)
             .bg(mode_bg)
@@ -1609,7 +2047,7 @@ fn render_statusline(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
 
     spans.push(Span::raw(format!(
         "  {} / {} ",
-        app.active_provider,
+        tab.active_provider,
         display_model(app)
     )));
     spans.push(Span::styled(
@@ -1630,21 +2068,21 @@ fn render_statusline(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         ));
     }
 
-    if let Some(speed) = app.metrics.last_tokens_per_sec {
+    if let Some(speed) = tab.metrics.last_tokens_per_sec {
         spans.push(Span::styled(
             format!(" {speed:.1} tok/s"),
             Style::default().fg(MINT_TEAL),
         ));
     }
 
-    if app.is_running {
+    if tab.is_running {
         let frame_char = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
-        let elapsed = app
+        let elapsed = tab
             .metrics
             .elapsed_ms()
             .map(|ms| format!(" ({})", format_compact_ms(ms)))
             .unwrap_or_default();
-        let activity = match &app.active_tool {
+        let activity = match &tab.active_tool {
             Some(tool) => format!(" | {frame_char} tool:{tool}{elapsed}"),
             None => format!(" | {frame_char} running{elapsed}"),
         };
@@ -1654,7 +2092,7 @@ fn render_statusline(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ));
-    } else if let Some(turn_ms) = app.metrics.last_turn_ms {
+    } else if let Some(turn_ms) = tab.metrics.last_turn_ms {
         spans.push(Span::styled(
             format!(" {}", format_compact_ms(turn_ms)),
             Style::default().fg(Color::DarkGray),
@@ -1712,10 +2150,10 @@ fn format_compact_ms(ms: u64) -> String {
 }
 
 fn format_usage_compact(app: &AppState) -> String {
-    let p = app.usage.prompt_tokens.map(|v| v.max(0) as u64);
-    let c = app.usage.completion_tokens.map(|v| v.max(0) as u64);
-    let t = app
-        .usage
+    let usage = &app.tab().usage;
+    let p = usage.prompt_tokens.map(|v| v.max(0) as u64);
+    let c = usage.completion_tokens.map(|v| v.max(0) as u64);
+    let t = usage
         .total_tokens
         .map(|v| v.max(0) as u64)
         .or_else(|| match (p, c) {
@@ -1741,14 +2179,15 @@ fn format_usage_compact(app: &AppState) -> String {
 }
 
 fn format_session_usage(app: &AppState) -> Option<String> {
-    let total = app.metrics.session_total_tokens;
+    let metrics = &app.tab().metrics;
+    let total = metrics.session_total_tokens;
     if total == 0 {
         return None;
     }
     Some(format!(
         "session ↑{} ↓{} Σ{}",
-        format_compact_tokens(app.metrics.session_prompt_tokens),
-        format_compact_tokens(app.metrics.session_completion_tokens),
+        format_compact_tokens(metrics.session_prompt_tokens),
+        format_compact_tokens(metrics.session_completion_tokens),
         format_compact_tokens(total)
     ))
 }
@@ -1856,6 +2295,63 @@ fn capture_screen_lines(frame: &mut Frame<'_>, app: &mut AppState) {
 }
 
 fn render_selection_highlight(frame: &mut Frame<'_>, app: &AppState) {
+    let highlight = Style::default()
+        .bg(Color::Rgb(58, 74, 107))
+        .fg(Color::White);
+
+    if let Some(sel) = app.doc_selection
+        && sel.anchor != sel.head
+        && app.modal.is_none()
+    {
+        let inner = app.transcript_inner_area;
+        if inner.width > 0 && inner.height > 0 && !app.transcript_wrapped_lines.is_empty() {
+            let max_line = app.transcript_wrapped_lines.len() - 1;
+            let a = DocPos {
+                line: sel.anchor.line.min(max_line),
+                col: sel.anchor.col,
+            };
+            let b = DocPos {
+                line: sel.head.line.min(max_line),
+                col: sel.head.col,
+            };
+            let (start, end) = if (a.line, a.col) <= (b.line, b.col) {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            let vis_start = app.tab().scroll_offset;
+            let vis_end = vis_start + inner.height as usize;
+            let draw_start = start.line.max(vis_start);
+            let draw_end = end.line.min(vis_end.saturating_sub(1));
+            if draw_start <= draw_end {
+                let min_col = inner.x;
+                let max_col = inner.x + inner.width - 1;
+                let buf = frame.buffer_mut();
+                for doc_line in draw_start..=draw_end {
+                    let row = inner.y + (doc_line - vis_start) as u16;
+                    let c_start = if doc_line == start.line {
+                        inner.x.saturating_add(start.col as u16)
+                    } else {
+                        min_col
+                    }
+                    .clamp(min_col, max_col);
+                    let c_end = if doc_line == end.line {
+                        inner.x.saturating_add(end.col as u16)
+                    } else {
+                        max_col
+                    }
+                    .clamp(min_col, max_col);
+                    for col in c_start..=c_end {
+                        if let Some(cell) = buf.cell_mut((col, row)) {
+                            cell.set_style(highlight);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+    }
+
     let Some(sel) = app.selection else {
         return;
     };
@@ -1869,9 +2365,6 @@ fn render_selection_highlight(frame: &mut Frame<'_>, app: &AppState) {
     let min_col = bounds.x;
     let max_col = bounds.x + bounds.width - 1;
     let buf = frame.buffer_mut();
-    let highlight = Style::default()
-        .bg(Color::Rgb(58, 74, 107))
-        .fg(Color::White);
     for row in start.row..=end.row {
         let c_start = if row == start.row { start.col } else { min_col }.max(min_col);
         let c_end = if row == end.row { end.col } else { max_col }.min(max_col);
@@ -1884,25 +2377,43 @@ fn render_selection_highlight(frame: &mut Frame<'_>, app: &AppState) {
 }
 
 fn wrap_tagged_lines(
-    lines: Vec<(Line<'static>, Option<usize>)>,
+    lines: Vec<TaggedTranscriptLine>,
     width: usize,
-) -> (Vec<Line<'static>>, Vec<ThinkingHitZone>) {
+) -> (
+    Vec<Line<'static>>,
+    Vec<ThinkingHitZone>,
+    Vec<TranscriptWrappedLine>,
+) {
     if width == 0 {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), Vec::new());
     }
 
     let mut out = Vec::with_capacity(lines.len());
+    let mut doc_lines = Vec::with_capacity(lines.len());
     let mut hit_zones: Vec<ThinkingHitZone> = Vec::new();
     let mut active_zone: Option<(usize, usize)> = None;
 
-    for (line, entry_tag) in lines {
+    for tagged in lines {
+        let TaggedTranscriptLine {
+            line,
+            entry_tag,
+            gutter_len,
+        } = tagged;
+        let line_style = line.style;
         let line_start = out.len();
         let total_chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
         if total_chars == 0 {
-            out.push(Line::default());
+            out.push(Line::default().style(line_style));
+            doc_lines.push(TranscriptWrappedLine {
+                text: String::new(),
+                gutter_len: 0,
+                soft_wrapped_next: false,
+            });
         } else {
             let mut current_spans: Vec<Span<'static>> = Vec::new();
+            let mut current_text = String::new();
             let mut current_col = 0;
+            let mut is_first_row = true;
 
             for span in line.spans {
                 let style = span.style;
@@ -1912,10 +2423,17 @@ fn wrap_tagged_lines(
                         if !buf.is_empty() {
                             current_spans.push(Span::styled(std::mem::take(&mut buf), style));
                         }
-                        out.push(Line::from(std::mem::take(&mut current_spans)));
+                        out.push(Line::from(std::mem::take(&mut current_spans)).style(line_style));
+                        doc_lines.push(TranscriptWrappedLine {
+                            text: std::mem::take(&mut current_text),
+                            gutter_len: if is_first_row { gutter_len } else { 0 },
+                            soft_wrapped_next: true,
+                        });
+                        is_first_row = false;
                         current_col = 0;
                     }
                     buf.push(ch);
+                    current_text.push(ch);
                     current_col += 1;
                 }
                 if !buf.is_empty() {
@@ -1924,7 +2442,12 @@ fn wrap_tagged_lines(
             }
 
             if !current_spans.is_empty() {
-                out.push(Line::from(current_spans));
+                out.push(Line::from(current_spans).style(line_style));
+                doc_lines.push(TranscriptWrappedLine {
+                    text: current_text,
+                    gutter_len: if is_first_row { gutter_len } else { 0 },
+                    soft_wrapped_next: false,
+                });
             }
         }
         match (active_zone, entry_tag) {
@@ -1960,7 +2483,7 @@ fn wrap_tagged_lines(
         });
     }
 
-    (out, hit_zones)
+    (out, hit_zones, doc_lines)
 }
 
 #[cfg(test)]
@@ -2069,7 +2592,7 @@ mod tests {
     #[test]
     fn renders_transcript_completion_and_statusline() {
         let mut app = test_app();
-        app.transcript.push(TranscriptEntry::User {
+        app.tab_mut().transcript.push(TranscriptEntry::User {
             text: "Explain Cargo.toml".to_string(),
         });
         let turn_id = TurnId::from_raw("turn-ui-render");
@@ -2114,9 +2637,9 @@ mod tests {
             reason: TurnEndReason::Completed,
         });
 
-        app.metrics.last_tokens_per_sec = Some(42.5);
-        app.metrics.last_ttft_ms = Some(310);
-        app.metrics.last_turn_ms = Some(1400);
+        app.tab_mut().metrics.last_tokens_per_sec = Some(42.5);
+        app.tab_mut().metrics.last_ttft_ms = Some(310);
+        app.tab_mut().metrics.last_turn_ms = Some(1400);
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         assert!(app.completion.is_active());
@@ -2276,15 +2799,15 @@ mod tests {
     #[test]
     fn statusline_renders_approval_mode_badge() {
         let mut app = test_app();
-        app.approval_mode = ApprovalMode::AutoEdit;
+        app.tab_mut().approval_mode = ApprovalMode::AutoEdit;
         let edit = render_to_string(&mut app);
         assert!(edit.contains("EDIT"));
         assert!(edit.contains("INS"));
 
-        app.approval_mode = ApprovalMode::Yolo;
+        app.tab_mut().approval_mode = ApprovalMode::Yolo;
         assert!(render_to_string(&mut app).contains("YOLO"));
 
-        app.approval_mode = ApprovalMode::Plan;
+        app.tab_mut().approval_mode = ApprovalMode::Plan;
         assert!(render_to_string(&mut app).contains("PLAN"));
     }
 
@@ -2361,7 +2884,7 @@ mod tests {
             status: "M".to_string(),
             path: "meerai-tui/src/ui.rs".to_string(),
         });
-        app.transcript.push(TranscriptEntry::User {
+        app.tab_mut().transcript.push(TranscriptEntry::User {
             text: "hi".to_string(),
         });
         app.handle_agent_event(AgentEvent::TurnStarted {
@@ -2514,5 +3037,115 @@ mod tests {
         let recollapsed = render_to_string(&mut app);
         assert!(recollapsed.contains("▸ [error]"));
         assert!(!recollapsed.contains("line 2 details"));
+    }
+
+    #[test]
+    fn renders_session_tabs_badges_and_session_select_modal() {
+        let mut app = test_app();
+        app.tab_mut().title = Some("First Tab".to_string());
+        app.tab_mut().session_id = meerai_session::SessionId::from_raw("sess-first");
+
+        let (tx2, _rx2) = mpsc::unbounded_channel();
+        let (_etx2, erx2) = mpsc::unbounded_channel();
+        app.apply_opened_session(
+            crate::OpenedSession {
+                session_id: meerai_session::SessionId::from_raw("sess-second"),
+                title: Some("Second Tab".to_string()),
+                provider: "gemini".to_string(),
+                model: "gemini-3.8-flash".to_string(),
+                approval_mode: ApprovalMode::Ask,
+                transcript: Vec::new(),
+                events: Vec::new(),
+                cmd_tx: tx2,
+                event_rx: erx2,
+            },
+            false,
+        );
+        app.switch_to_tab(0);
+        app.tabs[1].has_unread = true;
+
+        let tab_bar_screen = render_to_string(&mut app);
+        assert!(tab_bar_screen.contains("1: First Tab"));
+        assert!(tab_bar_screen.contains("2: Second Tab •"));
+        assert!(tab_bar_screen.contains(" + "));
+        assert!(app.tab_hit_zones.len() >= 3);
+
+        app.modal = Some(ActiveModal::SessionSelect {
+            filter: String::new(),
+            selected: 0,
+            sessions: vec![
+                meerai_session::SessionSummary {
+                    id: meerai_session::SessionId::from_raw("sess-first"),
+                    dir: PathBuf::from("/tmp/sess-first"),
+                    title: Some("First Tab".to_string()),
+                    model: Some("gemini-3.8-flash".to_string()),
+                    created_at_ms: 100,
+                    updated_at_ms: 200,
+                    bytes: 64,
+                    parent_session_id: None,
+                },
+                meerai_session::SessionSummary {
+                    id: meerai_session::SessionId::from_raw("sess-second"),
+                    dir: PathBuf::from("/tmp/sess-second"),
+                    title: Some("Second Tab".to_string()),
+                    model: Some("gemini-3.8-flash".to_string()),
+                    created_at_ms: 80,
+                    updated_at_ms: 150,
+                    bytes: 64,
+                    parent_session_id: None,
+                },
+                meerai_session::SessionSummary {
+                    id: meerai_session::SessionId::from_raw("sess-other"),
+                    dir: PathBuf::from("/tmp/sess-other"),
+                    title: Some("Other Task".to_string()),
+                    model: Some("gemini-3.8-flash".to_string()),
+                    created_at_ms: 50,
+                    updated_at_ms: 100,
+                    bytes: 64,
+                    parent_session_id: None,
+                },
+            ],
+            loading: false,
+            error: None,
+        });
+
+        let modal_screen = render_to_string(&mut app);
+        assert!(modal_screen.contains("Switch Session (/sessions)"));
+        assert!(modal_screen.contains("[tab 1*]"));
+        assert!(modal_screen.contains("[tab 2]"));
+        assert!(modal_screen.contains("Other Task"));
+    }
+
+    #[test]
+    fn renders_distinct_user_thinking_tool_and_response_roles() {
+        let mut app = test_app();
+        app.tab_mut().transcript.push(TranscriptEntry::User {
+            text: "Inspect Cargo.toml".to_string(),
+        });
+        app.tab_mut()
+            .transcript
+            .push(TranscriptEntry::ToolCall(crate::ToolCallEntry {
+                call_id: "tc-1".to_string(),
+                name: "code-read_file".to_string(),
+                args: "{\"path\":\"Cargo.toml\"}".to_string(),
+                status: ToolCallStatus::Succeeded,
+                output: Some("[workspace]\nmembers = []".to_string()),
+            }));
+        app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+            text: "# Summary\n```toml\nname = \"meerai\"\n```".to_string(),
+            reasoning: "Check workspace layout.".to_string(),
+            streaming: false,
+            reasoning_expanded: true,
+        });
+
+        let rendered = render_to_string(&mut app);
+        assert!(rendered.contains("┃ YOU"));
+        assert!(rendered.contains("┃ Inspect Cargo.toml"));
+        assert!(rendered.contains("▸ [tool] code-read_file [ok]"));
+        assert!(rendered.contains("↳ [workspace] members = []"));
+        assert!(rendered.contains("▾ Thinking (1 lines)"));
+        assert!(rendered.contains("● Response"));
+        assert!(rendered.contains("# Summary"));
+        assert!(rendered.contains("name = \"meerai\""));
     }
 }

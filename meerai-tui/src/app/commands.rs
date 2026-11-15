@@ -45,7 +45,8 @@ impl AppState {
             }
         }
         for message in messages {
-            self.transcript
+            self.tab_mut()
+                .transcript
                 .push(TranscriptEntry::System { text: message });
         }
     }
@@ -57,23 +58,49 @@ impl AppState {
 
         match cmd {
             "/help" => {
-                self.auto_follow = true;
-                self.transcript.push(TranscriptEntry::System {
+                let tab = self.tab_mut();
+                tab.auto_follow = true;
+                tab.transcript.push(TranscriptEntry::System {
                     text: format_help_text(),
                 });
             }
+            "/sessions" => {
+                if arg.is_empty() {
+                    self.open_session_select();
+                } else {
+                    self.switch_to_session_query(arg);
+                }
+            }
+            "/new" => {
+                if self.session_opener.is_some() {
+                    self.status_notice = Some("Opening new session tab...".to_string());
+                    self.pending_session_actions
+                        .push(PendingSessionAction::CreateNewTab);
+                } else {
+                    self.tab_mut().transcript.push(TranscriptEntry::Error {
+                        text: "Session switching is not available in this context.".to_string(),
+                        expanded: false,
+                    });
+                }
+            }
+            "/close" => {
+                self.close_active_tab();
+            }
             "/auth" => {
-                self.auto_follow = true;
                 let data_dir = default_data_dir();
                 let auth_path = data_dir.as_deref().map(auth_file_path);
-                let runtime = self.runtime.read().unwrap();
-                let text = format_auth_list(
-                    &runtime.catalog,
-                    self.secrets.as_ref(),
-                    auth_path.as_deref(),
-                    self.config_dir.as_deref(),
-                );
-                self.transcript.push(TranscriptEntry::System { text });
+                let text = {
+                    let runtime = self.runtime.read().unwrap();
+                    format_auth_list(
+                        &runtime.catalog,
+                        self.secrets.as_ref(),
+                        auth_path.as_deref(),
+                        self.config_dir.as_deref(),
+                    )
+                };
+                let tab = self.tab_mut();
+                tab.auto_follow = true;
+                tab.transcript.push(TranscriptEntry::System { text });
             }
             "/sidebar" => {
                 self.toggle_sidebar();
@@ -112,7 +139,7 @@ impl AppState {
                 self.apply_skill(arg);
             }
             "/model" => {
-                self.auto_follow = true;
+                self.tab_mut().auto_follow = true;
                 if arg.is_empty() {
                     self.open_model_input();
                 } else {
@@ -121,68 +148,72 @@ impl AppState {
                 }
             }
             "/clear" => {
-                self.transcript.clear();
-                self.pending_assistant_idx = None;
-                self.assistant_items.clear();
-                self.tool_items.clear();
-                self.subagent_items.clear();
-                self.scroll_offset = 0;
-                self.total_lines = 0;
-                self.auto_follow = true;
+                let tab = self.tab_mut();
+                tab.transcript.clear();
+                tab.pending_assistant_idx = None;
+                tab.assistant_items.clear();
+                tab.tool_items.clear();
+                tab.subagent_items.clear();
+                tab.scroll_offset = 0;
+                tab.total_lines = 0;
+                tab.auto_follow = true;
             }
             "/reset" => {
-                self.transcript.clear();
-                self.pending_assistant_idx = None;
-                self.assistant_items.clear();
-                self.tool_items.clear();
-                self.subagent_items.clear();
-                self.turn_id = None;
-                self.usage = UsageStats::default();
-                self.metrics = TurnMetrics::default();
-                self.scroll_offset = 0;
-                self.total_lines = 0;
-                self.auto_follow = true;
-                self.is_running = false;
-                self.active_tool = None;
-                let _ = self.cmd_tx.send(AgentCommand::Reset);
-                self.transcript.push(TranscriptEntry::System {
+                let tab = self.tab_mut();
+                tab.transcript.clear();
+                tab.pending_assistant_idx = None;
+                tab.assistant_items.clear();
+                tab.tool_items.clear();
+                tab.subagent_items.clear();
+                tab.turn_id = None;
+                tab.usage = UsageStats::default();
+                tab.metrics = TurnMetrics::default();
+                tab.scroll_offset = 0;
+                tab.total_lines = 0;
+                tab.auto_follow = true;
+                tab.is_running = false;
+                tab.active_tool = None;
+                let _ = tab.cmd_tx.send(AgentCommand::Reset);
+                tab.transcript.push(TranscriptEntry::System {
                     text: "Conversation reset.".to_string(),
                 });
             }
             "/cancel" => {
-                if self.is_running {
-                    let _ = self.cmd_tx.send(AgentCommand::Cancel);
+                let tab = self.tab_mut();
+                if tab.is_running {
+                    let _ = tab.cmd_tx.send(AgentCommand::Cancel);
                     self.status_notice = Some("Cancelling turn...".to_string());
                 } else {
-                    self.transcript.push(TranscriptEntry::System {
+                    tab.transcript.push(TranscriptEntry::System {
                         text: "No active turn to cancel.".to_string(),
                     });
                 }
             }
             "/compact" => {
-                self.auto_follow = true;
-                self.transcript.push(TranscriptEntry::System {
+                let tab = self.tab_mut();
+                tab.auto_follow = true;
+                tab.transcript.push(TranscriptEntry::System {
                     text: "Compaction requested.".to_string(),
                 });
-                let _ = self.cmd_tx.send(AgentCommand::Compact);
+                let _ = tab.cmd_tx.send(AgentCommand::Compact);
             }
             "/mode" => {
-                self.auto_follow = true;
+                let tab = self.tab_mut();
+                tab.auto_follow = true;
                 if arg.is_empty() {
-                    self.transcript.push(TranscriptEntry::System {
-                        text: format!("Approval mode: {}", approval_mode_label(self.approval_mode)),
-                    });
+                    let text = format!("Approval mode: {}", approval_mode_label(tab.approval_mode));
+                    tab.transcript.push(TranscriptEntry::System { text });
                 } else {
                     match parse_approval_mode(arg) {
                         Some(mode) => {
-                            self.approval_mode = mode;
-                            let _ = self.cmd_tx.send(AgentCommand::SetPermissionMode(mode));
-                            self.transcript.push(TranscriptEntry::System {
+                            tab.approval_mode = mode;
+                            let _ = tab.cmd_tx.send(AgentCommand::SetPermissionMode(mode));
+                            tab.transcript.push(TranscriptEntry::System {
                                 text: format!("Approval mode: {}", approval_mode_label(mode)),
                             });
                         }
                         None => {
-                            self.transcript.push(TranscriptEntry::Error {
+                            tab.transcript.push(TranscriptEntry::Error {
                                 text: format!(
                                     "Invalid mode: {arg}. Expected: plan, ask, auto-edit, yolo"
                                 ),
@@ -196,12 +227,82 @@ impl AppState {
                 self.quit();
             }
             other => {
-                self.auto_follow = true;
-                self.transcript.push(TranscriptEntry::Error {
+                let tab = self.tab_mut();
+                tab.auto_follow = true;
+                tab.transcript.push(TranscriptEntry::Error {
                     text: format!("Unknown command: {other}. Type /help for available commands."),
                     expanded: false,
                 });
             }
+        }
+    }
+
+    pub fn open_session_select(&mut self) {
+        let open_summaries: Vec<SessionSummary> = self
+            .tabs
+            .iter()
+            .map(|tab| SessionSummary {
+                id: tab.session_id.clone(),
+                dir: self.workspace_root.clone(),
+                title: Some(tab.display_title()),
+                model: (!tab.model.trim().is_empty()).then(|| tab.model.clone()),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                bytes: 0,
+                parent_session_id: None,
+            })
+            .collect();
+        let has_opener = self.session_opener.is_some();
+        self.modal = Some(ActiveModal::SessionSelect {
+            filter: String::new(),
+            selected: 0,
+            sessions: open_summaries,
+            loading: has_opener,
+            error: None,
+        });
+        if has_opener {
+            self.pending_session_actions
+                .push(PendingSessionAction::RefreshSessions);
+        }
+    }
+
+    pub(super) fn switch_to_session_query(&mut self, query: &str) {
+        let trimmed = query.trim();
+        if let Some(exact_idx) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.session_id.as_str() == trimmed)
+        {
+            self.switch_to_tab(exact_idx);
+            self.status_notice = Some(format!("Switched to tab {}", exact_idx + 1));
+            return;
+        }
+        let prefix_matches: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| tab.session_id.as_str().starts_with(trimmed))
+            .map(|(idx, _)| idx)
+            .collect();
+        if prefix_matches.len() == 1 && self.session_opener.is_none() {
+            let idx = prefix_matches[0];
+            self.switch_to_tab(idx);
+            self.status_notice = Some(format!("Switched to tab {}", idx + 1));
+            return;
+        }
+        if self.session_opener.is_some() {
+            self.status_notice = Some(format!("Opening session {trimmed}..."));
+            self.pending_session_actions
+                .push(PendingSessionAction::OpenSessionQuery(trimmed.to_string()));
+        } else if prefix_matches.len() == 1 {
+            let idx = prefix_matches[0];
+            self.switch_to_tab(idx);
+            self.status_notice = Some(format!("Switched to tab {}", idx + 1));
+        } else {
+            self.tab_mut().transcript.push(TranscriptEntry::Error {
+                text: format!("Session not found: {trimmed}"),
+                expanded: false,
+            });
         }
     }
 
@@ -228,7 +329,7 @@ impl AppState {
     }
 
     pub(super) fn apply_agent(&mut self, id: &str) {
-        self.auto_follow = true;
+        self.tab_mut().auto_follow = true;
         let Some(agent) = self.agents.iter().find(|agent| agent.id == id).cloned() else {
             let available = self.available_agent_ids();
             let message = if id.is_empty() {
@@ -236,20 +337,21 @@ impl AppState {
             } else {
                 format!("Unknown agent: {id}. Available agents: {available}")
             };
-            self.transcript
+            self.tab_mut()
+                .transcript
                 .push(TranscriptEntry::System { text: message });
             return;
         };
         let model = self.agent_model_spec(&agent);
         let source = agent.source.label();
         self.send_agent(&agent, model);
-        self.transcript.push(TranscriptEntry::System {
+        self.tab_mut().transcript.push(TranscriptEntry::System {
             text: format!("Applied agent {} ({source}).", agent.id),
         });
     }
 
     pub(super) fn apply_skill(&mut self, id: &str) {
-        self.auto_follow = true;
+        self.tab_mut().auto_follow = true;
         let Some(skill) = self.skills.iter().find(|skill| skill.id == id).cloned() else {
             let available = self.available_skill_ids();
             let message = if id.is_empty() {
@@ -257,19 +359,20 @@ impl AppState {
             } else {
                 format!("Unknown skill: {id}. Available skills: {available}")
             };
-            self.transcript
+            self.tab_mut()
+                .transcript
                 .push(TranscriptEntry::System { text: message });
             return;
         };
         let source = skill.source.label();
         self.send_skill(&skill);
-        self.transcript.push(TranscriptEntry::System {
+        self.tab_mut().transcript.push(TranscriptEntry::System {
             text: format!("Applied skill {} ({source}).", skill.id),
         });
     }
 
     pub(super) fn send_agent(&mut self, agent: &AgentDefinition, model: Option<String>) {
-        let _ = self.cmd_tx.send(AgentCommand::ApplyAgent {
+        let _ = self.tab().cmd_tx.send(AgentCommand::ApplyAgent {
             name: agent.id.clone(),
             instructions: agent.prompt.clone(),
             model,
@@ -277,7 +380,7 @@ impl AppState {
     }
 
     pub(super) fn send_skill(&mut self, skill: &SkillDefinition) {
-        let _ = self.cmd_tx.send(AgentCommand::ApplySkill {
+        let _ = self.tab().cmd_tx.send(AgentCommand::ApplySkill {
             name: skill.id.clone(),
             instructions: skill.body.clone(),
         });
@@ -288,7 +391,7 @@ impl AppState {
             Ok(Some(raw)) => raw,
             Ok(None) => return None,
             Err(raw) => {
-                self.transcript.push(TranscriptEntry::System {
+                self.tab_mut().transcript.push(TranscriptEntry::System {
                     text: format!(
                         "Agent {} model '{raw}' implies a provider change; it is not applied.",
                         agent.id
@@ -297,11 +400,12 @@ impl AppState {
                 return None;
             }
         };
+        let provider = self.tab().active_provider.clone();
         let spec = {
             let rt = self.runtime.read().unwrap();
-            rt.catalog.format_genai_spec(&self.active_provider, raw)
+            rt.catalog.format_genai_spec(&provider, raw)
         };
-        self.model = raw.to_string();
+        self.tab_mut().model = raw.to_string();
         Some(spec)
     }
 }
@@ -310,6 +414,7 @@ fn format_help_text() -> String {
     let commands = crate::completion::SLASH_COMMANDS
         .iter()
         .map(|(cmd, _, _)| match *cmd {
+            "/sessions" => "/sessions [id]".to_string(),
             "/model" => "/model [name]".to_string(),
             "/agent" => "/agent <id> (or @agent/<id>)".to_string(),
             "/skill" => "/skill <id> (or @skill/<id>)".to_string(),
@@ -323,9 +428,10 @@ fn format_help_text() -> String {
         .join(", ");
     format!(
         "Commands: {commands}\n\
-         Shortcuts: Ctrl-f search, Ctrl-t toggle thinking, Ctrl-b toggle sidebar, click thinking or changed file\n\
-         Insert: Enter send, Shift/Alt+Enter newline, @ file, / command, Esc Normal\n\
-         Normal: j/k/Up/Down scroll, / search, t toggle thinking, Ctrl-d/Ctrl-u half-page, gg/G top/bottom, i/a Insert, q quit"
+         Tabs: Alt-1..9 / Alt-Left/Right / Ctrl-PageUp/Down / click tab, Ctrl-w close tab, click [+] new tab\n\
+         Shortcuts: Ctrl-f search, Ctrl-t toggle thinking, Ctrl-b toggle sidebar, drag+scroll or click then Shift+click to copy\n\
+         Insert: Enter send, Shift/Alt/Ctrl+Enter or Ctrl-j or \\+Enter newline, @ file, / command, Esc Normal\n\
+         Normal: j/k/Up/Down scroll, gt/gT/[ / ] switch tab, / search, t toggle thinking, y copy reply, Ctrl-d/Ctrl-u half-page, gg/G top/bottom, i/a Insert, q quit"
     )
 }
 

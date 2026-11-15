@@ -80,8 +80,10 @@ Rules for all shapes:
   the default is the session model, and summarizer usage counts toward `max_session_tokens`.
 - Environment expansion supports `${VAR}` / `${VAR|default}` and `{env:VAR}`
   (`settings::expand_config_secret`).
-- `auth.json` lives in the app data dir, is written by `meerai auth login`, and is `0600` on Unix.
-  There is no keychain/keyring integration.
+- Credentials use `KeychainSecretStore` (macOS `/usr/bin/security`, Linux `secret-tool`, disabled via
+  `MEERAI_DISABLE_KEYCHAIN`) under service `meerai`, migrating stale entries out of `auth.json`. When
+  unavailable or failing, it falls back to `FileSecretStore` (`auth.json` in the app data dir,
+  written by `meerai auth login`, `0600` on Unix).
 - Tool-output redaction is `redact_run` in `meerai-agents/src/redact.rs`. It runs in the agent after
   the tool run and before spill, session log, UI items, or model text. Patterns: OpenAI/OpenRouter
   `sk-`, Anthropic `sk-ant-`, Google `AIza`, GitHub `ghp_`/`github_pat_`, AWS `AKIA`, Slack `xox*`,
@@ -199,30 +201,37 @@ Rules for all shapes:
   plus writable roots, reads to the workspace plus readable roots (including the session dir).
 - `meerai-tui` keeps rendering (`ratatui` + `crossterm`) decoupled from providers/tools via
   `AgentEvent` / `AgentCommand` channels. Use `tokio::select!` in the UI loop.
-- Current TUI surface: `NOR`/`INS` modes, `/` slash commands (completion list in
-  `completion.rs`, including `/agent`/`/skill`), `@` Mentions popup (agents, skills, files; Tab
-  accepts, Enter accepts without submitting), approval overlay (`y`/Enter, `t`, `a`, `n`, `r`, Esc),
-  sidebar with file changes, diff/search modals, transcript replay on resume, `Ctrl-b` sidebar,
-  `Ctrl-t` thinking, `Ctrl-c` cancel-then-
-  quit.
+- Current TUI surface: `NOR`/`INS` modes, multi-session tab bar (`[ + ]`, `Alt-1..9`,
+  `Ctrl-PageUp`/`PageDown`, `Alt-Left`/`Right`, `Ctrl-w`, `gt`/`gT`/`[`/`]`, mouse click), `/`
+  slash commands (completion list in `completion.rs`, including `/sessions [id-or-prefix]`,
+  `/new`, `/close`, `/agent`/`/skill`), `/sessions` picker modal, `@` Mentions popup (agents,
+  skills, files; Tab accepts, Enter accepts without submitting), approval overlay (`y`/Enter, `t`,
+  `a`, `n`, `r`, Esc), sidebar with file changes, diff/search modals, transcript replay on resume,
+  `Ctrl-b` sidebar, `Ctrl-t` thinking, `Ctrl-c` cancel-then-quit.
 - Planned only (do not describe as implemented): `Space` leader menu, Select mode, `:` command
-  mode, transcript search, `/rewind`, session picker, themes, OSC 52 clipboard fallback.
+  mode, transcript search, `/rewind`, themes, OSC 52 clipboard fallback.
 
 ## Security posture (M11)
 
-- **Landed:** path guards (`resolve_for_read`/`resolve_for_write`), `plan` hard read-only, approval
-  gates with headless fail-fast, provider-secret env scrub in `code/shell.rs`, best-effort
-  `redact_run`/`redact_text`, session `0700`/`0600` permissions, opt-in retention, and
-  session/turn token budgets.
+- **Landed:** path guards (`resolve_for_read`/`resolve_for_write`) plus sensitive-file path blocks
+  (`is_sensitive_path`) and default policy denies (`PolicyEngine::default_sensitive_rules()`), `plan`
+  hard read-only, approval gates with headless fail-fast, provider-secret env scrub in
+  `code/shell.rs` + `lsp/client.rs`, OS command sandboxing (`ExecutionWorld`: `SeatbeltWorld` on
+  macOS, `BubblewrapWorld` on Linux, `HostWorld` fallback with warning or `MEERAI_DISABLE_SANDBOX`),
+  OS keychain credential storage (`KeychainSecretStore` with `auth.json` fallback), best-effort
+  `redact_run`/`redact_text`, heuristic prompt-injection screening (`screen_run` /
+  `screen_untrusted_text`), session `0700`/`0600` permissions, opt-in retention, session/turn token
+  budgets, `deny.toml` + `cargo-deny-action` audit in CI/release, `docs/threat-model.md`, and
+  conditional macOS/Windows release signing steps (unsigned until signing secrets exist).
 - **M12 definitions are prompt text:** `.agents`/`.claude` agents and skills are untrusted
   repository instructions. They grant no tool, permission, script, MCP, or sandbox capability, and
   `tools`/`permissions`/`allowed-tools` are warning-only. Do not describe discovery as a security
   control.
-- **Backlog — never describe as shipped:** OS sandbox (`ExecutionWorld`: macOS Seatbelt, Linux
-  bubblewrap/Landlock, network denied by default), dependency audit in CI
-  (`cargo audit`/`cargo deny`), signed and notarized macOS/Windows artifacts, a written threat
-  model for repo instructions/model output/hooks/MCP/subagents, prompt-injection screening, and an
-  OS keychain. Source of truth: `docs/harness-spec.md` §9.6.
+- **Residual limits (see `docs/threat-model.md`):** Windows uses `HostWorld` and lacks Unix file
+  modes; `SeatbeltWorld`/`BubblewrapWorld` allow host-wide reads outside the workspace; `LspToolset`
+  is not wrapped in `ExecutionWorld`; redaction and injection screening are regex best-effort;
+  release archives remain unsigned when signing secrets are not set. Source of truth:
+  `docs/harness-spec.md` §9.6.
 
 ## Common review rejections
 
@@ -239,10 +248,11 @@ Rules for all shapes:
 - Describing `plan`/`yolo` as advisory: `plan` denies non-read effects before rules; `yolo` honors
   explicit `deny` rules.
 - Treating grant resources as globs (they match literally) or removing the TUI `t` turn-grant key.
-- Loading `.env` implicitly, or claiming an OS sandbox.
-- Claiming a security control that is M11 backlog: `cargo audit`/`cargo deny` in CI, signed or
-  notarized artifacts, a written threat model, prompt-injection screening, or an OS keychain.
-  See `docs/harness-spec.md` §9.6.
+- Loading `.env` implicitly, bypassing sensitive-file blocks (`is_sensitive_path` /
+  `default_sensitive_rules`), or claiming `HostWorld` / Windows runs inside an OS sandbox.
+- Claiming heuristic screening/redaction are guarantees, claiming `LspToolset` runs inside
+  `ExecutionWorld`, or claiming release binaries are signed when signing secrets are not configured.
+  See `docs/threat-model.md`.
 - Resolving the workspace to the discovered project root: `find_project_root` locates policy only;
   tools and sessions stay CWD-relative.
 - Letting a project `sessions` block affect retention, or pruning the currently active session.

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
+use std::process::Output;
+use std::sync::Arc;
 use std::time::Duration;
 
 use meerai_core::{
@@ -7,8 +8,8 @@ use meerai_core::{
     ToolOutput, ToolPermissionSpec, ToolRun, Toolset, async_trait,
 };
 
-use crate::code::shell::scrub_command_env;
 use crate::code::{CodeTools, definition_for, failure_run, parse_args, truncate_middle};
+use crate::world::{ExecutionWorld, HostWorld, SandboxPolicy, WorldCommand, WorldExecOutcome};
 
 const TOOLSET_NAME: &str = "sac";
 const RUN_SCRIPT_TOOL: &str = "sac-run_script";
@@ -41,6 +42,7 @@ struct RunScriptArgs {
 pub struct SearchAsCodeToolset {
     workspace_root: PathBuf,
     sensitive_env_vars: Vec<String>,
+    execution_world: Arc<dyn ExecutionWorld>,
 }
 
 impl SearchAsCodeToolset {
@@ -48,6 +50,7 @@ impl SearchAsCodeToolset {
         Self {
             workspace_root: workspace_root.into(),
             sensitive_env_vars: Vec::new(),
+            execution_world: Arc::new(HostWorld::new()),
         }
     }
 
@@ -60,8 +63,17 @@ impl SearchAsCodeToolset {
         self
     }
 
+    pub fn with_execution_world(mut self, world: Arc<dyn ExecutionWorld>) -> Self {
+        self.execution_world = world;
+        self
+    }
+
     pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
+    }
+
+    pub fn execution_world(&self) -> &Arc<dyn ExecutionWorld> {
+        &self.execution_world
     }
 
     async fn run_script(&self, args: RunScriptArgs) -> ToolRun {
@@ -83,32 +95,32 @@ impl SearchAsCodeToolset {
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .clamp(1, MAX_TIMEOUT_MS);
 
-        let (program, argv): (&str, Vec<&str>) = match args.language {
-            ScriptLanguage::Python => ("python3", vec!["-I", "-c", &args.script]),
-            ScriptLanguage::Javascript => ("node", vec!["-e", &args.script]),
+        let (program, argv): (&str, Vec<String>) = match args.language {
+            ScriptLanguage::Python => (
+                "python3",
+                vec!["-I".to_string(), "-c".to_string(), args.script.clone()],
+            ),
+            ScriptLanguage::Javascript => ("node", vec!["-e".to_string(), args.script.clone()]),
         };
 
-        let mut cmd = tokio::process::Command::new(program);
-        cmd.args(argv)
-            .current_dir(&cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-
-        scrub_command_env(&mut cmd, &self.sensitive_env_vars);
-
-        let child = match cmd.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                return failure_run(format!("cannot start {program}: {error}"));
-            }
+        let command = WorldCommand {
+            program: program.to_string(),
+            args: argv,
+            cwd: cwd.clone(),
+            removed_env_vars: self.sensitive_env_vars.clone(),
+        };
+        let policy = SandboxPolicy::ReadOnly {
+            workspace_root: cwd.clone(),
+            readable_roots: vec![cwd],
+            allow_network: false,
         };
 
-        match tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait_with_output())
+        match self
+            .execution_world
+            .spawn_command(&command, &policy, Duration::from_millis(timeout_ms))
             .await
         {
-            Err(_) => {
+            Ok(WorldExecOutcome::TimedOut) => {
                 let mut run = failure_run(format!(
                     "script timed out after {timeout_ms} ms and was killed"
                 ));
@@ -116,8 +128,8 @@ impl SearchAsCodeToolset {
                     Some("Narrow the script scope, or raise timeout_ms (up to 60000).".to_string());
                 run
             }
-            Ok(Err(error)) => failure_run(format!("script failed: {error}")),
-            Ok(Ok(output)) => complete(output),
+            Ok(WorldExecOutcome::Output(output)) => complete(output),
+            Err(error) => failure_run(format!("cannot start {program}: {error}")),
         }
     }
 }
@@ -353,5 +365,73 @@ mod tests {
 
         assert_eq!(run.observation.status, ObservationStatus::Success);
         assert_eq!(run.observation.stdout.trim(), "MISSING MISSING");
+    }
+
+    #[tokio::test]
+    async fn uses_readonly_network_free_policy_in_execution_world() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            use std::sync::Mutex as StdMutex;
+
+            #[derive(Debug, Default)]
+            struct RecordingWorld {
+                policies: StdMutex<Vec<SandboxPolicy>>,
+            }
+
+            #[async_trait]
+            impl ExecutionWorld for RecordingWorld {
+                fn kind(&self) -> &'static str {
+                    "recording"
+                }
+
+                fn is_sandboxed(&self) -> bool {
+                    true
+                }
+
+                async fn spawn_command(
+                    &self,
+                    _command: &WorldCommand,
+                    policy: &SandboxPolicy,
+                    _timeout: Duration,
+                ) -> std::io::Result<WorldExecOutcome> {
+                    self.policies.lock().unwrap().push(policy.clone());
+                    Ok(WorldExecOutcome::Output(Output {
+                        status: std::process::ExitStatus::from_raw(0),
+                        stdout: b"ok".to_vec(),
+                        stderr: Vec::new(),
+                    }))
+                }
+            }
+
+            let dir = TempDir::new().unwrap();
+            let world = Arc::new(RecordingWorld::default());
+            let toolset = SearchAsCodeToolset::new(dir.path()).with_execution_world(world.clone());
+
+            let run = toolset
+                .invoke_structured(
+                    RUN_SCRIPT_TOOL,
+                    r#"{"language": "python", "script": "print('ok')"}"#,
+                )
+                .await
+                .unwrap();
+            assert_eq!(run.observation.status, ObservationStatus::Success);
+
+            let recorded = world.policies.lock().unwrap();
+            assert_eq!(recorded.len(), 1);
+            match &recorded[0] {
+                SandboxPolicy::ReadOnly {
+                    workspace_root,
+                    readable_roots,
+                    allow_network,
+                } => {
+                    let canon = dir.path().canonicalize().unwrap();
+                    assert_eq!(workspace_root, &canon);
+                    assert_eq!(readable_roots, &[canon]);
+                    assert!(!allow_network);
+                }
+                other => panic!("expected ReadOnly policy, got {other:?}"),
+            }
+        }
     }
 }
