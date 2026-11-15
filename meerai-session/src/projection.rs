@@ -153,6 +153,10 @@ fn to_genai_tool_call(call: &meerai_core::ToolCall) -> GenaiToolCall {
     }
 }
 
+pub fn join_text_blocks(blocks: &[ContentBlock]) -> String {
+    join_text(blocks, false)
+}
+
 fn join_text(blocks: &[ContentBlock], keep_reasoning: bool) -> String {
     blocks
         .iter()

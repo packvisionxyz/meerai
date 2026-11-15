@@ -2,36 +2,23 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use genai::adapter::AdapterKind;
 use genai::chat::ChatOptions;
 use genai::resolver::{AuthData, Endpoint};
 use genai::{Client, Headers, ModelIden};
+use meerai_common::settings::{
+    AppSettings, ProviderOptions, legacy_user_models_path, resolve_config_api_key,
+    user_providers_path,
+};
+pub use meerai_core::env::{MEERAI_USER_AGENT, generate_opencode_session_id};
 use serde::Deserialize;
 
 use crate::secrets::SecretStore;
-use crate::settings::{
-    AppSettings, ProviderOptions, expand_config_secret, legacy_user_models_path,
-    user_providers_path,
-};
 
 const BUNDLED_PROVIDERS_YAML: &str = include_str!("../providers.yml");
-pub const MEERAI_USER_AGENT: &str = concat!("meerai/", env!("CARGO_PKG_VERSION"));
-
-pub fn generate_opencode_session_id() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = u64::from(std::process::id());
-    format!("ses_{millis:012x}{pid:08x}{seq:08x}")
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderInfo {
@@ -218,12 +205,8 @@ impl ProviderCatalog {
                 .default_model
                 .map(|m| m.trim().to_string())
                 .filter(|m| !m.is_empty());
-            let config_api_key = entry
-                .options
-                .as_ref()
-                .and_then(|opts| opts.api_key.as_deref())
-                .and_then(expand_config_secret)
-                .or_else(|| entry.api_key.as_deref().and_then(expand_config_secret));
+            let config_api_key =
+                resolve_config_api_key(entry.options.as_ref(), entry.api_key.as_deref());
 
             if let Some(existing) = self.providers.iter_mut().find(|p| p.id == id) {
                 if let Some(display_name) = entry.display_name {
@@ -282,6 +265,19 @@ impl ProviderCatalog {
 
     pub fn providers(&self) -> &[ProviderInfo] {
         &self.providers
+    }
+
+    pub fn sensitive_env_vars(&self) -> Vec<String> {
+        let mut vars: BTreeSet<String> = BTreeSet::new();
+        for provider in &self.providers {
+            for var in &provider.env_vars {
+                let clean = var.trim();
+                if !clean.is_empty() {
+                    vars.insert(clean.to_string());
+                }
+            }
+        }
+        vars.into_iter().collect()
     }
 
     pub fn provider(&self, provider_id: &str) -> Option<&ProviderInfo> {
@@ -697,7 +693,7 @@ mod tests {
         let mut settings = AppSettings::default();
         settings.providers.insert(
             "openai".to_string(),
-            crate::settings::SavedProviderSettings {
+            meerai_common::settings::SavedProviderSettings {
                 options: Some(ProviderOptions {
                     api_key: Some("sk-proj-abcdefgh9999".to_string()),
                 }),

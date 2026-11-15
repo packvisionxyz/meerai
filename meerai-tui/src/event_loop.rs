@@ -5,11 +5,11 @@ use anyhow::Result;
 use crossterm::event::EventStream;
 use futures::StreamExt;
 use meerai_agents::{AgentEvent, SessionItem};
-use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::{self, MissedTickBehavior};
 
-use crate::app::{AppState, FileChangeEntry, parse_git_status_porcelain};
+use crate::app::{AppState, FileChangeEntry};
+use crate::diff::list_git_changes;
 use crate::terminal::TerminalGuard;
 use crate::ui;
 
@@ -137,17 +137,9 @@ fn spawn_git_status_refresh(
     }
     *in_flight = true;
     tokio::spawn(async move {
-        let output = Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(workspace_root)
-            .output()
-            .await;
-        let changes = match output {
-            Ok(out) if out.status.success() => {
-                parse_git_status_porcelain(&String::from_utf8_lossy(&out.stdout))
-            }
-            _ => Vec::new(),
-        };
+        let changes = tokio::task::spawn_blocking(move || list_git_changes(&workspace_root))
+            .await
+            .unwrap_or_default();
         let _ = tx.send(changes);
     });
 }

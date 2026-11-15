@@ -10,9 +10,10 @@ mod write_file;
 
 use std::path::{Path, PathBuf};
 
+pub(crate) use meerai_core::text::truncate_middle;
 use meerai_core::{
-    EffectClass, ToolDefinition, ToolError, ToolObservation, ToolOutput, ToolRun, Toolset,
-    async_trait,
+    EffectClass, PermissionAction, ToolDefinition, ToolError, ToolObservation, ToolOutput,
+    ToolPermissionSpec, ToolRun, Toolset, async_trait,
 };
 
 pub const TOOL_NAMES: [&str; 7] = [
@@ -32,6 +33,7 @@ pub struct CodeTools {
     workspace_root: PathBuf,
     writable_roots: Vec<PathBuf>,
     readable_roots: Vec<PathBuf>,
+    sensitive_env_vars: Vec<String>,
 }
 
 impl CodeTools {
@@ -40,6 +42,7 @@ impl CodeTools {
             workspace_root: workspace_root.into(),
             writable_roots: Vec::new(),
             readable_roots: Vec::new(),
+            sensitive_env_vars: Vec::new(),
         }
     }
 
@@ -53,6 +56,15 @@ impl CodeTools {
         self
     }
 
+    pub fn with_sensitive_env_vars(mut self, vars: Vec<String>) -> Self {
+        self.sensitive_env_vars = vars
+            .into_iter()
+            .map(|v| v.trim().to_ascii_uppercase())
+            .filter(|v| !v.is_empty())
+            .collect();
+        self
+    }
+
     pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
     }
@@ -63,6 +75,10 @@ impl CodeTools {
 
     pub fn readable_roots(&self) -> &[PathBuf] {
         &self.readable_roots
+    }
+
+    pub(crate) fn sensitive_env_vars(&self) -> &[String] {
+        &self.sensitive_env_vars
     }
 }
 
@@ -119,44 +135,6 @@ pub(crate) fn refused_run(reason: String) -> ToolRun {
     run_from_observation(ToolObservation::refused(reason))
 }
 
-pub(crate) fn truncate_middle(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-
-    let head_budget = max_bytes / 2;
-    let tail_budget = max_bytes - head_budget;
-    let head_end = floor_char_boundary(text, head_budget);
-    let tail_start = ceil_char_boundary(text, text.len() - tail_budget);
-    let omitted = tail_start.saturating_sub(head_end);
-
-    format!(
-        "{}\n... [{omitted} bytes omitted] ...\n{}",
-        &text[..head_end],
-        &text[tail_start..]
-    )
-}
-
-fn floor_char_boundary(text: &str, mut index: usize) -> usize {
-    if index >= text.len() {
-        return text.len();
-    }
-    while index > 0 && !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
-
-fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
-    if index >= text.len() {
-        return text.len();
-    }
-    while index < text.len() && !text.is_char_boundary(index) {
-        index += 1;
-    }
-    index
-}
-
 #[async_trait]
 impl Toolset for CodeTools {
     fn name(&self) -> String {
@@ -186,6 +164,28 @@ impl Toolset for CodeTools {
             "shell" => EffectClass::Execute,
             _ => EffectClass::Read,
         }
+    }
+
+    fn permission_spec(&self, fn_name: &str) -> Option<ToolPermissionSpec> {
+        match bare_name(fn_name)? {
+            "read_file" | "list_dir" | "grep" | "glob" => Some(ToolPermissionSpec {
+                action: PermissionAction::Read,
+                resource_arg: Some("path"),
+            }),
+            "write_file" | "edit_file" => Some(ToolPermissionSpec {
+                action: PermissionAction::Edit,
+                resource_arg: Some("path"),
+            }),
+            "shell" => Some(ToolPermissionSpec {
+                action: PermissionAction::Shell,
+                resource_arg: Some("command"),
+            }),
+            _ => None,
+        }
+    }
+
+    fn should_spill_output(&self, fn_name: &str) -> bool {
+        bare_name(fn_name) != Some("read_file")
     }
 
     async fn invoke(&self, fn_name: &str, args: &str) -> Result<ToolOutput, ToolError> {

@@ -21,7 +21,6 @@ function Test-Requirement {
 
 function Test-Requirements {
     # BEGIN GENERATED REQUIREMENTS
-    Test-Requirement -Command 'git' -Reason 'tracks changed files in the TUI File Changes panel' -Setup 'Install Git (https://git-scm.com/downloads) and ensure ''git'' is on your PATH.'
     # END GENERATED REQUIREMENTS
 }
 

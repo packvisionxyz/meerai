@@ -112,7 +112,7 @@ jobs:
 
       - name: Build release binary
         shell: bash
-        run: cargo build --release --locked -p meerai-tui --target "${{ matrix.target }}"
+        run: cargo build --release --locked -p meerai-cli --target "${{ matrix.target }}"
 
       - name: Package Unix archive and checksum
         if: runner.os != 'Windows'

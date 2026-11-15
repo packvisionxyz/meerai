@@ -1,41 +1,5 @@
+pub use meerai_core::PermissionAction;
 use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PermissionAction {
-    Read,
-    Edit,
-    Shell,
-    Subagent,
-    #[serde(rename = "webfetch")]
-    WebFetch,
-    ExternalDirectory,
-}
-
-impl PermissionAction {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Read => "read",
-            Self::Edit => "edit",
-            Self::Shell => "shell",
-            Self::Subagent => "subagent",
-            Self::WebFetch => "webfetch",
-            Self::ExternalDirectory => "external_directory",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "read" => Some(Self::Read),
-            "edit" => Some(Self::Edit),
-            "shell" => Some(Self::Shell),
-            "subagent" => Some(Self::Subagent),
-            "webfetch" => Some(Self::WebFetch),
-            "external_directory" => Some(Self::ExternalDirectory),
-            _ => None,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -43,6 +7,17 @@ pub enum Effect {
     Allow,
     Ask,
     Deny,
+}
+
+impl Effect {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "allow" => Some(Self::Allow),
+            "ask" => Some(Self::Ask),
+            "deny" => Some(Self::Deny),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

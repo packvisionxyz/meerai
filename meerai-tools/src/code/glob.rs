@@ -4,7 +4,7 @@ use globset::Glob;
 use ignore::WalkBuilder;
 use meerai_core::ToolDefinition;
 
-use crate::code::paths::{display_path, flatten};
+use crate::code::paths::{display_path, relative_path};
 use crate::code::{CodeTools, ToolRun, failure_run, success_run};
 
 const MAX_GLOB_RESULTS: usize = 500;
@@ -115,20 +115,4 @@ fn collect(workspace: &Path, root: &Path, pattern: &str) -> Result<(Vec<String>,
     matches.dedup();
 
     Ok((matches, truncated))
-}
-
-fn relative_path(workspace: &Path, root: &Path, path: &Path) -> String {
-    if let Ok(relative) = path.strip_prefix(workspace)
-        && !relative.as_os_str().is_empty()
-    {
-        return flatten(relative);
-    }
-
-    if let Ok(relative) = path.strip_prefix(root)
-        && !relative.as_os_str().is_empty()
-    {
-        return flatten(relative);
-    }
-
-    flatten(path)
 }

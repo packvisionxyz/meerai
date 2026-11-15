@@ -1,8 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use meerai_core::EffectClass;
-use meerai_session::{ApprovalPreview, GrantScope};
+use meerai_core::{ApprovalPreview, EffectClass, GrantScope};
 use serde::{Deserialize, Serialize};
 
 use crate::matcher::{Candidate, ResourcePattern};
@@ -20,6 +19,48 @@ pub enum ApprovalMode {
     Ask,
     AutoEdit,
     Yolo,
+}
+
+impl ApprovalMode {
+    pub fn parse(raw: &str) -> Option<Self> {
+        parse_approval_mode(raw)
+    }
+
+    pub fn label(self) -> &'static str {
+        approval_mode_label(self)
+    }
+
+    pub fn badge(self) -> &'static str {
+        approval_mode_badge(self)
+    }
+}
+
+pub fn parse_approval_mode(raw: &str) -> Option<ApprovalMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "plan" => Some(ApprovalMode::Plan),
+        "ask" => Some(ApprovalMode::Ask),
+        "auto-edit" | "auto_edit" => Some(ApprovalMode::AutoEdit),
+        "yolo" => Some(ApprovalMode::Yolo),
+        _ => None,
+    }
+}
+
+pub fn approval_mode_label(mode: ApprovalMode) -> &'static str {
+    match mode {
+        ApprovalMode::Plan => "plan",
+        ApprovalMode::Ask => "ask",
+        ApprovalMode::AutoEdit => "auto-edit",
+        ApprovalMode::Yolo => "yolo",
+    }
+}
+
+pub fn approval_mode_badge(mode: ApprovalMode) -> &'static str {
+    match mode {
+        ApprovalMode::Plan => "PLAN",
+        ApprovalMode::Ask => "ASK",
+        ApprovalMode::AutoEdit => "EDIT",
+        ApprovalMode::Yolo => "YOLO",
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

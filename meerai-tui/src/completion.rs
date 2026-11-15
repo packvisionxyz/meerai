@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use meerai_common::definitions::{AgentDefinition, DefinitionSource, SkillDefinition};
+use meerai_core::text::floor_char_boundary;
+use meerai_tools::workspace_search::list_workspace_files;
 
 const MAX_SCAN_DEPTH: usize = 16;
 const MAX_SCAN_FILES: usize = 10_000;
@@ -190,8 +192,8 @@ impl CompletionEngine {
         let Some((start, end)) = self.replace_range else {
             return false;
         };
-        let start = clamp_char_boundary(input, start);
-        let end = clamp_char_boundary(input, end.max(start));
+        let start = floor_char_boundary(input, start);
+        let end = floor_char_boundary(input, end.max(start));
         input[start..end] == item.insert_text
     }
 
@@ -234,7 +236,7 @@ impl CompletionEngine {
     }
 
     pub fn update(&mut self, input: &str, cursor: usize) {
-        let cursor = clamp_char_boundary(input, cursor);
+        let cursor = floor_char_boundary(input, cursor);
         let Some(trigger) = detect_trigger(input, cursor) else {
             self.dismissed = None;
             self.clear_popup();
@@ -290,8 +292,8 @@ impl CompletionEngine {
         }
         let item = self.items.get(self.selected)?.clone();
         let (start, end) = self.replace_range?;
-        let start = clamp_char_boundary(input, start);
-        let end = clamp_char_boundary(input, end.max(start));
+        let start = floor_char_boundary(input, start);
+        let end = floor_char_boundary(input, end.max(start));
         let _ = cursor;
 
         let mut new_input = String::with_capacity(input.len() + item.insert_text.len());
@@ -318,14 +320,6 @@ impl CompletionEngine {
         self.items.clear();
         self.selected = 0;
     }
-}
-
-fn clamp_char_boundary(s: &str, idx: usize) -> usize {
-    let mut i = idx.min(s.len());
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
 }
 
 fn token_end(input: &str, cursor: usize) -> usize {
@@ -609,45 +603,7 @@ pub(crate) fn score_candidate(candidate: &str, query: &str) -> Option<MatchRank>
 }
 
 pub(crate) fn scan_workspace_files(root: &Path) -> Vec<String> {
-    let mut files = Vec::new();
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(false)
-        .parents(false)
-        .git_ignore(true)
-        .git_global(false)
-        .git_exclude(true)
-        .require_git(false)
-        .max_depth(Some(MAX_SCAN_DEPTH))
-        .filter_entry(|entry| {
-            if entry.depth() == 0 {
-                return true;
-            }
-            let name = entry.file_name().to_string_lossy();
-            !SKIPPED_DIRS.contains(&name.as_ref())
-        })
-        .build();
-
-    for entry in walker.flatten() {
-        if files.len() >= MAX_SCAN_FILES {
-            break;
-        }
-        if entry.file_type().is_some_and(|ft| ft.is_file())
-            && let Ok(rel) = entry.path().strip_prefix(root)
-        {
-            let normalized = rel
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
-            if !normalized.is_empty() {
-                files.push(normalized);
-            }
-        }
-    }
-
-    files.sort();
-    files.dedup();
-    files
+    list_workspace_files(root, SKIPPED_DIRS, MAX_SCAN_DEPTH, MAX_SCAN_FILES)
 }
 
 #[cfg(test)]

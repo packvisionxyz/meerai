@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use meerai_core::fs_perms::{create_private_dir_sync, write_private_sync};
 use serde::{Deserialize, Serialize};
 
 const AUTH_FILE_NAME: &str = "auth.json";
@@ -146,17 +146,12 @@ impl FileSecretStore {
 
     fn write_entries(&self, entries: &BTreeMap<String, String>) -> Result<()> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
+            create_private_dir_sync(parent).with_context(|| {
                 format!(
                     "failed to create credentials directory {}",
                     parent.display()
                 )
             })?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
-            }
         }
         let payload: BTreeMap<&str, ApiAuthEntry<'_>> = entries
             .iter()
@@ -175,43 +170,8 @@ impl FileSecretStore {
             serde_json::to_string_pretty(&payload).context("failed to serialize credentials")?
         );
 
-        #[cfg(unix)]
-        let mut file = {
-            use std::os::unix::fs::OpenOptionsExt;
-            fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&self.path)
-        }
-        .with_context(|| format!("failed to write credentials file {}", self.path.display()))?;
-
-        #[cfg(not(unix))]
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&self.path)
-            .with_context(|| format!("failed to write credentials file {}", self.path.display()))?;
-
-        file.write_all(body.as_bytes())
-            .with_context(|| format!("failed to write credentials file {}", self.path.display()))?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600)).with_context(
-                || {
-                    format!(
-                        "failed to set permissions on credentials file {}",
-                        self.path.display()
-                    )
-                },
-            )?;
-        }
-
-        Ok(())
+        write_private_sync(&self.path, body.as_bytes())
+            .with_context(|| format!("failed to write credentials file {}", self.path.display()))
     }
 }
 

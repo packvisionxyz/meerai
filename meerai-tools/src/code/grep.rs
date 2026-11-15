@@ -1,14 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobMatcher};
-use grep_regex::RegexMatcherBuilder;
-use grep_searcher::sinks::UTF8;
-use grep_searcher::{BinaryDetection, SearcherBuilder};
 use ignore::WalkBuilder;
 use meerai_core::ToolDefinition;
 
-use crate::code::paths::{display_path, flatten};
+use crate::code::paths::{display_path, relative_path};
 use crate::code::{CodeTools, ToolRun, failure_run, success_run};
+use crate::workspace_search::{build_searcher, build_smart_matcher, search_file_with_matcher};
 
 const MAX_MATCHES_PER_FILE: usize = 50;
 const MAX_TOTAL_MATCHES: usize = 200;
@@ -72,11 +70,7 @@ fn search(
     pattern: &str,
     include: Option<&str>,
 ) -> Result<String, String> {
-    let matcher = RegexMatcherBuilder::new()
-        .case_smart(true)
-        .line_terminator(Some(b'\n'))
-        .build(pattern)
-        .map_err(|error| format!("invalid pattern: {error}"))?;
+    let matcher = build_smart_matcher(pattern, false)?;
 
     let include: Option<GlobMatcher> = include
         .map(|glob| {
@@ -87,10 +81,7 @@ fn search(
         .transpose()?;
 
     let files = collect_files(root);
-    let mut searcher = SearcherBuilder::new()
-        .binary_detection(BinaryDetection::quit(b'\x00'))
-        .line_number(true)
-        .build();
+    let mut searcher = build_searcher();
 
     let mut matches: Vec<String> = Vec::new();
     let mut per_file_capped: Vec<String> = Vec::new();
@@ -109,19 +100,22 @@ fn search(
             continue;
         }
 
-        let mut file_matches = 0usize;
-        let _ = searcher.search_path(
+        let remaining = MAX_TOTAL_MATCHES.saturating_sub(matches.len());
+        let (hits, file_capped) = search_file_with_matcher(
+            &mut searcher,
             &matcher,
             &file,
-            UTF8(|line_number, line| {
-                let text = line.trim_end_matches(['\n', '\r']);
-                matches.push(format!("{path}:{line_number}:{text}"));
-                file_matches += 1;
-                Ok(file_matches < MAX_MATCHES_PER_FILE && matches.len() < MAX_TOTAL_MATCHES)
-            }),
+            &path,
+            MAX_MATCHES_PER_FILE,
+            remaining,
+            false,
         );
 
-        if file_matches >= MAX_MATCHES_PER_FILE {
+        for hit in hits {
+            matches.push(format!("{}:{}:{}", hit.path, hit.line, hit.text));
+        }
+
+        if file_capped {
             per_file_capped.push(path);
         }
     }
@@ -172,20 +166,4 @@ fn collect_files(root: &Path) -> Vec<PathBuf> {
 
     files.sort();
     files
-}
-
-fn relative_path(workspace: &Path, root: &Path, path: &Path) -> String {
-    if let Ok(relative) = path.strip_prefix(workspace)
-        && !relative.as_os_str().is_empty()
-    {
-        return flatten(relative);
-    }
-
-    if let Ok(relative) = path.strip_prefix(root)
-        && !relative.as_os_str().is_empty()
-    {
-        return flatten(relative);
-    }
-
-    flatten(path)
 }

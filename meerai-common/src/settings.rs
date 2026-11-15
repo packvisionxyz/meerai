@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
+use meerai_policy::{Effect, PermissionAction};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -46,12 +47,18 @@ impl SavedProviderSettings {
     }
 
     pub fn resolved_api_key(&self) -> Option<String> {
-        self.options
-            .as_ref()
-            .and_then(|opts| opts.api_key.as_deref())
-            .and_then(expand_config_secret)
-            .or_else(|| self.api_key.as_deref().and_then(expand_config_secret))
+        resolve_config_api_key(self.options.as_ref(), self.api_key.as_deref())
     }
+}
+
+pub fn resolve_config_api_key(
+    options: Option<&ProviderOptions>,
+    api_key: Option<&str>,
+) -> Option<String> {
+    options
+        .and_then(|opts| opts.api_key.as_deref())
+        .and_then(expand_config_secret)
+        .or_else(|| api_key.and_then(expand_config_secret))
 }
 
 pub fn expand_config_secret(raw: &str) -> Option<String> {
@@ -385,7 +392,8 @@ fn split_project_permissions(
         let action = mapping_str(map, "action");
         let resource = mapping_str(map, "resource");
         let effect = mapping_str(map, "effect");
-        let valid_action = action.is_some_and(|action| action == "*" || valid_action_name(action));
+        let valid_action =
+            action.is_some_and(|action| action == "*" || PermissionAction::parse(action).is_some());
         if !valid_action || resource.is_none() || effect.is_none() {
             warnings.push(format!(
                 "ignoring project permissions: rule {} is not a valid rule",
@@ -393,16 +401,16 @@ fn split_project_permissions(
             ));
             return None;
         }
-        match effect.unwrap_or_default() {
-            "allow" => warnings.push(format!(
+        match effect.and_then(Effect::parse) {
+            Some(Effect::Allow) => warnings.push(format!(
                 "dropped project permission rule {} (action: {}, resource: {}, effect: allow)",
                 index + 1,
                 action.unwrap_or_default(),
                 resource.unwrap_or_default()
             )),
-            "ask" => asks.push(entry.clone()),
-            "deny" => denies.push(entry.clone()),
-            _ => {
+            Some(Effect::Ask) => asks.push(entry.clone()),
+            Some(Effect::Deny) => denies.push(entry.clone()),
+            None => {
                 warnings.push(format!(
                     "ignoring project permissions: rule {} has an unknown effect",
                     index + 1
@@ -418,13 +426,6 @@ fn mapping_str<'a>(map: &'a serde_yaml::Mapping, key: &str) -> Option<&'a str> {
     map.iter()
         .find(|(name, _)| name.as_str() == Some(key))
         .and_then(|(_, value)| value.as_str())
-}
-
-fn valid_action_name(action: &str) -> bool {
-    matches!(
-        action,
-        "read" | "edit" | "shell" | "subagent" | "webfetch" | "external_directory"
-    )
 }
 
 fn merge_context(

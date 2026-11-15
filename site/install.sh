@@ -234,7 +234,7 @@ check_requirement() {
 
 check_requirements() {
     # BEGIN GENERATED REQUIREMENTS
-    check_requirement 'git' 'tracks changed files in the TUI File Changes panel' 'Install Git (https://git-scm.com/downloads) and ensure '\''git'\'' is on your PATH.'
+    :
     # END GENERATED REQUIREMENTS
 }
 

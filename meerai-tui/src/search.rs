@@ -1,10 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use grep_matcher::Matcher;
-use grep_regex::RegexMatcherBuilder;
-use grep_searcher::sinks::UTF8;
-use grep_searcher::{BinaryDetection, SearcherBuilder};
+use meerai_tools::workspace_search::{
+    build_searcher, build_smart_matcher, search_file_with_matcher,
+};
 
 use crate::completion::{MatchRank, scan_workspace_files, score_candidate};
 
@@ -79,52 +78,33 @@ pub fn search_content(workspace_root: &Path, files: &[String], query: &str) -> V
         return Vec::new();
     }
 
-    let matcher = RegexMatcherBuilder::new()
-        .case_smart(true)
-        .line_terminator(Some(b'\n'))
-        .build(trimmed)
-        .or_else(|_| {
-            RegexMatcherBuilder::new()
-                .case_smart(true)
-                .line_terminator(Some(b'\n'))
-                .build(&regex::escape(trimmed))
-        });
-
-    let Ok(matcher) = matcher else {
+    let Ok(matcher) = build_smart_matcher(trimmed, true) else {
         return Vec::new();
     };
 
-    let mut searcher = SearcherBuilder::new()
-        .binary_detection(BinaryDetection::quit(b'\x00'))
-        .line_number(true)
-        .build();
-
+    let mut searcher = build_searcher();
     let mut matches = Vec::new();
     for rel in files {
         if matches.len() >= MAX_SEARCH_RESULTS {
             break;
         }
         let full_path = workspace_root.join(rel);
-        let mut file_matches = 0usize;
-        let _ = searcher.search_path(
+        let remaining = MAX_SEARCH_RESULTS.saturating_sub(matches.len());
+        let (hits, _) = search_file_with_matcher(
+            &mut searcher,
             &matcher,
             &full_path,
-            UTF8(|line_num, line| {
-                let col = matcher
-                    .find(line.as_bytes())
-                    .ok()
-                    .flatten()
-                    .map(|m| line[..m.start().min(line.len())].chars().count() + 1);
-                matches.push(SearchMatch {
-                    path: rel.clone(),
-                    line: Some(line_num as usize),
-                    column: col,
-                    snippet: line.trim().to_string(),
-                });
-                file_matches += 1;
-                Ok(file_matches < MAX_MATCHES_PER_FILE && matches.len() < MAX_SEARCH_RESULTS)
-            }),
+            rel,
+            MAX_MATCHES_PER_FILE,
+            remaining,
+            true,
         );
+        matches.extend(hits.into_iter().map(|hit| SearchMatch {
+            path: hit.path,
+            line: Some(hit.line),
+            column: hit.column,
+            snippet: hit.text.trim().to_string(),
+        }));
     }
 
     matches

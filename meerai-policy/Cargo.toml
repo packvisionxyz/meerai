@@ -12,12 +12,8 @@ publish.workspace = true
 
 [dependencies]
 meerai-core = { path = "../meerai-core/" }
-meerai-session = { path = "../meerai-session/" }
 
 anyhow = { workspace = true }
 globset = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
-
-[lints.cargo]
-unused_dependencies = "allow"

@@ -3,6 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use meerai_core::text::{ceil_char_boundary, floor_char_boundary};
 
 pub(crate) const BLOB_DIR_NAME: &str = "blobs";
 
@@ -145,22 +146,6 @@ fn tail_boundary(text: &str, limit: usize) -> usize {
         Some(offset) => target + offset + 1,
         None => target,
     }
-}
-
-fn floor_char_boundary(text: &str, index: usize) -> usize {
-    let mut index = index.min(text.len());
-    while index > 0 && !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
-
-fn ceil_char_boundary(text: &str, index: usize) -> usize {
-    let mut index = index.min(text.len());
-    while index < text.len() && !text.is_char_boundary(index) {
-        index += 1;
-    }
-    index
 }
 
 #[cfg(test)]

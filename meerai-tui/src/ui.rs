@@ -2,9 +2,10 @@ use std::sync::OnceLock;
 
 use meerai_agents::events::ApprovalKind;
 use meerai_common::definitions::{AgentDefinition, SkillDefinition};
-use meerai_common::providers::KeyStatus;
 use meerai_core::EffectClass;
-use meerai_policy::ApprovalMode;
+use meerai_core::text::truncate_single_line;
+use meerai_policy::{ApprovalMode, approval_mode_badge};
+use meerai_providers::providers::KeyStatus;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -14,8 +15,7 @@ use regex::Regex;
 
 use crate::app::{
     ActiveModal, AppState, InputMode, MentionKind, ThinkingHitZone, ToolCallStatus,
-    TranscriptEntry, approval_mode_badge, mention_is_known, normalize_selection_in_bounds,
-    parse_mention_token,
+    TranscriptEntry, mention_is_known, normalize_selection_in_bounds, parse_mention_token,
 };
 use crate::completion::{CompletionItemKind, CompletionKind};
 use crate::diff::{DiffCell, DiffRowKind};
@@ -1755,20 +1755,6 @@ fn cursor_row_col(input: &str, cursor: usize) -> (usize, usize) {
     (row, col)
 }
 
-fn truncate_single_line(text: &str, max_chars: usize) -> String {
-    let single: String = text
-        .chars()
-        .map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch })
-        .take(max_chars + 1)
-        .collect();
-    if single.chars().count() > max_chars {
-        let prefix: String = single.chars().take(max_chars.saturating_sub(3)).collect();
-        format!("{prefix}...")
-    } else {
-        single
-    }
-}
-
 pub fn summarize_error_line(text: &str, max_chars: usize) -> String {
     static MESSAGE_RE: OnceLock<Regex> = OnceLock::new();
     static CODE_RE: OnceLock<Regex> = OnceLock::new();
@@ -1945,9 +1931,9 @@ mod tests {
     use meerai_agents::{
         AgentEvent, ErrorCode, ItemDelta, ItemId, SessionItem, TurnEndReason, TurnId, Usage,
     };
-    use meerai_common::providers::{ProviderCatalog, RuntimeProviderState};
-    use meerai_common::secrets::{MemorySecretStore, SecretStore};
     use meerai_common::settings::AppSettings;
+    use meerai_providers::providers::{ProviderCatalog, RuntimeProviderState};
+    use meerai_providers::secrets::{MemorySecretStore, SecretStore};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc;

@@ -18,12 +18,22 @@ pub enum DefinitionSource {
 }
 
 impl DefinitionSource {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             DefinitionSource::Agents => ".agents",
             DefinitionSource::Claude => ".claude",
         }
     }
+}
+
+pub fn validate_agent_model(model: Option<&str>) -> Result<Option<&str>, &str> {
+    let Some(raw) = model.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(None);
+    };
+    if raw.contains(':') {
+        return Err(raw);
+    }
+    Ok(Some(raw))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

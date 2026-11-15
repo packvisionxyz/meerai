@@ -4,8 +4,8 @@ Pack Vision's terminal coding-agent harness — written in Rust, designed for
 autonomous and interactive software engineering in the terminal with a
 selection-first, modal TUI and a scriptable headless CLI.
 
-**Status:** early-stage, distribution-hardened. The workspace has eight crates
-plus the `meerai` binary (built by `meerai-tui`). Milestones M1–M5 of the
+**Status:** early-stage, distribution-hardened. The workspace has nine library
+crates plus the `meerai` binary (built by `meerai-cli`). Milestones M1–M5 of the
 [harness specification](docs/harness-spec.md) are landed: session log, `AgentEvent`
 v2 item protocol, coding tools, policy engine, context engine, and prompt
 composition. Project-root config discovery, TUI session replay, configurable
@@ -40,13 +40,13 @@ a version.
 ### From source
 
 ```sh
-cargo install --path meerai-tui --bin meerai
+cargo install --path meerai-cli --bin meerai
 ```
 
 Or build without installing:
 
 ```sh
-cargo build --release -p meerai-tui    # target/release/meerai
+cargo build --release -p meerai-cli    # target/release/meerai
 ```
 
 Rust `1.100.0` (pinned in [rust-toolchain.toml](rust-toolchain.toml)) is
@@ -111,18 +111,18 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   `shell`), workspace path guards, unified diffs, `ToolObservation`/`ToolRun`
   results, per-tool `EffectClass`, and provider-secret environment scrubbing
   from child processes.
-- **Modal TUI and headless mode (`meerai-tui`):** the `meerai` binary; modal
+- **Modal TUI (`meerai-tui`) and CLI/headless runner (`meerai-cli`):** modal
   transcript (including a session replayed by `--continue`/`--resume`), provider
   and model pickers, sidebar with file changes, diff and search views, approval
   overlay, `/compact`, `/mode`, `/agent`/`/skill`, and a `@` Mentions popup for
   agents, skills, and files; one-shot headless turns with a token summary on
   stderr, NDJSON event stream, `sessions list|rm|prune` management, and opt-in
   startup retention (`sessions.auto_prune_days`).
-- **Providers and config (`meerai-common`):** a `genai` 0.7 client factory over a
-  provider catalog (bundled `providers.yml` plus user overrides), `settings.yml`
-  plus a project `.meerai/settings.yml` found by walking up to the repository
-  root and merged with tighten-only permissions, `auth.json` storage, and
-  `${VAR|default}` env expansion.
+- **Config (`meerai-common`) and providers (`meerai-providers`):** a `genai`
+  0.7 client factory over a provider catalog (bundled `providers.yml` plus user
+  overrides), `auth.json` storage, `settings.yml` plus a project
+  `.meerai/settings.yml` found by walking up to the repository root and merged
+  with tighten-only permissions, and `${VAR|default}` env expansion.
 - **Tool primitives (`meerai-core`):** `Toolset`, `ToolCall`, `ToolDefinition`,
   `ToolOutput`, `ToolError`, `EffectClass`, `ToolObservation`, `ToolRun`, and
   `FileDiff`.
@@ -137,7 +137,6 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   and skill definitions, but applies them as instructions only.
 - Tool or permission mapping from agent definitions, MCP servers, and skill
   supporting files. M12 reads only `SKILL.md`.
-- A dedicated `meerai-cli` crate; the binary lives in `meerai-tui`.
 - Projection caching and frozen messages; per-model context windows.
 - USD cost and pricing: the harness reports token counts only, and
   `est_cost_usd` is always `None`. Pricing-data collection is the blocker.
@@ -156,22 +155,14 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 | --- | --- |
 | `meerai-core` | `Toolset` trait (`effect_of`, `invoke_structured`), `ToolOutput`, `ToolError`, `EffectClass`, `ToolObservation`, `ToolRun`, `FileDiff`; re-exports `genai`, `async_trait`, and `schemars::JsonSchema` |
 | `meerai-macros` | Proc-macros `#[tool]` and `#[derive(Toolset)]` |
-| `meerai-common` | `AppSettings` (`settings.yml`), project-root discovery plus project settings load/merge (`find_project_root`, `load_project_settings`, `merge_project_settings`), agent and skill definition discovery (`definitions`), provider catalog plus `genai` client factory (`providers.yml`), `auth.json` secret store |
+| `meerai-common` | `AppSettings` (`settings.yml`), project-root discovery plus project settings load/merge (`find_project_root`, `load_project_settings`, `merge_project_settings`), agent and skill definition discovery (`definitions`) |
+| `meerai-providers` | Provider catalog plus `genai` client factory (`providers.yml`), `auth.json` secret store |
 | `meerai-session` | `Session` append-only event log: JSONL/zstd generations, `derive_messages`, fork/revert, blob + spill, compaction primitives, listing, deletion, and pruning support |
 | `meerai-policy` | `PolicyEngine`: ordered permission rules, approval modes, turn/session grants |
 | `meerai-tools` | `code` module: `CodeTools`, the seven `code-*` tools with path guards, unified diffs, and observations |
 | `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent` v2, `prompt::{BASE_SYSTEM_PROMPT, compose_system_prompt}`, `spawn_worker`, and best-effort tool-output redaction |
-| `meerai-tui` | Modal terminal UI (`ratatui` + `crossterm`) and the `meerai` binary: TUI with transcript replay, headless mode, `auth` and `sessions` subcommands |
-
-### Planned crates
-
-| Crate | Role |
-| --- | --- |
-| `meerai-providers` | Split from `meerai-core`: provider implementations, streaming support, and config-driven factory |
-| `meerai-cli` | Dedicated binary crate: config/dotenv wiring and a dedicated CLI surface. Headless resume, TUI resume, and `--env-file` already ship in `meerai-tui` |
-
-The `meerai` binary currently lives in `meerai-tui` (`meerai-tui/Cargo.toml`,
-`[[bin]] name = "meerai"`).
+| `meerai-tui` | Modal terminal UI library (`ratatui` + `crossterm`) with transcript replay and approval overlay |
+| `meerai-cli` | Binary crate (`meerai`): CLI flags, headless runner, `auth` and `sessions` subcommands, TUI launcher |
 
 ## Usage
 
@@ -495,7 +486,7 @@ or `INSTA_UPDATE=always cargo test -p meerai-macros`.
 
 Key resolution order per provider is stored `auth.json` → `api_key` in
 `providers.yml`/`settings.yml` → the provider's environment variables. The
-bundled [providers.yml](meerai-common/providers.yml) declares those variables,
+bundled [providers.yml](meerai-providers/providers.yml) declares those variables,
 for example `OPENROUTER_API_KEY` (also `OPEN_ROUTER_API_KEY`) and
 `GEMINI_API_KEY`.
 

@@ -1,3 +1,4 @@
+use meerai_common::settings::ContextSettings;
 use meerai_policy::PolicyEngine;
 use meerai_session::Session;
 
@@ -29,6 +30,49 @@ impl Default for HarnessConfig {
             max_turn_secs: 1_800,
             summarizer_model: None,
         }
+    }
+}
+
+impl HarnessConfig {
+    pub fn from_context_settings(context: Option<&ContextSettings>) -> Self {
+        let mut cfg = Self::default();
+        let Some(context) = context else {
+            return cfg;
+        };
+        if let Some(value) = context.context_window_tokens {
+            cfg.context_window_tokens = value;
+        }
+        if let Some(value) = context.high_watermark_pct {
+            cfg.high_watermark_pct = value;
+        }
+        if let Some(value) = context.spill_max_inline_tokens {
+            cfg.spill_max_inline_tokens = value;
+        }
+        if let Some(value) = context.verbatim_window_turns {
+            cfg.verbatim_window_turns = value;
+        }
+        if let Some(value) = context.reasoning_pruning {
+            cfg.reasoning_pruning = value;
+        }
+        if let Some(value) = context.max_steps_per_turn {
+            cfg.max_steps_per_turn = value;
+        }
+        if let Some(value) = context.tool_timeout_ms {
+            cfg.tool_timeout_ms = value;
+        }
+        if let Some(value) = context.max_session_tokens {
+            cfg.max_session_tokens = Some(value);
+        }
+        if let Some(value) = context.max_turn_secs {
+            cfg.max_turn_secs = value;
+        }
+        if let Some(value) = &context.summarizer_model {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                cfg.summarizer_model = Some(trimmed.to_string());
+            }
+        }
+        cfg
     }
 }
 

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::async_trait;
+use crate::approval::ToolPermissionSpec;
 
 #[derive(Clone, Debug)]
 pub struct CommandOutput {
@@ -240,6 +241,14 @@ pub trait Toolset: Send + Sync {
     fn effect_of(&self, fn_name: &str) -> EffectClass {
         let _ = fn_name;
         EffectClass::Read
+    }
+
+    fn permission_spec(&self, _fn_name: &str) -> Option<ToolPermissionSpec> {
+        None
+    }
+
+    fn should_spill_output(&self, _fn_name: &str) -> bool {
+        true
     }
 
     async fn invoke(&self, fn_name: &str, args: &str) -> Result<ToolOutput, ToolError>;

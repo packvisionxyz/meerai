@@ -2,10 +2,10 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use genai::chat::ChatMessage;
+use meerai_core::env::{home_dir, now_millis};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
@@ -34,8 +34,8 @@ pub fn default_sessions_root() -> PathBuf {
 }
 
 fn home_fallback() -> PathBuf {
-    match std::env::var_os("HOME") {
-        Some(home) => PathBuf::from(home)
+    match home_dir() {
+        Some(home) => home
             .join(".local")
             .join("share")
             .join("meerai")
@@ -123,7 +123,9 @@ struct GitState {
 
 impl GitState {
     async fn detect(workspace: &Path) -> Self {
-        let git = workspace.join(".git");
+        let Some(git) = resolve_git_dir(workspace).await else {
+            return Self::default();
+        };
         let Some(head) = read_text_file(&git.join("HEAD")).await else {
             return Self::default();
         };
@@ -147,6 +149,26 @@ impl GitState {
             Self::default()
         }
     }
+}
+
+async fn resolve_git_dir(workspace: &Path) -> Option<PathBuf> {
+    let dot_git = workspace.join(".git");
+    let meta = fs::metadata(&dot_git).await.ok()?;
+    if meta.is_dir() {
+        return Some(dot_git);
+    }
+    if meta.is_file()
+        && let Some(raw) = read_text_file(&dot_git).await
+        && let Some(gitdir) = raw.trim().strip_prefix("gitdir:")
+    {
+        let target = PathBuf::from(gitdir.trim());
+        return Some(if target.is_absolute() {
+            target
+        } else {
+            workspace.join(target)
+        });
+    }
+    None
 }
 
 async fn resolve_git_ref(git: &Path, reference: &str) -> Option<String> {
@@ -747,13 +769,6 @@ async fn write_meta(dir: &Path, meta: &SessionMeta) -> Result<()> {
     perms::write_private(&path, format!("{raw}\n").as_bytes())
         .await
         .with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {

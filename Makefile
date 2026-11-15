@@ -18,7 +18,7 @@ else
 endif
 
 BIN_NAME := meerai
-TUI_PKG  := meerai-tui
+BIN_PKG  := meerai-cli
 DIST_DIR := dist
 
 UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)
@@ -74,14 +74,14 @@ check: ## Check required toolchain commands
 
 ##@ Development
 
-dev: ## Run meerai TUI locally in development mode (pass flags via ARGS="...")
-	cargo run -p $(TUI_PKG) -- $(ARGS)
+dev: ## Run meerai locally in development mode (pass flags via ARGS="...")
+	cargo run -p $(BIN_PKG) -- $(ARGS)
 
 run: dev ## Alias for dev
 
-watch: ## Watch source changes and rerun meerai TUI (requires cargo-watch)
+watch: ## Watch source changes and rerun meerai (requires cargo-watch)
 	@command -v cargo-watch >/dev/null 2>&1 || { echo "Install cargo-watch first: cargo install cargo-watch"; exit 1; }
-	cargo watch -x "run -p $(TUI_PKG) -- $(ARGS)"
+	cargo watch -x "run -p $(BIN_PKG) -- $(ARGS)"
 
 fmt: ## Format all workspace Rust crates
 	cargo fmt --all
@@ -108,19 +108,19 @@ verify: ci ## Alias for ci, matching the CI "verify" job
 ##@ Build & Packaging
 
 build: ## Build release binary (optional target=<triple>, e.g. target=x86_64-unknown-linux-gnu)
-	cargo build --release --locked -p $(TUI_PKG) $(if $(target),--target $(target),) $(ARGS)
+	cargo build --release --locked -p $(BIN_PKG) $(if $(target),--target $(target),) $(ARGS)
 	@BIN_PATH="target/$(if $(target),$(target)/,)release/$(BIN_NAME)$(BIN_EXT)"; \
 	echo "Built binary: $$BIN_PATH"
 
 build-debug: ## Build debug binary
-	cargo build -p $(TUI_PKG) $(ARGS)
+	cargo build -p $(BIN_PKG) $(ARGS)
 
 install: ## Install meerai locally into Cargo bin directory
-	cargo install --path $(TUI_PKG) --locked
+	cargo install --path $(BIN_PKG) --locked
 
 package: ## Build and package release archive + SHA256 into dist/ (optional target=<triple>)
 	@mkdir -p $(DIST_DIR)
-	cargo build --release --locked -p $(TUI_PKG) --target $(BUILD_TARGET) $(ARGS)
+	cargo build --release --locked -p $(BIN_PKG) --target $(BUILD_TARGET) $(ARGS)
 	@ARCHIVE_BASE="$(BIN_NAME)-$(BUILD_TARGET)"; \
 	if [[ "$(BUILD_TARGET)" == *windows* ]]; then \
 		ARCHIVE="$$ARCHIVE_BASE.zip"; \

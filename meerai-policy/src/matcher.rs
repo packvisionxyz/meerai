@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use globset::{GlobBuilder, GlobMatcher};
+use meerai_core::env::home_dir;
 
 use crate::rule::{ActionSelector, PermissionAction};
 
@@ -169,12 +170,6 @@ fn expand_home(resource: &str) -> String {
             .unwrap_or_else(|| resource.to_string()),
         None => resource.to_string(),
     }
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
 }
 
 #[cfg(test)]

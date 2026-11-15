@@ -12,34 +12,36 @@ and a scriptable headless CLI mode. The protocol and context design live in
 
 ## Current workspace
 
-Eight library crates plus the `meerai` binary (built by `meerai-tui`):
+Nine library crates plus the `meerai` binary (built by `meerai-cli`):
 
 | Crate | Current role |
 | --- | --- |
-| `meerai-core` | `Toolset` trait (`effect_of`, `invoke_structured`), `ToolCall`, `ToolDefinition`, `ToolOutput`, `ToolError`, `EffectClass`, `ToolObservation`, `ToolRun`, `FileDiff`; re-exports `genai`, `async_trait`, `schemars::JsonSchema` |
+| `meerai-core` | `Toolset` trait (`effect_of`, `permission_spec`, `should_spill_output`, `invoke_structured`), `ToolCall`, `ToolDefinition`, `ToolOutput`, `ToolError`, `EffectClass`, `PermissionAction`, `ApprovalPreview`, `GrantScope`, `ToolObservation`, `ToolRun`, `FileDiff`, shared text/env/fs-perms helpers; re-exports `genai`, `async_trait`, `schemars::JsonSchema` |
 | `meerai-macros` | `#[tool]` and `#[derive(Toolset)]` |
-| `meerai-common` | `AppSettings` (`settings.yml`), project-root discovery (`find_project_root`) and project settings merge, markdown agent/skill discovery (`definitions`), provider catalog + `genai` client factory, `auth.json` secret store |
+| `meerai-common` | `AppSettings` (`settings.yml`), project-root discovery (`find_project_root`) and project settings merge, markdown agent/skill discovery (`definitions`) |
+| `meerai-providers` | Provider catalog + `genai` client factory (`providers.yml`), `auth.json` secret store |
 | `meerai-session` | Append-only `SessionEvent` log, JSONL/zstd generations, `meta.json`, recovery, `derive_messages`, fork/revert, blob store, spill, compaction primitives, session list/delete/prune support |
 | `meerai-policy` | `PolicyEngine`: ordered rules, `ApprovalMode` presets, turn/session grants, YAML parsing |
-| `meerai-tools` | `code` module: `CodeTools` with seven `code-*` tools, path guards, unified diffs, observations |
+| `meerai-tools` | `code` module: `CodeTools` with seven `code-*` tools, path guards, unified diffs, observations, shared `workspace_search` helpers |
 | `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent` v2, `prompt`, `spawn_worker`, tool-output redaction |
-| `meerai-tui` | Modal TUI with resume transcript replay, headless runner, `auth`/`sessions` subcommands, `meerai` binary |
+| `meerai-tui` | Modal terminal UI (`ratatui` + `crossterm`) with transcript replay and approval overlay |
+| `meerai-cli` | Binary crate (`meerai`): CLI flags, headless runner, `auth`/`sessions` subcommands, TUI launcher |
 
 Dependency direction today:
 
 ```text
-core ──▶ session ──▶ policy ──▶ agents ──▶ tui
-  │                                   ▲
-  └──▶ tools ─────────────────────────┘
-common ───────────────────────────────▶ tui
+core ──▶ session ──▶ agents ──▶ tui ──▶ cli
+  ├──▶ policy ────────┘          ▲
+  ├──▶ tools ────────────────────┼────────┘
+  └──▶ common ──▶ providers ─────┘
 macros ──▶ (consumers)
 ```
 
 `meerai-agents` re-exports the session vocabulary from `events.rs`, so protocol
-code can name the types through `meerai_agents`; `meerai-tui` still depends on
-`meerai-session` directly for `Session` and the session CLI helpers.
-`meerai-tui` depends on concrete providers through `meerai-common`; it is not
-yet provider-agnostic at the manifest level.
+code can name the types through `meerai_agents`; `meerai-tui` consumes events
+and provider runtime state (`RuntimeProviderState`) without owning CLI wiring or
+`.env`/YAML parsing. `meerai-cli` wires `providers`, `common`, `policy`,
+`session`, `tools`, `agents`, and `tui` together.
 
 ## Current protocol and loop
 
@@ -156,7 +158,7 @@ compaction summaries. The default is the session model. Its usage counts toward
 - `providers.yml` in the config directory holds user provider overrides
   (`base_url`, `model`, `api_key`, `options.apiKey`, `recent_models`).
 - API keys: stored `auth.json` → configured `api_key` → provider env vars from
-  the bundled `meerai-common/providers.yml`. `auth.json` lives under
+  the bundled `meerai-providers/providers.yml`. `auth.json` lives under
   `$XDG_DATA_HOME/meerai` (default `~/.local/share/meerai`) and is `0600` on
   Unix.
 - `.env` is **opt-in**: `MEERAI_LOAD_DOTENV=1|true|yes` or `--env-file <PATH>`.
@@ -188,7 +190,7 @@ Application is prompt-only:
 
 - Startup `--agent <ID>` (one id; repeating is an error) and repeatable
   `--skill <ID>` append instructions to the system prompt
-  (`compose_definition_prompt` in `meerai-tui/src/main.rs`).
+  (`compose_definition_prompt` in `meerai-cli/src/main.rs`).
 - Model precedence is `--model` → `MEERAI_MODEL` → agent `model` →
   settings/provider default. An agent model containing `:` is ignored with a
   warning; `steps`/`mode` print a note and are not applied.
@@ -282,12 +284,12 @@ Not built unless marked. Current responsibilities are in the first table.
 | --- | --- |
 | `meerai-core` | Pure primitives; re-exports only stable protocol types |
 | `meerai-macros` | Tool proc-macros |
-| `meerai-providers` (planned) | Provider implementations, streaming, config-driven factory split from `meerai-common`/`core` |
-| `meerai-common` | Layered optional config, instructions and definition discovery, session storage helpers |
+| `meerai-providers` | Provider implementations and config-driven `genai` client factory split from `meerai-common` |
+| `meerai-common` | Layered config (`settings.yml`), instructions and definition discovery |
 | `meerai-tools` | Coding toolsets with diff preview and workspace guards |
 | `meerai-agents` | Event-driven streaming loop, approvals, compaction, multi-tool execution |
 | `meerai-tui` | Modal terminal UI; consumes `AgentEvent`/`AgentCommand` |
-| `meerai-cli` (planned) | Dedicated binary: `clap` CLI, TTY launcher, headless (`--prompt`, `--json`), resume, config/env wiring. `-p` remains provider. |
+| `meerai-cli` | Dedicated binary crate: CLI, TTY launcher, headless (`--prompt`, `--json`), resume, config/env wiring. `-p` remains provider. |
 
 Target dependency direction:
 
@@ -343,17 +345,15 @@ The enums are frozen additively; these are future variants, not current code.
 
 ## Migration roadmap (status)
 
-1. **Core protocol & provider hardening** — done via `genai`; the target split of
-   `meerai-providers` is still planned.
+1. **Core protocol & provider split** — done via `genai` and `meerai-providers`.
 2. **Event-driven streaming loop** — done (v2 item protocol, cancellation,
    approvals, all-tool execution, async retries).
-3. **Common cleanup** — done: settings/provider catalog/secrets exist; the
-   legacy config reader and the orphaned stop tools were removed.
+3. **Common cleanup** — done: `meerai-common` holds settings/definitions;
+   `meerai-providers` holds the provider catalog and secret store.
 4. **Coding toolsets** — done (`read_file`, `write_file`, `edit_file`,
    `list_dir`, `grep`, `glob`, `shell`).
-5. **CLI & headless runner** — done inside `meerai-tui` (`--prompt`, `--json`,
-   `--mode`, `--continue`, `--resume`, `auth`, `sessions`); a dedicated
-   `meerai-cli` crate is planned.
+5. **CLI & headless runner** — done in `meerai-cli` (`--prompt`, `--json`,
+   `--mode`, `--continue`, `--resume`, `auth`, `sessions`).
 6. **Modal TUI** — partly done: `NOR`/`INS`, slash commands, `@file`
    completion, approval overlay with turn/session grants, sidebar, diff/search
    modals, and resume transcript replay. The `Space` leader, Select mode, `:`

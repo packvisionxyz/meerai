@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub use meerai_core::{ApprovalPreview, GrantScope};
 use meerai_core::{ToolCall, ToolObservation};
 
 use crate::ids::{CallId, CheckpointId, CompactionId, RequestId, StepId, TurnId};
@@ -151,12 +152,6 @@ pub enum ApprovalKind {
     SandboxEscape,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ApprovalPreview {
-    pub title: String,
-    pub detail: String,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
@@ -165,13 +160,6 @@ pub enum ApprovalDecision {
     Decline,
     DeclineWithReason(String),
     Cancel,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GrantScope {
-    Turn,
-    Session,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

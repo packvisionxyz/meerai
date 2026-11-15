@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use meerai_core::text::floor_char_boundary;
+
 pub const BASE_SYSTEM_PROMPT: &str = r#"You are meerai, a terminal coding agent. You work inside the user's workspace and use the provided tools to inspect, change, and verify code.
 
 Operating rules:
@@ -57,10 +59,7 @@ fn cut(text: &str, limit: usize) -> (String, usize) {
     if text.len() <= limit {
         return (text.to_string(), 0);
     }
-    let mut end = limit;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = floor_char_boundary(text, limit);
     (text[..end].to_string(), text.len() - end)
 }
 

@@ -145,6 +145,22 @@ pub(crate) fn display_path(root: &Path, path: &Path) -> String {
     }
 }
 
+pub(crate) fn relative_path(workspace: &Path, root: &Path, path: &Path) -> String {
+    if let Ok(relative) = path.strip_prefix(workspace)
+        && !relative.as_os_str().is_empty()
+    {
+        return flatten(relative);
+    }
+
+    if let Ok(relative) = path.strip_prefix(root)
+        && !relative.as_os_str().is_empty()
+    {
+        return flatten(relative);
+    }
+
+    flatten(path)
+}
+
 pub(crate) fn flatten(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }

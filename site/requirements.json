@@ -1,7 +1,1 @@
-[
-  {
-    "command": "git",
-    "reason": "tracks changed files in the TUI File Changes panel",
-    "setup": "Install Git (https://git-scm.com/downloads) and ensure 'git' is on your PATH."
-  }
-]
+[]

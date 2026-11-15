@@ -1,6 +1,10 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+
+use git2::{Repository, Status, StatusOptions};
+use similar::{DiffOp, TextDiff};
+
+use crate::app::FileChangeEntry;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiffRowKind {
@@ -33,12 +37,134 @@ pub struct FileDiffView {
     pub rows: Vec<DiffRow>,
 }
 
+pub fn list_git_changes(workspace_root: &Path) -> Vec<FileChangeEntry> {
+    let Ok(repo) = Repository::discover(workspace_root) else {
+        return Vec::new();
+    };
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .renames_head_to_index(true)
+        .include_ignored(false);
+
+    let Ok(statuses) = repo.statuses(Some(&mut opts)) else {
+        return Vec::new();
+    };
+
+    let mut entries = Vec::new();
+    for entry in statuses.iter() {
+        let status = entry.status();
+        if status.is_ignored() {
+            continue;
+        }
+        let Some(code) = status_label(status) else {
+            continue;
+        };
+        let path = if status.is_index_renamed()
+            && let Some(delta) = entry.head_to_index()
+            && let (Some(old), Some(new)) = (delta.old_file().path(), delta.new_file().path())
+        {
+            format!("{} -> {}", old.to_string_lossy(), new.to_string_lossy())
+        } else if let Ok(p) = entry.path() {
+            p.to_string()
+        } else {
+            continue;
+        };
+        entries.push(FileChangeEntry {
+            status: code.to_string(),
+            path,
+        });
+    }
+    entries
+}
+
+fn status_label(status: Status) -> Option<&'static str> {
+    if status.is_conflicted() {
+        return Some("U");
+    }
+    let index_flags = Status::INDEX_NEW
+        | Status::INDEX_MODIFIED
+        | Status::INDEX_DELETED
+        | Status::INDEX_RENAMED
+        | Status::INDEX_TYPECHANGE;
+    if status.is_wt_new() && !status.intersects(index_flags) {
+        return Some("??");
+    }
+    if status.is_index_new() {
+        return Some("A");
+    }
+    if status.is_index_renamed() || status.is_wt_renamed() {
+        return Some("R");
+    }
+    if status.is_wt_deleted() || (status.is_index_deleted() && !status.is_wt_new()) {
+        return Some("D");
+    }
+    if status.intersects(
+        Status::INDEX_MODIFIED
+            | Status::INDEX_TYPECHANGE
+            | Status::WT_MODIFIED
+            | Status::WT_TYPECHANGE,
+    ) {
+        return Some("M");
+    }
+    None
+}
+
 pub fn build_file_diff(workspace_root: &Path, path: &str, status: &str) -> FileDiffView {
-    let target_path = path.rsplit(" -> ").next().unwrap_or(path);
-    if status != "??"
-        && let Some(raw_diff) = run_git_diff(workspace_root, target_path)
-    {
-        let (rows, additions, deletions) = parse_unified_diff(&raw_diff);
+    let (old_rel, new_rel) = path.split_once(" -> ").unwrap_or((path, path));
+    let repo = Repository::discover(workspace_root).ok();
+    let repo_root = repo
+        .as_ref()
+        .and_then(|r| r.workdir())
+        .map(Path::to_path_buf);
+
+    let resolve_wt_path = |rel: &str| {
+        if let Some(root) = &repo_root {
+            let candidate = root.join(rel);
+            if candidate.exists() || !workspace_root.join(rel).exists() {
+                return candidate;
+            }
+        }
+        workspace_root.join(rel)
+    };
+
+    if status == "??" {
+        return build_untracked_or_fallback_diff(&resolve_wt_path(new_rel), path, status);
+    }
+
+    let Some(repo) = repo else {
+        return build_untracked_or_fallback_diff(&workspace_root.join(new_rel), path, status);
+    };
+
+    let head_bytes = read_head_blob(&repo, old_rel);
+    let index_bytes = read_index_blob(&repo, new_rel).or_else(|| read_index_blob(&repo, old_rel));
+    let wt_bytes = fs::read(resolve_wt_path(new_rel)).ok();
+
+    let pair = match (head_bytes, wt_bytes) {
+        (Some(head), Some(wt)) if head != wt => Some((head, wt)),
+        (Some(head), Some(_)) if index_bytes.as_deref() != Some(head.as_slice()) => {
+            Some((head, index_bytes.unwrap_or_default()))
+        }
+        (Some(head), None) => Some((head, Vec::new())),
+        (None, Some(wt)) => Some((Vec::new(), wt)),
+        (None, None) => index_bytes.map(|idx| (Vec::new(), idx)),
+        _ => None,
+    };
+
+    if let Some((old_bytes, new_bytes)) = pair {
+        let (Ok(old_text), Ok(new_text)) =
+            (decode_text_bytes(&old_bytes), decode_text_bytes(&new_bytes))
+        else {
+            return FileDiffView {
+                path: path.to_string(),
+                status: status.to_string(),
+                additions: 0,
+                deletions: 0,
+                rows: vec![notice_row("(binary)", "(binary file changed)")],
+            };
+        };
+
+        let (rows, additions, deletions) = diff_texts(old_text, new_text);
         if !rows.is_empty() {
             return FileDiffView {
                 path: path.to_string(),
@@ -50,40 +176,51 @@ pub fn build_file_diff(workspace_root: &Path, path: &str, status: &str) -> FileD
         }
     }
 
-    build_untracked_or_fallback_diff(workspace_root, target_path, path, status)
+    build_untracked_or_fallback_diff(&resolve_wt_path(new_rel), path, status)
 }
 
-fn run_git_diff(workspace_root: &Path, path: &str) -> Option<String> {
-    let candidates: [&[&str]; 3] = [
-        &["diff", "--no-color", "-U3", "HEAD", "--", path],
-        &["diff", "--no-color", "-U3", "--", path],
-        &["diff", "--no-color", "-U3", "--cached", "--", path],
-    ];
+fn read_head_blob(repo: &Repository, rel: &str) -> Option<Vec<u8>> {
+    let head = repo.head().ok()?;
+    let tree = head.peel_to_tree().ok()?;
+    let entry = tree.get_path(Path::new(rel)).ok()?;
+    let blob = repo.find_blob(entry.id()).ok()?;
+    Some(blob.content().to_vec())
+}
 
-    for args in candidates {
-        if let Ok(output) = Command::new("git")
-            .args(args)
-            .current_dir(workspace_root)
-            .output()
-            && output.status.success()
-        {
-            let text = String::from_utf8_lossy(&output.stdout).into_owned();
-            if !text.trim().is_empty() {
-                return Some(text);
-            }
-        }
+fn read_index_blob(repo: &Repository, rel: &str) -> Option<Vec<u8>> {
+    let index = repo.index().ok()?;
+    let entry = index.get_path(Path::new(rel), 0)?;
+    let blob = repo.find_blob(entry.id).ok()?;
+    Some(blob.content().to_vec())
+}
+
+fn decode_text_bytes(bytes: &[u8]) -> Result<&str, ()> {
+    if bytes.contains(&0) {
+        return Err(());
     }
-    None
+    std::str::from_utf8(bytes).map_err(|_| ())
+}
+
+fn notice_row(left: &str, right: &str) -> DiffRow {
+    DiffRow {
+        kind: DiffRowKind::Context,
+        left: Some(DiffCell {
+            line_no: None,
+            text: left.to_string(),
+        }),
+        right: Some(DiffCell {
+            line_no: None,
+            text: right.to_string(),
+        }),
+    }
 }
 
 fn build_untracked_or_fallback_diff(
-    workspace_root: &Path,
-    target_path: &str,
+    full_path: &Path,
     display_path: &str,
     status: &str,
 ) -> FileDiffView {
-    let full_path = workspace_root.join(target_path);
-    match fs::read_to_string(&full_path) {
+    match fs::read_to_string(full_path) {
         Ok(content) => {
             let mut rows = Vec::new();
             for (idx, line) in content.lines().enumerate() {
@@ -97,17 +234,7 @@ fn build_untracked_or_fallback_diff(
                 });
             }
             if rows.is_empty() {
-                rows.push(DiffRow {
-                    kind: DiffRowKind::Context,
-                    left: Some(DiffCell {
-                        line_no: None,
-                        text: "(empty file)".to_string(),
-                    }),
-                    right: Some(DiffCell {
-                        line_no: None,
-                        text: "(empty file)".to_string(),
-                    }),
-                });
+                rows.push(notice_row("(empty file)", "(empty file)"));
                 return FileDiffView {
                     path: display_path.to_string(),
                     status: status.to_string(),
@@ -130,194 +257,215 @@ fn build_untracked_or_fallback_diff(
             status: status.to_string(),
             additions: 0,
             deletions: 0,
-            rows: vec![DiffRow {
-                kind: DiffRowKind::Context,
-                left: Some(DiffCell {
-                    line_no: None,
-                    text: "(unavailable)".to_string(),
-                }),
-                right: Some(DiffCell {
-                    line_no: None,
-                    text: "(file not readable or deleted)".to_string(),
-                }),
-            }],
+            rows: vec![notice_row(
+                "(unavailable)",
+                "(file not readable or deleted)",
+            )],
         },
     }
 }
 
-pub fn parse_unified_diff(raw_diff: &str) -> (Vec<DiffRow>, usize, usize) {
+pub fn diff_texts(old: &str, new: &str) -> (Vec<DiffRow>, usize, usize) {
+    let diff = TextDiff::from_lines(old, new);
     let mut rows = Vec::new();
     let mut additions = 0usize;
     let mut deletions = 0usize;
 
-    let mut in_hunk = false;
-    let mut old_line = 1usize;
-    let mut new_line = 1usize;
-    let mut pending_removed: Vec<(usize, String)> = Vec::new();
-    let mut pending_added: Vec<(usize, String)> = Vec::new();
-
-    for line in raw_diff.lines() {
-        if let Some((old_start, new_start)) = parse_hunk_header(line) {
-            flush_pending(
-                &mut rows,
-                &mut pending_removed,
-                &mut pending_added,
-                &mut additions,
-                &mut deletions,
-            );
-            in_hunk = true;
-            old_line = old_start;
-            new_line = new_start;
-            rows.push(DiffRow {
-                kind: DiffRowKind::HunkHeader(line.to_string()),
-                left: None,
-                right: None,
-            });
+    for group in diff.grouped_ops(3) {
+        let (Some(first), Some(last)) = (group.first(), group.last()) else {
             continue;
-        }
+        };
+        let old_start = first.old_range().start;
+        let old_end = last.old_range().end;
+        let new_start = first.new_range().start;
+        let new_end = last.new_range().end;
+        let old_len = old_end - old_start;
+        let new_len = new_end - new_start;
+        let header = format!(
+            "@@ -{},{} +{},{} @@",
+            if old_len == 0 {
+                old_start
+            } else {
+                old_start + 1
+            },
+            old_len,
+            if new_len == 0 {
+                new_start
+            } else {
+                new_start + 1
+            },
+            new_len,
+        );
+        rows.push(DiffRow {
+            kind: DiffRowKind::HunkHeader(header),
+            left: None,
+            right: None,
+        });
 
-        if !in_hunk {
-            continue;
-        }
-
-        if let Some(rest) = line.strip_prefix('-') {
-            pending_removed.push((old_line, rest.to_string()));
-            old_line += 1;
-        } else if let Some(rest) = line.strip_prefix('+') {
-            pending_added.push((new_line, rest.to_string()));
-            new_line += 1;
-        } else if let Some(rest) = line.strip_prefix(' ') {
-            flush_pending(
-                &mut rows,
-                &mut pending_removed,
-                &mut pending_added,
-                &mut additions,
-                &mut deletions,
-            );
-            rows.push(DiffRow {
-                kind: DiffRowKind::Context,
-                left: Some(DiffCell {
-                    line_no: Some(old_line),
-                    text: rest.to_string(),
-                }),
-                right: Some(DiffCell {
-                    line_no: Some(new_line),
-                    text: rest.to_string(),
-                }),
-            });
-            old_line += 1;
-            new_line += 1;
-        } else if line.starts_with("\\ No newline at end of file") {
-            continue;
-        } else if line.starts_with("diff ") || line.starts_with("index ") {
-            flush_pending(
-                &mut rows,
-                &mut pending_removed,
-                &mut pending_added,
-                &mut additions,
-                &mut deletions,
-            );
-            in_hunk = false;
+        for op in group {
+            match op {
+                DiffOp::Equal {
+                    old_index,
+                    new_index,
+                    len,
+                } => {
+                    for offset in 0..len {
+                        let old_ln = old_index + offset;
+                        let new_ln = new_index + offset;
+                        rows.push(DiffRow {
+                            kind: DiffRowKind::Context,
+                            left: Some(DiffCell {
+                                line_no: Some(old_ln + 1),
+                                text: trim_line_end(diff.old_slice(old_ln).unwrap_or_default())
+                                    .to_string(),
+                            }),
+                            right: Some(DiffCell {
+                                line_no: Some(new_ln + 1),
+                                text: trim_line_end(diff.new_slice(new_ln).unwrap_or_default())
+                                    .to_string(),
+                            }),
+                        });
+                    }
+                }
+                DiffOp::Delete {
+                    old_index, old_len, ..
+                } => {
+                    for offset in 0..old_len {
+                        let old_ln = old_index + offset;
+                        deletions += 1;
+                        rows.push(DiffRow {
+                            kind: DiffRowKind::Removed,
+                            left: Some(DiffCell {
+                                line_no: Some(old_ln + 1),
+                                text: trim_line_end(diff.old_slice(old_ln).unwrap_or_default())
+                                    .to_string(),
+                            }),
+                            right: None,
+                        });
+                    }
+                }
+                DiffOp::Insert {
+                    new_index, new_len, ..
+                } => {
+                    for offset in 0..new_len {
+                        let new_ln = new_index + offset;
+                        additions += 1;
+                        rows.push(DiffRow {
+                            kind: DiffRowKind::Added,
+                            left: None,
+                            right: Some(DiffCell {
+                                line_no: Some(new_ln + 1),
+                                text: trim_line_end(diff.new_slice(new_ln).unwrap_or_default())
+                                    .to_string(),
+                            }),
+                        });
+                    }
+                }
+                DiffOp::Replace {
+                    old_index,
+                    old_len,
+                    new_index,
+                    new_len,
+                } => {
+                    let pair_count = old_len.max(new_len);
+                    for offset in 0..pair_count {
+                        let left = (offset < old_len).then(|| DiffCell {
+                            line_no: Some(old_index + offset + 1),
+                            text: trim_line_end(
+                                diff.old_slice(old_index + offset).unwrap_or_default(),
+                            )
+                            .to_string(),
+                        });
+                        let right = (offset < new_len).then(|| DiffCell {
+                            line_no: Some(new_index + offset + 1),
+                            text: trim_line_end(
+                                diff.new_slice(new_index + offset).unwrap_or_default(),
+                            )
+                            .to_string(),
+                        });
+                        let kind = match (&left, &right) {
+                            (Some(_), Some(_)) => {
+                                deletions += 1;
+                                additions += 1;
+                                DiffRowKind::Modified
+                            }
+                            (Some(_), None) => {
+                                deletions += 1;
+                                DiffRowKind::Removed
+                            }
+                            (None, Some(_)) => {
+                                additions += 1;
+                                DiffRowKind::Added
+                            }
+                            (None, None) => continue,
+                        };
+                        rows.push(DiffRow { kind, left, right });
+                    }
+                }
+            }
         }
     }
-
-    flush_pending(
-        &mut rows,
-        &mut pending_removed,
-        &mut pending_added,
-        &mut additions,
-        &mut deletions,
-    );
 
     (rows, additions, deletions)
 }
 
-fn flush_pending(
-    rows: &mut Vec<DiffRow>,
-    removed: &mut Vec<(usize, String)>,
-    added: &mut Vec<(usize, String)>,
-    additions: &mut usize,
-    deletions: &mut usize,
-) {
-    let pair_count = removed.len().max(added.len());
-    for i in 0..pair_count {
-        let left = removed.get(i).map(|(ln, text)| DiffCell {
-            line_no: Some(*ln),
-            text: text.clone(),
-        });
-        let right = added.get(i).map(|(ln, text)| DiffCell {
-            line_no: Some(*ln),
-            text: text.clone(),
-        });
-        let kind = match (&left, &right) {
-            (Some(_), Some(_)) => {
-                *deletions += 1;
-                *additions += 1;
-                DiffRowKind::Modified
-            }
-            (Some(_), None) => {
-                *deletions += 1;
-                DiffRowKind::Removed
-            }
-            (None, Some(_)) => {
-                *additions += 1;
-                DiffRowKind::Added
-            }
-            (None, None) => continue,
-        };
-        rows.push(DiffRow { kind, left, right });
-    }
-    removed.clear();
-    added.clear();
-}
-
-fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
-    let rest = line.strip_prefix("@@ -")?;
-    let end_marker = rest.find(" @@")?;
-    let range_part = &rest[..end_marker];
-    let (old_part, new_part) = range_part.split_once(" +")?;
-    let old_start = old_part
-        .split_once(',')
-        .map(|(s, _)| s)
-        .unwrap_or(old_part)
-        .parse::<usize>()
-        .ok()?;
-    let new_start = new_part
-        .split_once(',')
-        .map(|(s, _)| s)
-        .unwrap_or(new_part)
-        .parse::<usize>()
-        .ok()?;
-    Some((old_start, new_start))
+fn trim_line_end(line: &str) -> &str {
+    line.trim_end_matches(&['\r', '\n'][..])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use git2::Signature;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "meerai_diff_{label}_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn init_repo_with_commit(root: &Path, files: &[(&str, &str)]) -> Repository {
+        let repo = Repository::init(root).unwrap();
+        let sig = Signature::now("Test", "test@example.com").unwrap();
+        let mut index = repo.index().unwrap();
+        for (rel, body) in files {
+            let full = root.join(rel);
+            if let Some(parent) = full.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(full, body).unwrap();
+            index.add_path(Path::new(rel)).unwrap();
+        }
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        drop(tree);
+        repo
+    }
+
     #[test]
-    fn parse_unified_diff_pairs_modified_and_added_lines() {
-        let raw = "\
-diff --git a/src/lib.rs b/src/lib.rs
-index 1111111..2222222 100644
---- a/src/lib.rs
-+++ b/src/lib.rs
-@@ -10,4 +10,5 @@ pub fn demo() {
- let a = 1;
--let b = 2;
-+let b = 20;
-+let c = 30;
- return a + b;
-";
-        let (rows, additions, deletions) = parse_unified_diff(raw);
+    fn diff_texts_pairs_modified_and_added_lines() {
+        let old = "let a = 1;\nlet b = 2;\nreturn a + b;\n";
+        let new = "let a = 1;\nlet b = 20;\nlet c = 30;\nreturn a + b;\n";
+        let (rows, additions, deletions) = diff_texts(old, new);
         assert_eq!(additions, 2);
         assert_eq!(deletions, 1);
         assert_eq!(rows.len(), 5);
         assert!(matches!(rows[0].kind, DiffRowKind::HunkHeader(_)));
         assert_eq!(rows[1].kind, DiffRowKind::Context);
-        assert_eq!(rows[1].left.as_ref().unwrap().line_no, Some(10));
-        assert_eq!(rows[1].right.as_ref().unwrap().line_no, Some(10));
+        assert_eq!(rows[1].left.as_ref().unwrap().line_no, Some(1));
+        assert_eq!(rows[1].right.as_ref().unwrap().line_no, Some(1));
 
         assert_eq!(rows[2].kind, DiffRowKind::Modified);
         assert_eq!(rows[2].left.as_ref().unwrap().text, "let b = 2;");
@@ -325,23 +473,17 @@ index 1111111..2222222 100644
 
         assert_eq!(rows[3].kind, DiffRowKind::Added);
         assert!(rows[3].left.is_none());
-        assert_eq!(rows[3].right.as_ref().unwrap().line_no, Some(12));
+        assert_eq!(rows[3].right.as_ref().unwrap().line_no, Some(3));
         assert_eq!(rows[3].right.as_ref().unwrap().text, "let c = 30;");
 
         assert_eq!(rows[4].kind, DiffRowKind::Context);
-        assert_eq!(rows[4].left.as_ref().unwrap().line_no, Some(12));
-        assert_eq!(rows[4].right.as_ref().unwrap().line_no, Some(13));
+        assert_eq!(rows[4].left.as_ref().unwrap().line_no, Some(3));
+        assert_eq!(rows[4].right.as_ref().unwrap().line_no, Some(4));
     }
 
     #[test]
     fn build_file_diff_reads_untracked_file() {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("meerai_diff_test_{}_{}", std::process::id(), nanos));
-        fs::create_dir_all(&root).unwrap();
+        let root = temp_dir("untracked");
         fs::write(root.join("notes.txt"), "line one\nline two\n").unwrap();
 
         let diff = build_file_diff(&root, "notes.txt", "??");
@@ -351,6 +493,63 @@ index 1111111..2222222 100644
         assert_eq!(diff.rows[0].kind, DiffRowKind::Added);
         assert_eq!(diff.rows[0].right.as_ref().unwrap().text, "line one");
         assert_eq!(diff.rows[1].right.as_ref().unwrap().line_no, Some(2));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn list_changes_and_build_file_diff_use_git2_and_similar() {
+        let root = temp_dir("git2");
+        let repo = init_repo_with_commit(
+            &root,
+            &[("src/lib.rs", "one\ntwo\nthree\n"), ("old.txt", "bye\n")],
+        );
+
+        fs::write(root.join("src/lib.rs"), "one\nTWO\nthree\nfour\n").unwrap();
+        fs::write(root.join("new.txt"), "added line\n").unwrap();
+        fs::write(root.join("notes.md"), "untracked\n").unwrap();
+        fs::remove_file(root.join("old.txt")).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("new.txt")).unwrap();
+        index.write().unwrap();
+
+        let changes = list_git_changes(&root);
+        assert!(changes.contains(&FileChangeEntry {
+            status: "M".to_string(),
+            path: "src/lib.rs".to_string(),
+        }));
+        assert!(changes.contains(&FileChangeEntry {
+            status: "A".to_string(),
+            path: "new.txt".to_string(),
+        }));
+        assert!(changes.contains(&FileChangeEntry {
+            status: "D".to_string(),
+            path: "old.txt".to_string(),
+        }));
+        assert!(changes.contains(&FileChangeEntry {
+            status: "??".to_string(),
+            path: "notes.md".to_string(),
+        }));
+
+        let modified = build_file_diff(&root, "src/lib.rs", "M");
+        assert_eq!(modified.additions, 2);
+        assert_eq!(modified.deletions, 1);
+        assert!(
+            modified
+                .rows
+                .iter()
+                .any(|row| row.kind == DiffRowKind::Modified
+                    && row.left.as_ref().is_some_and(|c| c.text == "two")
+                    && row.right.as_ref().is_some_and(|c| c.text == "TWO"))
+        );
+
+        let added = build_file_diff(&root, "new.txt", "A");
+        assert_eq!(added.additions, 1);
+        assert_eq!(added.deletions, 0);
+
+        let deleted = build_file_diff(&root, "old.txt", "D");
+        assert_eq!(deleted.additions, 0);
+        assert_eq!(deleted.deletions, 1);
 
         let _ = fs::remove_dir_all(&root);
     }

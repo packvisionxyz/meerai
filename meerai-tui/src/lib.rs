@@ -4,9 +4,9 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use meerai_agents::{AgentCommand, AgentEvent};
 use meerai_common::definitions::{AgentDefinition, SkillDefinition};
-use meerai_common::providers::RuntimeProviderState;
-use meerai_common::secrets::SecretStore;
 use meerai_common::settings::AppSettings;
+use meerai_providers::providers::RuntimeProviderState;
+use meerai_providers::secrets::SecretStore;
 use meerai_session::LoggedEvent;
 use tokio::sync::mpsc;
 

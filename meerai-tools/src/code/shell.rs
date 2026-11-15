@@ -80,12 +80,18 @@ fn shell_invocation(command: &str) -> (&'static str, Vec<String>) {
     (SHELL_PROGRAM, args)
 }
 
-fn is_sensitive_env(name: &str) -> bool {
+fn is_sensitive_env_with(name: &str, extra: &[String]) -> bool {
     let upper = name.to_ascii_uppercase();
     SENSITIVE_ENV_NAMES.contains(&upper.as_str())
+        || extra.iter().any(|item| item == &upper)
         || SENSITIVE_ENV_SUFFIXES
             .iter()
             .any(|suffix| upper.ends_with(suffix))
+}
+
+#[cfg(test)]
+fn is_sensitive_env(name: &str) -> bool {
+    is_sensitive_env_with(name, &[])
 }
 
 impl CodeTools {
@@ -113,7 +119,7 @@ impl CodeTools {
             .kill_on_drop(true);
 
         for (name, _) in std::env::vars() {
-            if is_sensitive_env(&name) {
+            if is_sensitive_env_with(&name, self.sensitive_env_vars()) {
                 child.env_remove(name);
             }
         }

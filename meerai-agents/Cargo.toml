@@ -11,6 +11,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+meerai-common = { path = "../meerai-common/" }
 meerai-core = { path = "../meerai-core/" }
 meerai-policy = { path = "../meerai-policy/" }
 meerai-session = { path = "../meerai-session/" }
