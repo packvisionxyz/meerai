@@ -783,8 +783,8 @@ impl AppState {
                 mut filter,
                 mut selected,
                 sessions,
-                loading,
-                error,
+                mut loading,
+                mut error,
             } => {
                 let filtered_ids: Vec<(meerai_session::SessionId, Option<usize>)> =
                     filter_session_summaries(&sessions, &filter)
@@ -797,6 +797,7 @@ impl AppState {
 
                 match key.code {
                     KeyCode::Esc => {
+                        self.session_delete_confirm = None;
                         self.modal = None;
                     }
                     KeyCode::Up | KeyCode::Char('p') if key.code == KeyCode::Up || has_ctrl => {
@@ -830,6 +831,31 @@ impl AppState {
                     KeyCode::Backspace => {
                         filter.pop();
                         selected = 0;
+                        self.session_delete_confirm = None;
+                        self.modal = Some(ActiveModal::SessionSelect {
+                            filter,
+                            selected,
+                            sessions,
+                            loading,
+                            error,
+                        });
+                    }
+                    KeyCode::Char('d') if has_ctrl => {
+                        if let Some((session_id, open_tab)) = filtered_ids.get(selected) {
+                            if open_tab.is_some() {
+                                error = Some("Close the tab before deleting this session".into());
+                                self.session_delete_confirm = None;
+                            } else if self.session_delete_confirm.as_ref() == Some(session_id) {
+                                self.session_delete_confirm = None;
+                                loading = true;
+                                error = None;
+                                self.pending_session_actions
+                                    .push(PendingSessionAction::DeleteSession(session_id.clone()));
+                            } else {
+                                self.session_delete_confirm = Some(session_id.clone());
+                                error = None;
+                            }
+                        }
                         self.modal = Some(ActiveModal::SessionSelect {
                             filter,
                             selected,
@@ -885,6 +911,45 @@ impl AppState {
                             sessions,
                             loading,
                             error,
+                        });
+                    }
+                }
+            }
+            ActiveModal::UserMessageActions {
+                entry_idx,
+                mut selected,
+            } => {
+                let actions = [UserAction::Revert, UserAction::Copy, UserAction::Fork];
+                let run = |state: &mut Self, action| {
+                    state.modal = None;
+                    state.run_user_action(entry_idx, action);
+                };
+                match key.code {
+                    KeyCode::Esc => {
+                        self.modal = None;
+                    }
+                    KeyCode::Up | KeyCode::Char('p') if key.code == KeyCode::Up || has_ctrl => {
+                        selected = if selected == 0 { 2 } else { selected - 1 };
+                        self.modal = Some(ActiveModal::UserMessageActions {
+                            entry_idx,
+                            selected,
+                        });
+                    }
+                    KeyCode::Down | KeyCode::Char('n') if key.code == KeyCode::Down || has_ctrl => {
+                        selected = (selected + 1) % 3;
+                        self.modal = Some(ActiveModal::UserMessageActions {
+                            entry_idx,
+                            selected,
+                        });
+                    }
+                    KeyCode::Enter => run(self, actions[selected.min(2)]),
+                    KeyCode::Char('r') if !has_ctrl => run(self, UserAction::Revert),
+                    KeyCode::Char('c') if !has_ctrl => run(self, UserAction::Copy),
+                    KeyCode::Char('f') if !has_ctrl => run(self, UserAction::Fork),
+                    _ => {
+                        self.modal = Some(ActiveModal::UserMessageActions {
+                            entry_idx,
+                            selected,
                         });
                     }
                 }

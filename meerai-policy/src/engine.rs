@@ -18,6 +18,7 @@ pub enum ApprovalMode {
     #[default]
     Ask,
     AutoEdit,
+    AutoApprove,
     Yolo,
 }
 
@@ -40,6 +41,7 @@ pub fn parse_approval_mode(raw: &str) -> Option<ApprovalMode> {
         "plan" => Some(ApprovalMode::Plan),
         "ask" => Some(ApprovalMode::Ask),
         "auto-edit" | "auto_edit" => Some(ApprovalMode::AutoEdit),
+        "auto-approve" | "auto_approve" | "auto" => Some(ApprovalMode::AutoApprove),
         "yolo" => Some(ApprovalMode::Yolo),
         _ => None,
     }
@@ -50,6 +52,7 @@ pub fn approval_mode_label(mode: ApprovalMode) -> &'static str {
         ApprovalMode::Plan => "plan",
         ApprovalMode::Ask => "ask",
         ApprovalMode::AutoEdit => "auto-edit",
+        ApprovalMode::AutoApprove => "auto-approve",
         ApprovalMode::Yolo => "yolo",
     }
 }
@@ -59,6 +62,7 @@ pub fn approval_mode_badge(mode: ApprovalMode) -> &'static str {
         ApprovalMode::Plan => "PLAN",
         ApprovalMode::Ask => "ASK",
         ApprovalMode::AutoEdit => "EDIT",
+        ApprovalMode::AutoApprove => "AUTO",
         ApprovalMode::Yolo => "YOLO",
     }
 }
@@ -250,6 +254,11 @@ impl PolicyEngine {
         self.warnings_read().clone()
     }
 
+    pub fn matched_effect(&self, check: &PermissionCheck) -> Option<Effect> {
+        let candidate = Candidate::new(check.action, &check.resource, &self.workspace_root);
+        self.last_matching_rule(&candidate)
+    }
+
     pub fn decide(&self, check: &PermissionCheck) -> Decision {
         if self.mode == ApprovalMode::Plan && check.effect != EffectClass::Read {
             return Decision::Deny {
@@ -363,6 +372,7 @@ impl PolicyEngine {
                 EffectClass::Read => Decision::Allow,
                 EffectClass::Write | EffectClass::Execute | EffectClass::External => Decision::Ask,
             },
+            ApprovalMode::AutoApprove => Decision::Allow,
             ApprovalMode::Yolo => Decision::Allow,
         }
     }
@@ -722,6 +732,79 @@ permissions:
             allow_then_deny.decide(&check(PermissionAction::Read, "a", EffectClass::Read)),
             deny()
         );
+    }
+
+    #[test]
+    fn auto_approve_allows_by_default_but_respects_rules() {
+        let engine = PolicyEngine::new(ApprovalMode::AutoApprove)
+            .with_workspace_root("/tmp/ws")
+            .with_rules(vec![
+                rule(
+                    ActionSelector::Action(PermissionAction::Shell),
+                    "git push *",
+                    Effect::Ask,
+                ),
+                rule(
+                    ActionSelector::Action(PermissionAction::Shell),
+                    "rm *",
+                    Effect::Deny,
+                ),
+            ]);
+
+        for (action, effect, resource) in [
+            (PermissionAction::Read, EffectClass::Read, "src/main.rs"),
+            (PermissionAction::Edit, EffectClass::Write, "src/main.rs"),
+            (PermissionAction::Shell, EffectClass::Execute, "cargo test"),
+            (
+                PermissionAction::WebFetch,
+                EffectClass::External,
+                "https://x",
+            ),
+        ] {
+            assert_eq!(
+                engine.decide(&check(action, resource, effect)),
+                Decision::Allow,
+                "{action:?} {resource}"
+            );
+        }
+        assert_eq!(
+            engine.decide(&check(
+                PermissionAction::Shell,
+                "git push origin main",
+                EffectClass::Execute
+            )),
+            Decision::Ask
+        );
+        assert!(matches!(
+            engine.decide(&check(
+                PermissionAction::Shell,
+                "rm -rf target",
+                EffectClass::Execute
+            )),
+            Decision::Deny { .. }
+        ));
+        assert_eq!(ApprovalMode::parse("auto"), Some(ApprovalMode::AutoApprove));
+        assert_eq!(
+            ApprovalMode::parse("auto-approve"),
+            Some(ApprovalMode::AutoApprove)
+        );
+    }
+
+    #[test]
+    fn matched_effect_reports_explicit_rules() {
+        let engine = PolicyEngine::new(ApprovalMode::Ask)
+            .with_workspace_root("/tmp/ws")
+            .with_rules(vec![rule(
+                ActionSelector::Action(PermissionAction::Shell),
+                "git *",
+                Effect::Ask,
+            )]);
+        let ask = check(PermissionAction::Shell, "git status", EffectClass::Execute);
+        assert_eq!(engine.matched_effect(&ask), Some(Effect::Ask));
+        assert_eq!(engine.decide(&ask), Decision::Ask);
+
+        let other = check(PermissionAction::Shell, "ls -la", EffectClass::Execute);
+        assert_eq!(engine.matched_effect(&other), None);
     }
 
     #[test]

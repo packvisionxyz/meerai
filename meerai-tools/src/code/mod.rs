@@ -39,6 +39,7 @@ pub struct CodeTools {
     sensitive_env_vars: Vec<String>,
     allowed_tools: Option<Vec<&'static str>>,
     allow_sensitive_files: bool,
+    extra_roots: Arc<std::sync::RwLock<Vec<PathBuf>>>,
     execution_world: Arc<dyn ExecutionWorld>,
 }
 
@@ -51,6 +52,7 @@ impl CodeTools {
             sensitive_env_vars: Vec::new(),
             allowed_tools: None,
             allow_sensitive_files: false,
+            extra_roots: Arc::new(std::sync::RwLock::new(Vec::new())),
             execution_world: Arc::new(HostWorld::new()),
         }
     }
@@ -105,6 +107,21 @@ impl CodeTools {
 
     pub fn readable_roots(&self) -> &[PathBuf] {
         &self.readable_roots
+    }
+
+    pub fn extra_roots(&self) -> Vec<PathBuf> {
+        self.extra_roots
+            .read()
+            .map(|roots| roots.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn add_extra_root(&self, root: &std::path::Path) {
+        if let Ok(mut roots) = self.extra_roots.write()
+            && !roots.iter().any(|existing| existing == root)
+        {
+            roots.push(root.to_path_buf());
+        }
     }
 
     pub fn allow_sensitive_files(&self) -> bool {
@@ -238,6 +255,10 @@ impl Toolset for CodeTools {
 
     fn should_spill_output(&self, fn_name: &str) -> bool {
         bare_name(fn_name) != Some("read_file")
+    }
+
+    fn grant_path_root(&self, root: &std::path::Path) {
+        self.add_extra_root(root);
     }
 
     async fn invoke(&self, fn_name: &str, args: &str) -> Result<ToolOutput, ToolError> {

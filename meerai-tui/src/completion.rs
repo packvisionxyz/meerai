@@ -51,8 +51,13 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
     ("/compact", "Compact older turns to reclaim context", false),
     (
         "/mode",
-        "Show or set approval mode (plan|ask|auto-edit|yolo)",
+        "Show or set approval mode (plan|ask|auto-edit|auto-approve|yolo)",
         true,
+    ),
+    (
+        "/reload",
+        "Reload settings, theme, definitions, and prompt",
+        false,
     ),
     ("/quit", "Exit meerai", false),
 ];

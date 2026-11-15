@@ -215,13 +215,32 @@ impl AppState {
                         None => {
                             tab.transcript.push(TranscriptEntry::Error {
                                 text: format!(
-                                    "Invalid mode: {arg}. Expected: plan, ask, auto-edit, yolo"
+                                    "Invalid mode: {arg}. Expected: plan, ask, auto-edit, auto-approve, yolo"
                                 ),
                                 expanded: false,
                             });
                         }
                     }
                 }
+            }
+            "/reload" => {
+                self.pending_reload = true;
+                self.status_notice = Some("Reloading configuration...".to_string());
+            }
+            "/update" => {
+                let current = env!("CARGO_PKG_VERSION");
+                let text = match &self.update_available {
+                    Some(latest) => format!(
+                        "Update available: v{current} -> v{latest}\nRun: {}",
+                        crate::update::install_hint()
+                    ),
+                    None => {
+                        format!("meerai v{current} is up to date (or the update check failed).")
+                    }
+                };
+                let tab = self.tab_mut();
+                tab.auto_follow = true;
+                tab.transcript.push(TranscriptEntry::System { text });
             }
             "/quit" | "/q" => {
                 self.quit();
@@ -418,7 +437,7 @@ fn format_help_text() -> String {
             "/model" => "/model [name]".to_string(),
             "/agent" => "/agent <id> (or @agent/<id>)".to_string(),
             "/skill" => "/skill <id> (or @skill/<id>)".to_string(),
-            "/mode" => "/mode [plan|ask|auto-edit|yolo]".to_string(),
+            "/mode" => "/mode [plan|ask|auto-edit|auto-approve|yolo]".to_string(),
             "/search" => "/search [query]".to_string(),
             "/grep" => "/grep [query]".to_string(),
             "/diff" => "/diff [path]".to_string(),

@@ -18,9 +18,11 @@ pub mod diff;
 pub mod event_loop;
 pub mod markdown;
 pub mod search;
+pub mod tabs;
 pub mod terminal;
 pub mod theme;
 pub mod ui;
+pub mod update;
 
 pub use app::{
     ActiveModal, AppState, FileChangeEntry, HoverZone, InputMode, MIN_SIDEBAR_WIDTH,
@@ -52,6 +54,7 @@ pub trait SessionOpener: Send + Sync {
     async fn open_session(&self, id: &SessionId) -> Result<OpenedSession>;
     async fn create_session(&self) -> Result<OpenedSession>;
     async fn fork_session(&self, id: &SessionId, turn: &TurnId) -> Result<OpenedSession>;
+    async fn delete_session(&self, id: &SessionId) -> Result<bool>;
 }
 
 pub struct TuiLaunchConfig {
@@ -70,6 +73,10 @@ pub struct TuiLaunchConfig {
     pub agents: Vec<AgentDefinition>,
     pub skills: Vec<SkillDefinition>,
     pub session_opener: Option<Arc<dyn SessionOpener>>,
+    pub update_available: Option<String>,
+    pub restore_sessions: Vec<SessionId>,
+    pub launch_system: String,
+    pub launch_definitions: String,
 }
 
 pub async fn run_tui(
@@ -88,6 +95,7 @@ pub async fn run_tui(
         config.settings,
         config.config_dir,
     );
+    app.tab_persistence = true;
     app.set_initial_session(
         config.initial_session_id,
         config.initial_session_title,
@@ -98,6 +106,13 @@ pub async fn run_tui(
     app.agents = config.agents;
     app.skills = config.skills;
     app.session_opener = config.session_opener;
+    app.update_available = config.update_available;
+    app.launch_system = config.launch_system;
+    app.launch_definitions = config.launch_definitions;
+    for id in config.restore_sessions {
+        app.pending_session_actions
+            .push(PendingSessionAction::OpenSessionId(id));
+    }
     let result = event_loop::run_event_loop(&mut terminal, &mut app, event_rx).await;
     app.quit();
     result

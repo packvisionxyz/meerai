@@ -17,7 +17,7 @@ use regex::Regex;
 use crate::app::{
     ActiveModal, AppState, DocPos, HoverZone, InputMode, MentionKind, TabHitKind, TabHitZone,
     ThinkingHitZone, ToolCallStatus, TranscriptEntry, TranscriptWrappedLine, UserAction,
-    UserActionHit, mention_is_known, normalize_selection_in_bounds, parse_mention_token,
+    mention_is_known, normalize_selection_in_bounds, parse_mention_token,
 };
 use crate::completion::{CompletionItemKind, CompletionKind};
 use crate::diff::{DiffCell, DiffRowKind};
@@ -55,14 +55,18 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
         let chat_chunks =
             Layout::vertical([Constraint::Min(3), Constraint::Length(composer_height)])
                 .split(cols[0]);
-        let sidebar_chunks =
-            Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)])
-                .split(cols[1]);
+        let sidebar = cols[1];
+        let gap = 1u16.min(sidebar.height);
+        let body = sidebar.height.saturating_sub(gap);
+        let top = (body as u32 * 55 / 100) as u16;
+        let bottom = body.saturating_sub(top);
+        let overview_area = Rect::new(sidebar.x, sidebar.y, sidebar.width, top);
+        let changes_area = Rect::new(sidebar.x, sidebar.y + top + gap, sidebar.width, bottom);
 
         render_transcript(frame, app, chat_chunks[0]);
         render_composer(frame, app, chat_chunks[1]);
-        render_sidebar_overview(frame, app, sidebar_chunks[0]);
-        render_sidebar_changes(frame, app, sidebar_chunks[1]);
+        render_sidebar_overview(frame, app, overview_area);
+        render_sidebar_changes(frame, app, changes_area);
         (chat_chunks[0], chat_chunks[1])
     } else {
         app.sidebar_changes_inner_area = Rect::default();
@@ -132,7 +136,7 @@ fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     let total_tab_width = |s: usize, e: usize| -> usize {
         labels[s..e]
             .iter()
-            .map(|(l, _)| l.chars().count() + 1)
+            .map(|(l, _)| l.chars().count() + 3)
             .sum::<usize>()
     };
     let budget = width.saturating_sub(new_btn.len() + 4);
@@ -163,6 +167,22 @@ fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
         }
         spans.push(Span::styled(label.clone(), *style));
         col = col.saturating_add(label_len);
+        let close_w = 1u16.min(area.x + area.width - col);
+        if close_w > 0 {
+            app.tab_hit_zones.push(TabHitZone {
+                rect: Rect::new(col, area.y, close_w, 1),
+                kind: TabHitKind::CloseTab(idx),
+            });
+        }
+        spans.push(Span::styled(
+            "×",
+            if idx == app.active_tab {
+                Style::default().fg(theme::p().muted)
+            } else {
+                Style::default().fg(theme::p().faint)
+            },
+        ));
+        col = col.saturating_add(close_w);
         spans.push(Span::raw(" "));
         col = col.saturating_add(1);
     }
@@ -202,13 +222,12 @@ fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
 
 fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     let inner = Rect {
-        x: area.x.saturating_add(1),
-        y: area.y,
-        width: area.width.saturating_sub(2),
-        height: area.height,
+        x: area.x.saturating_add(2),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(4),
+        height: area.height.saturating_sub(2),
     };
 
-    app.user_action_hits.clear();
     let raw_lines = build_transcript_lines(app, inner.width as usize);
     let mut wrapped = if inner.width > 0 {
         wrap_tagged_lines(raw_lines, inner.width as usize)
@@ -260,35 +279,6 @@ fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     let first_visible = scroll_y as usize;
     let last_visible = first_visible + inner.height as usize;
 
-    if let Some(idx) = hovered
-        && matches!(
-            app.tab().transcript.get(idx),
-            Some(TranscriptEntry::User { .. })
-        )
-        && let Some(zone) = app
-            .hover_zones
-            .iter()
-            .find(|zone| zone.entry_idx == idx)
-            .copied()
-        && zone.start_line >= first_visible
-        && zone.start_line < last_visible
-    {
-        let y = inner.y + (zone.start_line - first_visible) as u16;
-        const ACTIONS: &str = "Revert  Copy  Fork";
-        let start_x = inner.x + inner.width.saturating_sub(ACTIONS.len() as u16);
-        for (action, offset, len) in [
-            (UserAction::Revert, 0u16, 6u16),
-            (UserAction::Copy, 8, 4),
-            (UserAction::Fork, 14, 4),
-        ] {
-            app.user_action_hits.push(UserActionHit {
-                rect: Rect::new(start_x + offset, y, len, 1),
-                entry_idx: idx,
-                action,
-            });
-        }
-    }
-
     let mut paint = |bands: &[(usize, usize)], color: ratatui::style::Color| {
         for &(start, end) in bands {
             if end <= first_visible || start >= last_visible {
@@ -330,37 +320,9 @@ fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
 
     let key_status = app.active_key_status();
     let (key_badge, key_color) = key_status_style(&key_status);
-    let state_span = if tab.is_running {
-        let ch = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
-        let label = match tab.metrics.elapsed_ms() {
-            Some(ms) => format!("{ch} running ({})", format_compact_ms(ms)),
-            None => format!("{ch} running"),
-        };
-        Span::styled(label, Style::default().fg(theme::p().warning))
-    } else {
-        let label = match tab.metrics.last_turn_ms {
-            Some(ms) => format!("idle ({})", format_compact_ms(ms)),
-            None => "idle".to_string(),
-        };
-        Span::styled(label, Style::default().fg(theme::p().success))
-    };
-
-    let mut token_summary = format_usage_compact(app);
-    if tab.metrics.turn_count > 1 && tab.metrics.session_total_tokens > 0 {
-        token_summary.push_str(&format!(
-            " · s:Σ{}",
-            format_compact_tokens(tab.metrics.session_total_tokens)
-        ));
-    }
-    let speed_summary = match (tab.metrics.last_tokens_per_sec, tab.metrics.last_ttft_ms) {
-        (Some(tps), Some(ttft)) => format!("{tps:.1} tok/s · {}", format_compact_ms(ttft)),
-        (Some(tps), None) => format!("{tps:.1} tok/s"),
-        (None, Some(ttft)) => format!("ttft {}", format_compact_ms(ttft)),
-        (None, None) => "-".to_string(),
-    };
-
     let field =
         |name: &str| Span::styled(format!("{name:<9}"), Style::default().fg(theme::p().muted));
+    let workspace = display_workspace(&app.workspace_root);
 
     let mut lines = vec![
         Line::from(Span::styled(" SESSION", theme::label())),
@@ -389,18 +351,10 @@ fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             field("auth"),
             Span::styled(format!("[{key_badge}]"), Style::default().fg(key_color)),
         ]),
-        Line::from(vec![field("state"), state_span]),
         Line::from(vec![
-            field("tokens"),
+            field("dir"),
             Span::styled(
-                truncate_single_line(&token_summary, width.saturating_sub(10)),
-                theme::text(),
-            ),
-        ]),
-        Line::from(vec![
-            field("speed"),
-            Span::styled(
-                truncate_single_line(&speed_summary, width.saturating_sub(10)),
+                truncate_single_line(&workspace, width.saturating_sub(10)),
                 Style::default().fg(theme::p().muted),
             ),
         ]),
@@ -496,9 +450,19 @@ fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+fn display_workspace(path: &std::path::Path) -> String {
+    let raw = path.display().to_string();
+    if let Some(home) = meerai_core::env::home_dir()
+        && let Some(rest) = raw.strip_prefix(&home.display().to_string())
+    {
+        return format!("~{rest}");
+    }
+    raw
+}
+
 fn render_sidebar_changes(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     frame.render_widget(
-        Block::default().style(Style::default().bg(theme::p().surface)),
+        Block::default().style(Style::default().bg(theme::p().surface_high)),
         area,
     );
     let area = Rect {
@@ -605,35 +569,39 @@ fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
     let key_status = app.active_key_status();
     let (badge, badge_color) = key_status_style(&key_status);
 
-    vec![
-        tagged_line(
-            Line::from(vec![
-                Span::styled(
-                    "meerai",
-                    Style::default()
-                        .fg(theme::p().accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    format!("{} / {}", app.tab().active_provider, display_model(app)),
-                    Style::default().fg(theme::p().muted),
-                ),
-                Span::raw(" "),
-                Span::styled(format!("[{badge}]"), Style::default().fg(badge_color)),
-            ]),
-            None,
-            0,
-        ),
-        tagged_line(
-            Line::from(Span::styled(
-                format!("{}", app.workspace_root.display()),
-                Style::default().fg(theme::p().faint),
-            )),
-            None,
-            0,
-        ),
-    ]
+    vec![tagged_line(
+        Line::from(vec![
+            Span::styled(
+                "meerai",
+                Style::default()
+                    .fg(theme::p().accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("{} / {}", app.tab().active_provider, display_model(app)),
+                Style::default().fg(theme::p().muted),
+            ),
+            Span::raw(" "),
+            Span::styled(format!("[{badge}]"), Style::default().fg(badge_color)),
+        ]),
+        None,
+        0,
+    )]
+}
+
+fn script_from_args(name: &str, args: &str) -> Option<(String, String)> {
+    if !name.ends_with("run_script") {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(args).ok()?;
+    let script = value.get("script")?.as_str()?.to_string();
+    let language = value
+        .get("language")
+        .and_then(|v| v.as_str())
+        .unwrap_or("script")
+        .to_string();
+    Some((language, script))
 }
 
 fn tool_status_badge(status: &ToolCallStatus) -> (&'static str, Color) {
@@ -891,7 +859,14 @@ fn build_transcript_lines(app: &AppState, width: usize) -> Vec<TaggedTranscriptL
             }
             TranscriptEntry::ToolCall(tc) => {
                 let (badge, badge_color) = tool_status_badge(&tc.status);
-                let args_preview = truncate_single_line(&tc.args, 60);
+                let script = script_from_args(&tc.name, &tc.args);
+                let args_preview = match &script {
+                    Some((language, code)) => {
+                        let first = code.lines().next().unwrap_or("").trim();
+                        truncate_single_line(&format!("{language} · {first}"), 60)
+                    }
+                    None => truncate_single_line(&tc.args, 60),
+                };
                 let active = matches!(
                     tc.status,
                     ToolCallStatus::Proposed | ToolCallStatus::Running
@@ -931,7 +906,12 @@ fn build_transcript_lines(app: &AppState, width: usize) -> Vec<TaggedTranscriptL
                 } else {
                     output.lines().collect()
                 };
-                let collapsible = output_lines.len() > 1
+                const PREVIEW_LINES: usize = 8;
+                let full_args = tc.args.trim().to_string();
+                let args_collapsible = full_args.chars().count() > 60;
+                let collapsible = script.is_some()
+                    || args_collapsible
+                    || !output_lines.is_empty()
                     || output_lines
                         .first()
                         .is_some_and(|line| line.chars().count() > 120);
@@ -964,6 +944,65 @@ fn build_transcript_lines(app: &AppState, width: usize) -> Vec<TaggedTranscriptL
                     idx,
                 ));
 
+                if tc.expanded && !full_args.is_empty() {
+                    let pretty = serde_json::from_str::<serde_json::Value>(&full_args)
+                        .ok()
+                        .and_then(|value| serde_json::to_string_pretty(&value).ok())
+                        .unwrap_or_else(|| full_args.clone());
+                    for line in pretty.lines().take(40) {
+                        lines.push(with_hover(
+                            banded_line(
+                                Line::from(vec![
+                                    Span::styled("  · ", Style::default().fg(theme::p().faint)),
+                                    Span::styled(
+                                        line.to_string(),
+                                        Style::default().fg(theme::p().faint),
+                                    ),
+                                ]),
+                                Some(idx),
+                                4,
+                            ),
+                            idx,
+                        ));
+                    }
+                }
+                if tc.expanded
+                    && let Some((_, code)) = &script
+                {
+                    const MAX_SCRIPT_LINES: usize = 100;
+                    for line in code.lines().take(MAX_SCRIPT_LINES) {
+                        lines.push(with_hover(
+                            banded_line(
+                                Line::from(vec![
+                                    Span::styled("  › ", Style::default().fg(theme::p().faint)),
+                                    Span::styled(
+                                        line.to_string(),
+                                        Style::default().fg(theme::p().text),
+                                    ),
+                                ]),
+                                Some(idx),
+                                4,
+                            ),
+                            idx,
+                        ));
+                    }
+                    if code.lines().count() > MAX_SCRIPT_LINES {
+                        lines.push(with_hover(
+                            banded_line(
+                                Line::from(Span::styled(
+                                    format!(
+                                        "  … {} more script lines",
+                                        code.lines().count() - MAX_SCRIPT_LINES
+                                    ),
+                                    Style::default().fg(theme::p().faint),
+                                )),
+                                Some(idx),
+                                4,
+                            ),
+                            idx,
+                        ));
+                    }
+                }
                 if !output_lines.is_empty() {
                     if tc.expanded {
                         const MAX_EXPANDED_LINES: usize = 200;
@@ -1000,14 +1039,15 @@ fn build_transcript_lines(app: &AppState, width: usize) -> Vec<TaggedTranscriptL
                             ));
                         }
                     } else {
-                        let preview = truncate_single_line(output, 120);
-                        if !preview.is_empty() {
+                        let start = output_lines.len().saturating_sub(PREVIEW_LINES);
+                        for (offset, line) in output_lines[start..].iter().enumerate() {
+                            let gutter = if offset == 0 { "  ↳ " } else { "    " };
                             lines.push(with_hover(
                                 banded_line(
                                     Line::from(vec![
-                                        Span::styled("  ↳ ", Style::default().fg(theme::p().faint)),
+                                        Span::styled(gutter, Style::default().fg(theme::p().faint)),
                                         Span::styled(
-                                            preview,
+                                            truncate_single_line(line, 200),
                                             Style::default().fg(theme::p().faint),
                                         ),
                                     ]),
@@ -1152,51 +1192,38 @@ fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
         Block::default().style(Style::default().bg(theme::p().surface)),
         area,
     );
-    let (mode_label, mode_color) = match app.mode {
-        InputMode::Insert => ("insert", theme::p().accent),
-        InputMode::Normal => ("normal", theme::p().info),
-    };
-    let queued = app.tab().queued.len();
-    let mode_hint = if queued == 0 {
-        mode_label.to_string()
-    } else {
-        format!("{mode_label} · {queued} queued · Ctrl-g send now")
-    };
-
-    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
-    let rule_style = Style::default().fg(theme::p().border);
-    let hint_width = mode_hint.chars().count() + 2;
-    let rule_width = (area.width as usize).saturating_sub(hint_width);
-    let rule = Line::from(vec![
-        Span::styled("─".repeat(rule_width), rule_style),
-        Span::styled(format!(" {mode_hint} "), Style::default().fg(mode_color)),
-    ]);
-    frame.render_widget(Paragraph::new(rule), rows[0]);
-
-    let body = rows[1];
+    if area.height < 3 || area.width < 6 {
+        return;
+    }
     let inner = Rect {
-        x: body.x.saturating_add(2),
-        y: body.y,
-        width: body.width.saturating_sub(2),
-        height: body.height,
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
     };
+    let content = Rect {
+        x: inner.x.saturating_add(2),
+        width: inner.width.saturating_sub(2),
+        ..inner
+    };
+    app.composer_input_area = content;
+
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "❯",
             Style::default().fg(theme::p().interactive),
         ))),
-        Rect::new(body.x, body.y, 2, 1),
+        Rect::new(inner.x, inner.y, 2, 1),
     );
 
-    app.composer_input_area = inner;
     let (cursor_row, cursor_col) = cursor_row_col(&app.tab().input, app.tab().cursor);
-    let visible_rows = inner.height.max(1) as usize;
+    let visible_rows = content.height.max(1) as usize;
     let scroll_y = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
     app.composer_scroll = scroll_y;
 
     let tab = app.tab();
     let mut cursor_display_col = cursor_col;
-    let content = if tab.input.is_empty() {
+    let lines = if tab.input.is_empty() {
         Paragraph::new(Line::from(Span::styled(
             "Ask meerai anything...",
             Style::default().fg(theme::p().faint),
@@ -1219,14 +1246,18 @@ fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
         Paragraph::new(lines).scroll((scroll_y.min(u16::MAX as usize) as u16, 0))
     };
 
-    frame.render_widget(content, inner);
+    frame.render_widget(lines, content);
 
-    if app.modal.is_none() && app.mode == InputMode::Insert && inner.width > 0 && inner.height > 0 {
-        let max_x = inner.x + inner.width.saturating_sub(1);
+    if app.modal.is_none()
+        && app.mode == InputMode::Insert
+        && content.width > 0
+        && content.height > 0
+    {
+        let max_x = content.x + content.width.saturating_sub(1);
         let rel_row = cursor_row.saturating_sub(scroll_y);
-        let max_y = inner.y + inner.height.saturating_sub(1);
-        let x = (inner.x + cursor_display_col as u16).min(max_x);
-        let y = (inner.y + rel_row as u16).min(max_y);
+        let max_y = content.y + content.height.saturating_sub(1);
+        let x = (content.x + cursor_display_col as u16).min(max_x);
+        let y = (content.y + rel_row as u16).min(max_y);
         frame.set_cursor_position(Position::new(x, y));
     }
 }
@@ -1359,7 +1390,7 @@ fn render_completion_popup(
 
     let max_visible = (transcript_area.height.saturating_sub(2) as usize).clamp(1, 8);
     let height = (items.len().min(max_visible) as u16) + 2;
-    let width = composer_area.width.saturating_sub(2).min(78);
+    let width = composer_area.width.saturating_sub(2).min(64);
 
     let x = composer_area.x + 1;
     let y = composer_area.y.saturating_sub(height);
@@ -1443,7 +1474,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
 
     match modal {
         ActiveModal::ProviderSelect { filter, selected } => {
-            let popup = centered_rect(area, 72, 68, 44, 10);
+            let popup = cap_width(centered_rect(area, 66, 68, 42, 10), 64);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::p().border))
@@ -1519,7 +1550,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             existing_key_status,
             error,
         } => {
-            let popup = centered_rect_fixed(area, 72, 13);
+            let popup = centered_rect_fixed(area, 64, 13);
             let title = format!(" Connect {provider_name} ({provider_id}) ");
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -1613,7 +1644,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             } else {
                 (8 + recent.len().min(8)) as u16
             };
-            let popup = centered_rect_fixed(area, 72, height);
+            let popup = centered_rect_fixed(area, 60, height);
             let title = format!(" Set Model [{active_provider}] (/model) ");
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -1950,6 +1981,56 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 layout[2],
             );
         }
+        ActiveModal::UserMessageActions {
+            entry_idx,
+            selected,
+        } => {
+            let popup = centered_rect_fixed(area, 40, 8);
+            let block = theme::dialog(" Message ");
+            let inner = block.inner(popup);
+            frame.render_widget(Clear, popup);
+            frame.render_widget(block, popup);
+
+            let rows = Layout::vertical([
+                Constraint::Length(3),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+
+            let items = [
+                (UserAction::Revert, "Revert", "r"),
+                (UserAction::Copy, "Copy", "c"),
+                (UserAction::Fork, "Fork", "f"),
+            ];
+            let list_items: Vec<ListItem<'_>> = items
+                .iter()
+                .map(|(_, label, key)| {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!(" {label}"), Style::default().fg(theme::p().text)),
+                        Span::raw("  "),
+                        Span::styled(*key, Style::default().fg(theme::p().faint)),
+                    ]))
+                })
+                .collect();
+            let mut state = ListState::default();
+            state.select(Some((*selected).min(2)));
+            let list = List::new(list_items).highlight_style(
+                Style::default()
+                    .bg(theme::p().surface_high)
+                    .add_modifier(Modifier::BOLD),
+            );
+            frame.render_stateful_widget(list, rows[0], &mut state);
+            let _ = entry_idx;
+
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "Enter run · Esc close",
+                    Style::default().fg(theme::p().faint),
+                ))),
+                rows[2],
+            );
+        }
         ActiveModal::CommandPalette { filter, selected } => {
             let popup = centered_rect(area, 50, 62, 46, 12);
             let popup = Rect {
@@ -2044,7 +2125,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             let Some(request) = queue.first() else {
                 return;
             };
-            let popup = centered_rect(area, 88, 48, 50, 12);
+            let popup = cap_width(centered_rect(area, 64, 46, 46, 12), 72);
             let title = if queue.len() > 1 {
                 format!(" Approval required ({}) ", queue.len())
             } else {
@@ -2122,7 +2203,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             } else {
                 vec![
                     Line::from(Span::styled(
-                        "y accept · t accept-for-turn · a accept-for-session · n decline · r decline-with-reason · esc cancel",
+                        "y accept · t turn · a session · n deny · r reason · esc cancel",
                         Style::default().fg(theme::p().faint),
                     )),
                     Line::default(),
@@ -2137,7 +2218,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             loading,
             error,
         } => {
-            let popup = centered_rect(area, 78, 72, 48, 12);
+            let popup = cap_width(centered_rect(area, 66, 72, 46, 12), 68);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::p().border))
@@ -2261,15 +2342,26 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 frame.render_stateful_widget(list, rows[1], &mut state);
             }
 
+            let selected_id = filtered
+                .get((*selected).min(filtered.len().saturating_sub(1)))
+                .map(|summary| summary.id.clone());
+            let confirming = app.session_delete_confirm.is_some()
+                && app.session_delete_confirm.as_ref() == selected_id.as_ref();
             let footer_text = if *loading {
                 "Refreshing...  Enter:switch  Up/Down:move  Esc:close"
+            } else if confirming {
+                "Press Ctrl-d again to delete  ·  Esc:cancel"
             } else {
-                "Enter:switch  Up/Down:move  Type:filter  Esc:close"
+                "Enter:switch  Ctrl-d:delete  Up/Down:move  Type:filter  Esc:close"
             };
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     footer_text,
-                    Style::default().fg(theme::p().faint),
+                    Style::default().fg(if confirming {
+                        theme::p().error
+                    } else {
+                        theme::p().faint
+                    }),
                 ))),
                 rows[2],
             );
@@ -2348,7 +2440,13 @@ fn display_model(app: &AppState) -> &str {
     }
 }
 
-fn render_statusline(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
+fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::p().surface)),
+        area,
+    );
+    app.update_hit = None;
+    let mut update_hit: Option<Rect> = None;
     let tab = app.tab();
     let (badge_text, badge_color) = match app.mode {
         InputMode::Insert => (" INS ", theme::p().accent),
@@ -2366,6 +2464,7 @@ fn render_statusline(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         ApprovalMode::Plan => theme::p().accent,
         ApprovalMode::Ask => theme::p().warning,
         ApprovalMode::AutoEdit => theme::p().info,
+        ApprovalMode::AutoApprove => theme::p().success,
         ApprovalMode::Yolo => theme::p().error,
     };
     spans.push(Span::styled(
@@ -2391,6 +2490,17 @@ fn render_statusline(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             format!(" · {usage_str}"),
             Style::default().fg(theme::p().muted),
         ));
+    }
+
+    if let Some(latest) = app.update_available.clone() {
+        let label = format!(" · update v{latest} (/update)");
+        let offset: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+        let width = label.chars().count() as u16;
+        let x = area.x.saturating_add(offset as u16);
+        if x.saturating_add(width) <= area.x.saturating_add(area.width) {
+            update_hit = Some(Rect::new(x, area.y, width, 1));
+            spans.push(Span::styled(label, Style::default().fg(theme::p().warning)));
+        }
     }
 
     if let Some(session_usage) = format_session_usage(app) {
@@ -2456,6 +2566,7 @@ fn render_statusline(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         spans.push(Span::styled(hint, Style::default().fg(theme::p().faint)));
     }
 
+    app.update_hit = update_hit;
     let bar = Paragraph::new(Line::from(spans));
     frame.render_widget(bar, area);
 }
@@ -2551,6 +2662,17 @@ fn centered_rect(area: Rect, percent_x: u16, percent_y: u16, min_w: u16, min_h: 
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     Rect::new(x, y, width, height)
+}
+
+fn cap_width(rect: Rect, max: u16) -> Rect {
+    if rect.width <= max {
+        return rect;
+    }
+    Rect {
+        x: rect.x + (rect.width - max) / 2,
+        width: max,
+        ..rect
+    }
 }
 
 fn centered_rect_fixed(area: Rect, max_w: u16, max_h: u16) -> Rect {
@@ -2984,6 +3106,102 @@ mod tests {
     }
 
     #[test]
+    fn statusline_shows_update_and_the_hit_zone_runs_it() {
+        let mut app = test_app();
+        app.update_available = Some("9.9.9".to_string());
+        let rendered = render_to_string(&mut app);
+        assert!(rendered.contains("update v9.9.9"));
+        let hit = app.update_hit.expect("update hit zone");
+
+        assert!(app.handle_mouse_event(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: hit.x + 1,
+            row: hit.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }));
+        assert!(app.tab().transcript.iter().any(|entry| matches!(
+            entry,
+            TranscriptEntry::System { text } if text.contains("9.9.9")
+        )));
+    }
+
+    #[test]
+    fn sidebar_shows_the_workspace_without_duplicated_metrics() {
+        let mut app = test_app();
+        let rendered = render_to_string(&mut app);
+        assert!(rendered.contains("dir"));
+        assert!(!rendered.contains("tokens "));
+        assert!(!rendered.contains("speed "));
+        assert!(!rendered.contains("state "));
+    }
+
+    #[test]
+    fn running_tools_expand_to_show_full_arguments() {
+        let mut app = test_app();
+        app.tab_mut().transcript.push(TranscriptEntry::User {
+            text: "go".to_string(),
+        });
+        app.tab_mut()
+            .transcript
+            .push(TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
+                call_id: "call-1".to_string(),
+                name: "code-grep".to_string(),
+                args: format!(
+                    "{{\"query\":\"{}\",\"target\":\"TARGET-VALUE\"}}",
+                    "x".repeat(80)
+                ),
+                status: ToolCallStatus::Running,
+                output: None,
+                expanded: false,
+            }));
+
+        let collapsed = render_to_string(&mut app);
+        assert!(collapsed.contains("[click to expand]"));
+        assert!(!collapsed.contains("TARGET-VALUE"));
+
+        let row = (0..28)
+            .find(|y| {
+                app.screen_lines
+                    .get(*y as usize)
+                    .is_some_and(|line| line.join("").contains("code-grep"))
+            })
+            .expect("tool row");
+        let col = app.transcript_inner_area.x + 2;
+        assert!(app.toggle_entry_at(col, row));
+
+        let expanded = render_to_string(&mut app);
+        assert!(expanded.contains("[click to hide]"));
+        assert!(expanded.contains("TARGET-VALUE"));
+    }
+
+    #[test]
+    fn session_picker_shows_delete_and_confirmation_hints() {
+        let mut app = test_app();
+        app.modal = Some(ActiveModal::SessionSelect {
+            filter: String::new(),
+            selected: 0,
+            sessions: vec![meerai_session::SessionSummary {
+                id: meerai_session::SessionId::from_raw("ses-old"),
+                dir: std::path::PathBuf::from("/tmp/ses-old"),
+                title: Some("Old".to_string()),
+                model: None,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+                bytes: 0,
+                parent_session_id: None,
+            }],
+            loading: false,
+            error: None,
+        });
+        let rendered = render_to_string(&mut app);
+        assert!(rendered.contains("Ctrl-d:delete"));
+
+        app.session_delete_confirm = Some(meerai_session::SessionId::from_raw("ses-old"));
+        let confirming = render_to_string(&mut app);
+        assert!(confirming.contains("Press Ctrl-d again to delete"));
+    }
+
+    #[test]
     fn renders_command_palette_with_shortcuts() {
         let mut app = test_app();
         app.modal = Some(ActiveModal::CommandPalette {
@@ -3073,18 +3291,19 @@ mod tests {
                 name: "code-read_file".to_string(),
                 args: "{}".to_string(),
                 status: ToolCallStatus::Succeeded,
-                output: Some(format!(
-                    "{}\nbeta-unique\ngamma-unique",
-                    "alpha ".repeat(24)
-                )),
+                output: Some(
+                    (0..12)
+                        .map(|index| format!("line-{index}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
                 expanded: false,
             }));
 
         let collapsed = render_to_string(&mut app);
         assert!(collapsed.contains("[click to expand]"));
-        assert!(collapsed.contains("alpha"));
-        assert!(!collapsed.contains("beta-unique"));
-        assert!(!collapsed.contains("gamma-unique"));
+        assert!(collapsed.contains("line-11"));
+        assert!(!collapsed.contains("line-0"));
 
         let row = (0..28)
             .find(|y| {
@@ -3098,14 +3317,13 @@ mod tests {
 
         let expanded = render_to_string(&mut app);
         assert!(expanded.contains("[click to hide]"));
-        assert!(expanded.contains("alpha"));
-        assert!(expanded.contains("beta-unique"));
-        assert!(expanded.contains("gamma-unique"));
+        assert!(expanded.contains("line-11"));
+        assert!(expanded.contains("line-0"));
 
         assert!(app.toggle_entry_at(col, row));
         let collapsed_again = render_to_string(&mut app);
         assert!(collapsed_again.contains("[click to expand]"));
-        assert!(!collapsed_again.contains("gamma-unique"));
+        assert!(!collapsed_again.contains("line-0"));
     }
 
     #[test]
@@ -3306,8 +3524,8 @@ mod tests {
         assert!(rendered.contains("[saved]"));
         assert!(rendered.contains("↑100 ↓25 Σ125"));
         assert!(rendered.contains("session ↑100 ↓25 Σ125"));
-        assert!(rendered.contains("42.5 tok/s · 310ms"));
-        assert!(rendered.contains("idle (1.4s)"));
+        assert!(rendered.contains("42.5 tok/s"));
+        assert!(rendered.contains("1.4s"));
         assert!(rendered.contains("meerai"));
         assert!(!rendered.contains("> You"));
         assert!(!rendered.contains("◆ Assistant"));
@@ -3357,11 +3575,11 @@ mod tests {
     }
 
     #[test]
-    fn composer_renders_prompt_and_mode_rule() {
+    fn composer_renders_prompt_and_marker() {
         let mut app = test_app();
         let rendered = render_to_string(&mut app);
         assert!(rendered.contains("Ask meerai anything"));
-        assert!(rendered.contains("insert"));
+        assert!(rendered.contains("❯"));
     }
 
     #[test]
@@ -3459,6 +3677,9 @@ mod tests {
         assert!(edit.contains("EDIT"));
         assert!(edit.contains("INS"));
 
+        app.tab_mut().approval_mode = ApprovalMode::AutoApprove;
+        assert!(render_to_string(&mut app).contains("AUTO"));
+
         app.tab_mut().approval_mode = ApprovalMode::Yolo;
         assert!(render_to_string(&mut app).contains("YOLO"));
 
@@ -3490,8 +3711,8 @@ mod tests {
         assert!(rendered.contains("kind: tool call · effect: write"));
         assert!(rendered.contains("resource: src/main.rs"));
         assert!(rendered.contains("y accept"));
-        assert!(rendered.contains("t accept-for-turn"));
-        assert!(rendered.contains("accept-for-session"));
+        assert!(rendered.contains("t turn"));
+        assert!(rendered.contains("a session"));
         assert!(rendered.contains("esc cancel"));
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
@@ -3799,7 +4020,8 @@ mod tests {
         assert!(rendered.contains("▌ you"));
         assert!(rendered.contains("▌ Inspect Cargo.toml"));
         assert!(rendered.contains("▸ [tool] code-read_file [ok]"));
-        assert!(rendered.contains("↳ [workspace] members = []"));
+        assert!(rendered.contains("↳ [workspace]"));
+        assert!(rendered.contains("members = []"));
         assert!(rendered.contains("▾ Thought (1 line)"));
         assert!(rendered.contains("● Response"));
         assert!(rendered.contains("Summary"));

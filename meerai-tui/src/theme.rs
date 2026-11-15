@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use meerai_common::settings::ThemeSettings;
 use ratatui::style::{Color, Modifier, Style};
@@ -89,14 +89,28 @@ impl Palette {
     }
 }
 
-static PALETTE: OnceLock<Palette> = OnceLock::new();
+static PALETTE: OnceLock<RwLock<Palette>> = OnceLock::new();
 
-pub fn install(palette: Palette) {
-    let _ = PALETTE.set(palette);
+fn palette_lock() -> &'static RwLock<Palette> {
+    PALETTE.get_or_init(|| RwLock::new(Palette::default()))
 }
 
-pub fn p() -> &'static Palette {
-    PALETTE.get_or_init(Palette::default)
+pub fn install(palette: Palette) {
+    set(palette);
+}
+
+pub fn set(palette: Palette) {
+    let lock = palette_lock();
+    if let Ok(mut current) = lock.write() {
+        *current = palette;
+    }
+}
+
+pub fn p() -> Palette {
+    palette_lock()
+        .read()
+        .map(|palette| *palette)
+        .unwrap_or_default()
 }
 
 pub fn parse_color(raw: &str) -> Option<Color> {

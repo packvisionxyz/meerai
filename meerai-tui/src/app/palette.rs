@@ -88,6 +88,13 @@ pub(crate) const PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         section: "Approval",
+        label: "Approval mode: auto-approve",
+        hint: "/mode auto-approve",
+        keywords: "mode automatic approve allow permissions",
+        action: PaletteAction::Slash("/mode auto-approve"),
+    },
+    PaletteCommand {
+        section: "Approval",
         label: "Approval mode: yolo",
         hint: "/mode yolo",
         keywords: "mode allow all permissions",

@@ -23,8 +23,8 @@ providers:
     requires_api_key: true
   - id: alibaba-token-plan
     display_name: "Alibaba Token Plan (DashScope)"
-    adapter: aliyun
-    base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/"
+    adapter: openai
+    base_url: "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1/"
     env_vars:
       - ALIYUN_API_KEY
       - DASHSCOPE_API_KEY

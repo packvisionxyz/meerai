@@ -126,13 +126,19 @@ impl CodeTools {
             removed_env_vars: self.sensitive_env_vars().to_vec(),
         };
 
-        let mut writable_roots = Vec::with_capacity(self.writable_roots().len());
+        let mut writable_roots = Vec::with_capacity(self.writable_roots().len() + 1);
         for root in self.writable_roots() {
             writable_roots.push(canonicalize_or_keep(root).await);
         }
-        let mut readable_roots = Vec::with_capacity(self.readable_roots().len());
+        for root in self.extra_roots() {
+            writable_roots.push(canonicalize_or_keep(&root).await);
+        }
+        let mut readable_roots = Vec::with_capacity(self.readable_roots().len() + 1);
         for root in self.readable_roots() {
             readable_roots.push(canonicalize_or_keep(root).await);
+        }
+        for root in self.extra_roots() {
+            readable_roots.push(canonicalize_or_keep(&root).await);
         }
         let policy = SandboxPolicy::WorkspaceWrite {
             workspace_root: cwd,

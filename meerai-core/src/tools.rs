@@ -255,6 +255,8 @@ pub trait Toolset: Send + Sync {
         true
     }
 
+    fn grant_path_root(&self, _root: &std::path::Path) {}
+
     async fn invoke(&self, fn_name: &str, args: &str) -> Result<ToolOutput, ToolError>;
 
     async fn invoke_structured(&self, fn_name: &str, args: &str) -> Result<ToolRun, ToolError> {

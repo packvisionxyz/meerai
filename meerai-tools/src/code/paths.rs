@@ -132,9 +132,11 @@ impl CodeTools {
     }
 
     pub(crate) async fn resolve_for_read(&self, raw: &str) -> Result<PathBuf, PathIssue> {
+        let mut roots = self.readable_roots().to_vec();
+        roots.extend(self.extra_roots());
         resolve_read_path_with_policy(
             &self.workspace_root,
-            self.readable_roots(),
+            &roots,
             raw,
             self.allow_sensitive_files(),
         )
@@ -142,9 +144,11 @@ impl CodeTools {
     }
 
     pub(crate) async fn resolve_for_write(&self, raw: &str) -> Result<PathBuf, PathIssue> {
+        let mut roots = self.writable_roots().to_vec();
+        roots.extend(self.extra_roots());
         resolve_write_path_with_policy(
             &self.workspace_root,
-            self.writable_roots(),
+            &roots,
             raw,
             self.allow_sensitive_files(),
         )
@@ -550,5 +554,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(read_env.observation.status, ObservationStatus::Success);
+    }
+}
+
+#[cfg(test)]
+mod outside_root_tests {
+    use std::fs;
+
+    use meerai_core::{ObservationStatus, Toolset};
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn outside_access_is_refused_until_a_root_is_granted() {
+        let workspace = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let file = outside.path().join("note.txt");
+        fs::write(&file, "outside").unwrap();
+        let args = json!({ "path": file.to_string_lossy() }).to_string();
+
+        let tools = CodeTools::new(workspace.path());
+        let refused = tools
+            .invoke_structured("code-read_file", &args)
+            .await
+            .unwrap();
+        assert_eq!(refused.observation.status, ObservationStatus::Refused);
+
+        tools.grant_path_root(outside.path());
+        let allowed = tools
+            .invoke_structured("code-read_file", &args)
+            .await
+            .unwrap();
+        assert_eq!(allowed.observation.status, ObservationStatus::Success);
+        let text = match &allowed.output {
+            meerai_core::ToolOutput::Text(text) | meerai_core::ToolOutput::Fail(text) => text,
+            meerai_core::ToolOutput::Stop(reason) => reason,
+        };
+        assert!(text.contains("outside"));
     }
 }

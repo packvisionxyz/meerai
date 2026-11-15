@@ -1714,32 +1714,44 @@ fn dragging_over_expanded_content_does_not_collapse_it() {
 }
 
 #[test]
-fn clicking_a_user_action_copies_or_forks_the_message() {
+fn clicking_a_user_message_opens_actions_and_copies_or_forks() {
     let (mut app, _rx, _secrets) = test_app();
     app.tab_mut().transcript.push(TranscriptEntry::User {
         text: "hello world".to_string(),
     });
-    app.user_action_hits = vec![UserActionHit {
-        rect: Rect::new(5, 5, 4, 1),
+    app.transcript_inner_area = Rect::new(1, 1, 60, 10);
+    app.thinking_hit_zones = vec![ThinkingHitZone {
         entry_idx: 0,
-        action: UserAction::Copy,
+        start_line: 0,
+        end_line: 2,
     }];
-    let click = MouseEvent {
+    let press = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: 6,
-        row: 5,
+        column: 5,
+        row: 1,
         modifiers: KeyModifiers::NONE,
     };
-    assert!(app.handle_mouse_event(click));
+    let release = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 5,
+        row: 1,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(app.handle_mouse_event(press));
+    assert!(app.handle_mouse_event(release));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::UserMessageActions { entry_idx: 0, .. })
+    ));
+
+    app.handle_key_event(key(KeyCode::Char('c')));
+    assert!(app.modal.is_none());
     assert_eq!(app.last_copied_text.as_deref(), Some("hello world"));
 
     app.session_opener = Some(std::sync::Arc::new(DummySessionOpener));
-    app.user_action_hits = vec![UserActionHit {
-        rect: Rect::new(5, 5, 4, 1),
-        entry_idx: 0,
-        action: UserAction::Fork,
-    }];
-    assert!(app.handle_mouse_event(click));
+    assert!(app.handle_mouse_event(press));
+    assert!(app.handle_mouse_event(release));
+    app.handle_key_event(key(KeyCode::Char('f')));
     assert!(matches!(
         app.pending_session_actions.last(),
         Some(PendingSessionAction::ForkSession { draft, turn: None, .. })
@@ -1748,7 +1760,7 @@ fn clicking_a_user_action_copies_or_forks_the_message() {
 }
 
 #[test]
-fn clicking_revert_truncates_and_sends_the_agent_command() {
+fn user_message_revert_truncates_and_sends_the_agent_command() {
     let (mut app, mut rx, _secrets) = test_app();
     app.tab_mut().transcript.push(TranscriptEntry::User {
         text: "first".to_string(),
@@ -1762,18 +1774,24 @@ fn clicking_revert_truncates_and_sends_the_agent_command() {
     app.tab_mut()
         .user_turns
         .insert(0, TurnId::from_raw("turn-1"));
-    app.user_action_hits = vec![UserActionHit {
-        rect: Rect::new(5, 5, 6, 1),
+    app.transcript_inner_area = Rect::new(1, 1, 60, 10);
+    app.thinking_hit_zones = vec![ThinkingHitZone {
         entry_idx: 0,
-        action: UserAction::Revert,
+        start_line: 0,
+        end_line: 2,
     }];
-    let click = MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: 6,
-        row: 5,
-        modifiers: KeyModifiers::NONE,
-    };
-    assert!(app.handle_mouse_event(click));
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        app.handle_mouse_event(MouseEvent {
+            kind,
+            column: 5,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+    app.handle_key_event(key(KeyCode::Char('r')));
     assert!(app.tab().transcript.is_empty());
     assert_eq!(
         rx.try_recv().unwrap(),
@@ -2189,6 +2207,10 @@ impl SessionOpener for DummySessionOpener {
         turn: &meerai_agents::TurnId,
     ) -> anyhow::Result<OpenedSession> {
         anyhow::bail!("unexpected fork_session call for {id} at {turn}")
+    }
+
+    async fn delete_session(&self, id: &SessionId) -> anyhow::Result<bool> {
+        anyhow::bail!("unexpected delete_session call for {id}")
     }
 }
 
@@ -2705,4 +2727,123 @@ fn test_agent_definition(id: &str) -> AgentDefinition {
         prompt: String::new(),
         path: PathBuf::from(format!(".agents/agents/{id}.md")),
     }
+}
+
+#[test]
+fn update_command_reports_the_available_version() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.update_available = Some("9.9.9".to_string());
+    app.tab_mut().input = "/update".to_string();
+    app.handle_key_event(key(KeyCode::Enter));
+
+    let text = app
+        .tab()
+        .transcript
+        .iter()
+        .find_map(|entry| match entry {
+            TranscriptEntry::System { text } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("system message");
+    assert!(text.contains("9.9.9"), "{text}");
+    assert!(text.contains("install.sh"), "{text}");
+}
+
+#[test]
+fn clicking_the_tab_close_button_closes_without_deleting_the_session() {
+    let (mut app, _rx, _secrets) = test_app();
+    let first = app.tab().session_id.clone();
+    let (opened, _event_rx) = make_opened_session("ses-close-two", Some("two"), Vec::new());
+    let _ = app.apply_opened_session(opened, false);
+    assert_eq!(app.tabs().len(), 2);
+
+    app.tab_hit_zones = vec![TabHitZone {
+        rect: Rect::new(10, 0, 1, 1),
+        kind: TabHitKind::CloseTab(1),
+    }];
+    assert!(app.click_tab_at(10, 0));
+    assert_eq!(app.tabs().len(), 1);
+    assert_eq!(app.tab().session_id, first);
+
+    app.pending_session_actions.clear();
+}
+
+#[tokio::test]
+async fn reload_keeps_the_session_and_sends_the_agent_command() {
+    let (mut app, mut rx, _secrets) = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "keep me".to_string(),
+    });
+    app.launch_system = "Be terse.".to_string();
+
+    app.perform_reload().await;
+
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        AgentCommand::Reload { .. }
+    ));
+    assert!(matches!(
+        app.tab().transcript.first(),
+        Some(TranscriptEntry::User { text }) if text == "keep me"
+    ));
+    assert!(app.tab().transcript.iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::System { text } if text.contains("Reloaded")
+    )));
+}
+
+#[test]
+fn reload_slash_command_defers_to_the_event_loop() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.tab_mut().input = "/reload".to_string();
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(app.pending_reload);
+}
+
+#[test]
+fn session_picker_deletes_after_a_second_ctrl_d() {
+    let (mut app, _rx, _secrets) = test_app();
+    let summary = make_session_summary("ses-delete", Some("Old task"), 10, None);
+    app.modal = Some(ActiveModal::SessionSelect {
+        filter: String::new(),
+        selected: 0,
+        sessions: vec![summary.clone()],
+        loading: false,
+        error: None,
+    });
+
+    app.handle_key_event(key_mod(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert_eq!(app.session_delete_confirm.as_ref(), Some(&summary.id));
+    assert!(app.pending_session_actions.is_empty());
+
+    app.handle_key_event(key_mod(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert!(app.session_delete_confirm.is_none());
+    assert!(matches!(
+        app.pending_session_actions.last(),
+        Some(PendingSessionAction::DeleteSession(id)) if id == &summary.id
+    ));
+}
+
+#[test]
+fn session_picker_refuses_to_delete_an_open_session() {
+    let (mut app, _rx, _secrets) = test_app();
+    let (opened, _event_rx) = make_opened_session("ses-open", Some("Open"), Vec::new());
+    let _ = app.apply_opened_session(opened, false);
+    let summary = make_session_summary("ses-open", Some("Open"), 10, None);
+    app.modal = Some(ActiveModal::SessionSelect {
+        filter: String::new(),
+        selected: 0,
+        sessions: vec![summary.clone()],
+        loading: false,
+        error: None,
+    });
+
+    app.handle_key_event(key_mod(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert!(app.session_delete_confirm.is_none());
+    assert!(app.pending_session_actions.is_empty());
+    assert!(matches!(
+        &app.modal,
+        Some(ActiveModal::SessionSelect { error: Some(message), .. })
+            if message.contains("Close the tab")
+    ));
 }

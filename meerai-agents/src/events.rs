@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
+use meerai_common::settings::ContextSettings;
 use meerai_core::{EffectClass, FileDiff};
-use meerai_policy::ApprovalMode;
+use meerai_policy::{ApprovalMode, PermissionRule};
 pub use meerai_session::{
     AbortCause, ApprovalDecision, ApprovalKind, ApprovalPreview, CallId, CompactionTrigger,
     ContentBlock, ErrorCode, GrantScope, ItemId, RequestId, StepFinish, TurnEndReason, TurnId,
@@ -190,6 +191,11 @@ pub enum AgentCommand {
     ApplySkill {
         name: String,
         instructions: String,
+    },
+    Reload {
+        rules: Option<Vec<PermissionRule>>,
+        context: Option<ContextSettings>,
+        system_prompt: String,
     },
     Revert {
         turn_id: TurnId,

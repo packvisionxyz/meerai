@@ -17,7 +17,8 @@ impl MultiTurnAgent {
                 | AgentCommand::SetPermissionMode(_)
                 | AgentCommand::Compact
                 | AgentCommand::ApplyAgent { .. }
-                | AgentCommand::ApplySkill { .. } => {
+                | AgentCommand::ApplySkill { .. }
+                | AgentCommand::Reload { .. } => {
                     self.handle_live_command(command, event_tx).await;
                 }
                 AgentCommand::Approve { .. }
@@ -109,6 +110,7 @@ pub fn spawn_worker(
                                                 | AgentCommand::Compact
                                                 | AgentCommand::ApplyAgent { .. }
                                                 | AgentCommand::ApplySkill { .. }
+                                                | AgentCommand::Reload { .. }
                                                 | AgentCommand::Revert { .. }),
                                             ) => {
                                                 let _ = inbox_tx.send(command);
@@ -152,6 +154,11 @@ pub fn spawn_worker(
                         .apply_skill_instructions(&name, &instructions, &event_tx)
                         .await;
                 }
+                AgentCommand::Reload {
+                    rules,
+                    context,
+                    system_prompt,
+                } => agent.reload_config(rules, context, system_prompt),
                 AgentCommand::Revert { turn_id } => {
                     if let Err(err) = agent.revert_to_turn(&turn_id).await {
                         let _ = event_tx.send(AgentEvent::Error {

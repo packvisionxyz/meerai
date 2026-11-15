@@ -4,6 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::harness::HarnessConfig;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures::future::join_all;
@@ -13,6 +14,7 @@ use genai::chat::{
     ToolResponse,
 };
 use genai::{Client, Headers};
+use meerai_common::settings::ContextSettings;
 use meerai_core::env::{MEERAI_USER_AGENT, generate_opencode_session_id, resolve_lexical_subpath};
 use meerai_core::text::floor_char_boundary;
 use meerai_core::{
@@ -20,7 +22,8 @@ use meerai_core::{
     Toolset,
 };
 use meerai_policy::{
-    ApprovalMode, Decision, PermissionAction, PermissionCheck, approval_preview_for,
+    ApprovalMode, Decision, PermissionAction, PermissionCheck, PermissionRule, PolicyEngine,
+    approval_preview_for,
 };
 use meerai_session::{
     ApprovalPreview, BreakerAction, BreakerKind, CompactionId, CompactionResult, CompactionTrigger,
@@ -362,6 +365,7 @@ pub struct MultiTurnAgent {
     pub(super) pending_compact: bool,
     pub(in crate::multi_turn_agent) failure_tracker: FailureTracker,
     pub(super) injected_instruction_dirs: HashSet<PathBuf>,
+    pub(super) outside_grants: HashSet<PathBuf>,
 }
 
 impl std::fmt::Debug for MultiTurnAgent {
@@ -437,6 +441,7 @@ impl MultiTurnAgent {
             pending_compact: false,
             failure_tracker: FailureTracker::default(),
             injected_instruction_dirs: HashSet::new(),
+            outside_grants: HashSet::new(),
         }
     }
 
@@ -535,6 +540,27 @@ impl MultiTurnAgent {
         instructions::session_title(prompt)
     }
 
+    pub(super) fn reload_config(
+        &mut self,
+        rules: Option<Vec<PermissionRule>>,
+        context: Option<ContextSettings>,
+        system_prompt: String,
+    ) {
+        if let Some(harness) = self.harness.as_mut() {
+            let mode = harness.policy.mode();
+            let workspace = harness.policy.workspace_root().to_path_buf();
+            let mut policy = PolicyEngine::new(mode).with_workspace_root(workspace);
+            if let Some(rules) = rules {
+                policy = policy.with_rules(rules);
+            }
+            harness.policy = policy;
+            harness.config = HarnessConfig::from_context_settings(context.as_ref());
+        }
+        self.system_prompt = system_prompt;
+        self.system_prompt_generation = self.system_prompt_generation.wrapping_add(1);
+        self.logged_system_prompt = None;
+    }
+
     pub async fn revert_to_turn(&mut self, turn_id: &TurnId) -> Result<()> {
         let Some(harness) = self.harness.as_ref() else {
             anyhow::bail!("no session to revert");
@@ -545,6 +571,7 @@ impl MultiTurnAgent {
         self.pending_compact = false;
         self.failure_tracker = FailureTracker::default();
         self.injected_instruction_dirs.clear();
+        self.outside_grants.clear();
         Ok(())
     }
 
@@ -556,6 +583,7 @@ impl MultiTurnAgent {
         self.pending_compact = false;
         self.failure_tracker = FailureTracker::default();
         self.injected_instruction_dirs.clear();
+        self.outside_grants.clear();
     }
 
     pub async fn prompt(&mut self, prompt: &str) -> Result<String> {

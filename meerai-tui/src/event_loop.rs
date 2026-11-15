@@ -36,6 +36,7 @@ enum LoopMsg {
         tab_id: u64,
     },
     SessionsListed(Result<Vec<SessionSummary>>),
+    SessionDeleted(Result<bool>),
     SessionResolved {
         replace_empty_tab: bool,
         result: Result<SessionResolveOutcome>,
@@ -64,6 +65,7 @@ pub async fn run_event_loop(
         &mut git_in_flight,
     );
 
+    let _ = dispatch_pending_actions(app, &loop_tx);
     terminal.draw(|frame| ui::render(frame, app))?;
 
     while !app.should_quit {
@@ -130,6 +132,12 @@ pub async fn run_event_loop(
                     );
                 }
             }
+        }
+
+        if app.pending_reload {
+            app.pending_reload = false;
+            app.perform_reload().await;
+            needs_redraw = true;
         }
 
         if app.should_quit {
@@ -232,6 +240,14 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
                         replace_empty_tab: false,
                         result,
                     });
+                });
+            }
+            PendingSessionAction::DeleteSession(id) => {
+                let opener = opener.clone();
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let result = opener.delete_session(&id).await;
+                    let _ = tx.send(LoopMsg::SessionDeleted(result));
                 });
             }
             PendingSessionAction::ForkSession {
@@ -341,6 +357,22 @@ fn handle_loop_msg(
         LoopMsg::SessionsListed(result) => {
             app.apply_listed_sessions(result);
             false
+        }
+        LoopMsg::SessionDeleted(result) => {
+            match result {
+                Ok(true) => {
+                    app.status_notice = Some("Session deleted".to_string());
+                }
+                Ok(false) => {
+                    app.status_notice = Some("Session was already gone".to_string());
+                }
+                Err(err) => {
+                    app.status_notice = Some(format!("Delete failed: {err:#}"));
+                }
+            }
+            app.pending_session_actions
+                .push(PendingSessionAction::RefreshSessions);
+            true
         }
         LoopMsg::SessionResolved {
             replace_empty_tab,

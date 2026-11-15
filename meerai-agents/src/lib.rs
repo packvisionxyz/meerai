@@ -4,6 +4,7 @@ mod multi_turn_agent;
 pub mod prompt;
 mod redact;
 pub mod screen;
+pub mod shell_safety;
 pub mod subagent;
 
 pub use events::{

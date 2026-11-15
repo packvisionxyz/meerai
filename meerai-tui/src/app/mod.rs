@@ -3,6 +3,7 @@ mod events;
 mod input;
 mod modals;
 mod palette;
+mod reload;
 #[cfg(test)]
 mod tests;
 
@@ -95,6 +96,10 @@ pub enum ActiveModal {
         filter: String,
         selected: usize,
     },
+    UserMessageActions {
+        entry_idx: usize,
+        selected: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,12 +112,14 @@ pub enum PendingSessionAction {
         turn: Option<TurnId>,
         draft: String,
     },
+    DeleteSession(SessionId),
     CreateNewTab,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabHitKind {
     Tab(usize),
+    CloseTab(usize),
     NewTab,
 }
 
@@ -121,13 +128,6 @@ pub enum UserAction {
     Revert,
     Copy,
     Fork,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct UserActionHit {
-    pub rect: Rect,
-    pub entry_idx: usize,
-    pub action: UserAction,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -439,7 +439,13 @@ pub struct AppState {
     pub thinking_hit_zones: Vec<ThinkingHitZone>,
     pub hover_zones: Vec<HoverZone>,
     pub hovered_entry: Option<usize>,
-    pub user_action_hits: Vec<UserActionHit>,
+    pub update_available: Option<String>,
+    pub launch_system: String,
+    pub launch_definitions: String,
+    pub(super) pending_reload: bool,
+    pub(super) session_delete_confirm: Option<SessionId>,
+    pub(crate) tab_persistence: bool,
+    pub update_hit: Option<Rect>,
     pub composer_input_area: Rect,
     pub composer_scroll: usize,
     pub(super) pending_toggle: Option<usize>,
@@ -550,7 +556,13 @@ impl AppState {
             thinking_hit_zones: Vec::new(),
             hover_zones: Vec::new(),
             hovered_entry: None,
-            user_action_hits: Vec::new(),
+            update_available: None,
+            launch_system: String::new(),
+            launch_definitions: String::new(),
+            pending_reload: false,
+            session_delete_confirm: None,
+            tab_persistence: false,
+            update_hit: None,
             composer_input_area: Rect::default(),
             composer_scroll: 0,
             pending_toggle: None,
@@ -615,6 +627,15 @@ impl AppState {
         tab.transcript = transcript;
         tab.user_turns = user_turn_map(&tab.transcript, events);
         tab.seed_usage_from_events(events);
+        self.persist_tabs();
+    }
+
+    pub fn persist_tabs(&self) {
+        if !self.tab_persistence {
+            return;
+        }
+        let ids: Vec<SessionId> = self.tabs.iter().map(|tab| tab.session_id.clone()).collect();
+        crate::tabs::save(&ids, self.active_tab, &self.workspace_root);
     }
 
     fn reset_ephemeral_ui_state(&mut self) {
@@ -646,6 +667,7 @@ impl AppState {
         self.active_tab = index;
         self.tabs[index].has_unread = false;
         self.reset_ephemeral_ui_state();
+        self.persist_tabs();
 
         let provider = self.tabs[index].active_provider.clone();
         if let Ok(mut rt) = self.runtime.write() {
@@ -712,6 +734,7 @@ impl AppState {
 
         self.tabs[self.active_tab].has_unread = false;
         self.reset_ephemeral_ui_state();
+        self.persist_tabs();
 
         let provider = self.tabs[self.active_tab].active_provider.clone();
         if let Ok(mut rt) = self.runtime.write() {
@@ -772,6 +795,7 @@ impl AppState {
                 rt.active_provider = provider;
             }
             self.sync_completion_models();
+            self.persist_tabs();
         } else {
             self.tabs.push(tab);
             let new_idx = self.tabs.len() - 1;

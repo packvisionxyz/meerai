@@ -560,21 +560,60 @@ impl MultiTurnAgent {
         cancel: &CancellationToken,
         inbox: Option<&mut mpsc::UnboundedReceiver<AgentCommand>>,
     ) -> Authorization {
+        let outside = self
+            .tools
+            .iter()
+            .find(|tool| tool.contain(&check.tool_name))
+            .and_then(|tool| tool.permission_spec(&check.tool_name))
+            .filter(|spec| {
+                matches!(
+                    spec.action,
+                    meerai_core::PermissionAction::Read | meerai_core::PermissionAction::Edit
+                )
+            })
+            .and(self.harness.as_ref())
+            .and_then(|harness| {
+                outside_workspace(harness.policy.workspace_root(), &check.resource)
+            });
+        let outside = outside.as_deref();
+
         let Some(harness) = self.harness.as_ref() else {
             return Authorization::Allowed;
         };
 
-        match harness.policy.decide(check) {
+        let mut decision = harness.policy.decide(check);
+        if auto_approve_safe_shell(
+            check,
+            &decision,
+            harness.policy.matched_effect(check),
+            harness.policy.mode(),
+        ) {
+            decision = Decision::Allow;
+        }
+        if let Some(path) = outside
+            && !matches!(decision, Decision::Deny { .. })
+            && harness.policy.mode() != meerai_policy::ApprovalMode::Yolo
+            && !self.outside_granted(path)
+        {
+            decision = Decision::Ask;
+        }
+        match decision {
             Decision::Allow => Authorization::Allowed,
             Decision::Deny { reason } => Authorization::Refused(reason),
             Decision::Ask => {
                 let has_channel = inbox.is_some();
                 let request_id = RequestId::new();
+                let mut preview = approval_preview_for(check);
+                if let Some(path) = outside {
+                    preview
+                        .detail
+                        .push_str(&format!("\noutside workspace: {}", path.display()));
+                }
                 let request = ApprovalRequest {
                     request_id: request_id.clone(),
                     turn_id: turn_id.clone(),
                     kind: ApprovalKind::ToolCall,
-                    preview: approval_preview_for(check),
+                    preview,
                     effect: Some(check.effect),
                 };
                 let _ = event_tx.send(AgentEvent::ItemDelta {
@@ -609,6 +648,9 @@ impl MultiTurnAgent {
                                 scope,
                             });
                         }
+                        if let Some(path) = outside {
+                            self.grant_outside_path(&check.tool_name, path);
+                        }
                         Authorization::Allowed
                     }
                     ApprovalDecision::Decline => {
@@ -627,6 +669,24 @@ impl MultiTurnAgent {
                 }
             }
         }
+    }
+
+    fn outside_granted(&self, path: &std::path::Path) -> bool {
+        self.outside_grants
+            .iter()
+            .any(|root| path.starts_with(root))
+    }
+
+    fn grant_outside_path(&mut self, tool_name: &str, path: &std::path::Path) {
+        let root = if path.is_dir() {
+            path.to_path_buf()
+        } else {
+            path.parent().unwrap_or(path).to_path_buf()
+        };
+        if let Some(tool) = self.tools.iter().find(|tool| tool.contain(tool_name)) {
+            tool.grant_path_root(&root);
+        }
+        self.outside_grants.insert(root);
     }
 
     pub(super) async fn await_decision(
@@ -795,7 +855,8 @@ impl DecisionCtx<'_> {
                 | AgentCommand::SetPermissionMode(_)
                 | AgentCommand::Compact
                 | AgentCommand::ApplyAgent { .. }
-                | AgentCommand::ApplySkill { .. } => {
+                | AgentCommand::ApplySkill { .. }
+                | AgentCommand::Reload { .. } => {
                     self.handle_live_command(command, event_tx).await;
                 }
                 AgentCommand::SubmitPrompt(_)
@@ -839,6 +900,7 @@ impl DecisionCtx<'_> {
                 )
                 .await;
             }
+            AgentCommand::Reload { .. } => {}
             AgentCommand::Approve { .. }
             | AgentCommand::SubmitPrompt(_)
             | AgentCommand::SetModel(_)
@@ -1150,4 +1212,126 @@ async fn run_tool_from(
     }
 
     unreachable!("loop always returns on final attempt")
+}
+
+fn outside_workspace(workspace: &std::path::Path, resource: &str) -> Option<std::path::PathBuf> {
+    use std::path::{Component, Path, PathBuf};
+
+    let raw = resource.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = Path::new(raw);
+    let has_parent = path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir));
+    if !path.is_absolute() && !has_parent {
+        return None;
+    }
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    if normalized.starts_with(workspace) {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+#[cfg(test)]
+mod outside_tests {
+    use std::path::Path;
+
+    use super::outside_workspace;
+
+    #[test]
+    fn detects_paths_outside_the_workspace() {
+        let workspace = Path::new("/tmp/work");
+        assert!(outside_workspace(workspace, "src/main.rs").is_none());
+        assert!(outside_workspace(workspace, "./src/main.rs").is_none());
+        assert_eq!(
+            outside_workspace(workspace, "../secret.txt"),
+            Some(Path::new("/tmp/secret.txt").to_path_buf())
+        );
+        assert_eq!(
+            outside_workspace(workspace, "/etc/passwd"),
+            Some(Path::new("/etc/passwd").to_path_buf())
+        );
+    }
+}
+
+fn auto_approve_safe_shell(
+    check: &PermissionCheck,
+    decision: &Decision,
+    rule_effect: Option<meerai_policy::Effect>,
+    mode: meerai_policy::ApprovalMode,
+) -> bool {
+    matches!(decision, Decision::Ask)
+        && rule_effect.is_none()
+        && mode != meerai_policy::ApprovalMode::Plan
+        && check.action == meerai_core::PermissionAction::Shell
+        && crate::shell_safety::command_is_safe(&check.resource)
+}
+
+#[cfg(test)]
+mod auto_approve_tests {
+    use super::auto_approve_safe_shell;
+    use meerai_core::{EffectClass, PermissionAction};
+    use meerai_policy::{ApprovalMode, Decision, Effect, PermissionCheck};
+
+    fn check(command: &str) -> PermissionCheck {
+        PermissionCheck {
+            action: PermissionAction::Shell,
+            resource: command.to_string(),
+            effect: EffectClass::Execute,
+            tool_name: "code-shell".to_string(),
+        }
+    }
+
+    #[test]
+    fn auto_approves_safe_shell_only_without_an_explicit_rule() {
+        let safe = check("git status && git diff");
+        assert!(auto_approve_safe_shell(
+            &safe,
+            &Decision::Ask,
+            None,
+            ApprovalMode::Ask
+        ));
+        assert!(!auto_approve_safe_shell(
+            &safe,
+            &Decision::Ask,
+            Some(Effect::Ask),
+            ApprovalMode::Ask
+        ));
+        assert!(!auto_approve_safe_shell(
+            &safe,
+            &Decision::Ask,
+            None,
+            ApprovalMode::Plan
+        ));
+        assert!(!auto_approve_safe_shell(
+            &check("cargo test"),
+            &Decision::Ask,
+            None,
+            ApprovalMode::Ask
+        ));
+        assert!(!auto_approve_safe_shell(
+            &safe,
+            &Decision::Deny { reason: "x".into() },
+            None,
+            ApprovalMode::Ask
+        ));
+    }
 }

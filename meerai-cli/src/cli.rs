@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 
 pub(crate) const HELP_TEXT: &str = "Usage:\n  \
     meerai [-p|--provider <PROVIDER>] [-m|--model <MODEL>] [--system <INSTRUCTIONS>]\n          \
-    [--mode <plan|ask|auto-edit|yolo>] [--continue | --resume <ID> | --fork <ID>] [--env-file <PATH>]\n          \
+    [--mode <plan|ask|auto-edit|auto-approve|yolo>] [--continue | --resume <ID> | --fork <ID>] [--env-file <PATH>]\n          \
     [--agent <ID>] [--skill <ID>]... [-h|--help] [-V|--version]\n  \
     meerai --prompt <TEXT> [--json] [--continue | --resume <ID> | --fork <ID>] [--mode <MODE>]\n          \
     [--agent <ID>] [--skill <ID>]...\n  \
@@ -34,7 +34,7 @@ pub(crate) const HELP_TEXT: &str = "Usage:\n  \
         --resume <ID>          Resume a session by id (TUI or headless)\n  \
         --fork <ID>            Fork a session from its latest closed turn and open it\n  \
         --json                 Print one NDJSON AgentEvent per line (with --prompt)\n  \
-        --mode <MODE>          Approval mode: plan, ask, auto-edit, yolo\n  \
+        --mode <MODE>          Approval mode: plan, ask, auto-edit, auto-approve, yolo\n  \
         --agent <ID>           Apply a markdown agent by id\n  \
         --skill <ID>           Apply a markdown skill by id (repeatable)\n  \
         --env-file <PATH>         Load variables from PATH (no implicit .env loading)\n  \

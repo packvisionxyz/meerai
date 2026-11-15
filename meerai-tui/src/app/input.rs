@@ -84,6 +84,7 @@ impl AppState {
                             filter.push_str(&clean);
                             *selected = 0;
                         }
+                        ActiveModal::UserMessageActions { .. } => {}
                     }
                     return true;
                 }
@@ -115,6 +116,26 @@ impl AppState {
             self.last_mouse_pos = Some(pos);
         }
 
+        if self.modal.is_some()
+            && !matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            )
+        {
+            return false;
+        }
+
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some(hit) = self.update_hit
+            && mouse.column >= hit.x
+            && mouse.column < hit.x + hit.width
+            && mouse.row >= hit.y
+            && mouse.row < hit.y + hit.height
+        {
+            self.handle_slash_command("/update");
+            return true;
+        }
+
         if mouse.kind == MouseEventKind::Moved {
             let hovered = self.hovered_entry_at(pos);
             if hovered != self.hovered_entry {
@@ -132,11 +153,6 @@ impl AppState {
                     return true;
                 }
                 if self.modal.is_none() && self.click_file_change_at(mouse.column, mouse.row) {
-                    self.selection = None;
-                    self.doc_selection = None;
-                    return true;
-                }
-                if self.modal.is_none() && self.run_user_action_at(mouse.column, mouse.row) {
                     self.selection = None;
                     self.doc_selection = None;
                     return true;
@@ -538,6 +554,7 @@ impl AppState {
                 let _ = self.switch_to_tab(index);
                 true
             }
+            TabHitKind::CloseTab(index) => self.close_tab(index),
             TabHitKind::NewTab => {
                 if self.session_opener.is_some() {
                     self.status_notice = Some("Opening new session tab...".to_string());
@@ -623,37 +640,22 @@ impl AppState {
                 *expanded = !*expanded;
                 true
             }
-            Some(TranscriptEntry::ToolCall(tc))
-                if tc
-                    .output
-                    .as_deref()
-                    .is_some_and(|out| !out.trim().is_empty()) =>
-            {
+            Some(TranscriptEntry::ToolCall(tc)) => {
                 tc.expanded = !tc.expanded;
+                true
+            }
+            Some(TranscriptEntry::User { .. }) => {
+                self.modal = Some(ActiveModal::UserMessageActions {
+                    entry_idx,
+                    selected: 0,
+                });
                 true
             }
             _ => false,
         }
     }
 
-    pub(super) fn run_user_action_at(&mut self, column: u16, row: u16) -> bool {
-        let hit = self
-            .user_action_hits
-            .iter()
-            .find(|hit| {
-                column >= hit.rect.x
-                    && column < hit.rect.x + hit.rect.width
-                    && row >= hit.rect.y
-                    && row < hit.rect.y + hit.rect.height
-            })
-            .copied();
-        let Some(hit) = hit else {
-            return false;
-        };
-        self.run_user_action(hit.entry_idx, hit.action)
-    }
-
-    fn run_user_action(&mut self, entry_idx: usize, action: UserAction) -> bool {
+    pub(super) fn run_user_action(&mut self, entry_idx: usize, action: UserAction) -> bool {
         let text = match self.tab().transcript.get(entry_idx) {
             Some(TranscriptEntry::User { text, .. }) => text.clone(),
             _ => return false,

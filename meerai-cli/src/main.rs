@@ -26,7 +26,8 @@ use meerai_providers::providers::{
 };
 use meerai_providers::secrets::{auth_file_path, default_secret_store};
 use meerai_session::{
-    Session, SessionConfig, SessionId, SessionSummary, TurnId, default_sessions_root, list_sessions,
+    Session, SessionConfig, SessionId, SessionSummary, TurnId, default_sessions_root,
+    delete_session as delete_session_dir, list_sessions,
 };
 use meerai_tools::search_as_code::ScriptRuntime;
 use meerai_tools::{
@@ -142,13 +143,15 @@ fn load_dotenv(explicit: Option<&Path>) -> Result<()> {
 fn resolve_approval_mode(flag: Option<&str>, configured: Option<&str>) -> Result<ApprovalMode> {
     if let Some(raw) = flag {
         return parse_approval_mode(raw).ok_or_else(|| {
-            anyhow::anyhow!("invalid --mode value '{raw}': expected plan, ask, auto-edit, yolo")
+            anyhow::anyhow!(
+                "invalid --mode value '{raw}': expected plan, ask, auto-edit, auto-approve, yolo"
+            )
         });
     }
     match configured {
         Some(raw) => parse_approval_mode(raw).ok_or_else(|| {
             anyhow::anyhow!(
-                "invalid approval_mode '{raw}' in settings.yml: expected plan, ask, auto-edit, yolo"
+                "invalid approval_mode '{raw}' in settings.yml: expected plan, ask, auto-edit, auto-approve, yolo"
             )
         }),
         None => Ok(ApprovalMode::Ask),
@@ -386,6 +389,15 @@ async fn main() -> Result<()> {
     }
 
     let session_config = SessionConfig::new(workspace_root.clone());
+    let restore_ids = if cli.prompt.is_none()
+        && !cli.continue_session
+        && cli.resume.is_none()
+        && cli.fork.is_none()
+    {
+        meerai_tui::tabs::saved_sessions_for(&workspace_root)
+    } else {
+        Vec::new()
+    };
     let session = if cli.continue_session {
         let root = default_sessions_root();
         let id = continue_session_id(&root).await?;
@@ -396,6 +408,14 @@ async fn main() -> Result<()> {
     } else if let Some(raw) = cli.fork.as_deref() {
         let root = default_sessions_root();
         fork_session(&root, &workspace_root, raw, None).await?
+    } else if let Some(first) = restore_ids.first() {
+        match Session::open(&session_config, first.clone(), workspace_root.clone()).await {
+            Ok(session) => session,
+            Err(_) => {
+                Session::open_or_create(&session_config, SessionId::new(), workspace_root.clone())
+                    .await?
+            }
+        }
     } else {
         Session::open_or_create(&session_config, SessionId::new(), workspace_root.clone()).await?
     };
@@ -418,6 +438,10 @@ async fn main() -> Result<()> {
     );
     let initial_system =
         compose_definition_prompt(base_system.clone(), &selected_skills, selected_agent);
+    let launch_definitions = initial_system
+        .strip_prefix(base_system.as_str())
+        .unwrap_or_default()
+        .to_string();
 
     let host = Arc::new(CliSessionHost {
         workspace_root: workspace_root.clone(),
@@ -446,6 +470,7 @@ async fn main() -> Result<()> {
     let initial_transcript = transcript_from_events(&initial_events);
     let agent = host.build_agent(session, &active_provider, &active_model, initial_system)?;
     let (cmd_tx, event_rx) = spawn_worker(agent);
+    let update_available = meerai_tui::update::check_latest().await;
 
     meerai_tui::run_tui(
         cmd_tx,
@@ -466,6 +491,10 @@ async fn main() -> Result<()> {
             agents: definitions.agents,
             skills: definitions.skills,
             session_opener: Some(host),
+            update_available,
+            restore_sessions: restore_ids.iter().skip(1).cloned().collect(),
+            launch_system: cli.system,
+            launch_definitions,
         },
     )
     .await
@@ -632,6 +661,12 @@ impl SessionOpener for CliSessionHost {
             session.set_model(&model).await?;
         }
         self.build_opened_session(session, provider, model)
+    }
+
+    async fn delete_session(&self, id: &SessionId) -> Result<bool> {
+        let root = self.session_config.root.clone();
+        let id = id.clone();
+        sessions_cmd::run_blocking(move || delete_session_dir(&root, &id)).await
     }
 
     async fn fork_session(&self, id: &SessionId, turn: &TurnId) -> Result<OpenedSession> {
