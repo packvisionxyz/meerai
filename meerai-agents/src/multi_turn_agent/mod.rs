@@ -535,6 +535,19 @@ impl MultiTurnAgent {
         instructions::session_title(prompt)
     }
 
+    pub async fn revert_to_turn(&mut self, turn_id: &TurnId) -> Result<()> {
+        let Some(harness) = self.harness.as_ref() else {
+            anyhow::bail!("no session to revert");
+        };
+        harness.session.revert(turn_id).await?;
+        self.chat_history.clear();
+        self.pending_steers.clear();
+        self.pending_compact = false;
+        self.failure_tracker = FailureTracker::default();
+        self.injected_instruction_dirs.clear();
+        Ok(())
+    }
+
     pub fn reset(&mut self) {
         self.chat_history.clear();
         self.session_id = generate_opencode_session_id();

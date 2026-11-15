@@ -191,6 +191,9 @@ pub enum AgentCommand {
         name: String,
         instructions: String,
     },
+    Revert {
+        turn_id: TurnId,
+    },
     Cancel,
     Reset,
     Quit,

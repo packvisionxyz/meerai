@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
-use meerai_agents::{AgentCommand, AgentEvent};
+use meerai_agents::{AgentCommand, AgentEvent, TurnId};
 use meerai_common::definitions::{AgentDefinition, SkillDefinition};
 use meerai_common::settings::AppSettings;
 use meerai_core::async_trait;
@@ -51,6 +51,7 @@ pub trait SessionOpener: Send + Sync {
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>>;
     async fn open_session(&self, id: &SessionId) -> Result<OpenedSession>;
     async fn create_session(&self) -> Result<OpenedSession>;
+    async fn fork_session(&self, id: &SessionId, turn: &TurnId) -> Result<OpenedSession>;
 }
 
 pub struct TuiLaunchConfig {

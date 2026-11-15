@@ -12,6 +12,7 @@ publish.workspace = true
 
 [dependencies]
 meerai-core = { path = "../meerai-core/" }
+meerai-macros = { path = "../meerai-macros/" }
 
 async-trait = { workspace = true }
 globset = { workspace = true }

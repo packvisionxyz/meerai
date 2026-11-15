@@ -23,6 +23,7 @@ impl MultiTurnAgent {
                 AgentCommand::Approve { .. }
                 | AgentCommand::SubmitPrompt(_)
                 | AgentCommand::SetModel(_)
+                | AgentCommand::Revert { .. }
                 | AgentCommand::Reset => {}
             }
         }
@@ -107,7 +108,8 @@ pub fn spawn_worker(
                                                 | AgentCommand::SetPermissionMode(_)
                                                 | AgentCommand::Compact
                                                 | AgentCommand::ApplyAgent { .. }
-                                                | AgentCommand::ApplySkill { .. }),
+                                                | AgentCommand::ApplySkill { .. }
+                                                | AgentCommand::Revert { .. }),
                                             ) => {
                                                 let _ = inbox_tx.send(command);
                                             }
@@ -149,6 +151,14 @@ pub fn spawn_worker(
                     agent
                         .apply_skill_instructions(&name, &instructions, &event_tx)
                         .await;
+                }
+                AgentCommand::Revert { turn_id } => {
+                    if let Err(err) = agent.revert_to_turn(&turn_id).await {
+                        let _ = event_tx.send(AgentEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: format!("revert failed: {err}"),
+                        });
+                    }
                 }
                 AgentCommand::Reset => agent.reset(),
                 AgentCommand::Cancel => {}

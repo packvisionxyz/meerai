@@ -7,7 +7,7 @@ mod palette;
 mod tests;
 
 pub(crate) use commands::{MentionKind, mention_is_known, parse_mention_token};
-pub use events::{session_usage_from_events, transcript_from_events};
+pub use events::{session_usage_from_events, transcript_from_events, user_turn_map};
 pub use input::{clamp_pos_to_bounds, normalize_selection_in_bounds};
 pub(crate) use palette::{PaletteAction, filtered_commands};
 
@@ -102,6 +102,11 @@ pub enum PendingSessionAction {
     RefreshSessions,
     OpenSessionId(SessionId),
     OpenSessionQuery(String),
+    ForkSession {
+        session_id: SessionId,
+        turn: Option<TurnId>,
+        draft: String,
+    },
     CreateNewTab,
 }
 
@@ -109,6 +114,20 @@ pub enum PendingSessionAction {
 pub enum TabHitKind {
     Tab(usize),
     NewTab,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserAction {
+    Revert,
+    Copy,
+    Fork,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UserActionHit {
+    pub rect: Rect,
+    pub entry_idx: usize,
+    pub action: UserAction,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,6 +160,7 @@ pub struct ToolCallEntry {
     pub args: String,
     pub status: ToolCallStatus,
     pub output: Option<String>,
+    pub expanded: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -283,6 +303,7 @@ pub struct SessionTab {
     pub metrics: TurnMetrics,
     pub is_running: bool,
     pub queued: Vec<String>,
+    pub user_turns: HashMap<usize, TurnId>,
     pub turn_id: Option<TurnId>,
     pub active_tool: Option<String>,
     pub scroll_offset: usize,
@@ -323,6 +344,7 @@ impl SessionTab {
             metrics: TurnMetrics::default(),
             is_running: false,
             queued: Vec::new(),
+            user_turns: HashMap::new(),
             turn_id: None,
             active_tool: None,
             scroll_offset: 0,
@@ -417,6 +439,10 @@ pub struct AppState {
     pub thinking_hit_zones: Vec<ThinkingHitZone>,
     pub hover_zones: Vec<HoverZone>,
     pub hovered_entry: Option<usize>,
+    pub user_action_hits: Vec<UserActionHit>,
+    pub composer_input_area: Rect,
+    pub composer_scroll: usize,
+    pub(super) pending_toggle: Option<usize>,
     pub selection: Option<TextSelection>,
     pub doc_selection: Option<DocSelection>,
     pub last_transcript_anchor: Option<DocPos>,
@@ -524,6 +550,10 @@ impl AppState {
             thinking_hit_zones: Vec::new(),
             hover_zones: Vec::new(),
             hovered_entry: None,
+            user_action_hits: Vec::new(),
+            composer_input_area: Rect::default(),
+            composer_scroll: 0,
+            pending_toggle: None,
             selection: None,
             doc_selection: None,
             last_transcript_anchor: None,
@@ -583,6 +613,7 @@ impl AppState {
         tab.title = title.and_then(normalize_tab_title);
         tab.approval_mode = approval_mode;
         tab.transcript = transcript;
+        tab.user_turns = user_turn_map(&tab.transcript, events);
         tab.seed_usage_from_events(events);
     }
 
@@ -725,6 +756,7 @@ impl AppState {
             opened.cmd_tx,
         );
         tab.transcript = opened.transcript;
+        tab.user_turns = user_turn_map(&tab.transcript, &opened.events);
         tab.seed_usage_from_events(&opened.events);
 
         if replace_empty_tab && self.should_replace_active_tab() {

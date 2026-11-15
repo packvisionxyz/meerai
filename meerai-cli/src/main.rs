@@ -26,7 +26,7 @@ use meerai_providers::providers::{
 };
 use meerai_providers::secrets::{auth_file_path, default_secret_store};
 use meerai_session::{
-    Session, SessionConfig, SessionId, SessionSummary, default_sessions_root, list_sessions,
+    Session, SessionConfig, SessionId, SessionSummary, TurnId, default_sessions_root, list_sessions,
 };
 use meerai_tools::search_as_code::ScriptRuntime;
 use meerai_tools::{
@@ -632,5 +632,18 @@ impl SessionOpener for CliSessionHost {
             session.set_model(&model).await?;
         }
         self.build_opened_session(session, provider, model)
+    }
+
+    async fn fork_session(&self, id: &SessionId, turn: &TurnId) -> Result<OpenedSession> {
+        let source = Session::open(
+            &self.session_config,
+            id.clone(),
+            self.workspace_root.clone(),
+        )
+        .await?;
+        let forked = Session::fork(&self.session_config, &source, turn).await?;
+        let meta = forked.meta();
+        let (provider, model) = self.resolve_session_provider_model(meta.model.as_deref());
+        self.build_opened_session(forked, provider, model)
     }
 }

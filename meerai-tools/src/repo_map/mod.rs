@@ -7,16 +7,14 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use ignore::WalkBuilder;
-use meerai_core::{
-    EffectClass, PermissionAction, ToolDefinition, ToolError, ToolOutput, ToolPermissionSpec,
-    ToolRun, Toolset, async_trait,
-};
+use meerai_core::{ToolError, ToolOutput, ToolRun, async_trait};
+use schemars::JsonSchema as _;
 
-use crate::code::{CodeTools, definition_for, failure_run, parse_args, success_run};
+use crate::code::{CodeTools, failure_run, success_run};
 use extract::{FileTags, SourceLang, extract_tags};
 use rank::{normalize_rel, rank_files, render_repo_map};
 
-const TOOLSET_NAME: &str = "retrieval";
+#[cfg(test)]
 const REPO_MAP_TOOL: &str = "retrieval-repo_map";
 const DEFAULT_MAX_TOKENS: usize = 1500;
 const MIN_TOKENS: usize = 200;
@@ -61,7 +59,15 @@ struct RepoMapCache {
     parse_count: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, meerai_macros::Toolset)]
+#[toolset(
+    name = "retrieval",
+    tool(
+        name = "Repo Map",
+        description = "Build an AST-based repository map of symbols ranked by cross-file references within a token budget.",
+        params = RepoMapArgs,
+    )
+)]
 pub struct RepoMapToolset {
     workspace_root: PathBuf,
     readable_roots: Vec<PathBuf>,
@@ -100,7 +106,7 @@ impl RepoMapToolset {
         &self.readable_roots
     }
 
-    async fn build_repo_map(&self, args: RepoMapArgs) -> ToolRun {
+    async fn build_repo_map(&self, args: &RepoMapArgs) -> ToolRun {
         let root = CodeTools::new(&self.workspace_root)
             .canonical_workspace_root()
             .await;
@@ -120,6 +126,7 @@ impl RepoMapToolset {
             .clamp(MIN_TOKENS, MAX_TOKENS);
         let focus_files: Vec<String> = args
             .focus_files
+            .clone()
             .unwrap_or_default()
             .into_iter()
             .map(|s| normalize_rel(&s))
@@ -271,52 +278,16 @@ fn discover_source_files(root: &Path) -> Vec<(PathBuf, String, SourceLang, FileS
 }
 
 #[async_trait]
-impl Toolset for RepoMapToolset {
-    fn name(&self) -> String {
-        TOOLSET_NAME.to_string()
-    }
-
-    fn definition(&self) -> Vec<ToolDefinition> {
-        vec![definition_for::<RepoMapArgs>(
-            REPO_MAP_TOOL,
-            "Build an AST-based repository map of symbols ranked by cross-file references within a token budget.",
-        )]
-    }
-
-    fn contain(&self, fn_name: &str) -> bool {
-        fn_name == REPO_MAP_TOOL
-    }
-
-    fn effect_of(&self, _fn_name: &str) -> EffectClass {
-        EffectClass::Read
-    }
-
-    fn permission_spec(&self, fn_name: &str) -> Option<ToolPermissionSpec> {
-        (fn_name == REPO_MAP_TOOL).then_some(ToolPermissionSpec {
-            action: PermissionAction::Read,
-            resource_arg: None,
-        })
-    }
-
-    fn should_spill_output(&self, _fn_name: &str) -> bool {
-        true
-    }
-
-    async fn invoke(&self, fn_name: &str, args: &str) -> Result<ToolOutput, ToolError> {
-        Ok(self.invoke_structured(fn_name, args).await?.output)
-    }
-
-    async fn invoke_structured(&self, fn_name: &str, args: &str) -> Result<ToolRun, ToolError> {
-        if fn_name != REPO_MAP_TOOL {
-            return Err(ToolError::InvalidFunctionName(fn_name.to_string()));
-        }
-        Ok(self.build_repo_map(parse_args(args)?).await)
+impl RetrievalInvoke for RepoMapToolset {
+    async fn repo_map(&self, args: &RepoMapArgs) -> Result<ToolOutput, ToolError> {
+        Ok(self.build_repo_map(args).await.output)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use meerai_core::Toolset;
     use std::fs;
     use tempfile::TempDir;
 
@@ -326,6 +297,23 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn derives_the_retrieval_runtime_name_and_schema() {
+        let dir = TempDir::new().unwrap();
+        let tool = RepoMapToolset::new(dir.path());
+        let definitions = Toolset::definition(&tool);
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].name, "retrieval-repo_map");
+        assert!(
+            definitions[0]
+                .parameters
+                .get("properties")
+                .is_some_and(|props| props.get("max_tokens").is_some())
+        );
+        assert_eq!(tool.name(), "retrieval");
+        assert!(tool.contain("retrieval-repo_map"));
     }
 
     #[tokio::test]

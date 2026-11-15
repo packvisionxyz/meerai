@@ -798,8 +798,10 @@ impl DecisionCtx<'_> {
                 | AgentCommand::ApplySkill { .. } => {
                     self.handle_live_command(command, event_tx).await;
                 }
-                AgentCommand::SubmitPrompt(_) | AgentCommand::SetModel(_) | AgentCommand::Reset => {
-                }
+                AgentCommand::SubmitPrompt(_)
+                | AgentCommand::SetModel(_)
+                | AgentCommand::Revert { .. }
+                | AgentCommand::Reset => {}
             }
         }
     }
@@ -840,6 +842,7 @@ impl DecisionCtx<'_> {
             AgentCommand::Approve { .. }
             | AgentCommand::SubmitPrompt(_)
             | AgentCommand::SetModel(_)
+            | AgentCommand::Revert { .. }
             | AgentCommand::Reset
             | AgentCommand::Cancel
             | AgentCommand::Quit => {}

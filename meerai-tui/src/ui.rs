@@ -16,8 +16,8 @@ use regex::Regex;
 
 use crate::app::{
     ActiveModal, AppState, DocPos, HoverZone, InputMode, MentionKind, TabHitKind, TabHitZone,
-    ThinkingHitZone, ToolCallStatus, TranscriptEntry, TranscriptWrappedLine, mention_is_known,
-    normalize_selection_in_bounds, parse_mention_token,
+    ThinkingHitZone, ToolCallStatus, TranscriptEntry, TranscriptWrappedLine, UserAction,
+    UserActionHit, mention_is_known, normalize_selection_in_bounds, parse_mention_token,
 };
 use crate::completion::{CompletionItemKind, CompletionKind};
 use crate::diff::{DiffCell, DiffRowKind};
@@ -208,7 +208,8 @@ fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
         height: area.height,
     };
 
-    let raw_lines = build_transcript_lines(app);
+    app.user_action_hits.clear();
+    let raw_lines = build_transcript_lines(app, inner.width as usize);
     let mut wrapped = if inner.width > 0 {
         wrap_tagged_lines(raw_lines, inner.width as usize)
     } else {
@@ -258,6 +259,35 @@ fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     }
     let first_visible = scroll_y as usize;
     let last_visible = first_visible + inner.height as usize;
+
+    if let Some(idx) = hovered
+        && matches!(
+            app.tab().transcript.get(idx),
+            Some(TranscriptEntry::User { .. })
+        )
+        && let Some(zone) = app
+            .hover_zones
+            .iter()
+            .find(|zone| zone.entry_idx == idx)
+            .copied()
+        && zone.start_line >= first_visible
+        && zone.start_line < last_visible
+    {
+        let y = inner.y + (zone.start_line - first_visible) as u16;
+        const ACTIONS: &str = "Revert  Copy  Fork";
+        let start_x = inner.x + inner.width.saturating_sub(ACTIONS.len() as u16);
+        for (action, offset, len) in [
+            (UserAction::Revert, 0u16, 6u16),
+            (UserAction::Copy, 8, 4),
+            (UserAction::Fork, 14, 4),
+        ] {
+            app.user_action_hits.push(UserActionHit {
+                rect: Rect::new(start_x + offset, y, len, 1),
+                entry_idx: idx,
+                action,
+            });
+        }
+    }
 
     let mut paint = |bands: &[(usize, usize)], color: ratatui::style::Color| {
         for &(start, end) in bands {
@@ -713,7 +743,7 @@ fn digest_line(digest: &TurnDigest, running: bool, spinner: &str) -> Option<Line
     ]))
 }
 
-fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
+fn build_transcript_lines(app: &AppState, width: usize) -> Vec<TaggedTranscriptLine> {
     let mut lines = build_header_lines(app);
     let transcript = &app.tab().transcript;
     if transcript.is_empty() {
@@ -730,19 +760,25 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
         }
         match entry {
             TranscriptEntry::User { text } => {
-                lines.push(with_hover(
-                    banded_line(
-                        Line::from(Span::styled(
-                            "▌ you",
-                            Style::default()
-                                .fg(theme::p().accent)
-                                .add_modifier(Modifier::BOLD),
-                        )),
-                        None,
-                        2,
-                    ),
-                    idx,
-                ));
+                let mut header = vec![Span::styled(
+                    "▌ you",
+                    Style::default()
+                        .fg(theme::p().accent)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                if app.hovered_entry == Some(idx) {
+                    const ACTIONS: &str = "Revert  Copy  Fork";
+                    let used = 5usize;
+                    let pad = width.saturating_sub(used + ACTIONS.len());
+                    header.push(Span::raw(" ".repeat(pad)));
+                    let action_style = Style::default().fg(theme::p().faint);
+                    header.push(Span::styled("Revert", action_style));
+                    header.push(Span::styled("  ", action_style));
+                    header.push(Span::styled("Copy", action_style));
+                    header.push(Span::styled("  ", action_style));
+                    header.push(Span::styled("Fork", action_style));
+                }
+                lines.push(with_hover(banded_line(Line::from(header), None, 2), idx));
                 for line in text.split('\n') {
                     lines.push(with_hover(
                         banded_line(
@@ -888,39 +924,99 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                         Style::default().fg(theme::p().faint),
                     )
                 };
-                let line = Line::from(vec![
+
+                let output = tc.output.as_deref().unwrap_or("").trim_end();
+                let output_lines: Vec<&str> = if output.is_empty() {
+                    Vec::new()
+                } else {
+                    output.lines().collect()
+                };
+                let collapsible = output_lines.len() > 1
+                    || output_lines
+                        .first()
+                        .is_some_and(|line| line.chars().count() > 120);
+
+                let mut header = vec![
                     Span::styled(lead, lead_style),
                     Span::styled(tc.name.clone(), name_style),
                     Span::styled(" ", Style::default()),
                     Span::styled(format!("[{badge}]"), badge_style),
-                    if args_preview.is_empty() {
-                        Span::raw("")
-                    } else {
-                        Span::styled(format!(" {args_preview}"), args_style)
-                    },
-                ]);
+                ];
+                if args_preview.is_empty() {
+                    header.push(Span::raw(""));
+                } else {
+                    header.push(Span::styled(format!(" {args_preview}"), args_style));
+                }
+                if collapsible {
+                    header.push(Span::styled(
+                        if tc.expanded {
+                            "  [click to hide]"
+                        } else {
+                            "  [click to expand]"
+                        },
+                        Style::default()
+                            .fg(theme::p().faint)
+                            .add_modifier(Modifier::ITALIC),
+                    ));
+                }
                 lines.push(with_hover(
-                    if active {
-                        banded_line(line, None, 2)
-                    } else {
-                        tagged_line(line, None, 2)
-                    },
+                    banded_line(Line::from(header), Some(idx), 2),
                     idx,
                 ));
-                if let Some(output) = &tc.output {
-                    let preview = truncate_single_line(output, 120);
-                    if !preview.is_empty() {
-                        lines.push(with_hover(
-                            tagged_line(
-                                Line::from(vec![
-                                    Span::styled("  ↳ ", Style::default().fg(theme::p().faint)),
-                                    Span::styled(preview, Style::default().fg(theme::p().faint)),
-                                ]),
-                                None,
-                                4,
-                            ),
-                            idx,
-                        ));
+
+                if !output_lines.is_empty() {
+                    if tc.expanded {
+                        const MAX_EXPANDED_LINES: usize = 200;
+                        for line in output_lines.iter().take(MAX_EXPANDED_LINES) {
+                            lines.push(with_hover(
+                                banded_line(
+                                    Line::from(vec![
+                                        Span::styled("  │ ", Style::default().fg(theme::p().faint)),
+                                        Span::styled(
+                                            (*line).to_string(),
+                                            Style::default().fg(theme::p().muted),
+                                        ),
+                                    ]),
+                                    Some(idx),
+                                    4,
+                                ),
+                                idx,
+                            ));
+                        }
+                        if output_lines.len() > MAX_EXPANDED_LINES {
+                            lines.push(with_hover(
+                                banded_line(
+                                    Line::from(Span::styled(
+                                        format!(
+                                            "  … {} more lines",
+                                            output_lines.len() - MAX_EXPANDED_LINES
+                                        ),
+                                        Style::default().fg(theme::p().faint),
+                                    )),
+                                    Some(idx),
+                                    4,
+                                ),
+                                idx,
+                            ));
+                        }
+                    } else {
+                        let preview = truncate_single_line(output, 120);
+                        if !preview.is_empty() {
+                            lines.push(with_hover(
+                                banded_line(
+                                    Line::from(vec![
+                                        Span::styled("  ↳ ", Style::default().fg(theme::p().faint)),
+                                        Span::styled(
+                                            preview,
+                                            Style::default().fg(theme::p().faint),
+                                        ),
+                                    ]),
+                                    Some(idx),
+                                    4,
+                                ),
+                                idx,
+                            ));
+                        }
                     }
                 }
             }
@@ -1051,7 +1147,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
     lines
 }
 
-fn render_composer(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
+fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     frame.render_widget(
         Block::default().style(Style::default().bg(theme::p().surface)),
         area,
@@ -1092,11 +1188,13 @@ fn render_composer(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         Rect::new(body.x, body.y, 2, 1),
     );
 
-    let tab = app.tab();
-    let (cursor_row, cursor_col) = cursor_row_col(&tab.input, tab.cursor);
+    app.composer_input_area = inner;
+    let (cursor_row, cursor_col) = cursor_row_col(&app.tab().input, app.tab().cursor);
     let visible_rows = inner.height.max(1) as usize;
     let scroll_y = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
+    app.composer_scroll = scroll_y;
 
+    let tab = app.tab();
     let mut cursor_display_col = cursor_col;
     let content = if tab.input.is_empty() {
         Paragraph::new(Line::from(Span::styled(
@@ -2915,6 +3013,7 @@ mod tests {
                 args: "{}".to_string(),
                 status: ToolCallStatus::Succeeded,
                 output: None,
+                expanded: false,
             }));
 
         let _ = render_to_string(&mut app);
@@ -2962,7 +3061,55 @@ mod tests {
     }
 
     #[test]
-    fn completed_tool_rows_shade_into_the_background() {
+    fn clicking_a_tool_row_expands_and_collapses_its_output() {
+        let mut app = test_app();
+        app.tab_mut().transcript.push(TranscriptEntry::User {
+            text: "read it".to_string(),
+        });
+        app.tab_mut()
+            .transcript
+            .push(TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
+                call_id: "call-1".to_string(),
+                name: "code-read_file".to_string(),
+                args: "{}".to_string(),
+                status: ToolCallStatus::Succeeded,
+                output: Some(format!(
+                    "{}\nbeta-unique\ngamma-unique",
+                    "alpha ".repeat(24)
+                )),
+                expanded: false,
+            }));
+
+        let collapsed = render_to_string(&mut app);
+        assert!(collapsed.contains("[click to expand]"));
+        assert!(collapsed.contains("alpha"));
+        assert!(!collapsed.contains("beta-unique"));
+        assert!(!collapsed.contains("gamma-unique"));
+
+        let row = (0..28)
+            .find(|y| {
+                app.screen_lines
+                    .get(*y as usize)
+                    .is_some_and(|line| line.join("").contains("code-read_file"))
+            })
+            .expect("tool row");
+        let col = app.transcript_inner_area.x + 2;
+        assert!(app.toggle_entry_at(col, row));
+
+        let expanded = render_to_string(&mut app);
+        assert!(expanded.contains("[click to hide]"));
+        assert!(expanded.contains("alpha"));
+        assert!(expanded.contains("beta-unique"));
+        assert!(expanded.contains("gamma-unique"));
+
+        assert!(app.toggle_entry_at(col, row));
+        let collapsed_again = render_to_string(&mut app);
+        assert!(collapsed_again.contains("[click to expand]"));
+        assert!(!collapsed_again.contains("gamma-unique"));
+    }
+
+    #[test]
+    fn tool_runs_have_a_band_and_shaded_text_when_finished() {
         let mut app = test_app();
         app.tab_mut().transcript.push(TranscriptEntry::User {
             text: "run things".to_string(),
@@ -2975,6 +3122,7 @@ mod tests {
                 args: "{}".to_string(),
                 status: ToolCallStatus::Running,
                 output: None,
+                expanded: false,
             }));
         app.tab_mut()
             .transcript
@@ -2984,6 +3132,7 @@ mod tests {
                 args: "{}".to_string(),
                 status: ToolCallStatus::Succeeded,
                 output: None,
+                expanded: false,
             }));
 
         let backend = TestBackend::new(120, 28);
@@ -2992,31 +3141,32 @@ mod tests {
         let buffer = terminal.backend().buffer().clone();
         let palette = crate::theme::Palette::default();
 
-        let row_with = |needle: &str| -> u16 {
-            (0..28)
-                .find(|y| {
-                    (0..120)
-                        .map(|x| (x, *y))
-                        .collect::<Vec<_>>()
-                        .iter()
-                        .map(|(x, y)| buffer[(*x, *y)].symbol().to_string())
-                        .collect::<String>()
-                        .contains(needle)
-                })
-                .unwrap_or_else(|| panic!("row for {needle}"))
+        let locate = |needle: &str| -> (u16, u16) {
+            for y in 0..28 {
+                let text: String = (0..120).map(|x| buffer[(x, y)].symbol()).collect();
+                if let Some(col) = text.find(needle) {
+                    return (col as u16, y);
+                }
+            }
+            panic!("row for {needle}")
         };
 
-        let running_row = row_with("code-shell");
-        let done_row = row_with("code_edit_file");
+        let (run_col, run_row) = locate("code-shell");
+        let (done_col, done_row) = locate("code_edit_file");
         assert_eq!(
-            buffer[(20, running_row)].bg,
+            buffer[(run_col, run_row)].bg,
             palette.surface,
-            "active tool row keeps the raised band"
+            "running tool row keeps the raised band"
         );
         assert_eq!(
-            buffer[(20, done_row)].bg,
-            palette.background,
-            "finished tool row recedes into the background"
+            buffer[(done_col, done_row)].bg,
+            palette.surface,
+            "finished tool row keeps the band"
+        );
+        assert_ne!(
+            buffer[(run_col, run_row)].fg,
+            buffer[(done_col, done_row)].fg,
+            "finished tool rows use muted text"
         );
     }
 
@@ -3045,6 +3195,7 @@ mod tests {
                     args: "{}".to_string(),
                     status,
                     output: None,
+                    expanded: false,
                 }));
         }
 
@@ -3422,7 +3573,7 @@ mod tests {
         let zone = app.thinking_hit_zones[0];
         let click_row = app.transcript_inner_area.y + zone.start_line as u16;
         let click_col = app.transcript_inner_area.x + 2;
-        assert!(app.toggle_thinking_at(click_col, click_row));
+        assert!(app.toggle_entry_at(click_col, click_row));
 
         let expanded = render_to_string(&mut app);
         assert!(expanded.contains("▾ Thinking (2 lines)"));
@@ -3530,7 +3681,7 @@ mod tests {
         let zone = app.thinking_hit_zones[0];
         let click_row = app.transcript_inner_area.y + zone.start_line as u16;
         let click_col = app.transcript_inner_area.x + 2;
-        assert!(app.toggle_thinking_at(click_col, click_row));
+        assert!(app.toggle_entry_at(click_col, click_row));
 
         let expanded = render_to_string(&mut app);
         assert!(expanded.contains("▾ [error] (2 lines)"));
@@ -3538,7 +3689,7 @@ mod tests {
 
         let zone2 = app.thinking_hit_zones[0];
         let click_row2 = app.transcript_inner_area.y + zone2.start_line as u16;
-        assert!(app.toggle_thinking_at(click_col, click_row2));
+        assert!(app.toggle_entry_at(click_col, click_row2));
         let recollapsed = render_to_string(&mut app);
         assert!(recollapsed.contains("▸ [error]"));
         assert!(!recollapsed.contains("line 2 details"));
@@ -3635,6 +3786,7 @@ mod tests {
                 args: "{\"path\":\"Cargo.toml\"}".to_string(),
                 status: ToolCallStatus::Succeeded,
                 output: Some("[workspace]\nmembers = []".to_string()),
+                expanded: false,
             }));
         app.tab_mut().transcript.push(TranscriptEntry::Assistant {
             text: "# Summary\n```toml\nname = \"meerai\"\n```".to_string(),

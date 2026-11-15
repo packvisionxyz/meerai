@@ -10,6 +10,34 @@ use meerai_session::{
 
 use super::*;
 
+pub fn user_turn_map(
+    transcript: &[TranscriptEntry],
+    events: &[LoggedEvent],
+) -> std::collections::HashMap<usize, TurnId> {
+    let user_indices: Vec<usize> = transcript
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| matches!(entry, TranscriptEntry::User { .. }))
+        .map(|(idx, _)| idx)
+        .collect();
+    let mut map = std::collections::HashMap::new();
+    let mut current: Option<TurnId> = None;
+    let mut ordinal = 0usize;
+    for logged in events {
+        match &logged.event {
+            SessionEvent::TurnStarted { turn_id, .. } => current = Some(turn_id.clone()),
+            SessionEvent::UserMessage { .. } => {
+                if let (Some(turn), Some(idx)) = (current.clone(), user_indices.get(ordinal)) {
+                    map.insert(*idx, turn);
+                }
+                ordinal += 1;
+            }
+            _ => {}
+        }
+    }
+    map
+}
+
 impl AppState {
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         let tab_id = self.tab().tab_id;
@@ -78,6 +106,14 @@ impl SessionTab {
     pub(super) fn apply_agent_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::TurnStarted { turn_id, model } => {
+                if let Some(idx) = self
+                    .transcript
+                    .iter()
+                    .rposition(|entry| matches!(entry, TranscriptEntry::User { .. }))
+                    && !self.user_turns.contains_key(&idx)
+                {
+                    self.user_turns.insert(idx, turn_id.clone());
+                }
                 self.is_running = true;
                 self.turn_id = Some(turn_id);
                 self.usage = UsageStats::default();
@@ -127,6 +163,7 @@ impl SessionTab {
                             args,
                             status: map_item_status(status),
                             output: None,
+                            expanded: false,
                         }));
                     self.tool_items.insert(id, call_id);
                 }
@@ -264,6 +301,7 @@ impl SessionTab {
                                 args: String::new(),
                                 status,
                                 output,
+                                expanded: false,
                             }));
                     }
                     if self.active_tool.as_deref() == Some(name.as_str()) {
@@ -547,6 +585,7 @@ pub fn transcript_from_events(events: &[LoggedEvent]) -> Vec<TranscriptEntry> {
                     args: args.clone(),
                     status: ToolCallStatus::Running,
                     output: None,
+                    expanded: false,
                 }));
             }
             SessionEvent::ToolResult { call_id, output } => {

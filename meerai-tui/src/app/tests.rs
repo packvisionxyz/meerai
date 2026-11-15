@@ -913,6 +913,7 @@ fn agent_event_streaming_updates_transcript_and_status() {
             args: "{\"path\":\"Cargo.toml\"}".to_string(),
             status: ToolCallStatus::Running,
             output: None,
+            expanded: false,
         }))
     );
 
@@ -936,6 +937,7 @@ fn agent_event_streaming_updates_transcript_and_status() {
             args: "{\"path\":\"Cargo.toml\"}".to_string(),
             status: ToolCallStatus::Succeeded,
             output: Some("ok".to_string()),
+            expanded: false,
         }))
     );
 
@@ -1270,6 +1272,7 @@ fn transcript_from_events_replays_known_entries_and_skips_runtime_events() {
                 args: "{\"path\":\"src/lib.rs\"}".to_string(),
                 status: ToolCallStatus::Succeeded,
                 output: Some("file contents".to_string()),
+                expanded: false,
             }),
             TranscriptEntry::ToolCall(ToolCallEntry {
                 call_id: "call-2".to_string(),
@@ -1277,6 +1280,7 @@ fn transcript_from_events_replays_known_entries_and_skips_runtime_events() {
                 args: "{}".to_string(),
                 status: ToolCallStatus::Cancelled,
                 output: None,
+                expanded: false,
             }),
             TranscriptEntry::System {
                 text: "Compacted history".to_string(),
@@ -1306,6 +1310,7 @@ fn transcript_from_events_marks_unmatched_tool_calls_cancelled() {
             args: "{}".to_string(),
             status: ToolCallStatus::Cancelled,
             output: None,
+            expanded: false,
         })]
     );
 }
@@ -1639,13 +1644,20 @@ fn handles_mouse_thinking_toggle() {
         end_line: 1,
     }];
 
-    let click = MouseEvent {
+    let press = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 5,
         row: 1,
         modifiers: KeyModifiers::NONE,
     };
-    assert!(app.handle_mouse_event(click));
+    let release = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 5,
+        row: 1,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(app.handle_mouse_event(press));
+    assert!(app.handle_mouse_event(release));
     assert!(matches!(
         app.tab().transcript.first(),
         Some(TranscriptEntry::Assistant {
@@ -1653,6 +1665,140 @@ fn handles_mouse_thinking_toggle() {
             ..
         })
     ));
+}
+
+#[test]
+fn dragging_over_expanded_content_does_not_collapse_it() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: "Hello!".to_string(),
+        reasoning: "line 1\nline 2".to_string(),
+        streaming: false,
+        reasoning_expanded: true,
+    });
+    app.transcript_inner_area = Rect::new(1, 1, 60, 10);
+    app.thinking_hit_zones = vec![ThinkingHitZone {
+        entry_idx: 0,
+        start_line: 0,
+        end_line: 3,
+    }];
+
+    let press = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 5,
+        row: 1,
+        modifiers: KeyModifiers::NONE,
+    };
+    let drag = MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 20,
+        row: 3,
+        modifiers: KeyModifiers::NONE,
+    };
+    let release = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 20,
+        row: 3,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(app.handle_mouse_event(press));
+    assert!(app.handle_mouse_event(drag));
+    assert!(app.handle_mouse_event(release));
+    assert!(matches!(
+        app.tab().transcript.first(),
+        Some(TranscriptEntry::Assistant {
+            reasoning_expanded: true,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn clicking_a_user_action_copies_or_forks_the_message() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "hello world".to_string(),
+    });
+    app.user_action_hits = vec![UserActionHit {
+        rect: Rect::new(5, 5, 4, 1),
+        entry_idx: 0,
+        action: UserAction::Copy,
+    }];
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 6,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(app.handle_mouse_event(click));
+    assert_eq!(app.last_copied_text.as_deref(), Some("hello world"));
+
+    app.session_opener = Some(std::sync::Arc::new(DummySessionOpener));
+    app.user_action_hits = vec![UserActionHit {
+        rect: Rect::new(5, 5, 4, 1),
+        entry_idx: 0,
+        action: UserAction::Fork,
+    }];
+    assert!(app.handle_mouse_event(click));
+    assert!(matches!(
+        app.pending_session_actions.last(),
+        Some(PendingSessionAction::ForkSession { draft, turn: None, .. })
+            if draft == "hello world"
+    ));
+}
+
+#[test]
+fn clicking_revert_truncates_and_sends_the_agent_command() {
+    let (mut app, mut rx, _secrets) = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "first".to_string(),
+    });
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: "answer".to_string(),
+        reasoning: String::new(),
+        streaming: false,
+        reasoning_expanded: false,
+    });
+    app.tab_mut()
+        .user_turns
+        .insert(0, TurnId::from_raw("turn-1"));
+    app.user_action_hits = vec![UserActionHit {
+        rect: Rect::new(5, 5, 6, 1),
+        entry_idx: 0,
+        action: UserAction::Revert,
+    }];
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 6,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(app.handle_mouse_event(click));
+    assert!(app.tab().transcript.is_empty());
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::Revert {
+            turn_id: TurnId::from_raw("turn-1")
+        }
+    );
+}
+
+#[test]
+fn clicking_the_composer_moves_the_cursor() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.tab_mut().input = "hello world".to_string();
+    app.tab_mut().cursor = 0;
+    app.composer_input_area = Rect::new(2, 20, 40, 3);
+    app.composer_scroll = 0;
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 8,
+        row: 20,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(app.handle_mouse_event(click));
+    assert_eq!(app.tab().cursor, 6);
+    assert_eq!(app.mode, InputMode::Insert);
 }
 
 #[test]
@@ -2035,6 +2181,14 @@ impl SessionOpener for DummySessionOpener {
 
     async fn create_session(&self) -> anyhow::Result<OpenedSession> {
         anyhow::bail!("unexpected create_session call")
+    }
+
+    async fn fork_session(
+        &self,
+        id: &SessionId,
+        turn: &meerai_agents::TurnId,
+    ) -> anyhow::Result<OpenedSession> {
+        anyhow::bail!("unexpected fork_session call for {id} at {turn}")
     }
 }
 

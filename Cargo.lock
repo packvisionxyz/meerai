@@ -1891,6 +1891,7 @@ dependencies = [
  "ignore",
  "lsp-types",
  "meerai-core",
+ "meerai-macros",
  "regex",
  "schemars 1.2.3",
  "serde",

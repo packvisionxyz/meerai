@@ -21,7 +21,10 @@ const GIT_POLL_TICKS: usize = 40;
 
 enum SessionResolveOutcome {
     AlreadyOpen(SessionId),
-    Opened(OpenedSession),
+    Opened {
+        opened: OpenedSession,
+        draft: Option<String>,
+    },
 }
 
 enum LoopMsg {
@@ -187,10 +190,12 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
                 let opener = opener.clone();
                 let tx = loop_tx.clone();
                 tokio::spawn(async move {
-                    let result = opener
-                        .open_session(&id)
-                        .await
-                        .map(SessionResolveOutcome::Opened);
+                    let result = opener.open_session(&id).await.map(|opened| {
+                        SessionResolveOutcome::Opened {
+                            opened,
+                            draft: None,
+                        }
+                    });
                     let _ = tx.send(LoopMsg::SessionResolved {
                         replace_empty_tab,
                         result,
@@ -215,10 +220,39 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
                 let opener = opener.clone();
                 let tx = loop_tx.clone();
                 tokio::spawn(async move {
-                    let result = opener
-                        .create_session()
-                        .await
-                        .map(SessionResolveOutcome::Opened);
+                    let result =
+                        opener
+                            .create_session()
+                            .await
+                            .map(|opened| SessionResolveOutcome::Opened {
+                                opened,
+                                draft: None,
+                            });
+                    let _ = tx.send(LoopMsg::SessionResolved {
+                        replace_empty_tab: false,
+                        result,
+                    });
+                });
+            }
+            PendingSessionAction::ForkSession {
+                session_id,
+                turn,
+                draft,
+            } => {
+                let opener = opener.clone();
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let result = async {
+                        let opened = match turn {
+                            Some(turn) => opener.fork_session(&session_id, &turn).await?,
+                            None => opener.create_session().await?,
+                        };
+                        Ok(SessionResolveOutcome::Opened {
+                            opened,
+                            draft: Some(draft),
+                        })
+                    }
+                    .await;
                     let _ = tx.send(LoopMsg::SessionResolved {
                         replace_empty_tab: false,
                         result,
@@ -244,7 +278,10 @@ async fn resolve_and_open_query(
         return opener
             .open_session(&exact.id)
             .await
-            .map(SessionResolveOutcome::Opened);
+            .map(|opened| SessionResolveOutcome::Opened {
+                opened,
+                draft: None,
+            });
     }
 
     let prefix_matches: Vec<&SessionSummary> = sessions
@@ -259,7 +296,10 @@ async fn resolve_and_open_query(
             opener
                 .open_session(&single.id)
                 .await
-                .map(SessionResolveOutcome::Opened)
+                .map(|opened| SessionResolveOutcome::Opened {
+                    opened,
+                    draft: None,
+                })
         }
         [] => bail!("no session matching '{trimmed}'"),
         many => {
@@ -313,10 +353,17 @@ fn handle_loop_msg(
                         app.status_notice = Some(format!("Switched to tab {}", idx + 1));
                     }
                 }
-                Ok(SessionResolveOutcome::Opened(opened)) => {
+                Ok(SessionResolveOutcome::Opened { opened, draft }) => {
                     if let Some((new_tab_id, event_rx)) =
                         app.apply_opened_session(opened, replace_empty_tab)
                     {
+                        if let Some(draft) = draft
+                            && let Some(idx) = app.tab_index_by_id(new_tab_id)
+                        {
+                            let tab = &mut app.tabs[idx];
+                            tab.cursor = draft.len();
+                            tab.input = draft;
+                        }
                         spawn_tab_forwarder(new_tab_id, event_rx, loop_tx.clone());
                     }
                 }

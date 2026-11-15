@@ -136,6 +136,18 @@ impl AppState {
                     self.doc_selection = None;
                     return true;
                 }
+                if self.modal.is_none() && self.run_user_action_at(mouse.column, mouse.row) {
+                    self.selection = None;
+                    self.doc_selection = None;
+                    return true;
+                }
+                if self.modal.is_none() && self.composer_click_to_cursor(mouse.column, mouse.row) {
+                    self.selection = None;
+                    self.doc_selection = None;
+                    return true;
+                }
+
+                self.pending_toggle = self.entry_at(mouse.column, mouse.row);
 
                 if let Some(doc_pos) = self.screen_to_doc_pos_exact(mouse.column, mouse.row) {
                     self.selection = None;
@@ -160,9 +172,6 @@ impl AppState {
                         head: doc_pos,
                         active: true,
                     });
-                    if self.modal.is_none() {
-                        let _ = self.toggle_thinking_at(mouse.column, mouse.row);
-                    }
                     return true;
                 }
 
@@ -172,9 +181,6 @@ impl AppState {
                     head: pos,
                     active: true,
                 });
-                if self.modal.is_none() {
-                    let _ = self.toggle_thinking_at(mouse.column, mouse.row);
-                }
                 return true;
             }
             MouseEventKind::Drag(MouseButton::Left) => {
@@ -190,18 +196,26 @@ impl AppState {
                         }
                     }
                     if let Some(head) = self.screen_to_doc_pos_clamped(mouse.column, mouse.row) {
+                        if head != sel.anchor {
+                            self.pending_toggle = None;
+                        }
                         sel.head = head;
                     }
                     self.doc_selection = Some(sel);
                     return true;
                 }
                 if let Some(sel) = &mut self.selection {
+                    if pos != sel.anchor {
+                        self.pending_toggle = None;
+                    }
                     sel.head = pos;
                     sel.active = true;
                     return true;
                 }
+                return false;
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                let mut was_click = true;
                 if let Some(mut sel) = self.doc_selection.take()
                     && sel.active
                 {
@@ -210,24 +224,27 @@ impl AppState {
                     }
                     sel.active = false;
                     if sel.anchor != sel.head {
+                        was_click = false;
                         let text = self.extract_doc_selected_text(sel);
                         if !text.is_empty() {
                             self.copy_text_to_clipboard(&text);
                         }
                     }
-                    return true;
-                }
-                if let Some(mut sel) = self.selection.take() {
+                } else if let Some(mut sel) = self.selection.take() {
                     sel.head = pos;
                     sel.active = false;
                     if sel.anchor != sel.head {
+                        was_click = false;
                         let text = self.extract_selected_text(sel);
                         if !text.is_empty() {
                             self.copy_text_to_clipboard(&text);
                         }
                     }
-                    return true;
                 }
+                if was_click && let Some(idx) = self.pending_toggle.take() {
+                    self.toggle_entry_index(idx);
+                }
+                return true;
             }
             _ => {}
         }
@@ -565,7 +582,7 @@ impl AppState {
             .map(|zone| zone.entry_idx)
     }
 
-    pub fn toggle_thinking_at(&mut self, column: u16, row: u16) -> bool {
+    fn entry_at(&self, column: u16, row: u16) -> Option<usize> {
         let area = self.transcript_inner_area;
         if area.width == 0
             || area.height == 0
@@ -574,19 +591,25 @@ impl AppState {
             || row < area.y
             || row >= area.y + area.height
         {
-            return false;
+            return None;
         }
         let virtual_line = self
             .effective_scroll()
             .saturating_add((row - area.y) as usize);
-        let Some(entry_idx) = self
-            .thinking_hit_zones
+        self.thinking_hit_zones
             .iter()
             .find(|z| virtual_line >= z.start_line && virtual_line < z.end_line)
             .map(|z| z.entry_idx)
-        else {
-            return false;
-        };
+    }
+
+    pub fn toggle_entry_at(&mut self, column: u16, row: u16) -> bool {
+        match self.entry_at(column, row) {
+            Some(idx) => self.toggle_entry_index(idx),
+            None => false,
+        }
+    }
+
+    fn toggle_entry_index(&mut self, entry_idx: usize) -> bool {
         match self.tab_mut().transcript.get_mut(entry_idx) {
             Some(TranscriptEntry::Assistant {
                 reasoning,
@@ -600,8 +623,132 @@ impl AppState {
                 *expanded = !*expanded;
                 true
             }
+            Some(TranscriptEntry::ToolCall(tc))
+                if tc
+                    .output
+                    .as_deref()
+                    .is_some_and(|out| !out.trim().is_empty()) =>
+            {
+                tc.expanded = !tc.expanded;
+                true
+            }
             _ => false,
         }
+    }
+
+    pub(super) fn run_user_action_at(&mut self, column: u16, row: u16) -> bool {
+        let hit = self
+            .user_action_hits
+            .iter()
+            .find(|hit| {
+                column >= hit.rect.x
+                    && column < hit.rect.x + hit.rect.width
+                    && row >= hit.rect.y
+                    && row < hit.rect.y + hit.rect.height
+            })
+            .copied();
+        let Some(hit) = hit else {
+            return false;
+        };
+        self.run_user_action(hit.entry_idx, hit.action)
+    }
+
+    fn run_user_action(&mut self, entry_idx: usize, action: UserAction) -> bool {
+        let text = match self.tab().transcript.get(entry_idx) {
+            Some(TranscriptEntry::User { text, .. }) => text.clone(),
+            _ => return false,
+        };
+        match action {
+            UserAction::Copy => {
+                self.copy_text_to_clipboard(&text);
+                self.status_notice = Some("Copied message".to_string());
+                true
+            }
+            UserAction::Revert => self.revert_to_entry(entry_idx),
+            UserAction::Fork => self.fork_from_entry(entry_idx, text),
+        }
+    }
+
+    fn revert_to_entry(&mut self, entry_idx: usize) -> bool {
+        if self.tab().is_running {
+            self.status_notice = Some("Cancel the running turn before reverting".to_string());
+            return true;
+        }
+        let turn = self.tab().user_turns.get(&entry_idx).cloned();
+        let Some(turn_id) = turn else {
+            self.status_notice = Some("Revert is unavailable for this message".to_string());
+            return true;
+        };
+        let _ = self.tab().cmd_tx.send(AgentCommand::Revert {
+            turn_id: turn_id.clone(),
+        });
+        let tab = self.tab_mut();
+        tab.transcript.truncate(entry_idx);
+        tab.user_turns.retain(|idx, _| *idx < entry_idx);
+        tab.auto_follow = true;
+        self.status_notice = Some("Reverted to before this message".to_string());
+        true
+    }
+
+    fn fork_from_entry(&mut self, entry_idx: usize, draft: String) -> bool {
+        if self.tab().is_running {
+            self.status_notice = Some("Cancel the running turn before forking".to_string());
+            return true;
+        }
+        if self.session_opener.is_none() {
+            self.status_notice = Some("Fork needs an open session".to_string());
+            return true;
+        }
+        let session_id = self.tab().session_id.clone();
+        let previous_turn = self.tab().transcript[..entry_idx]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, entry)| matches!(entry, TranscriptEntry::User { .. }))
+            .and_then(|(idx, _)| self.tab().user_turns.get(&idx).cloned());
+        self.pending_session_actions
+            .push(PendingSessionAction::ForkSession {
+                session_id,
+                turn: previous_turn,
+                draft,
+            });
+        self.status_notice = Some("Forking session...".to_string());
+        true
+    }
+
+    fn composer_click_to_cursor(&mut self, column: u16, row: u16) -> bool {
+        let area = self.composer_input_area;
+        if area.width == 0
+            || area.height == 0
+            || column < area.x
+            || column >= area.x + area.width
+            || row < area.y
+            || row >= area.y + area.height
+        {
+            return false;
+        }
+        let input = self.tab().input.clone();
+        let lines: Vec<&str> = input.split('\n').collect();
+        let line_idx =
+            (self.composer_scroll + (row - area.y) as usize).min(lines.len().saturating_sub(1));
+        let display_col = (column - area.x) as usize;
+        let char_idx =
+            display_col_to_char_index(lines[line_idx], display_col, &self.agents, &self.skills);
+        let line_start: usize = input
+            .split('\n')
+            .take(line_idx)
+            .map(|line| line.len() + 1)
+            .sum();
+        let byte_in_line = lines[line_idx]
+            .char_indices()
+            .nth(char_idx)
+            .map(|(idx, _)| idx)
+            .unwrap_or(lines[line_idx].len());
+        let tab = self.tab_mut();
+        tab.cursor = (line_start + byte_in_line).min(tab.input.len());
+        self.mode = InputMode::Insert;
+        self.update_completion();
+        true
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
@@ -1305,3 +1452,32 @@ pub(super) fn write_system_clipboard(text: &str) {
 
 #[cfg(test)]
 pub(super) fn write_system_clipboard(_text: &str) {}
+
+fn display_col_to_char_index(
+    line: &str,
+    display_col: usize,
+    agents: &[meerai_common::definitions::AgentDefinition],
+    skills: &[meerai_common::definitions::SkillDefinition],
+) -> usize {
+    let mut display = 0usize;
+    let mut index = 0usize;
+    while index < line.len() && display < display_col {
+        if let Some((kind, id, end)) = parse_mention_token(line, index)
+            && mention_is_known(kind, id, agents, skills)
+        {
+            let width = id.chars().count();
+            if display + width > display_col {
+                return line[..end].chars().count();
+            }
+            display += width;
+            index = end;
+            continue;
+        }
+        let Some(ch) = line[index..].chars().next() else {
+            break;
+        };
+        display += 1;
+        index += ch.len_utf8();
+    }
+    line[..index].chars().count()
+}

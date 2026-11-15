@@ -111,7 +111,7 @@ fn build_definition_fn(derived: &ToolsetDerive) -> proc_macro2::TokenStream {
     quote! {
         fn definition(&self) -> Vec<meerai_core::ToolDefinition> {
             let generator = &mut schemars::SchemaGenerator::new(
-                schemars::generate::SchemaSettings::default().with(|s| {
+                schemars::generate::SchemaSettings::draft07().with(|s| {
                     s.meta_schema = None;
                 }),
             );
