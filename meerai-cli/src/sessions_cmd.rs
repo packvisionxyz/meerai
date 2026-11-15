@@ -5,7 +5,7 @@ use meerai_common::settings::AppSettings;
 use meerai_core::env::now_millis;
 use meerai_session::{
     Session, SessionConfig, SessionId, SessionSummary, TurnId, default_sessions_root,
-    delete_session, latest_session, list_sessions,
+    delete_session, latest_session, list_sessions, session_has_user_input,
 };
 
 use crate::cli::{SessionTarget, SessionsCommand};
@@ -99,6 +99,40 @@ pub(crate) async fn auto_prune_sessions(settings: &AppSettings, exclude: &Sessio
         Ok(count) => eprintln!("{}", format_prune_message(count, days)),
         Err(err) => eprintln!("Warning: automatic session prune failed: {err:#}"),
     }
+}
+
+pub(crate) async fn prune_empty_sessions(exclude: &SessionId) {
+    match remove_empty_sessions(&default_sessions_root(), exclude).await {
+        Ok(0) => {}
+        Ok(count) => eprintln!("Removed {count} empty sessions"),
+        Err(err) => eprintln!("Warning: empty session cleanup failed: {err:#}"),
+    }
+}
+
+pub(crate) async fn remove_empty_sessions(root: &Path, exclude: &SessionId) -> Result<usize> {
+    let sessions = list_sessions(root)?;
+    let mut removed = 0usize;
+    for summary in sessions {
+        if &summary.id == exclude || summary.parent_session_id.is_some() {
+            continue;
+        }
+        if summary
+            .title
+            .as_deref()
+            .is_some_and(|t| !t.trim().is_empty())
+        {
+            continue;
+        }
+        match session_has_user_input(&summary.dir).await {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(_) => continue,
+        }
+        if delete_session(root, &summary.id)? {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 pub(crate) async fn run_sessions(command: &SessionsCommand) -> Result<()> {

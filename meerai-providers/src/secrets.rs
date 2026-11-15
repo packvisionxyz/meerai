@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::process::{Command, Output, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use meerai_core::fs_perms::{create_private_dir_sync, write_private_sync};
@@ -291,18 +291,20 @@ fn binary_on_path(name: &str) -> bool {
     })
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NativeKeychainBackend;
+#[derive(Debug, Default)]
+pub struct NativeKeychainBackend {
+    available: OnceLock<bool>,
+}
 
 impl NativeKeychainBackend {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
 #[cfg(target_os = "macos")]
-impl KeychainBackend for NativeKeychainBackend {
-    fn is_available(&self) -> bool {
+impl NativeKeychainBackend {
+    fn probe(&self) -> bool {
         if keychain_disabled_by_env() || !Path::new(MACOS_SECURITY_BIN).is_file() {
             return false;
         }
@@ -331,6 +333,32 @@ impl KeychainBackend for NativeKeychainBackend {
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl NativeKeychainBackend {
+    fn probe(&self) -> bool {
+        if keychain_disabled_by_env() {
+            return false;
+        }
+        let has_dbus =
+            std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some_and(|val| !val.is_empty());
+        has_dbus && binary_on_path("secret-tool")
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+impl NativeKeychainBackend {
+    fn probe(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl KeychainBackend for NativeKeychainBackend {
+    fn is_available(&self) -> bool {
+        *self.available.get_or_init(|| self.probe())
     }
 
     fn get_secret(&self, service: &str, account: &str) -> Result<Option<String>> {
@@ -387,12 +415,7 @@ impl KeychainBackend for NativeKeychainBackend {
 #[cfg(target_os = "linux")]
 impl KeychainBackend for NativeKeychainBackend {
     fn is_available(&self) -> bool {
-        if keychain_disabled_by_env() {
-            return false;
-        }
-        let has_dbus =
-            std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some_and(|val| !val.is_empty());
-        has_dbus && binary_on_path("secret-tool")
+        *self.available.get_or_init(|| self.probe())
     }
 
     fn get_secret(&self, service: &str, account: &str) -> Result<Option<String>> {
@@ -467,7 +490,7 @@ impl KeychainBackend for NativeKeychainBackend {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 impl KeychainBackend for NativeKeychainBackend {
     fn is_available(&self) -> bool {
-        false
+        *self.available.get_or_init(|| self.probe())
     }
 
     fn get_secret(&self, _service: &str, _account: &str) -> Result<Option<String>> {

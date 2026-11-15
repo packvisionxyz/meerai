@@ -22,11 +22,16 @@ use crate::app::{
 use crate::completion::{CompletionItemKind, CompletionKind};
 use crate::diff::{DiffCell, DiffRowKind};
 use crate::search::SearchMode;
+use crate::theme;
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
     let area = frame.area();
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::p().background)),
+        area,
+    );
     app.terminal_width = area.width;
     let composer_lines = app.tab().input.split('\n').count().clamp(1, 6) as u16;
     let composer_height = composer_lines + 2;
@@ -104,17 +109,18 @@ fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
             let label = format!(" {}: {}{} ", idx + 1, title, indicator);
             let style = if is_active {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(theme::p().accent)
                     .add_modifier(Modifier::BOLD)
             } else if !tab.pending_approvals.is_empty() {
-                Style::default().fg(Color::LightRed).bg(Color::DarkGray)
+                Style::default()
+                    .fg(theme::p().error)
+                    .add_modifier(Modifier::BOLD)
             } else if tab.is_running {
-                Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+                Style::default().fg(theme::p().warning)
             } else if tab.has_unread {
-                Style::default().fg(Color::Cyan).bg(Color::DarkGray)
+                Style::default().fg(theme::p().text)
             } else {
-                Style::default().fg(Color::Gray).bg(Color::Black)
+                Style::default().fg(theme::p().muted)
             };
             (label, style)
         })
@@ -142,7 +148,7 @@ fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     let mut col = area.x;
     if start > 0 {
         let marker = "« ";
-        spans.push(Span::styled(marker, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(marker, Style::default().fg(theme::p().faint)));
         col = col.saturating_add(marker.chars().count() as u16);
     }
 
@@ -157,13 +163,13 @@ fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
         }
         spans.push(Span::styled(label.clone(), *style));
         col = col.saturating_add(label_len);
-        spans.push(Span::styled(" ", Style::default().bg(Color::Black)));
+        spans.push(Span::raw(" "));
         col = col.saturating_add(1);
     }
 
     if end < labels.len() {
         let marker = "» ";
-        spans.push(Span::styled(marker, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(marker, Style::default().fg(theme::p().faint)));
         col = col.saturating_add(marker.chars().count() as u16);
     }
 
@@ -176,8 +182,7 @@ fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
         spans.push(Span::styled(
             new_btn,
             Style::default()
-                .fg(Color::Green)
-                .bg(Color::Black)
+                .fg(theme::p().muted)
                 .add_modifier(Modifier::BOLD),
         ));
         col = col.saturating_add(new_w);
@@ -188,27 +193,38 @@ fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     if width.saturating_sub(used) >= hint.len() + 2 {
         let pad = width - used - hint.len() - 1;
         spans.push(Span::raw(" ".repeat(pad)));
-        spans.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(hint, Style::default().fg(theme::p().faint)));
     }
 
-    let bar = Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Black));
+    let bar = Paragraph::new(Line::from(spans));
     frame.render_widget(bar, area);
 }
 
 fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
-    let block = Block::default().borders(Borders::ALL).title(" Chat ");
-    let inner = block.inner(area);
-
-    let raw_lines = build_transcript_lines(app);
-    let (wrapped_lines, hit_zones, doc_lines) = if inner.width > 0 {
-        wrap_tagged_lines(raw_lines, inner.width as usize)
-    } else {
-        (Vec::new(), Vec::new(), Vec::new())
+    let inner = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: area.height,
     };
 
+    let raw_lines = build_transcript_lines(app);
+    let wrapped = if inner.width > 0 {
+        wrap_tagged_lines(raw_lines, inner.width as usize)
+    } else {
+        WrappedTranscript {
+            lines: Vec::new(),
+            hit_zones: Vec::new(),
+            doc_lines: Vec::new(),
+            bands: Vec::new(),
+        }
+    };
+    let wrapped_lines = wrapped.lines;
+    let bands = wrapped.bands;
+
     app.transcript_inner_area = inner;
-    app.thinking_hit_zones = hit_zones;
-    app.transcript_wrapped_lines = doc_lines;
+    app.thinking_hit_zones = wrapped.hit_zones;
+    app.transcript_wrapped_lines = wrapped.doc_lines;
 
     let scroll_y = {
         let tab = app.tab_mut();
@@ -223,16 +239,44 @@ fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
         tab.scroll_offset.min(u16::MAX as usize) as u16
     };
 
-    let paragraph = Paragraph::new(wrapped_lines)
-        .block(block)
-        .scroll((scroll_y, 0));
-    frame.render_widget(paragraph, area);
+    let paragraph = Paragraph::new(wrapped_lines).scroll((scroll_y, 0));
+    frame.render_widget(paragraph, inner);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let first_visible = scroll_y as usize;
+    let last_visible = first_visible + inner.height as usize;
+    let band_bg = theme::p().surface;
+    for (start, end) in bands {
+        if end <= first_visible || start >= last_visible {
+            continue;
+        }
+        let from = start.max(first_visible);
+        let to = end.min(last_visible);
+        let buf = frame.buffer_mut();
+        for row in from..to {
+            let y = inner.y + (row - first_visible) as u16;
+            for col in inner.x..inner.x + inner.width {
+                if let Some(cell) = buf.cell_mut((col, y)) {
+                    cell.set_bg(band_bg);
+                }
+            }
+        }
+    }
 }
 
 fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
-    let block = Block::default().borders(Borders::ALL).title(" Session ");
-    let inner = block.inner(area);
-    let width = inner.width as usize;
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::p().surface)),
+        area,
+    );
+    let area = Rect {
+        x: area.x.saturating_add(1),
+        width: area.width.saturating_sub(1),
+        ..area
+    };
+    let width = area.width as usize;
     let tab = app.tab();
 
     let key_status = app.active_key_status();
@@ -243,18 +287,13 @@ fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             Some(ms) => format!("{ch} running ({})", format_compact_ms(ms)),
             None => format!("{ch} running"),
         };
-        Span::styled(
-            label,
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
+        Span::styled(label, Style::default().fg(theme::p().warning))
     } else {
         let label = match tab.metrics.last_turn_ms {
             Some(ms) => format!("idle ({})", format_compact_ms(ms)),
             None => "idle".to_string(),
         };
-        Span::styled(label, Style::default().fg(Color::Green))
+        Span::styled(label, Style::default().fg(theme::p().success))
     };
 
     let mut token_summary = format_usage_compact(app);
@@ -271,48 +310,49 @@ fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         (None, None) => "-".to_string(),
     };
 
+    let field =
+        |name: &str| Span::styled(format!("{name:<9}"), Style::default().fg(theme::p().muted));
+
     let mut lines = vec![
+        Line::from(Span::styled(" SESSION", theme::label())),
         Line::from(vec![
-            Span::styled("session  ", Style::default().fg(Color::DarkGray)),
-            Span::raw(truncate_single_line(
-                tab.session_id.as_str(),
-                width.saturating_sub(9),
-            )),
+            field("session"),
+            Span::styled(
+                truncate_single_line(tab.session_id.as_str(), width.saturating_sub(10)),
+                theme::text(),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("provider ", Style::default().fg(Color::DarkGray)),
-            Span::raw(truncate_single_line(
-                &tab.active_provider,
-                width.saturating_sub(9),
-            )),
+            field("provider"),
+            Span::styled(
+                truncate_single_line(&tab.active_provider, width.saturating_sub(10)),
+                theme::text(),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("model    ", Style::default().fg(Color::DarkGray)),
-            Span::raw(truncate_single_line(
-                display_model(app),
-                width.saturating_sub(9),
-            )),
+            field("model"),
+            Span::styled(
+                truncate_single_line(display_model(app), width.saturating_sub(10)),
+                theme::text(),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("auth     ", Style::default().fg(Color::DarkGray)),
+            field("auth"),
             Span::styled(format!("[{key_badge}]"), Style::default().fg(key_color)),
         ]),
+        Line::from(vec![field("state"), state_span]),
         Line::from(vec![
-            Span::styled("state    ", Style::default().fg(Color::DarkGray)),
-            state_span,
-        ]),
-        Line::from(vec![
-            Span::styled("tokens   ", Style::default().fg(Color::DarkGray)),
-            Span::raw(truncate_single_line(
-                &token_summary,
-                width.saturating_sub(9),
-            )),
-        ]),
-        Line::from(vec![
-            Span::styled("speed    ", Style::default().fg(Color::DarkGray)),
+            field("tokens"),
             Span::styled(
-                truncate_single_line(&speed_summary, width.saturating_sub(9)),
-                Style::default().fg(Color::Rgb(133, 191, 181)),
+                truncate_single_line(&token_summary, width.saturating_sub(10)),
+                theme::text(),
+            ),
+        ]),
+        Line::from(vec![
+            field("speed"),
+            Span::styled(
+                truncate_single_line(&speed_summary, width.saturating_sub(10)),
+                Style::default().fg(theme::p().muted),
             ),
         ]),
         Line::default(),
@@ -320,49 +360,33 @@ fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
 
     if app.mcp_servers.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled(
-                "MCP ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("(0) ", Style::default().fg(Color::DarkGray)),
-            Span::styled("none", Style::default().fg(Color::DarkGray)),
+            Span::styled(" MCP ", theme::label()),
+            Span::styled("none", Style::default().fg(theme::p().faint)),
         ]));
     } else {
         lines.push(Line::from(vec![
-            Span::styled(
-                "MCP ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(" MCP ", theme::label()),
             Span::styled(
                 format!("({})", app.mcp_servers.len()),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::p().faint),
             ),
         ]));
         for srv in &app.mcp_servers {
-            lines.push(Line::from(format!(
-                "  • {}",
-                truncate_single_line(srv, width.saturating_sub(4))
+            lines.push(Line::from(Span::styled(
+                format!("  • {}", truncate_single_line(srv, width.saturating_sub(4))),
+                theme::muted(),
             )));
         }
     }
 
+    lines.push(Line::default());
     lines.push(Line::from(vec![
-        Span::styled(
-            "Agents ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("(1) ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" AGENTS ", theme::label()),
         Span::raw("main "),
         if app.tab().is_running {
-            Span::styled("[active]", Style::default().fg(Color::Yellow))
+            Span::styled("[active]", Style::default().fg(theme::p().warning))
         } else {
-            Span::styled("[ready]", Style::default().fg(Color::Green))
+            Span::styled("[ready]", Style::default().fg(theme::p().faint))
         },
     ]));
 
@@ -380,26 +404,19 @@ fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
 
     if recent_tools.is_empty() && app.registered_tools.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled(
-                "Tools ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("(0 calls) ", Style::default().fg(Color::DarkGray)),
-            Span::styled("idle", Style::default().fg(Color::DarkGray)),
+            Span::styled(" TOOLS ", theme::label()),
+            Span::styled("(0 calls) idle", Style::default().fg(theme::p().faint)),
         ]));
     } else {
         lines.push(Line::from(vec![
+            Span::styled(" TOOLS ", theme::label()),
             Span::styled(
-                "Tools ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("({} calls)", recent_tools.len()),
-                Style::default().fg(Color::DarkGray),
+                if recent_tools.len() == 1 {
+                    "(1 call)".to_string()
+                } else {
+                    format!("({} calls)", recent_tools.len())
+                },
+                Style::default().fg(theme::p().faint),
             ),
         ]));
         for tool_name in app.registered_tools.iter().take(4) {
@@ -408,16 +425,16 @@ fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                     "  • {}",
                     truncate_single_line(tool_name, width.saturating_sub(4))
                 ),
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )));
         }
         for tc in recent_tools.into_iter().rev() {
             let (badge, color) = match tc.status {
-                ToolCallStatus::Proposed | ToolCallStatus::Running => ("run", Color::Yellow),
-                ToolCallStatus::Succeeded => ("ok", Color::Green),
-                ToolCallStatus::Failed => ("fail", Color::Red),
-                ToolCallStatus::Stopped => ("stop", Color::Magenta),
-                ToolCallStatus::Cancelled => ("cancel", Color::Magenta),
+                ToolCallStatus::Proposed | ToolCallStatus::Running => ("run", theme::p().warning),
+                ToolCallStatus::Succeeded => ("ok", theme::p().success),
+                ToolCallStatus::Failed => ("fail", theme::p().error),
+                ToolCallStatus::Stopped => ("stop", theme::p().muted),
+                ToolCallStatus::Cancelled => ("cancel", theme::p().muted),
             };
             let max_name = width.saturating_sub(10);
             lines.push(Line::from(vec![
@@ -427,69 +444,70 @@ fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         }
     }
 
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_sidebar_changes(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
-    let title = format!(" File Changes ({}) ", app.file_changes.len());
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let inner = block.inner(area);
-    let width = inner.width as usize;
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::p().surface)),
+        area,
+    );
+    let area = Rect {
+        x: area.x.saturating_add(1),
+        width: area.width.saturating_sub(1),
+        ..area
+    };
+    let title = format!(" File Changes ({})", app.file_changes.len());
+    let width = area.width as usize;
 
-    app.sidebar_changes_inner_area = inner;
+    app.sidebar_changes_inner_area = area;
 
-    let mut lines = Vec::new();
+    let mut lines = vec![Line::from(Span::styled(title, theme::label()))];
     let mut visible_rows = 0usize;
     if app.file_changes.is_empty() {
         lines.push(Line::from(Span::styled(
-            "Clean working tree",
-            Style::default().fg(Color::DarkGray),
+            " Clean working tree",
+            Style::default().fg(theme::p().faint),
         )));
     } else {
-        let max_rows = inner.height.max(1) as usize;
+        let max_rows = area.height.max(1) as usize;
         for entry in app.file_changes.iter().take(max_rows) {
             let status_color = match entry.status.as_str() {
-                "??" | "A" => Color::Green,
-                "D" => Color::Red,
-                _ => Color::Yellow,
+                "??" | "A" => theme::p().success,
+                "D" => theme::p().error,
+                _ => theme::p().warning,
             };
             let badge = format!("{:>2} ", entry.status);
-            let max_path = width.saturating_sub(badge.len());
+            let max_path = width.saturating_sub(badge.len() + 1);
             lines.push(Line::from(vec![
                 Span::styled(badge, Style::default().fg(status_color)),
-                Span::raw(truncate_single_line(&entry.path, max_path)),
+                Span::styled(
+                    truncate_single_line(&entry.path, max_path),
+                    Style::default().fg(theme::p().muted),
+                ),
             ]));
             visible_rows += 1;
         }
-        if app.file_changes.len() > max_rows && !lines.is_empty() {
+        if app.file_changes.len() > max_rows && visible_rows > 1 {
             let remaining = app.file_changes.len() - max_rows + 1;
             lines.pop();
             visible_rows = visible_rows.saturating_sub(1);
             lines.push(Line::from(Span::styled(
                 format!("... and {remaining} more"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::p().faint),
             )));
         }
     }
     app.visible_file_change_rows = visible_rows;
 
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    frame.render_widget(Paragraph::new(lines), area);
 }
-
-const MINT_TEAL: Color = Color::Rgb(133, 191, 181);
-const USER_ROW_BG: Color = Color::Rgb(32, 39, 54);
-const TOOL_ROW_BG: Color = Color::Rgb(30, 41, 34);
-const THINK_ROW_BG: Color = Color::Rgb(41, 36, 48);
-const CODE_BLOCK_BG: Color = Color::Rgb(26, 30, 38);
-const THINK_ACCENT: Color = Color::Rgb(222, 184, 102);
-const ASSISTANT_ACCENT: Color = Color::Rgb(115, 198, 255);
-const TOOL_ACCENT: Color = Color::Rgb(122, 178, 255);
-const LOGO_M_ROWS: [&str; 4] = ["██      ██", "████  ████", "██  ██  ██", "██      ██"];
 
 struct TaggedTranscriptLine {
     line: Line<'static>,
     entry_tag: Option<usize>,
     gutter_len: usize,
+    band: bool,
 }
 
 fn tagged_line(
@@ -501,29 +519,40 @@ fn tagged_line(
         line,
         entry_tag,
         gutter_len,
+        band: false,
+    }
+}
+
+fn banded_line(
+    line: Line<'static>,
+    entry_tag: Option<usize>,
+    gutter_len: usize,
+) -> TaggedTranscriptLine {
+    TaggedTranscriptLine {
+        line,
+        entry_tag,
+        gutter_len,
+        band: true,
     }
 }
 
 fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
     let key_status = app.active_key_status();
     let (badge, badge_color) = key_status_style(&key_status);
-    let logo_style = Style::default().fg(MINT_TEAL).add_modifier(Modifier::BOLD);
 
     vec![
         tagged_line(
             Line::from(vec![
-                Span::styled(LOGO_M_ROWS[0], logo_style),
-                Span::raw("  "),
                 Span::styled(
                     "meerai",
                     Style::default()
-                        .fg(Color::White)
+                        .fg(theme::p().accent)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  "),
                 Span::styled(
                     format!("{} / {}", app.tab().active_provider, display_model(app)),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(theme::p().muted),
                 ),
                 Span::raw(" "),
                 Span::styled(format!("[{badge}]"), Style::default().fg(badge_color)),
@@ -532,35 +561,10 @@ fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
             0,
         ),
         tagged_line(
-            Line::from(vec![
-                Span::styled(LOGO_M_ROWS[1], logo_style),
-                Span::styled(
-                    "  Commands: /sessions, /new, /connect, /models, /help, @ (files).",
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]),
-            None,
-            0,
-        ),
-        tagged_line(
-            Line::from(vec![
-                Span::styled(LOGO_M_ROWS[2], logo_style),
-                Span::styled(
-                    "  Shortcuts: Ctrl-j/Shift+Enter newline, Ctrl-t think, Drag/Shift+Click copy.",
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]),
-            None,
-            0,
-        ),
-        tagged_line(
-            Line::from(vec![
-                Span::styled(LOGO_M_ROWS[3], logo_style),
-                Span::styled(
-                    format!("  Workspace: {}", app.workspace_root.display()),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]),
+            Line::from(Span::styled(
+                format!("{}", app.workspace_root.display()),
+                Style::default().fg(theme::p().faint),
+            )),
             None,
             0,
         ),
@@ -569,12 +573,12 @@ fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
 
 fn tool_status_badge(status: &ToolCallStatus) -> (&'static str, Color) {
     match status {
-        ToolCallStatus::Proposed => ("proposed", Color::Yellow),
-        ToolCallStatus::Running => ("running", Color::Yellow),
-        ToolCallStatus::Succeeded => ("ok", Color::Green),
-        ToolCallStatus::Failed => ("fail", Color::Red),
-        ToolCallStatus::Stopped => ("stop", Color::Magenta),
-        ToolCallStatus::Cancelled => ("cancelled", Color::Magenta),
+        ToolCallStatus::Proposed => ("proposed", theme::p().warning),
+        ToolCallStatus::Running => ("running", theme::p().warning),
+        ToolCallStatus::Succeeded => ("ok", theme::p().success),
+        ToolCallStatus::Failed => ("fail", theme::p().error),
+        ToolCallStatus::Stopped => ("stop", theme::p().muted),
+        ToolCallStatus::Cancelled => ("cancelled", theme::p().muted),
     }
 }
 
@@ -582,15 +586,10 @@ fn assistant_line_style(line: &str, in_code_block: &mut bool) -> Style {
     let trimmed = line.trim_start();
     if trimmed.starts_with("```") {
         *in_code_block = !*in_code_block;
-        return Style::default()
-            .fg(MINT_TEAL)
-            .bg(CODE_BLOCK_BG)
-            .add_modifier(Modifier::BOLD);
+        return Style::default().fg(theme::p().faint).bg(theme::p().surface);
     }
     if *in_code_block {
-        return Style::default()
-            .fg(Color::Rgb(215, 224, 236))
-            .bg(CODE_BLOCK_BG);
+        return Style::default().fg(theme::p().text).bg(theme::p().surface);
     }
     if trimmed.starts_with("# ")
         || trimmed.starts_with("## ")
@@ -598,15 +597,15 @@ fn assistant_line_style(line: &str, in_code_block: &mut bool) -> Style {
         || trimmed.starts_with("#### ")
     {
         return Style::default()
-            .fg(ASSISTANT_ACCENT)
+            .fg(theme::p().text)
             .add_modifier(Modifier::BOLD);
     }
     if trimmed.starts_with("> ") {
         return Style::default()
-            .fg(Color::Gray)
+            .fg(theme::p().muted)
             .add_modifier(Modifier::ITALIC);
     }
-    Style::default().fg(Color::Rgb(236, 240, 246))
+    Style::default().fg(theme::p().text)
 }
 
 fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
@@ -623,43 +622,22 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
         }
         match entry {
             TranscriptEntry::User { text } => {
-                lines.push(tagged_line(
-                    Line::from(vec![
-                        Span::styled(
-                            "┃ ",
-                            Style::default()
-                                .fg(MINT_TEAL)
-                                .bg(USER_ROW_BG)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            "YOU",
-                            Style::default()
-                                .fg(MINT_TEAL)
-                                .bg(USER_ROW_BG)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ])
-                    .style(Style::default().bg(USER_ROW_BG)),
+                lines.push(banded_line(
+                    Line::from(Span::styled(
+                        "▌ you",
+                        Style::default()
+                            .fg(theme::p().accent)
+                            .add_modifier(Modifier::BOLD),
+                    )),
                     None,
                     2,
                 ));
                 for line in text.split('\n') {
-                    lines.push(tagged_line(
+                    lines.push(banded_line(
                         Line::from(vec![
-                            Span::styled(
-                                "┃ ",
-                                Style::default()
-                                    .fg(MINT_TEAL)
-                                    .bg(USER_ROW_BG)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(
-                                line.to_string(),
-                                Style::default().fg(Color::White).bg(USER_ROW_BG),
-                            ),
-                        ])
-                        .style(Style::default().bg(USER_ROW_BG)),
+                            Span::styled("▌ ", Style::default().fg(theme::p().accent)),
+                            Span::styled(line.to_string(), Style::default().fg(theme::p().text)),
+                        ]),
                         None,
                         2,
                     ));
@@ -680,30 +658,23 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                                     "  ▾ Thinking ({line_count} lines)  [click or Ctrl-t to hide]"
                                 ),
                                 Style::default()
-                                    .fg(THINK_ACCENT)
-                                    .bg(THINK_ROW_BG)
-                                    .add_modifier(Modifier::BOLD),
-                            ))
-                            .style(Style::default().bg(THINK_ROW_BG)),
+                                    .fg(theme::p().muted)
+                                    .add_modifier(Modifier::ITALIC),
+                            )),
                             Some(idx),
                             2,
                         ));
                         for line in reasoning.split('\n') {
                             lines.push(tagged_line(
                                 Line::from(vec![
-                                    Span::styled(
-                                        "  │ ",
-                                        Style::default().fg(THINK_ACCENT).bg(THINK_ROW_BG),
-                                    ),
+                                    Span::styled("  │ ", Style::default().fg(theme::p().faint)),
                                     Span::styled(
                                         line.to_string(),
                                         Style::default()
-                                            .fg(Color::Rgb(208, 200, 184))
-                                            .bg(THINK_ROW_BG)
+                                            .fg(theme::p().muted)
                                             .add_modifier(Modifier::ITALIC),
                                     ),
-                                ])
-                                .style(Style::default().bg(THINK_ROW_BG)),
+                                ]),
                                 Some(idx),
                                 4,
                             ));
@@ -713,11 +684,9 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                             Line::from(Span::styled(
                                 format!("  ▸ Thinking ({line_count} lines)  [click or Ctrl-t]"),
                                 Style::default()
-                                    .fg(THINK_ACCENT)
-                                    .bg(THINK_ROW_BG)
+                                    .fg(theme::p().muted)
                                     .add_modifier(Modifier::ITALIC),
-                            ))
-                            .style(Style::default().bg(THINK_ROW_BG)),
+                            )),
                             Some(idx),
                             2,
                         ));
@@ -727,14 +696,14 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     let mut header_spans = vec![Span::styled(
                         "  ● Response",
                         Style::default()
-                            .fg(ASSISTANT_ACCENT)
+                            .fg(theme::p().muted)
                             .add_modifier(Modifier::BOLD),
                     )];
                     if *streaming {
                         let ch = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
                         header_spans.push(Span::styled(
                             format!(" {ch}"),
-                            Style::default().fg(ASSISTANT_ACCENT),
+                            Style::default().fg(theme::p().muted),
                         ));
                     }
                     lines.push(tagged_line(Line::from(header_spans), None, 2));
@@ -763,31 +732,26 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                 } else {
                     "▸ [tool] ".to_string()
                 };
-                lines.push(tagged_line(
+                lines.push(banded_line(
                     Line::from(vec![
-                        Span::styled(lead, Style::default().fg(TOOL_ACCENT).bg(TOOL_ROW_BG)),
+                        Span::styled(lead, Style::default().fg(theme::p().interactive)),
                         Span::styled(
                             tc.name.clone(),
                             Style::default()
-                                .fg(Color::White)
-                                .bg(TOOL_ROW_BG)
+                                .fg(theme::p().text)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(" ", Style::default().bg(TOOL_ROW_BG)),
-                        Span::styled(
-                            format!("[{badge}]"),
-                            Style::default().fg(color).bg(TOOL_ROW_BG),
-                        ),
+                        Span::styled(" ", Style::default()),
+                        Span::styled(format!("[{badge}]"), Style::default().fg(color)),
                         if args_preview.is_empty() {
                             Span::raw("")
                         } else {
                             Span::styled(
                                 format!(" {args_preview}"),
-                                Style::default().fg(Color::Gray).bg(TOOL_ROW_BG),
+                                Style::default().fg(theme::p().muted),
                             )
                         },
-                    ])
-                    .style(Style::default().bg(TOOL_ROW_BG)),
+                    ]),
                     None,
                     2,
                 ));
@@ -796,18 +760,9 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     if !preview.is_empty() {
                         lines.push(tagged_line(
                             Line::from(vec![
-                                Span::styled(
-                                    "  ↳ ",
-                                    Style::default().fg(TOOL_ACCENT).bg(TOOL_ROW_BG),
-                                ),
-                                Span::styled(
-                                    preview,
-                                    Style::default()
-                                        .fg(Color::Rgb(185, 194, 185))
-                                        .bg(TOOL_ROW_BG),
-                                ),
-                            ])
-                            .style(Style::default().bg(TOOL_ROW_BG)),
+                                Span::styled("  ↳ ", Style::default().fg(theme::p().faint)),
+                                Span::styled(preview, Style::default().fg(theme::p().muted)),
+                            ]),
                             None,
                             4,
                         ));
@@ -818,24 +773,16 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                 let (badge, color) = tool_status_badge(&sub.status);
                 lines.push(tagged_line(
                     Line::from(vec![
-                        Span::styled(
-                            "▸ [subagent] ",
-                            Style::default().fg(Color::Cyan).bg(TOOL_ROW_BG),
-                        ),
+                        Span::styled("▸ [subagent] ", Style::default().fg(theme::p().accent)),
                         Span::styled(
                             sub.agent.clone(),
                             Style::default()
-                                .fg(Color::White)
-                                .bg(TOOL_ROW_BG)
+                                .fg(theme::p().text)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(" ", Style::default().bg(TOOL_ROW_BG)),
-                        Span::styled(
-                            format!("[{badge}]"),
-                            Style::default().fg(color).bg(TOOL_ROW_BG),
-                        ),
-                    ])
-                    .style(Style::default().bg(TOOL_ROW_BG)),
+                        Span::styled(" ", Style::default()),
+                        Span::styled(format!("[{badge}]"), Style::default().fg(color)),
+                    ]),
                     None,
                     2,
                 ));
@@ -844,18 +791,9 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     if !preview.is_empty() {
                         lines.push(tagged_line(
                             Line::from(vec![
-                                Span::styled(
-                                    "  ↳ ",
-                                    Style::default().fg(Color::Cyan).bg(TOOL_ROW_BG),
-                                ),
-                                Span::styled(
-                                    preview,
-                                    Style::default()
-                                        .fg(Color::Rgb(185, 194, 185))
-                                        .bg(TOOL_ROW_BG),
-                                ),
-                            ])
-                            .style(Style::default().bg(TOOL_ROW_BG)),
+                                Span::styled("  ↳ ", Style::default().fg(theme::p().faint)),
+                                Span::styled(preview, Style::default().fg(theme::p().muted)),
+                            ]),
                             None,
                             4,
                         ));
@@ -867,7 +805,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     lines.push(tagged_line(
                         Line::from(Span::styled(
                             format!("[system] {line}"),
-                            Style::default().fg(Color::Yellow),
+                            Style::default().fg(theme::p().muted),
                         )),
                         None,
                         0,
@@ -880,7 +818,9 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     lines.push(tagged_line(
                         Line::from(Span::styled(
                             format!("  ▾ [error] ({line_count} lines)  [click to hide]"),
-                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(theme::p().error)
+                                .add_modifier(Modifier::BOLD),
                         )),
                         Some(idx),
                         2,
@@ -888,10 +828,10 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     for line in text.split('\n') {
                         lines.push(tagged_line(
                             Line::from(vec![
-                                Span::styled("  │ ", Style::default().fg(Color::Red)),
+                                Span::styled("  │ ", Style::default().fg(theme::p().faint)),
                                 Span::styled(
                                     line.to_string(),
-                                    Style::default().fg(Color::LightRed),
+                                    Style::default().fg(theme::p().error),
                                 ),
                             ]),
                             Some(idx),
@@ -910,12 +850,12 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                         Line::from(vec![
                             Span::styled(
                                 format!("  ▸ [error] {summary}"),
-                                Style::default().fg(Color::Red),
+                                Style::default().fg(theme::p().error),
                             ),
                             Span::styled(
                                 "  [click to expand]",
                                 Style::default()
-                                    .fg(Color::DarkGray)
+                                    .fg(theme::p().faint)
                                     .add_modifier(Modifier::ITALIC),
                             ),
                         ]),
@@ -931,22 +871,45 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
 }
 
 fn render_composer(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
-    let (title, border_style) = match app.mode {
-        InputMode::Insert => (
-            " Prompt (Insert) — / commands, @ mentions, Ctrl-j/Alt+Enter newline ",
-            Style::default().fg(Color::Green),
-        ),
-        InputMode::Normal => (
-            " Prompt (Normal) — i/a edit, Drag/Shift+Click copy, j/k scroll, q quit ",
-            Style::default().fg(Color::Blue),
-        ),
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::p().surface)),
+        area,
+    );
+    let (mode_label, mode_color) = match app.mode {
+        InputMode::Insert => ("insert", theme::p().accent),
+        InputMode::Normal => ("normal", theme::p().info),
+    };
+    let queued = app.tab().queued.len();
+    let mode_hint = if queued == 0 {
+        mode_label.to_string()
+    } else {
+        format!("{mode_label} · {queued} queued · Ctrl-g send now")
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(title);
-    let inner = block.inner(area);
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
+    let rule_style = Style::default().fg(theme::p().border);
+    let hint_width = mode_hint.chars().count() + 2;
+    let rule_width = (area.width as usize).saturating_sub(hint_width);
+    let rule = Line::from(vec![
+        Span::styled("─".repeat(rule_width), rule_style),
+        Span::styled(format!(" {mode_hint} "), Style::default().fg(mode_color)),
+    ]);
+    frame.render_widget(Paragraph::new(rule), rows[0]);
+
+    let body = rows[1];
+    let inner = Rect {
+        x: body.x.saturating_add(2),
+        y: body.y,
+        width: body.width.saturating_sub(2),
+        height: body.height,
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "❯",
+            Style::default().fg(theme::p().interactive),
+        ))),
+        Rect::new(body.x, body.y, 2, 1),
+    );
 
     let tab = app.tab();
     let (cursor_row, cursor_col) = cursor_row_col(&tab.input, tab.cursor);
@@ -957,7 +920,7 @@ fn render_composer(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     let content = if tab.input.is_empty() {
         Paragraph::new(Line::from(Span::styled(
             "Ask meerai anything...",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::p().faint),
         )))
     } else {
         let lines: Vec<Line<'_>> = tab
@@ -977,7 +940,7 @@ fn render_composer(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         Paragraph::new(lines).scroll((scroll_y.min(u16::MAX as usize) as u16, 0))
     };
 
-    frame.render_widget(content.block(block), area);
+    frame.render_widget(content, inner);
 
     if app.modal.is_none() && app.mode == InputMode::Insert && inner.width > 0 && inner.height > 0 {
         let max_x = inner.x + inner.width.saturating_sub(1);
@@ -1094,8 +1057,8 @@ fn push_composer_text(
 
 fn mention_chip_style(kind: MentionKind) -> Style {
     let color = match kind {
-        MentionKind::Agent => Color::Cyan,
-        MentionKind::Skill => Color::Magenta,
+        MentionKind::Agent => theme::p().accent,
+        MentionKind::Skill => theme::p().interactive,
     };
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
@@ -1157,9 +1120,9 @@ fn render_completion_popup(
             )];
             if let Some(badge) = item.item_kind.badge() {
                 let color = match item.item_kind {
-                    CompletionItemKind::Agent => Color::Cyan,
-                    CompletionItemKind::Skill => Color::Magenta,
-                    CompletionItemKind::Plain | CompletionItemKind::File => Color::Gray,
+                    CompletionItemKind::Agent => theme::p().accent,
+                    CompletionItemKind::Skill => theme::p().interactive,
+                    CompletionItemKind::Plain | CompletionItemKind::File => theme::p().muted,
                 };
                 spans.push(Span::styled(
                     format!("|{badge}"),
@@ -1169,7 +1132,7 @@ fn render_completion_popup(
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
                 item.description.clone(),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::p().faint),
             ));
             ListItem::new(Line::from(spans))
         })
@@ -1179,16 +1142,11 @@ fn render_completion_popup(
     list_state.select(Some(app.completion.selected()));
 
     let list = List::new(list_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(title),
-        )
+        .block(theme::dialog(&title))
         .highlight_style(
             Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
+                .bg(theme::p().surface_high)
+                .fg(theme::p().text)
                 .add_modifier(Modifier::BOLD),
         );
 
@@ -1209,7 +1167,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             let popup = centered_rect(area, 72, 68, 44, 10);
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
+                .border_style(Style::default().fg(theme::p().border))
+                .style(Style::default().bg(theme::p().surface))
                 .title(" Connect Provider (/connect) ");
             let inner = block.inner(popup);
             frame.render_widget(Clear, popup);
@@ -1223,7 +1182,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             .split(inner);
 
             let filter_line = Line::from(vec![
-                Span::styled("Filter: ", Style::default().fg(Color::Yellow)),
+                Span::styled("Filter: ", Style::default().fg(theme::p().warning)),
                 Span::raw(if filter.is_empty() {
                     "(type to filter)"
                 } else {
@@ -1247,7 +1206,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                         ),
                         Span::styled(
                             format!(" ({}) ", p.id),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(theme::p().faint),
                         ),
                         Span::styled(format!("[{badge}]"), Style::default().fg(color)),
                     ]))
@@ -1260,15 +1219,15 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             }
             let list = List::new(list_items).highlight_style(
                 Style::default()
-                    .bg(Color::Blue)
-                    .fg(Color::White)
+                    .bg(theme::p().surface_high)
+                    .fg(theme::p().text)
                     .add_modifier(Modifier::BOLD),
             );
             frame.render_stateful_widget(list, rows[1], &mut state);
 
             let footer = Paragraph::new(Line::from(Span::styled(
                 "Enter:configure  Up/Down:move  Type:filter  Esc:close",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::p().faint),
             )));
             frame.render_widget(footer, rows[2]);
         }
@@ -1285,7 +1244,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             let title = format!(" Connect {provider_name} ({provider_id}) ");
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
+                .border_style(Style::default().fg(theme::p().border))
+                .style(Style::default().bg(theme::p().surface))
                 .title(title);
             let inner = block.inner(popup);
             frame.render_widget(Clear, popup);
@@ -1313,17 +1273,17 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
 
             let key_label_style = if !editing_base_url {
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(theme::p().success)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(theme::p().faint)
             };
             let url_label_style = if *editing_base_url {
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(theme::p().success)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(theme::p().faint)
             };
 
             let mut lines = vec![
@@ -1346,17 +1306,17 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             if let Some(err) = error {
                 lines.push(Line::from(Span::styled(
                     format!("Error: {err}"),
-                    Style::default().fg(Color::Red),
+                    Style::default().fg(theme::p().error),
                 )));
             } else {
                 lines.push(Line::from(Span::styled(
                     "Saved in ~/.local/share/meerai/auth.json (0600).",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme::p().faint),
                 )));
             }
             lines.push(Line::from(Span::styled(
                 "Enter:save  Tab:switch field  Ctrl-d:delete key  Esc:back",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::p().faint),
             )));
 
             frame.render_widget(Paragraph::new(lines), inner);
@@ -1378,7 +1338,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             let title = format!(" Set Model [{active_provider}] (/model) ");
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
+                .border_style(Style::default().fg(theme::p().border))
+                .style(Style::default().bg(theme::p().surface))
                 .title(title);
             let inner = block.inner(popup);
             frame.render_widget(Clear, popup);
@@ -1396,7 +1357,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 .map(|m| format!("(Enter keeps '{m}', or type model name)"))
                 .unwrap_or_else(|| "(type model name, e.g. gpt-4o)".to_string());
             let input_display = if input.is_empty() {
-                Span::styled(placeholder, Style::default().fg(Color::DarkGray))
+                Span::styled(placeholder, Style::default().fg(theme::p().faint))
             } else {
                 Span::raw(input.as_str())
             };
@@ -1405,7 +1366,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                     Span::styled(
                         "Model: ",
                         Style::default()
-                            .fg(Color::Green)
+                            .fg(theme::p().success)
                             .add_modifier(Modifier::BOLD),
                     ),
                     input_display,
@@ -1418,7 +1379,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
                         "No recent models saved for this provider.",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme::p().faint),
                     ))),
                     rows[1],
                 );
@@ -1439,8 +1400,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 }
                 let list = List::new(list_items).highlight_style(
                     Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
+                        .bg(theme::p().surface_high)
+                        .fg(theme::p().text)
                         .add_modifier(Modifier::BOLD),
                 );
                 frame.render_stateful_widget(list, rows[1], &mut state);
@@ -1449,19 +1410,19 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             let status_line = if let Some(err) = error {
                 Line::from(Span::styled(
                     format!("Error: {err}"),
-                    Style::default().fg(Color::Red),
+                    Style::default().fg(theme::p().error),
                 ))
             } else {
                 Line::from(Span::styled(
                     "Any model name is accepted; validation runs on request.",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme::p().faint),
                 ))
             };
             let footer_lines = vec![
                 status_line,
                 Line::from(Span::styled(
                     "Enter:apply  Up/Down:recent  Ctrl-u:clear  Esc:close",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme::p().faint),
                 )),
             ];
             frame.render_widget(Paragraph::new(footer_lines), rows[2]);
@@ -1483,7 +1444,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             );
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
+                .border_style(Style::default().fg(theme::p().border))
+                .style(Style::default().bg(theme::p().surface))
                 .title(title);
             let inner = block.inner(popup);
             frame.render_widget(Clear, popup);
@@ -1496,11 +1458,13 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
 
             let left_block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray))
+                .border_style(Style::default().fg(theme::p().border))
+                .style(Style::default().bg(theme::p().surface))
                 .title(format!(" Original (a/{}) ", diff.path));
             let right_block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray))
+                .border_style(Style::default().fg(theme::p().border))
+                .style(Style::default().bg(theme::p().surface))
                 .title(format!(" Working Tree (b/{}) ", diff.path));
 
             let left_inner_w = left_block.inner(panes[0]).width as usize;
@@ -1531,7 +1495,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     "j/k:scroll  Ctrl-d/u:page  g/G:top/bot  Tab/[:]:next/prev file  Esc/q:close",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme::p().faint),
                 ))),
                 rows[1],
             );
@@ -1552,7 +1516,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             );
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
+                .border_style(Style::default().fg(theme::p().border))
+                .style(Style::default().bg(theme::p().surface))
                 .title(title);
             let inner = block.inner(popup);
             frame.render_widget(Clear, popup);
@@ -1566,8 +1531,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             .split(inner);
 
             let mode_color = match mode {
-                SearchMode::Files => Color::Green,
-                SearchMode::Content => Color::Yellow,
+                SearchMode::Files => theme::p().muted,
+                SearchMode::Content => theme::p().muted,
             };
             let placeholder = match mode {
                 SearchMode::Files => "(type to fuzzy-match file paths)",
@@ -1575,7 +1540,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             };
             let query_block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray))
+                .border_style(Style::default().fg(theme::p().border))
+                .style(Style::default().bg(theme::p().surface))
                 .title(" Query ");
             let query_inner = query_block.inner(layout[0]);
             let input_box = Paragraph::new(Line::from(vec![
@@ -1584,7 +1550,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                     Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
                 ),
                 if query.is_empty() {
-                    Span::styled(placeholder, Style::default().fg(Color::DarkGray))
+                    Span::styled(placeholder, Style::default().fg(theme::p().faint))
                 } else {
                     Span::raw(query.as_str())
                 },
@@ -1605,7 +1571,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
 
             let results_block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray))
+                .border_style(Style::default().fg(theme::p().border))
+                .style(Style::default().bg(theme::p().surface))
                 .title(" Results ");
             let results_inner_w = results_block.inner(panes[0]).width as usize;
 
@@ -1629,8 +1596,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             }
             let list = List::new(list_items).block(results_block).highlight_style(
                 Style::default()
-                    .bg(Color::Blue)
-                    .fg(Color::White)
+                    .bg(theme::p().surface_high)
+                    .fg(theme::p().text)
                     .add_modifier(Modifier::BOLD),
             );
             frame.render_stateful_widget(list, panes[0], &mut list_state);
@@ -1641,7 +1608,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 .unwrap_or_else(|| " Preview ".to_string());
             let preview_block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray))
+                .border_style(Style::default().fg(theme::p().border))
+                .style(Style::default().bg(theme::p().surface))
                 .title(preview_title);
             let preview_inner = preview_block.inner(panes[1]);
             let preview_w = preview_inner.width as usize;
@@ -1666,22 +1634,22 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                                     Span::styled(
                                         gutter,
                                         Style::default()
-                                            .fg(Color::Yellow)
-                                            .bg(USER_ROW_BG)
+                                            .fg(theme::p().warning)
+                                            .bg(theme::p().surface_high)
                                             .add_modifier(Modifier::BOLD),
                                     ),
                                     Span::styled(
                                         body,
                                         Style::default()
-                                            .fg(Color::White)
-                                            .bg(USER_ROW_BG)
+                                            .fg(theme::p().text)
+                                            .bg(theme::p().surface_high)
                                             .add_modifier(Modifier::BOLD),
                                     ),
                                 ])
-                                .style(Style::default().bg(USER_ROW_BG))
+                                .style(Style::default().bg(theme::p().surface_high))
                             } else {
                                 Line::from(vec![
-                                    Span::styled(gutter, Style::default().fg(Color::DarkGray)),
+                                    Span::styled(gutter, Style::default().fg(theme::p().faint)),
                                     Span::raw(body),
                                 ])
                             }
@@ -1690,7 +1658,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 }
                 None => vec![Line::from(Span::styled(
                     "No matching results.",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme::p().faint),
                 ))],
             };
             frame.render_widget(Paragraph::new(preview_lines).block(preview_block), panes[1]);
@@ -1698,7 +1666,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     "Tab:Files/Content  Up/Down:select  PgUp/PgDn:scroll preview  Enter:insert @file  Esc:close",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme::p().faint),
                 ))),
                 layout[2],
             );
@@ -1719,7 +1687,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             };
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::LightRed))
+                .border_style(Style::default().fg(theme::p().error))
+                .style(Style::default().bg(theme::p().surface))
                 .title(title);
             let inner = block.inner(popup);
             frame.render_widget(Clear, popup);
@@ -1748,12 +1717,12 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 Line::from(Span::styled(
                     request.preview.title.clone(),
                     Style::default()
-                        .fg(Color::White)
+                        .fg(theme::p().text)
                         .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(Span::styled(
                     format!("kind: {kind}{effect}"),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme::p().faint),
                 )),
             ];
             frame.render_widget(Paragraph::new(header), rows[0]);
@@ -1761,7 +1730,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             let detail = if request.preview.detail.is_empty() {
                 vec![Line::from(Span::styled(
                     "(no details)",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme::p().faint),
                 ))]
             } else {
                 request
@@ -1776,20 +1745,20 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             let footer = if *editing_reason {
                 vec![
                     Line::from(vec![
-                        Span::styled("Reason: ", Style::default().fg(Color::Yellow)),
+                        Span::styled("Reason: ", Style::default().fg(theme::p().warning)),
                         Span::raw(reason.as_str()),
-                        Span::styled("█", Style::default().fg(Color::Yellow)),
+                        Span::styled("█", Style::default().fg(theme::p().warning)),
                     ]),
                     Line::from(Span::styled(
                         "Enter:send decline reason  Esc:back",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme::p().faint),
                     )),
                 ]
             } else {
                 vec![
                     Line::from(Span::styled(
                         "y accept · t accept-for-turn · a accept-for-session · n decline · r decline-with-reason · esc cancel",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme::p().faint),
                     )),
                     Line::default(),
                 ]
@@ -1806,7 +1775,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             let popup = centered_rect(area, 78, 72, 48, 12);
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
+                .border_style(Style::default().fg(theme::p().border))
+                .style(Style::default().bg(theme::p().surface))
                 .title(" Switch Session (/sessions) ");
             let inner = block.inner(popup);
             frame.render_widget(Clear, popup);
@@ -1820,7 +1790,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             .split(inner);
 
             let filter_line = Line::from(vec![
-                Span::styled("Filter: ", Style::default().fg(Color::Yellow)),
+                Span::styled("Filter: ", Style::default().fg(theme::p().warning)),
                 Span::raw(if filter.is_empty() {
                     "(type to filter by id, title, or model)"
                 } else {
@@ -1834,7 +1804,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
                         "Loading sessions...",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme::p().faint),
                     ))),
                     rows[1],
                 );
@@ -1842,7 +1812,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
                         format!("Failed to list sessions: {err}"),
-                        Style::default().fg(Color::Red),
+                        Style::default().fg(theme::p().error),
                     ))),
                     rows[1],
                 );
@@ -1850,7 +1820,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
                         "No matching sessions.",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme::p().faint),
                     ))),
                     rows[1],
                 );
@@ -1865,14 +1835,14 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                             Some(idx) if idx == app.active_tab => (
                                 format!("[tab {}*] ", idx + 1),
                                 Style::default()
-                                    .fg(Color::Green)
+                                    .fg(theme::p().success)
                                     .add_modifier(Modifier::BOLD),
                             ),
                             Some(idx) => (
                                 format!("[tab {}] ", idx + 1),
-                                Style::default().fg(Color::Cyan),
+                                Style::default().fg(theme::p().accent),
                             ),
-                            None => ("       ".to_string(), Style::default().fg(Color::DarkGray)),
+                            None => ("       ".to_string(), Style::default().fg(theme::p().faint)),
                         };
                         let raw_title = summary
                             .title
@@ -1887,14 +1857,14 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                         {
                             Style::default().add_modifier(Modifier::BOLD)
                         } else {
-                            Style::default().fg(Color::DarkGray)
+                            Style::default().fg(theme::p().faint)
                         };
                         let mut item_spans = vec![
                             Span::styled(tab_badge, badge_style),
                             Span::styled(title_text, title_style),
                             Span::styled(
                                 format!("  {}", summary.id),
-                                Style::default().fg(Color::DarkGray),
+                                Style::default().fg(theme::p().faint),
                             ),
                         ];
                         if let Some(model) =
@@ -1902,13 +1872,13 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                         {
                             item_spans.push(Span::styled(
                                 format!(" · {}", truncate_single_line(model, 22)),
-                                Style::default().fg(Color::Gray),
+                                Style::default().fg(theme::p().muted),
                             ));
                         }
                         if summary.updated_at_ms > 0 {
                             item_spans.push(Span::styled(
                                 format!(" · {}", format_relative_age(now, summary.updated_at_ms)),
-                                Style::default().fg(Color::DarkGray),
+                                Style::default().fg(theme::p().faint),
                             ));
                         }
                         ListItem::new(Line::from(item_spans))
@@ -1919,8 +1889,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 state.select(Some((*selected).min(filtered.len() - 1)));
                 let list = List::new(list_items).highlight_style(
                     Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
+                        .bg(theme::p().surface_high)
+                        .fg(theme::p().text)
                         .add_modifier(Modifier::BOLD),
                 );
                 frame.render_stateful_widget(list, rows[1], &mut state);
@@ -1934,7 +1904,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     footer_text,
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme::p().faint),
                 ))),
                 rows[2],
             );
@@ -1965,13 +1935,13 @@ fn format_diff_pane_line(
         return Line::from(Span::styled(
             truncate_single_line(header, pane_width),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme::p().accent)
                 .add_modifier(Modifier::BOLD),
         ));
     }
 
     let Some(cell) = cell else {
-        return Line::from(Span::styled("~", Style::default().fg(Color::DarkGray)));
+        return Line::from(Span::styled("~", Style::default().fg(theme::p().faint)));
     };
 
     let prefix = match (kind, is_left) {
@@ -1990,16 +1960,16 @@ fn format_diff_pane_line(
 
     let style = match (kind, is_left) {
         (DiffRowKind::Removed, true) | (DiffRowKind::Modified, true) => {
-            Style::default().fg(Color::Red)
+            Style::default().fg(theme::p().diff_removed)
         }
         (DiffRowKind::Added, false) | (DiffRowKind::Modified, false) => {
-            Style::default().fg(Color::Green)
+            Style::default().fg(theme::p().diff_added)
         }
-        _ => Style::default().fg(Color::Gray),
+        _ => Style::default().fg(theme::p().diff_context),
     };
 
     Line::from(vec![
-        Span::styled(line_num, Style::default().fg(Color::DarkGray)),
+        Span::styled(line_num, Style::default().fg(theme::p().faint)),
         Span::styled(body, style),
     ])
 }
@@ -2015,63 +1985,60 @@ fn display_model(app: &AppState) -> &str {
 
 fn render_statusline(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     let tab = app.tab();
-    let (badge_text, badge_bg) = match app.mode {
-        InputMode::Insert => (" INS ", Color::Green),
-        InputMode::Normal => (" NOR ", Color::Blue),
+    let (badge_text, badge_color) = match app.mode {
+        InputMode::Insert => (" INS ", theme::p().accent),
+        InputMode::Normal => (" NOR ", theme::p().info),
     };
 
     let mut spans = vec![Span::styled(
         badge_text,
         Style::default()
-            .fg(Color::Black)
-            .bg(badge_bg)
+            .fg(badge_color)
             .add_modifier(Modifier::BOLD),
     )];
 
-    let mode_bg = match tab.approval_mode {
-        ApprovalMode::Plan => Color::Magenta,
-        ApprovalMode::Ask => Color::Yellow,
-        ApprovalMode::AutoEdit => Color::Cyan,
-        ApprovalMode::Yolo => Color::LightRed,
+    let mode_color = match tab.approval_mode {
+        ApprovalMode::Plan => theme::p().accent,
+        ApprovalMode::Ask => theme::p().warning,
+        ApprovalMode::AutoEdit => theme::p().info,
+        ApprovalMode::Yolo => theme::p().error,
     };
     spans.push(Span::styled(
-        format!("{} ", approval_mode_badge(tab.approval_mode)),
-        Style::default()
-            .fg(Color::Black)
-            .bg(mode_bg)
-            .add_modifier(Modifier::BOLD),
+        format!(" {} ", approval_mode_badge(tab.approval_mode)),
+        Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
     ));
 
     let key_status = app.active_key_status();
     let (key_badge, key_color) = key_status_style(&key_status);
 
-    spans.push(Span::raw(format!(
-        "  {} / {} ",
-        tab.active_provider,
-        display_model(app)
-    )));
+    spans.push(Span::styled(
+        format!(" {} / {} ", tab.active_provider, display_model(app)),
+        Style::default().fg(theme::p().muted),
+    ));
     spans.push(Span::styled(
         format!("[{key_badge}]"),
         Style::default().fg(key_color),
     ));
 
     let usage_str = format_usage_compact(app);
-    spans.push(Span::styled(
-        format!(" | {usage_str}"),
-        Style::default().fg(Color::Gray),
-    ));
+    if usage_str != "-" {
+        spans.push(Span::styled(
+            format!(" · {usage_str}"),
+            Style::default().fg(theme::p().muted),
+        ));
+    }
 
     if let Some(session_usage) = format_session_usage(app) {
         spans.push(Span::styled(
             format!(" · {session_usage}"),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::p().faint),
         ));
     }
 
     if let Some(speed) = tab.metrics.last_tokens_per_sec {
         spans.push(Span::styled(
             format!(" {speed:.1} tok/s"),
-            Style::default().fg(MINT_TEAL),
+            Style::default().fg(theme::p().faint),
         ));
     }
 
@@ -2083,42 +2050,48 @@ fn render_statusline(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             .map(|ms| format!(" ({})", format_compact_ms(ms)))
             .unwrap_or_default();
         let activity = match &tab.active_tool {
-            Some(tool) => format!(" | {frame_char} tool:{tool}{elapsed}"),
-            None => format!(" | {frame_char} running{elapsed}"),
+            Some(tool) => format!(" · {frame_char} {tool}{elapsed}"),
+            None => format!(" · {frame_char} running{elapsed}"),
         };
         spans.push(Span::styled(
             activity,
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::p().warning),
         ));
     } else if let Some(turn_ms) = tab.metrics.last_turn_ms {
         spans.push(Span::styled(
             format!(" {}", format_compact_ms(turn_ms)),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::p().faint),
         ));
     }
 
     if let Some(notice) = &app.status_notice {
         spans.push(Span::styled(
-            format!(" | {notice}"),
-            Style::default().fg(Color::LightRed),
+            format!(" · {notice}"),
+            Style::default().fg(theme::p().error),
         ));
     } else {
-        let hint = match app.mode {
-            InputMode::Insert => {
-                if app.completion.is_active() {
-                    " | Tab/Enter:accept Esc:dismiss"
-                } else {
-                    " | Ctrl-f:search Ctrl-t:think Ctrl-b:side /connect /models Esc:Normal"
-                }
+        let hint = if tab.is_running {
+            if tab.queued.is_empty() {
+                " · Ctrl-c cancel · Ctrl-g send now"
+            } else {
+                " · Ctrl-c cancel · Ctrl-g send queued"
             }
-            InputMode::Normal => " | i:Insert /:search t:think Ctrl-b:side j/k:scroll q:quit",
+        } else {
+            match app.mode {
+                InputMode::Insert => {
+                    if app.completion.is_active() {
+                        " · Tab/Enter accept · Esc dismiss"
+                    } else {
+                        " · Ctrl-f search · Ctrl-t think · Ctrl-b side · Esc normal"
+                    }
+                }
+                InputMode::Normal => " · i insert · / search · t think · Ctrl-b side · q quit",
+            }
         };
-        spans.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(hint, Style::default().fg(theme::p().faint)));
     }
 
-    let bar = Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Black));
+    let bar = Paragraph::new(Line::from(spans));
     frame.render_widget(bar, area);
 }
 
@@ -2195,10 +2168,10 @@ fn format_session_usage(app: &AppState) -> Option<String> {
 fn key_status_style(status: &KeyStatus) -> (String, Color) {
     let badge = status.badge();
     let color = match status {
-        KeyStatus::Stored | KeyStatus::Config => Color::Green,
-        KeyStatus::Env(_) => Color::Cyan,
-        KeyStatus::NotRequired => Color::Blue,
-        KeyStatus::Missing => Color::Red,
+        KeyStatus::Stored | KeyStatus::Config => theme::p().success,
+        KeyStatus::Env(_) => theme::p().muted,
+        KeyStatus::NotRequired => theme::p().muted,
+        KeyStatus::Missing => theme::p().error,
     };
     (badge, color)
 }
@@ -2295,9 +2268,7 @@ fn capture_screen_lines(frame: &mut Frame<'_>, app: &mut AppState) {
 }
 
 fn render_selection_highlight(frame: &mut Frame<'_>, app: &AppState) {
-    let highlight = Style::default()
-        .bg(Color::Rgb(58, 74, 107))
-        .fg(Color::White);
+    let highlight = Style::default().bg(theme::p().border).fg(theme::p().text);
 
     if let Some(sel) = app.doc_selection
         && sel.anchor != sel.head
@@ -2376,21 +2347,27 @@ fn render_selection_highlight(frame: &mut Frame<'_>, app: &AppState) {
     }
 }
 
-fn wrap_tagged_lines(
-    lines: Vec<TaggedTranscriptLine>,
-    width: usize,
-) -> (
-    Vec<Line<'static>>,
-    Vec<ThinkingHitZone>,
-    Vec<TranscriptWrappedLine>,
-) {
+struct WrappedTranscript {
+    lines: Vec<Line<'static>>,
+    hit_zones: Vec<ThinkingHitZone>,
+    doc_lines: Vec<TranscriptWrappedLine>,
+    bands: Vec<(usize, usize)>,
+}
+
+fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedTranscript {
     if width == 0 {
-        return (Vec::new(), Vec::new(), Vec::new());
+        return WrappedTranscript {
+            lines: Vec::new(),
+            hit_zones: Vec::new(),
+            doc_lines: Vec::new(),
+            bands: Vec::new(),
+        };
     }
 
     let mut out = Vec::with_capacity(lines.len());
     let mut doc_lines = Vec::with_capacity(lines.len());
     let mut hit_zones: Vec<ThinkingHitZone> = Vec::new();
+    let mut bands: Vec<(usize, usize)> = Vec::new();
     let mut active_zone: Option<(usize, usize)> = None;
 
     for tagged in lines {
@@ -2398,6 +2375,7 @@ fn wrap_tagged_lines(
             line,
             entry_tag,
             gutter_len,
+            band,
         } = tagged;
         let line_style = line.style;
         let line_start = out.len();
@@ -2450,6 +2428,12 @@ fn wrap_tagged_lines(
                 });
             }
         }
+        if band {
+            match bands.last_mut() {
+                Some((_, end)) if *end == line_start => *end = out.len(),
+                _ => bands.push((line_start, out.len())),
+            }
+        }
         match (active_zone, entry_tag) {
             (Some((cur_idx, _start)), Some(idx)) if cur_idx == idx => {}
             (Some((cur_idx, start)), Some(idx)) => {
@@ -2483,7 +2467,12 @@ fn wrap_tagged_lines(
         });
     }
 
-    (out, hit_zones, doc_lines)
+    WrappedTranscript {
+        lines: out,
+        hit_zones,
+        doc_lines,
+        bands,
+    }
 }
 
 #[cfg(test)]
@@ -2578,7 +2567,7 @@ mod tests {
         });
 
         let wide = render_to_string_with_size(&mut app, 120, 28);
-        assert!(wide.contains("Session"));
+        assert!(wide.contains("SESSION"));
         assert!(wide.contains("File Changes (1)"));
         assert!(app.visible_file_change_rows == 1);
         assert!(app.sidebar_changes_inner_area.width > 0);
@@ -2587,6 +2576,43 @@ mod tests {
         assert!(!narrow.contains("File Changes (1)"));
         assert_eq!(app.visible_file_change_rows, 0);
         assert_eq!(app.sidebar_changes_inner_area, Rect::default());
+    }
+
+    #[test]
+    fn paints_sidebar_panel_and_user_band_without_main_borders() {
+        let mut app = test_app();
+        app.tab_mut().transcript.push(TranscriptEntry::User {
+            text: "highlight me".to_string(),
+        });
+        app.file_changes.push(crate::app::FileChangeEntry {
+            status: "M".to_string(),
+            path: "src/main.rs".to_string(),
+        });
+
+        let backend = TestBackend::new(120, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let surface = crate::theme::Palette::default().surface;
+        assert_eq!(buffer[(110, 4)].bg, surface, "sidebar panel background");
+
+        let band_row = (0..28)
+            .find(|y| {
+                (0..100).any(|x| {
+                    let mut symbol = String::new();
+                    symbol.push_str(buffer[(x, *y)].symbol());
+                    symbol == "▌"
+                })
+            })
+            .expect("user band row");
+        assert_eq!(buffer[(80, band_row)].bg, surface, "user band background");
+
+        let rendered: String = (0..28)
+            .flat_map(|y| (0..120).map(move |x| (x, y)))
+            .map(|(x, y)| buffer[(x, y)].symbol().to_string())
+            .collect();
+        assert!(!rendered.contains('┌'), "no box border in the main layout");
     }
 
     #[test]
@@ -2652,15 +2678,13 @@ mod tests {
         assert!(rendered.contains("session ↑100 ↓25 Σ125"));
         assert!(rendered.contains("42.5 tok/s · 310ms"));
         assert!(rendered.contains("idle (1.4s)"));
-        assert!(rendered.contains("██      ██"));
         assert!(rendered.contains("meerai"));
-        assert!(rendered.contains("Commands"));
         assert!(!rendered.contains("> You"));
         assert!(!rendered.contains("◆ Assistant"));
-        assert!(rendered.contains("Session"));
-        assert!(rendered.contains("MCP (0)"));
-        assert!(rendered.contains("Agents (1)"));
-        assert!(rendered.contains("Tools (0 calls)"));
+        assert!(rendered.contains("SESSION"));
+        assert!(rendered.contains("MCP"));
+        assert!(rendered.contains("AGENTS"));
+        assert!(rendered.contains("TOOLS"));
         assert!(rendered.contains("File Changes"));
     }
 
@@ -2703,10 +2727,11 @@ mod tests {
     }
 
     #[test]
-    fn composer_title_names_mentions() {
+    fn composer_renders_prompt_and_mode_rule() {
         let mut app = test_app();
         let rendered = render_to_string(&mut app);
-        assert!(rendered.contains("@ mentions"));
+        assert!(rendered.contains("Ask meerai anything"));
+        assert!(rendered.contains("insert"));
     }
 
     #[test]
@@ -2717,14 +2742,14 @@ mod tests {
         let (spans, cursor) = render_composer_line("@skill/deliver", Some(14), &agents, &skills);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content, "deliver");
-        assert_eq!(spans[0].style.fg, Some(Color::Magenta));
+        assert_eq!(spans[0].style.fg, Some(theme::p().interactive));
         assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(cursor, 7);
 
         let (spans, cursor) = render_composer_line("@agent/reviewer", Some(15), &agents, &skills);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content, "reviewer");
-        assert_eq!(spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(spans[0].style.fg, Some(theme::p().accent));
         assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(cursor, 8);
     }
@@ -2757,8 +2782,8 @@ mod tests {
         let texts: Vec<String> = spans.iter().map(|span| span.content.to_string()).collect();
         assert_eq!(texts, vec!["run ", "deliver", " then ", "reviewer", " now"]);
         assert_eq!(span_text(&spans), "run deliver then reviewer now");
-        assert_eq!(spans[1].style.fg, Some(Color::Magenta));
-        assert_eq!(spans[3].style.fg, Some(Color::Cyan));
+        assert_eq!(spans[1].style.fg, Some(theme::p().interactive));
+        assert_eq!(spans[3].style.fg, Some(theme::p().accent));
     }
 
     #[test]
@@ -3139,8 +3164,8 @@ mod tests {
         });
 
         let rendered = render_to_string(&mut app);
-        assert!(rendered.contains("┃ YOU"));
-        assert!(rendered.contains("┃ Inspect Cargo.toml"));
+        assert!(rendered.contains("▌ you"));
+        assert!(rendered.contains("▌ Inspect Cargo.toml"));
         assert!(rendered.contains("▸ [tool] code-read_file [ok]"));
         assert!(rendered.contains("↳ [workspace] members = []"));
         assert!(rendered.contains("▾ Thinking (1 lines)"));

@@ -26,6 +26,60 @@ pub enum ScriptLanguage {
     Javascript,
 }
 
+impl ScriptLanguage {
+    pub fn runtime(self) -> ScriptRuntime {
+        match self {
+            ScriptLanguage::Python => ScriptRuntime::Python,
+            ScriptLanguage::Javascript => ScriptRuntime::Javascript,
+        }
+    }
+
+    pub fn program(self) -> &'static str {
+        self.runtime().program()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptRuntime {
+    Python,
+    Javascript,
+}
+
+impl ScriptRuntime {
+    pub fn language(self) -> ScriptLanguage {
+        match self {
+            ScriptRuntime::Python => ScriptLanguage::Python,
+            ScriptRuntime::Javascript => ScriptLanguage::Javascript,
+        }
+    }
+
+    pub fn program(self) -> &'static str {
+        match self {
+            ScriptRuntime::Python => "python3",
+            ScriptRuntime::Javascript => "node",
+        }
+    }
+
+    pub fn detect() -> Option<Self> {
+        let probe = |program: &str| {
+            std::process::Command::new(program)
+                .arg("--version")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        if probe("python3") {
+            Some(ScriptRuntime::Python)
+        } else if probe("node") {
+            Some(ScriptRuntime::Javascript)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct RunScriptArgs {
     #[schemars(
@@ -43,6 +97,7 @@ pub struct SearchAsCodeToolset {
     workspace_root: PathBuf,
     sensitive_env_vars: Vec<String>,
     execution_world: Arc<dyn ExecutionWorld>,
+    runtime: Option<ScriptRuntime>,
 }
 
 impl SearchAsCodeToolset {
@@ -51,7 +106,17 @@ impl SearchAsCodeToolset {
             workspace_root: workspace_root.into(),
             sensitive_env_vars: Vec::new(),
             execution_world: Arc::new(HostWorld::new()),
+            runtime: None,
         }
+    }
+
+    pub fn with_runtime(mut self, runtime: ScriptRuntime) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    pub fn runtime(&self) -> Option<ScriptRuntime> {
+        self.runtime
     }
 
     pub fn with_sensitive_env_vars(mut self, vars: Vec<String>) -> Self {
@@ -94,6 +159,19 @@ impl SearchAsCodeToolset {
             .timeout_ms
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .clamp(1, MAX_TIMEOUT_MS);
+
+        if let Some(runtime) = self.runtime
+            && args.language != runtime.language()
+        {
+            return failure_run(format!(
+                "{} is not available at startup; use language=\"{}\" instead",
+                args.language.program(),
+                match runtime {
+                    ScriptRuntime::Python => "python",
+                    ScriptRuntime::Javascript => "javascript",
+                }
+            ));
+        }
 
         let (program, argv): (&str, Vec<String>) = match args.language {
             ScriptLanguage::Python => (
@@ -197,9 +275,20 @@ impl Toolset for SearchAsCodeToolset {
     }
 
     fn definition(&self) -> Vec<ToolDefinition> {
+        let description = match self.runtime {
+            Some(ScriptRuntime::Python) => {
+                "Run a short Python analysis script (python3 -I) in the workspace root with sensitive environment variables scrubbed. Prefer one script over many small lookups when a task needs multi-step scanning or aggregation."
+            }
+            Some(ScriptRuntime::Javascript) => {
+                "Run a short JavaScript analysis script (node -e) in the workspace root with sensitive environment variables scrubbed. Prefer one script over many small lookups when a task needs multi-step scanning or aggregation."
+            }
+            None => {
+                "Run a short Python or JavaScript analysis script in the workspace root with sensitive environment variables scrubbed."
+            }
+        };
         vec![definition_for::<RunScriptArgs>(
             RUN_SCRIPT_TOOL,
-            "Run a short Python or JavaScript analysis script in the workspace root with sensitive environment variables scrubbed.",
+            description,
         )]
     }
 
@@ -296,6 +385,29 @@ mod tests {
         assert_eq!(run.observation.status, ObservationStatus::Success);
         assert_eq!(run.observation.exit_code, Some(0));
         assert_eq!(run.observation.stdout.trim(), "hello sac");
+    }
+
+    #[tokio::test]
+    async fn rejects_language_outside_detected_runtime() {
+        let dir = TempDir::new().unwrap();
+        let toolset = SearchAsCodeToolset::new(dir.path()).with_runtime(ScriptRuntime::Python);
+        let run = toolset
+            .invoke_structured(
+                RUN_SCRIPT_TOOL,
+                r#"{"language": "javascript", "script": "console.log(1)"}"#,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(run.observation.status, ObservationStatus::Error);
+        let output = match &run.output {
+            ToolOutput::Fail(text) | ToolOutput::Text(text) => text.clone(),
+            ToolOutput::Stop(reason) => format!("{reason:?}"),
+        };
+        assert!(
+            output.contains("use language=\"python\" instead"),
+            "{output}"
+        );
     }
 
     #[tokio::test]

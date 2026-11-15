@@ -57,6 +57,21 @@ pub async fn compose_system_prompt(user_system: &str, workspace_root: &Path) -> 
     prompt
 }
 
+pub fn append_script_guidance(mut prompt: String, runtime: Option<&str>) -> String {
+    let Some(runtime) = runtime else {
+        return prompt;
+    };
+    prompt.push_str("\n\n## Script analysis\n\n");
+    prompt.push_str(
+        "When a task needs multi-step scanning, parsing, or aggregation (counting matches, filtering JSON, walking many files, cross-file checks), write one short ",
+    );
+    prompt.push_str(runtime);
+    prompt.push_str(
+        " script and run it with sac-run_script instead of chaining many code-grep, code-glob, or code-list_dir calls. Keep the script read-only, print a compact result, and cite the files it read.",
+    );
+    prompt
+}
+
 fn cut(text: &str, limit: usize) -> (String, usize) {
     if text.len() <= limit {
         return (text.to_string(), 0);

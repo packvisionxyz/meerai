@@ -9,6 +9,7 @@ pub(crate) use commands::{MentionKind, mention_is_known, parse_mention_token};
 pub use events::{session_usage_from_events, transcript_from_events};
 pub use input::{clamp_pos_to_bounds, normalize_selection_in_bounds};
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -268,6 +269,7 @@ pub struct SessionTab {
     pub usage: UsageStats,
     pub metrics: TurnMetrics,
     pub is_running: bool,
+    pub queued: Vec<String>,
     pub turn_id: Option<TurnId>,
     pub active_tool: Option<String>,
     pub scroll_offset: usize,
@@ -307,6 +309,7 @@ impl SessionTab {
             usage: UsageStats::default(),
             metrics: TurnMetrics::default(),
             is_running: false,
+            queued: Vec::new(),
             turn_id: None,
             active_tool: None,
             scroll_offset: 0,
@@ -406,6 +409,7 @@ pub struct AppState {
     pub transcript_wrapped_lines: Vec<TranscriptWrappedLine>,
     pub screen_lines: Vec<Vec<String>>,
     pub last_copied_text: Option<String>,
+    key_status_cache: RefCell<HashMap<String, KeyStatus>>,
     pub should_quit: bool,
     pub status_notice: Option<String>,
     pub session_opener: Option<Arc<dyn SessionOpener>>,
@@ -510,6 +514,7 @@ impl AppState {
             transcript_wrapped_lines: Vec::new(),
             screen_lines: Vec::new(),
             last_copied_text: None,
+            key_status_cache: RefCell::new(HashMap::new()),
             should_quit: false,
             status_notice: None,
             session_opener: None,
@@ -775,7 +780,22 @@ impl AppState {
             rt.active_provider = provider_id.clone();
             rt.active_provider_info()
         };
-        check_key_status(&provider, self.secrets.as_ref())
+        self.cached_key_status(&provider)
+    }
+
+    pub fn invalidate_key_status(&mut self) {
+        self.key_status_cache.get_mut().clear();
+    }
+
+    fn cached_key_status(&self, provider: &ProviderInfo) -> KeyStatus {
+        if let Some(status) = self.key_status_cache.borrow().get(&provider.id) {
+            return status.clone();
+        }
+        let status = check_key_status(provider, self.secrets.as_ref());
+        self.key_status_cache
+            .borrow_mut()
+            .insert(provider.id.clone(), status.clone());
+        status
     }
 
     pub fn active_provider_default_base_url(&self, provider_id: &str) -> Option<String> {
@@ -796,7 +816,7 @@ impl AppState {
                     || p.id.to_ascii_lowercase().contains(&needle)
                     || p.display_name.to_ascii_lowercase().contains(&needle)
             })
-            .map(|p| (p.clone(), check_key_status(p, self.secrets.as_ref())))
+            .map(|p| (p.clone(), self.cached_key_status(p)))
             .collect()
     }
 

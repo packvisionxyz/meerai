@@ -28,6 +28,7 @@ use meerai_providers::secrets::{auth_file_path, default_secret_store};
 use meerai_session::{
     Session, SessionConfig, SessionId, SessionSummary, default_sessions_root, list_sessions,
 };
+use meerai_tools::search_as_code::ScriptRuntime;
 use meerai_tools::{
     CodeTools, ExecutionWorld, LspToolset, RepoMapToolset, SearchAsCodeToolset,
     detect_execution_world,
@@ -37,7 +38,9 @@ use meerai_tui::{OpenedSession, SessionOpener, TuiLaunchConfig, transcript_from_
 use auth_cmd::run_auth;
 use cli::{CliSubcommand, HELP_TEXT, parse_args};
 use headless::run_headless;
-use sessions_cmd::{auto_prune_sessions, continue_session_id, fork_session, run_sessions};
+use sessions_cmd::{
+    auto_prune_sessions, continue_session_id, fork_session, prune_empty_sessions, run_sessions,
+};
 
 const FALLBACK_PROVIDER: &str = "opencode-go";
 
@@ -152,6 +155,31 @@ fn resolve_approval_mode(flag: Option<&str>, configured: Option<&str>) -> Result
     }
 }
 
+fn apply_local_theme(workspace_root: &Path, project_root: &Path, settings: &mut AppSettings) {
+    if workspace_root == project_root {
+        return;
+    }
+    match load_project_settings(workspace_root) {
+        Ok(Some(local)) => {
+            if let Some(local_theme) = local.theme {
+                let mut theme = settings.theme.take().unwrap_or_default();
+                theme.overlay(local_theme);
+                settings.theme = Some(theme);
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!(
+                "Warning: ignoring working-directory theme ({}): {err:#}",
+                workspace_root
+                    .join(".meerai")
+                    .join("settings.yml")
+                    .display()
+            );
+        }
+    }
+}
+
 fn build_policy(
     mode: ApprovalMode,
     permissions: Option<&serde_yaml::Value>,
@@ -171,6 +199,7 @@ fn build_workspace_toolsets(
     sac: &SearchAsCodeToolset,
     read_only: bool,
 ) -> Vec<Box<dyn Toolset>> {
+    let script_runtime = sac.runtime();
     let code = if read_only {
         code_tools
             .clone()
@@ -183,7 +212,7 @@ fn build_workspace_toolsets(
         Box::new(repo_map.clone()),
         Box::new(lsp.clone()),
     ];
-    if !read_only {
+    if !read_only && script_runtime.is_some() {
         toolsets.push(Box::new(sac.clone()));
     }
     toolsets
@@ -244,6 +273,13 @@ async fn main() -> Result<()> {
         eprintln!("Warning: {warning}");
     }
     catalog.apply_settings(&settings);
+    apply_local_theme(&workspace_root, &project_root, &mut settings);
+    let (palette, theme_warnings) =
+        meerai_tui::theme::Palette::from_settings(&settings.theme.clone().unwrap_or_default());
+    for warning in theme_warnings {
+        eprintln!("Warning: {warning}");
+    }
+    meerai_tui::theme::install(palette);
     let secrets = default_secret_store(data_dir.as_deref());
     let auth_path = data_dir.as_deref().map(auth_file_path);
 
@@ -366,6 +402,7 @@ async fn main() -> Result<()> {
     if !active_model.trim().is_empty() {
         session.set_model(&active_model).await?;
     }
+    prune_empty_sessions(session.id()).await;
     auto_prune_sessions(&settings, session.id()).await;
 
     let execution_world = detect_execution_world(true).await;
@@ -373,7 +410,12 @@ async fn main() -> Result<()> {
         eprintln!("Warning: {warning}");
     }
 
+    let script_runtime = ScriptRuntime::detect();
     let base_system = meerai_agents::compose_system_prompt(&cli.system, &workspace_root).await;
+    let base_system = meerai_agents::prompt::append_script_guidance(
+        base_system,
+        script_runtime.map(ScriptRuntime::program),
+    );
     let initial_system =
         compose_definition_prompt(base_system.clone(), &selected_skills, selected_agent);
 
@@ -388,6 +430,7 @@ async fn main() -> Result<()> {
         sensitive_env_vars,
         custom_agents: definitions.agents.clone(),
         base_system,
+        script_runtime,
         default_provider: active_provider.clone(),
         default_model: active_model.clone(),
     });
@@ -439,6 +482,7 @@ struct CliSessionHost {
     sensitive_env_vars: Vec<String>,
     custom_agents: Vec<AgentDefinition>,
     base_system: String,
+    script_runtime: Option<ScriptRuntime>,
     default_provider: String,
     default_model: String,
 }
@@ -499,9 +543,12 @@ impl CliSessionHost {
         let repo_map = RepoMapToolset::new(self.workspace_root.clone())
             .with_readable_roots(readable_roots.clone());
         let lsp = LspToolset::new(self.workspace_root.clone()).with_readable_roots(readable_roots);
-        let sac = SearchAsCodeToolset::new(self.workspace_root.clone())
+        let mut sac = SearchAsCodeToolset::new(self.workspace_root.clone())
             .with_sensitive_env_vars(self.sensitive_env_vars.clone())
             .with_execution_world(self.execution_world.clone());
+        if let Some(runtime) = self.script_runtime {
+            sac = sac.with_runtime(runtime);
+        }
         let initial_tools = build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, false);
         let subagent_factory: SubagentToolFactory = Arc::new(move |read_only| {
             build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, read_only)

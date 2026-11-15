@@ -181,13 +181,13 @@ impl AppState {
                     match self.secrets.delete_key(&provider_id) {
                         Ok(()) => {
                             api_key.clear();
+                            self.invalidate_key_status();
                             let provider_info = {
                                 let rt = self.runtime.read().unwrap();
                                 rt.catalog.provider(&provider_id).cloned()
                             };
                             if let Some(info) = provider_info {
-                                existing_key_status =
-                                    check_key_status(&info, self.secrets.as_ref());
+                                existing_key_status = self.cached_key_status(&info);
                             } else {
                                 existing_key_status = KeyStatus::Missing;
                             }
@@ -241,6 +241,7 @@ impl AppState {
                             });
                             return true;
                         }
+                        self.invalidate_key_status();
                     } else if !existing_key_status.is_configured() {
                         self.modal = Some(ActiveModal::ApiKeyInput {
                             provider_id,

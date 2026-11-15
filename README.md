@@ -119,7 +119,10 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   `LspToolset` (`lsp-go_to_definition`, `lsp-find_references`,
   `lsp-get_diagnostics` over stdio JSON-RPC), and `SearchAsCodeToolset`
   (`sac-run_script` running `python3 -I` or `node -e` with env scrubbing and
-  `EffectClass::Execute` policy gating).
+  `EffectClass::Execute` policy gating). At startup meerai probes `python3`,
+  then `node`; it registers the script tool only for the detected runtime and
+  tells the model to prefer one analysis script over long chains of small
+  lookups.
 - **Modal TUI (`meerai-tui`) and CLI/headless runner (`meerai-cli`):** modal
   transcript (including sessions replayed by `--continue`/`--resume`/`--fork`),
   multi-session tabs (`/new`, `/close`, `[ + ]`, `Alt-1..9`, `gt`/`gT`), `/sessions`
@@ -127,8 +130,10 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   items, diff and search views, approval overlay, `/compact`, `/mode`,
   `/agent`/`/skill`, and a `@` Mentions popup for agents, skills, and files;
   one-shot headless turns with a token summary on stderr, NDJSON event stream,
-  `sessions list|rm|prune|fork` management, `--fork <ID>`, and opt-in startup
-  retention (`sessions.auto_prune_days`).
+  `sessions list|rm|prune|fork` management, `--fork <ID>`, startup cleanup of
+  unused sessions, and opt-in startup retention (`sessions.auto_prune_days`).
+  While a turn runs, `Enter` queues the message for the next turn and `Ctrl-g`
+  steers it now.
 - **Config (`meerai-common`) and providers (`meerai-providers`):** a `genai`
   0.7 client factory over a provider catalog (bundled `providers.yml` plus user
   overrides), `auth.json` storage, `settings.yml` plus a project
@@ -352,7 +357,9 @@ meerai sessions prune --days=7 --keep=5
 (`--days N`, default 30), except the newest `--keep N` sessions (default 0).
 Those new sessions stay even when they are older than the cutoff. The command
 prints `removed N sessions`. The cutoff uses the global session root, which
-`MEERAI_SESSION_DIR` can override. Automatic pruning at startup is opt-in; see
+`MEERAI_SESSION_DIR` can override. At startup meerai also deletes unused
+sessions: sessions with no user message, no title, and no parent session. The
+active session is never deleted. Automatic retention pruning is opt-in; see
 [Session retention](#session-retention).
 
 `--continue` opens the most recently active session (`updated_at_ms` moves on
@@ -371,8 +378,8 @@ user message is not retitled by the agent.
 
 - `$XDG_CONFIG_HOME/meerai` (default `~/.config/meerai`): `settings.yml`
   (`active_provider`, `active_model`, `providers`, `approval_mode`,
-  `permissions`, `context`, `sessions`) and `providers.yml` (user provider
-  overrides).
+  `permissions`, `context`, `sessions`, `theme`) and `providers.yml` (user
+  provider overrides).
 - `<project-root>/.meerai/settings.yml`: optional project settings, merged over
   the user `settings.yml`. The project root is found by walking up from the
   process CWD. See [Project config](#project-config).
@@ -424,6 +431,10 @@ context:
   `max_session_tokens` and `max_turn_secs` are clamped against user values: a
   project value cannot raise a user cap, and a project cannot use `0` to disable
   the turn clock.
+- **`theme`** — reviewed like any other color choice and merged field by field
+  over the user theme. It changes only the palette, never a capability. A
+  `.meerai/settings.yml` in the working directory also overrides `theme` when
+  that directory is below the project root.
 - **Ignored fields** — `active_provider`, `active_model`, `providers`, and
   `approval_mode` are ignored with a warning, so a repository cannot change
   provider endpoints or switch the approval mode to `yolo`. A project `sessions`
@@ -435,6 +446,39 @@ context:
 `context.summarizer_model` is optional. It is a full `provider:model` spec used
 for compaction summaries; the default is the session model. Summarizer usage
 counts toward `context.max_session_tokens`.
+
+### Theme
+
+The TUI uses the opencode dark palette by default: near-black background,
+raised surfaces for the sidebar, composer, and user/tool blocks, muted borders
+only on dialogs, a purple accent, and a warm orange interactive color. Override
+any token in `settings.yml` (user), `<project-root>/.meerai/settings.yml`
+(project), or the working directory's `.meerai/settings.yml` (theme only):
+
+```yaml
+# ~/.config/meerai/settings.yml
+theme:
+  background: "#0a0a0a"
+  surface: "#141414"
+  surface_high: "#1e1e1e"
+  text: "#eeeeee"
+  muted: "#808080"
+  faint: "#4c4c4c"
+  accent: "#9d7cd8"
+  interactive: "#fab283"
+  border: "#484848"
+  error: "#e06c75"
+  warning: "#f5a742"
+  success: "#7fd88f"
+  info: "#56b6c2"
+  diff_added: "#4fd6be"
+  diff_removed: "#c53b53"
+  diff_context: "#828bb8"
+```
+
+Values accept `#rgb`, `#rrggbb`, or a terminal color name (`black`, `darkgray`,
+`lightblue`, ...). An invalid value prints a warning and keeps the default.
+Project and working-directory themes override the user theme field by field.
 
 ### Session retention
 

@@ -18,6 +18,7 @@ pub mod diff;
 pub mod event_loop;
 pub mod search;
 pub mod terminal;
+pub mod theme;
 pub mod ui;
 
 pub use app::{

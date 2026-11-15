@@ -1229,7 +1229,8 @@ fn build_workspace_toolsets_exposes_all_and_filters_read_only() {
     let code_tools = CodeTools::new(root.clone());
     let repo_map = RepoMapToolset::new(root.clone());
     let lsp = LspToolset::new(root.clone());
-    let sac = SearchAsCodeToolset::new(root.clone());
+    let sac = SearchAsCodeToolset::new(root.clone())
+        .with_runtime(meerai_tools::search_as_code::ScriptRuntime::Python);
 
     let full_names: Vec<String> =
         build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, false)
@@ -1355,7 +1356,9 @@ async fn build_workspace_toolsets_blocks_sensitive_files_and_attaches_execution_
     let code_tools = CodeTools::new(root.clone()).with_execution_world(world_dyn.clone());
     let repo_map = RepoMapToolset::new(root.clone());
     let lsp = LspToolset::new(root.clone());
-    let sac = SearchAsCodeToolset::new(root.clone()).with_execution_world(world_dyn.clone());
+    let sac = SearchAsCodeToolset::new(root.clone())
+        .with_execution_world(world_dyn.clone())
+        .with_runtime(meerai_tools::search_as_code::ScriptRuntime::Python);
 
     assert_eq!(code_tools.execution_world().kind(), "recording");
     assert_eq!(sac.execution_world().kind(), "recording");
@@ -1437,6 +1440,7 @@ async fn cli_session_host_lists_creates_and_opens_sessions() {
     session_config.root = sessions_root.clone();
 
     let host = CliSessionHost {
+        script_runtime: None,
         workspace_root: workspace_root.clone(),
         session_config,
         runtime,
@@ -1467,6 +1471,63 @@ async fn cli_session_host_lists_creates_and_opens_sessions() {
     assert_eq!(reopened.provider, expected_provider);
     assert_eq!(reopened.model, expected_model);
     let _ = reopened.cmd_tx.send(AgentCommand::Quit);
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test]
+async fn empty_session_cleanup_removes_unused_sessions_only() {
+    use meerai_session::{
+        ContentBlock, InputSource, SessionConfig, SessionEvent, TurnId, TurnTrigger,
+    };
+
+    let root = std::env::temp_dir().join(format!("meerai-empty-sessions-{}", SessionId::new()));
+    let config = SessionConfig {
+        root: root.clone(),
+        workspace: root.clone(),
+        project_local: false,
+    };
+
+    let unused_id = SessionId::new();
+    let _unused = Session::open_or_create(&config, unused_id.clone(), root.clone())
+        .await
+        .unwrap();
+
+    let active_id = SessionId::new();
+    let _active = Session::open_or_create(&config, active_id.clone(), root.clone())
+        .await
+        .unwrap();
+
+    let used_id = SessionId::new();
+    let used = Session::open_or_create(&config, used_id.clone(), root.clone())
+        .await
+        .unwrap();
+    used.append(SessionEvent::TurnStarted {
+        turn_id: TurnId::from_raw("turn-1"),
+        trigger: TurnTrigger::UserPrompt,
+    })
+    .await
+    .unwrap();
+    used.append(SessionEvent::UserMessage {
+        source: InputSource::User,
+        content: vec![ContentBlock::Text("keep me".to_string())],
+    })
+    .await
+    .unwrap();
+
+    let removed = crate::sessions_cmd::remove_empty_sessions(&root, &active_id)
+        .await
+        .unwrap();
+    assert_eq!(removed, 1);
+
+    let remaining: Vec<String> = list_sessions(&root)
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.id.to_string())
+        .collect();
+    assert!(remaining.contains(&active_id.to_string()));
+    assert!(remaining.contains(&used_id.to_string()));
+    assert!(!remaining.contains(&unused_id.to_string()));
 
     std::fs::remove_dir_all(&root).ok();
 }

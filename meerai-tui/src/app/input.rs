@@ -341,11 +341,7 @@ impl AppState {
             .skip(start.line)
         {
             let chars: Vec<char> = row.text.chars().collect();
-            let c_start = if line_idx == start.line {
-                start.col
-            } else {
-                0
-            };
+            let c_start = if line_idx == start.line { start.col } else { 0 };
             let c_end = if line_idx == end.line {
                 end.col
             } else {
@@ -729,6 +725,9 @@ impl AppState {
         }
 
         match key.code {
+            KeyCode::Char('g') if has_ctrl => {
+                self.send_now();
+            }
             KeyCode::Esc => {
                 self.mode = InputMode::Normal;
             }
@@ -997,10 +996,9 @@ impl AppState {
             tab.input.clear();
             tab.cursor = 0;
             tab.auto_follow = true;
-            tab.transcript.push(TranscriptEntry::User {
-                text: remaining.clone(),
-            });
-            let _ = tab.cmd_tx.send(AgentCommand::Steer(remaining));
+            tab.queued.push(remaining);
+            let depth = tab.queued.len();
+            self.status_notice = Some(format!("Queued {depth} message(s) · Ctrl-g sends now"));
             self.completion.reset();
             return;
         }
@@ -1019,6 +1017,36 @@ impl AppState {
             });
             let _ = tab.cmd_tx.send(AgentCommand::SubmitPrompt(remaining));
         }
+        self.completion.reset();
+    }
+
+    pub(super) fn send_now(&mut self) {
+        if !self.tab().is_running {
+            self.submit_input();
+            return;
+        }
+        let text = {
+            let tab = self.tab_mut();
+            if let Some(next) = tab.queued.first().cloned() {
+                tab.queued.remove(0);
+                next
+            } else {
+                let typed = tab.input.trim().to_string();
+                if typed.is_empty() {
+                    return;
+                }
+                tab.input.clear();
+                tab.cursor = 0;
+                typed
+            }
+        };
+        {
+            let tab = self.tab_mut();
+            tab.transcript
+                .push(TranscriptEntry::User { text: text.clone() });
+            let _ = tab.cmd_tx.send(AgentCommand::Steer(text));
+        }
+        self.status_notice = Some("Sent now".to_string());
         self.completion.reset();
     }
 

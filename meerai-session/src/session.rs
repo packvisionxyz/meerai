@@ -13,7 +13,8 @@ use tokio::io::AsyncWriteExt;
 use crate::blob::{BLOB_DIR_NAME, BlobStore};
 use crate::compaction::{COMPACTION_INTERRUPTED, open_compactions, open_turns, turn_start};
 use crate::event::{
-    AbortCause, CompactionResult, LoggedEvent, Seq, SeqRange, SessionEvent, TurnEndReason,
+    AbortCause, CompactionResult, InputSource, LoggedEvent, Seq, SeqRange, SessionEvent,
+    TurnEndReason,
 };
 use crate::ids::{SessionId, TurnId};
 use crate::projection::{ProjectionPolicy, derive_messages};
@@ -785,6 +786,19 @@ pub fn latest_session(root: &Path) -> Result<Option<SessionSummary>> {
         .find(|summary| summary.parent_session_id.is_none())
         .cloned()
         .or_else(|| sessions.into_iter().next()))
+}
+
+pub async fn session_has_user_input(dir: &Path) -> Result<bool> {
+    let loaded = storage::load(dir).await?;
+    Ok(loaded.events.iter().any(|logged| {
+        matches!(
+            &logged.event,
+            SessionEvent::UserMessage {
+                source: InputSource::User,
+                ..
+            }
+        )
+    }))
 }
 
 pub fn delete_session(root: &Path, id: &SessionId) -> Result<bool> {

@@ -373,6 +373,7 @@ impl SessionTab {
                         self.finalize_pending_subagents(ToolCallStatus::Failed);
                     }
                 }
+                self.flush_queued();
             }
             AgentEvent::Error { code, message } => {
                 self.is_running = false;
@@ -385,8 +386,24 @@ impl SessionTab {
                 self.finalize_pending_subagents(ToolCallStatus::Failed);
                 let text = format!("{} error: {message}", error_code_label(code));
                 self.push_error(text);
+                self.flush_queued();
             }
         }
+    }
+
+    fn flush_queued(&mut self) {
+        if self.is_running || self.queued.is_empty() {
+            return;
+        }
+        let next = self.queued.remove(0);
+        if self.title.is_none() {
+            self.title = normalize_tab_title(next.clone());
+        }
+        self.transcript
+            .push(TranscriptEntry::User { text: next.clone() });
+        self.auto_follow = true;
+        self.is_running = true;
+        let _ = self.cmd_tx.send(AgentCommand::SubmitPrompt(next));
     }
 
     fn assistant_item_idx(&mut self, item_id: ItemId) -> usize {

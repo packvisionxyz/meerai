@@ -126,6 +126,78 @@ pub struct SessionSettings {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThemeSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_high: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muted: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interactive: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_added: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_removed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_context: Option<String>,
+}
+
+impl ThemeSettings {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn overlay(&mut self, other: Self) {
+        macro_rules! overlay {
+            ($($field:ident),* $(,)?) => {
+                $(
+                    if other.$field.is_some() {
+                        self.$field = other.$field;
+                    }
+                )*
+            };
+        }
+        overlay!(
+            background,
+            surface,
+            surface_high,
+            text,
+            muted,
+            faint,
+            accent,
+            interactive,
+            border,
+            error,
+            warning,
+            success,
+            info,
+            diff_added,
+            diff_removed,
+            diff_context,
+        );
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_provider: Option<String>,
@@ -141,6 +213,8 @@ pub struct AppSettings {
     pub context: Option<ContextSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sessions: Option<SessionSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<ThemeSettings>,
 }
 
 impl AppSettings {
@@ -341,6 +415,12 @@ pub fn merge_project_settings(
     }
 
     merged.context = merge_context(merged.context.take(), project.context);
+
+    if let Some(project_theme) = project.theme {
+        let mut theme = merged.theme.take().unwrap_or_default();
+        theme.overlay(project_theme);
+        merged.theme = Some(theme);
+    }
 
     (merged, warnings)
 }
@@ -1061,5 +1141,17 @@ providers:
             );
         }
         assert_eq!(warnings.len(), 4);
+    }
+
+    #[test]
+    fn project_theme_overlays_user_theme_field_by_field() {
+        let user = settings_from_yaml("theme:\n  accent: \"#112233\"\n  background: \"#000000\"\n");
+        let project = settings_from_yaml("theme:\n  accent: \"#ababab\"\n");
+
+        let (merged, warnings) = merge_project_settings(user, project);
+        let theme = merged.theme.expect("theme merged");
+        assert_eq!(theme.accent.as_deref(), Some("#ababab"));
+        assert_eq!(theme.background.as_deref(), Some("#000000"));
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 }

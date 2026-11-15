@@ -1611,7 +1611,7 @@ fn compact_and_mode_commands_emit_agent_commands() {
 }
 
 #[test]
-fn steer_while_running_sends_steer_and_keeps_running() {
+fn submit_while_running_queues_and_keeps_turn() {
     let (mut app, mut rx, _secrets) = test_app();
     app.tab_mut().is_running = true;
     app.tab_mut().turn_id = Some(TurnId::from_raw("turn-steer"));
@@ -1619,17 +1619,12 @@ fn steer_while_running_sends_steer_and_keeps_running() {
     type_text(&mut app, "focus on tests");
     app.handle_key_event(key(KeyCode::Enter));
 
-    assert_eq!(
-        rx.try_recv().unwrap(),
-        AgentCommand::Steer("focus on tests".to_string())
-    );
+    assert!(rx.try_recv().is_err());
+    assert_eq!(app.tab().queued, vec!["focus on tests".to_string()]);
     assert!(app.tab().is_running);
     assert_eq!(app.tab().turn_id, Some(TurnId::from_raw("turn-steer")));
     assert!(app.tab().input.is_empty());
-    assert!(matches!(
-        app.tab().transcript.last(),
-        Some(TranscriptEntry::User { text }) if text == "focus on tests"
-    ));
+    assert!(app.tab().transcript.is_empty());
 }
 
 fn approval_request(id: &str, path: &str) -> ApprovalRequest {
@@ -2459,4 +2454,61 @@ fn doc_selection_copies_while_scrolling_across_long_and_wrapped_content() {
     assert!(full_copied.contains("Start marker"));
     assert!(full_copied.contains("Middle filler line 0"));
     assert!(full_copied.contains(&long_sentence));
+}
+
+#[test]
+fn submit_while_running_queues_instead_of_steering() {
+    let (mut app, mut rx, _secrets) = test_app();
+    app.tab_mut().is_running = true;
+    type_text(&mut app, "second task");
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert_eq!(app.tab().queued, vec!["second task".to_string()]);
+    assert!(app.tab().transcript.is_empty());
+    assert!(rx.try_recv().is_err());
+    assert!(app.status_notice.unwrap().contains("Queued 1"));
+}
+
+#[test]
+fn queued_message_sends_after_turn_completes() {
+    let (mut app, mut rx, _secrets) = test_app();
+    app.tab_mut().is_running = true;
+    app.tab_mut().queued.push("next task".to_string());
+
+    let turn_id = TurnId::from_raw("turn-queue");
+    app.tab_mut().apply_agent_event(AgentEvent::TurnCompleted {
+        turn_id,
+        reason: meerai_agents::TurnEndReason::Completed,
+    });
+
+    assert!(app.tab().queued.is_empty());
+    assert!(app.tab().is_running);
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::SubmitPrompt("next task".to_string())
+    );
+    assert!(matches!(
+        app.tab().transcript.last(),
+        Some(TranscriptEntry::User { text }) if text == "next task"
+    ));
+}
+
+#[test]
+fn ctrl_g_sends_queued_message_now_as_steering() {
+    let (mut app, mut rx, _secrets) = test_app();
+    app.tab_mut().is_running = true;
+    app.tab_mut().queued.push("urgent".to_string());
+    app.tab_mut().queued.push("later".to_string());
+
+    app.handle_key_event(key_mod(KeyCode::Char('g'), KeyModifiers::CONTROL));
+
+    assert_eq!(app.tab().queued, vec!["later".to_string()]);
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::Steer("urgent".to_string())
+    );
+    assert!(matches!(
+        app.tab().transcript.last(),
+        Some(TranscriptEntry::User { text }) if text == "urgent"
+    ));
 }

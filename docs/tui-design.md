@@ -9,9 +9,9 @@ terminal.
 **Status:** sections marked **Current** match `meerai-tui/src/app.rs` and
 `ui.rs`. Sections marked **Planned** are design, not implemented. Today the TUI
 has `NOR` and `INS` modes, slash commands, approvals, a sidebar with file
-changes, diff/search modals, and transcript replay for a resumed session. It has
-no Select mode, `Space` leader, `:` command mode, session picker, transcript
-search, `/rewind`, or themes.
+changes, diff/search modals, transcript replay for a resumed session, and a
+config-driven color palette. It has no Select mode, `Space` leader, `:` command
+mode, transcript search, or `/rewind`.
 
 ## Core Interaction Principles
 
@@ -53,7 +53,9 @@ Current layout (illustrative):
 
 The sidebar is hidden below a minimum width (`MIN_SIDEBAR_WIDTH`) and waits for
 a resize. Pressing `Ctrl-b` toggles it; clicking a changed file opens the diff
-modal. There is no separate "Context / Diff Drawer" or theme system.
+modal. There is no separate "Context / Diff Drawer". The palette follows the
+opencode dark theme and is overridable through the `theme` block in
+`settings.yml` or `.meerai/settings.yml`.
 
 ---
 
@@ -90,8 +92,10 @@ no keyboard Select mode.
 - `Tab` accepts a completion; `Enter` accepts a completion or submits when the
   completion is a no-op. `Esc` dismisses completion, then returns to `NOR`
   without discarding the draft.
-- While a turn runs, `Enter` sends the text as a `Steer` message instead of a
-  new prompt.
+- While a turn runs, `Enter` queues the message. The next queued message is
+  sent when the turn ends, in order.
+- `Ctrl-g` sends now: it steers the oldest queued message (or the current draft
+  when the queue is empty) at the next step boundary.
 
 ### 3. Slash commands — current
 
