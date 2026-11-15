@@ -833,44 +833,63 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                 }
             }
             TranscriptEntry::ToolCall(tc) => {
-                let (badge, color) = tool_status_badge(&tc.status);
+                let (badge, badge_color) = tool_status_badge(&tc.status);
                 let args_preview = truncate_single_line(&tc.args, 60);
+                let active = matches!(
+                    tc.status,
+                    ToolCallStatus::Proposed | ToolCallStatus::Running
+                );
                 let lead = if tc.status == ToolCallStatus::Running {
                     let ch = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
                     format!("{ch} [tool] ")
                 } else {
                     "▸ [tool] ".to_string()
                 };
-                lines.push(banded_line(
-                    Line::from(vec![
-                        Span::styled(lead, Style::default().fg(theme::p().interactive)),
-                        Span::styled(
-                            tc.name.clone(),
-                            Style::default()
-                                .fg(theme::p().text)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(" ", Style::default()),
-                        Span::styled(format!("[{badge}]"), Style::default().fg(color)),
-                        if args_preview.is_empty() {
-                            Span::raw("")
-                        } else {
-                            Span::styled(
-                                format!(" {args_preview}"),
-                                Style::default().fg(theme::p().muted),
-                            )
-                        },
-                    ]),
-                    None,
-                    2,
-                ));
+                let (lead_style, name_style, badge_style, args_style) = if active {
+                    (
+                        Style::default().fg(theme::p().interactive),
+                        Style::default()
+                            .fg(theme::p().text)
+                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(badge_color),
+                        Style::default().fg(theme::p().muted),
+                    )
+                } else {
+                    let badge_color = if tc.status == ToolCallStatus::Failed {
+                        theme::p().error
+                    } else {
+                        theme::p().faint
+                    };
+                    (
+                        Style::default().fg(theme::p().faint),
+                        Style::default().fg(theme::p().muted),
+                        Style::default().fg(badge_color),
+                        Style::default().fg(theme::p().faint),
+                    )
+                };
+                let line = Line::from(vec![
+                    Span::styled(lead, lead_style),
+                    Span::styled(tc.name.clone(), name_style),
+                    Span::styled(" ", Style::default()),
+                    Span::styled(format!("[{badge}]"), badge_style),
+                    if args_preview.is_empty() {
+                        Span::raw("")
+                    } else {
+                        Span::styled(format!(" {args_preview}"), args_style)
+                    },
+                ]);
+                lines.push(if active {
+                    banded_line(line, None, 2)
+                } else {
+                    tagged_line(line, None, 2)
+                });
                 if let Some(output) = &tc.output {
                     let preview = truncate_single_line(output, 120);
                     if !preview.is_empty() {
                         lines.push(tagged_line(
                             Line::from(vec![
                                 Span::styled("  ↳ ", Style::default().fg(theme::p().faint)),
-                                Span::styled(preview, Style::default().fg(theme::p().muted)),
+                                Span::styled(preview, Style::default().fg(theme::p().faint)),
                             ]),
                             None,
                             4,
@@ -879,29 +898,49 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                 }
             }
             TranscriptEntry::Subagent(sub) => {
-                let (badge, color) = tool_status_badge(&sub.status);
-                lines.push(tagged_line(
-                    Line::from(vec![
-                        Span::styled("▸ [subagent] ", Style::default().fg(theme::p().accent)),
-                        Span::styled(
-                            sub.agent.clone(),
-                            Style::default()
-                                .fg(theme::p().text)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(" ", Style::default()),
-                        Span::styled(format!("[{badge}]"), Style::default().fg(color)),
-                    ]),
-                    None,
-                    2,
-                ));
+                let (badge, badge_color) = tool_status_badge(&sub.status);
+                let active = matches!(
+                    sub.status,
+                    ToolCallStatus::Proposed | ToolCallStatus::Running
+                );
+                let (lead_style, name_style, badge_style) = if active {
+                    (
+                        Style::default().fg(theme::p().accent),
+                        Style::default()
+                            .fg(theme::p().text)
+                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(badge_color),
+                    )
+                } else {
+                    let badge_color = if sub.status == ToolCallStatus::Failed {
+                        theme::p().error
+                    } else {
+                        theme::p().faint
+                    };
+                    (
+                        Style::default().fg(theme::p().faint),
+                        Style::default().fg(theme::p().muted),
+                        Style::default().fg(badge_color),
+                    )
+                };
+                let line = Line::from(vec![
+                    Span::styled("▸ [subagent] ", lead_style),
+                    Span::styled(sub.agent.clone(), name_style),
+                    Span::styled(" ", Style::default()),
+                    Span::styled(format!("[{badge}]"), badge_style),
+                ]);
+                lines.push(if active {
+                    banded_line(line, None, 2)
+                } else {
+                    tagged_line(line, None, 2)
+                });
                 if let Some(report) = &sub.report {
                     let preview = truncate_single_line(report, 120);
                     if !preview.is_empty() {
                         lines.push(tagged_line(
                             Line::from(vec![
                                 Span::styled("  ↳ ", Style::default().fg(theme::p().faint)),
-                                Span::styled(preview, Style::default().fg(theme::p().muted)),
+                                Span::styled(preview, Style::default().fg(theme::p().faint)),
                             ]),
                             None,
                             4,
@@ -2787,6 +2826,65 @@ mod tests {
         assert!(rendered.contains("/new"));
         assert!(rendered.contains("filter commands"));
         assert!(rendered.contains("Enter run"));
+    }
+
+    #[test]
+    fn completed_tool_rows_shade_into_the_background() {
+        let mut app = test_app();
+        app.tab_mut().transcript.push(TranscriptEntry::User {
+            text: "run things".to_string(),
+        });
+        app.tab_mut()
+            .transcript
+            .push(TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
+                call_id: "running".to_string(),
+                name: "code-shell".to_string(),
+                args: "{}".to_string(),
+                status: ToolCallStatus::Running,
+                output: None,
+            }));
+        app.tab_mut()
+            .transcript
+            .push(TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
+                call_id: "done".to_string(),
+                name: "code_edit_file".to_string(),
+                args: "{}".to_string(),
+                status: ToolCallStatus::Succeeded,
+                output: None,
+            }));
+
+        let backend = TestBackend::new(120, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let palette = crate::theme::Palette::default();
+
+        let row_with = |needle: &str| -> u16 {
+            (0..28)
+                .find(|y| {
+                    (0..120)
+                        .map(|x| (x, *y))
+                        .collect::<Vec<_>>()
+                        .iter()
+                        .map(|(x, y)| buffer[(*x, *y)].symbol().to_string())
+                        .collect::<String>()
+                        .contains(needle)
+                })
+                .unwrap_or_else(|| panic!("row for {needle}"))
+        };
+
+        let running_row = row_with("code-shell");
+        let done_row = row_with("code_edit_file");
+        assert_eq!(
+            buffer[(20, running_row)].bg,
+            palette.surface,
+            "active tool row keeps the raised band"
+        );
+        assert_eq!(
+            buffer[(20, done_row)].bg,
+            palette.background,
+            "finished tool row recedes into the background"
+        );
     }
 
     #[test]

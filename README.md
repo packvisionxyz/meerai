@@ -452,8 +452,10 @@ counts toward `context.max_session_tokens`.
 ### Theme
 
 The TUI uses the opencode dark palette by default: near-black background,
-raised surfaces for the sidebar, composer, and user/tool blocks, muted borders
-only on dialogs, a purple accent, and a warm orange interactive color. Override
+raised surfaces for the sidebar, composer, and the user band, muted borders only
+on dialogs, a purple accent, and a warm orange interactive color. Active tool
+rows keep the raised band; finished rows fade to muted text and recede into the
+background so only running work stands out. Override
 any token in `settings.yml` (user), `<project-root>/.meerai/settings.yml`
 (project), or the working directory's `.meerai/settings.yml` (theme only):
 
