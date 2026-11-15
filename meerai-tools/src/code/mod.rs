@@ -146,7 +146,13 @@ fn bare_name(fn_name: &str) -> Option<&str> {
 }
 
 pub(crate) fn parse_args<T: serde::de::DeserializeOwned>(args: &str) -> Result<T, ToolError> {
-    serde_json::from_str(args).map_err(ToolError::WrongArguments)
+    let value = match serde_json::from_str::<serde_json::Value>(args) {
+        Ok(value) => value,
+        Err(err) => meerai_core::lenient::parse_tool_arguments(args)
+            .ok_or(ToolError::WrongArguments(err))?,
+    };
+    let value = meerai_core::lenient::normalize_tool_arguments(&value);
+    serde_json::from_value(value).map_err(ToolError::WrongArguments)
 }
 
 pub(crate) fn definition_for<T: schemars::JsonSchema>(

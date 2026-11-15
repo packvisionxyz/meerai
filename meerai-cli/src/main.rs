@@ -422,6 +422,17 @@ async fn main() -> Result<()> {
     if !active_model.trim().is_empty() {
         session.set_model(&active_model).await?;
     }
+    let approval_mode = if cli.mode.is_some() {
+        approval_mode
+    } else {
+        session
+            .meta()
+            .approval_mode
+            .as_deref()
+            .and_then(parse_approval_mode)
+            .unwrap_or(approval_mode)
+    };
+    let _ = session.set_approval_mode(approval_mode.label()).await;
     prune_empty_sessions(session.id()).await;
     auto_prune_sessions(&settings, session.id()).await;
 
@@ -616,12 +627,17 @@ impl CliSessionHost {
         let transcript = transcript_from_events(&events);
         let agent = self.build_agent(session, &provider, &model, self.base_system.clone())?;
         let (cmd_tx, event_rx) = spawn_worker(agent);
+        let approval_mode = meta
+            .approval_mode
+            .as_deref()
+            .and_then(parse_approval_mode)
+            .unwrap_or(self.approval_mode);
         Ok(OpenedSession {
             session_id: meta.id,
             title: meta.title,
             provider,
             model,
-            approval_mode: self.approval_mode,
+            approval_mode,
             transcript,
             events,
             cmd_tx,

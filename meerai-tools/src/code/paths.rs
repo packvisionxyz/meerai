@@ -567,6 +567,51 @@ mod outside_root_tests {
 
     use super::*;
 
+    #[test]
+    fn shell_definition_declares_required_command() {
+        let tools = CodeTools::new(".");
+        let definition = tools
+            .definition()
+            .into_iter()
+            .find(|definition| definition.name == "code-shell")
+            .expect("code-shell definition");
+        let required = definition
+            .parameters
+            .get("required")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            required.iter().any(|value| value == "command"),
+            "{}",
+            definition.parameters
+        );
+        assert!(
+            definition
+                .parameters
+                .get("properties")
+                .is_some_and(|properties| properties.get("command").is_some()),
+            "{}",
+            definition.parameters
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_accepts_double_encoded_arguments() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+        let tools = CodeTools::new(dir.path());
+        let args = serde_json::to_string(&serde_json::Value::String(
+            r#"{"path":"a.txt"}"#.to_string(),
+        ))
+        .unwrap();
+        let run = tools
+            .invoke_structured("code-read_file", &args)
+            .await
+            .unwrap();
+        assert_eq!(run.observation.status, ObservationStatus::Success);
+    }
+
     #[tokio::test]
     async fn outside_access_is_refused_until_a_root_is_granted() {
         let workspace = TempDir::new().unwrap();

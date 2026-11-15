@@ -87,6 +87,8 @@ pub struct SessionMeta {
     pub inherited_event_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<SessionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_mode: Option<String>,
 }
 
 impl SessionMeta {
@@ -104,6 +106,7 @@ impl SessionMeta {
             forked_from: None,
             inherited_event_count: None,
             parent_session_id: None,
+            approval_mode: None,
         }
     }
 }
@@ -426,6 +429,12 @@ impl Session {
         self.update_meta(|meta| meta.model = Some(model)).await
     }
 
+    pub async fn set_approval_mode(&self, approval_mode: impl Into<String>) -> Result<()> {
+        let approval_mode = approval_mode.into();
+        self.update_meta(|meta| meta.approval_mode = Some(approval_mode))
+            .await
+    }
+
     pub async fn flush(&self) -> Result<()> {
         let Some(dir) = &self.inner.dir else {
             return Ok(());
@@ -456,9 +465,11 @@ impl Session {
         boundary_turn: &TurnId,
     ) -> Result<Session> {
         let prefix = fork_prefix(&source.events(), boundary_turn)?;
+        let source_meta = source.meta();
         let forked_from = source.id().clone();
-        let cwd = source.meta().cwd;
+        let cwd = source_meta.cwd;
         let inherited_event_count = prefix.len() as u64;
+        let approval_mode = source_meta.approval_mode;
 
         let session = Self::open_or_create(config, SessionId::new(), cwd).await?;
         session.append_preserved(&prefix).await?;
@@ -466,6 +477,7 @@ impl Session {
             .update_meta(|meta| {
                 meta.forked_from = Some(forked_from);
                 meta.inherited_event_count = Some(inherited_event_count);
+                meta.approval_mode = approval_mode;
             })
             .await?;
 
@@ -1278,6 +1290,28 @@ mod tests {
         assert!(result.is_err());
 
         fs::remove_dir_all(&root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn approval_mode_persists_in_meta() {
+        let root = temp_root("approval-mode");
+        let config = config(&root);
+        let workspace = PathBuf::from("/tmp/workspace");
+        let session = Session::open_or_create(&config, SessionId::new(), workspace.clone())
+            .await
+            .unwrap();
+        assert_eq!(session.meta().approval_mode, None);
+
+        session.set_approval_mode("auto-approve").await.unwrap();
+        let id = session.id().clone();
+        drop(session);
+
+        let reopened = Session::open(&config, id, workspace).await.unwrap();
+        assert_eq!(
+            reopened.meta().approval_mode.as_deref(),
+            Some("auto-approve")
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[tokio::test]

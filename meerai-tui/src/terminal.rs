@@ -1,6 +1,6 @@
 use std::io::{self, Stdout, Write};
 use std::sync::Once;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use anyhow::Result;
 use crossterm::cursor::Show;
@@ -18,6 +18,7 @@ use ratatui::{Frame, Terminal};
 
 static PANIC_HOOK_ONCE: Once = Once::new();
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
+static STATUS: AtomicU8 = AtomicU8::new(u8::MAX);
 
 pub struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<Stdout>>,
@@ -90,28 +91,60 @@ pub fn restore_terminal() {
         LeaveAlternateScreen,
         Show
     );
-    let _ = io::stdout().write_all(b"\x1b]0;\x07");
-    let _ = io::stdout().flush();
+    let mut out = io::stdout();
+    let _ = out.write_all(b"\x1b]2;meerai\x07");
+    let _ = out.write_all(b"\x1b]6;1;bg;default\x07");
+    let _ = out.flush();
+    STATUS.store(u8::MAX, Ordering::Relaxed);
 }
 
-/// Ring the bell and flag the terminal (title + OSC 9) while an approval waits.
-pub fn notify_approval() {
-    if std::env::var("MEERAI_NO_NOTIFY")
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalStatus {
+    Idle,
+    Working,
+    Approval,
+}
+
+fn notifications_disabled() -> bool {
+    std::env::var("MEERAI_NO_NOTIFY")
         .ok()
-        .is_some_and(|v| matches!(v.trim(), "1" | "true" | "yes"))
-    {
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes"))
+}
+
+/// Set the window title and, on iTerm2, the tab background color.
+pub fn set_status(status: TerminalStatus) {
+    if notifications_disabled() {
+        return;
+    }
+    let (code, title, color) = match status {
+        TerminalStatus::Idle => (0u8, "meerai ●", None),
+        TerminalStatus::Working => (1, "meerai — working ●", Some((230, 180, 80))),
+        TerminalStatus::Approval => (2, "meerai — approval needed ●", Some((224, 92, 92))),
+    };
+    if STATUS.swap(code, Ordering::Relaxed) == code {
+        return;
+    }
+    let mut out = io::stdout();
+    let _ = write!(out, "\x1b]2;{title}\x07");
+    match color {
+        Some((r, g, b)) => {
+            let _ = write!(out, "\x1b]6;1;bg;{r};{g};{b}\x07");
+        }
+        None => {
+            let _ = out.write_all(b"\x1b]6;1;bg;default\x07");
+        }
+    }
+    let _ = out.flush();
+}
+
+/// Ring the bell and send an OSC 9 notification while an approval waits.
+pub fn notify_approval() {
+    if notifications_disabled() {
         return;
     }
     let mut out = io::stdout();
     let _ = out.write_all(b"\x07");
-    let _ = out.write_all(b"\x1b]0;meerai: approval needed\x07");
     let _ = out.write_all(b"\x1b]9;meerai needs your approval\x07");
-    let _ = out.flush();
-}
-
-pub fn clear_notification() {
-    let mut out = io::stdout();
-    let _ = out.write_all(b"\x1b]0;meerai\x07");
     let _ = out.flush();
 }
 

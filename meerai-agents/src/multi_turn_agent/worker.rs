@@ -133,7 +133,12 @@ pub fn spawn_worker(
                     }
                 }
                 AgentCommand::SetModel(model) => agent.set_model(model),
-                AgentCommand::SetPermissionMode(mode) => agent.set_permission_mode(mode),
+                AgentCommand::SetPermissionMode(mode) => {
+                    agent.set_permission_mode(mode);
+                    if let Some(harness) = agent.harness.as_ref() {
+                        let _ = harness.session.set_approval_mode(mode.label()).await;
+                    }
+                }
                 AgentCommand::Compact => {
                     let cancel = CancellationToken::new();
                     let _ = agent

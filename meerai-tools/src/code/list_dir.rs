@@ -9,6 +9,7 @@ use crate::code::{CodeTools, ToolRun, failure_run, success_run};
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct ListDirArgs {
     #[schemars(description = "Directory path, relative to the workspace root or absolute.")]
+    #[serde(alias = "dir", alias = "directory", alias = "file_path")]
     path: String,
 }
 

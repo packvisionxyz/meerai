@@ -146,6 +146,8 @@ impl MultiTurnAgent {
             max_secs: max_turn_secs,
         };
         let mut pressured = false;
+        let mut last_tool_signature: Option<String> = None;
+        let mut repeated_tool_batches = 0usize;
 
         for step_index in 0..max_steps {
             if cancel.is_cancelled() {
@@ -299,10 +301,15 @@ impl MultiTurnAgent {
                 });
             }
 
-            let tool_calls: Vec<ToolCall> = end
-                .captured_tool_calls()
-                .map(|calls| calls.into_iter().cloned().collect())
-                .unwrap_or_default();
+            let mut tool_calls: Vec<ToolCall> = collected.tool_calls;
+            for call in end.captured_tool_calls().unwrap_or_default() {
+                if !tool_calls
+                    .iter()
+                    .any(|existing| existing.call_id == call.call_id)
+                {
+                    tool_calls.push(call.clone());
+                }
+            }
             let core_calls: Vec<meerai_core::ToolCall> =
                 tool_calls.iter().map(meerai_core::ToolCall::from).collect();
 
@@ -341,6 +348,42 @@ impl MultiTurnAgent {
             } else {
                 self.chat_history
                     .push(ChatMessage::from(tool_calls.clone()));
+            }
+
+            if tool_calls.is_empty() {
+                last_tool_signature = None;
+                repeated_tool_batches = 0;
+            } else {
+                let mut parts: Vec<String> = tool_calls
+                    .iter()
+                    .map(|call| format!("{}:{}", call.fn_name, call.fn_arguments))
+                    .collect();
+                parts.sort();
+                let signature = parts.join("|");
+                if last_tool_signature.as_deref() == Some(signature.as_str()) {
+                    repeated_tool_batches += 1;
+                } else {
+                    repeated_tool_batches = 0;
+                    last_tool_signature = Some(signature);
+                }
+                if repeated_tool_batches == 2 {
+                    self.log_event(
+                        event_tx,
+                        SessionEvent::UserMessage {
+                            source: InputSource::RuntimeContext,
+                            content: vec![ContentBlock::Text(
+                                "You already called these tools with identical arguments. Read the results, change the arguments, or end the turn."
+                                    .to_string(),
+                            )],
+                        },
+                    )
+                    .await;
+                }
+                if repeated_tool_batches >= 4 {
+                    return Err(TurnError::loop_detected(anyhow!(
+                        "loop detected: repeated identical tool calls"
+                    )));
+                }
             }
 
             let stop_reason = if tool_calls.is_empty() {
@@ -443,6 +486,7 @@ impl MultiTurnAgent {
 
         let mut text = String::new();
         let mut reasoning = String::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut text_item_id: Option<ItemId> = None;
         let mut reasoning_item_id: Option<ItemId> = None;
         let mut end: Option<StreamEnd> = None;
@@ -476,9 +520,18 @@ impl MultiTurnAgent {
                                 }
                             }
                             ChatStreamEvent::End(stream_end) => end = Some(stream_end),
+                            ChatStreamEvent::ToolCallChunk(chunk) => {
+                                if let Some(existing) = tool_calls
+                                    .iter_mut()
+                                    .find(|call| call.call_id == chunk.tool_call.call_id)
+                                {
+                                    *existing = chunk.tool_call;
+                                } else {
+                                    tool_calls.push(chunk.tool_call);
+                                }
+                            }
                             ChatStreamEvent::Start
                             | ChatStreamEvent::ThoughtSignatureChunk(_)
-                            | ChatStreamEvent::ToolCallChunk(_)
                             | ChatStreamEvent::Heartbeat => {}
                         },
                         Some(Err(error)) => {
@@ -495,6 +548,7 @@ impl MultiTurnAgent {
             end: end.unwrap_or_default(),
             text,
             reasoning,
+            tool_calls,
             text_item_id,
             reasoning_item_id,
         })

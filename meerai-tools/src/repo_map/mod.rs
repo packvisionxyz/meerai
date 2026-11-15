@@ -79,7 +79,11 @@ struct RepoMapArgs {
     #[schemars(
         description = "Approximate token budget for the rendered repo map (200..=4000, default 1500)."
     )]
-    #[serde(default, deserialize_with = "meerai_core::lenient::option_usize_value")]
+    #[serde(
+        default,
+        alias = "budget",
+        deserialize_with = "meerai_core::lenient::option_usize_value"
+    )]
     max_tokens: Option<usize>,
     #[schemars(description = "Optional workspace-relative file paths to boost in ranking.")]
     focus_files: Option<Vec<String>>,

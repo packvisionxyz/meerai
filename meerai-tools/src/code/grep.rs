@@ -17,12 +17,15 @@ pub(crate) struct GrepArgs {
     #[schemars(
         description = "Regular expression to search for. Matching is case-insensitive unless the pattern contains an uppercase letter."
     )]
+    #[serde(alias = "query", alias = "regex")]
     pattern: String,
 
     #[schemars(description = "File or directory to search. Defaults to the workspace root.")]
+    #[serde(alias = "file", alias = "file_path")]
     path: Option<String>,
 
     #[schemars(description = "Glob filter for file paths, for example \"*.rs\".")]
+    #[serde(alias = "glob")]
     include: Option<String>,
 }
 

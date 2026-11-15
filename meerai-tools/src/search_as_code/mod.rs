@@ -85,8 +85,10 @@ struct RunScriptArgs {
     #[schemars(
         description = "Script runtime language: `python` (`python3 -I -c`) or `javascript` (`node -e`)."
     )]
+    #[serde(alias = "lang")]
     language: ScriptLanguage,
     #[schemars(description = "Script source code to execute in the workspace root.")]
+    #[serde(alias = "code")]
     script: String,
     #[schemars(description = "Timeout in milliseconds (default 15000, max 60000).")]
     #[serde(default, deserialize_with = "meerai_core::lenient::option_u64_value")]

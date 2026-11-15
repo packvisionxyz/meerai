@@ -153,7 +153,7 @@ impl MultiTurnAgent {
                 return Ok(None);
             }
 
-            let args_str = tc.fn_arguments.to_string();
+            let args_str = normalized_tool_args(&tc.fn_arguments);
             let effect = self
                 .tools
                 .iter()
@@ -877,6 +877,7 @@ impl DecisionCtx<'_> {
             AgentCommand::SetPermissionMode(mode) => {
                 if let Some(harness) = self.harness.as_mut() {
                     harness.policy.set_mode(mode);
+                    let _ = harness.session.set_approval_mode(mode.label()).await;
                 }
             }
             AgentCommand::Compact => *self.pending_compact = true,
@@ -1197,6 +1198,10 @@ async fn run_tool_from(
 
         match result {
             Ok(run) => return Ok(run),
+            Err(err @ meerai_core::ToolError::WrongArguments(_))
+            | Err(err @ meerai_core::ToolError::InvalidFunctionName(_)) => {
+                return Err(anyhow!("Failed to invoke tool '{name}': {err}"));
+            }
             Err(err) if attempt == max_attempts => {
                 return Err(anyhow!(
                     "Failed to invoke tool '{name}' after {max_attempts} attempts: {err}"
@@ -1334,4 +1339,8 @@ mod auto_approve_tests {
             ApprovalMode::Ask
         ));
     }
+}
+
+fn normalized_tool_args(value: &serde_json::Value) -> String {
+    meerai_core::lenient::normalize_tool_arguments(value).to_string()
 }

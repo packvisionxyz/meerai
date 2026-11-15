@@ -1806,6 +1806,7 @@ fn clicking_the_composer_moves_the_cursor() {
     let (mut app, _rx, _secrets) = test_app();
     app.tab_mut().input = "hello world".to_string();
     app.tab_mut().cursor = 0;
+    app.composer_block_area = Rect::new(0, 19, 60, 5);
     app.composer_input_area = Rect::new(2, 20, 40, 3);
     app.composer_scroll = 0;
     let click = MouseEvent {
@@ -2592,6 +2593,7 @@ fn doc_selection_copies_while_scrolling_across_long_and_wrapped_content() {
         row: start_screen_row,
         modifiers: KeyModifiers::NONE,
     }));
+    app.handle_key_event(key(KeyCode::Esc));
 
     app.scroll_to_bottom();
     terminal
@@ -2846,4 +2848,43 @@ fn session_picker_refuses_to_delete_an_open_session() {
         Some(ActiveModal::SessionSelect { error: Some(message), .. })
             if message.contains("Close the tab")
     ));
+}
+
+#[test]
+fn dragging_in_the_composer_selects_without_copying() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.tab_mut().input = "hello world".to_string();
+    app.tab_mut().cursor = 0;
+    app.composer_block_area = Rect::new(0, 19, 60, 4);
+    app.composer_input_area = Rect::new(2, 20, 50, 2);
+
+    let down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 20,
+        modifiers: KeyModifiers::NONE,
+    };
+    let drag = MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 8,
+        row: 20,
+        modifiers: KeyModifiers::NONE,
+    };
+    let up = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 8,
+        row: 20,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(app.handle_mouse_event(down));
+    assert!(app.handle_mouse_event(drag));
+    assert!(app.handle_mouse_event(up));
+
+    assert_eq!(app.composer_selection, Some((0, 6)));
+    assert!(app.last_copied_text.is_none());
+    assert_eq!(app.tab().cursor, 6);
+
+    app.handle_key_event(key(KeyCode::Backspace));
+    assert_eq!(app.tab().input, "world");
+    assert_eq!(app.tab().cursor, 0);
 }

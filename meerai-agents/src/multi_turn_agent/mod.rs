@@ -133,6 +133,7 @@ pub(super) struct CollectedStream {
     end: StreamEnd,
     pub(super) text: String,
     pub(super) reasoning: String,
+    pub(super) tool_calls: Vec<ToolCall>,
     text_item_id: Option<ItemId>,
     reasoning_item_id: Option<ItemId>,
 }

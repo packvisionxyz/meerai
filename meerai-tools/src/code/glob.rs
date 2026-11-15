@@ -14,9 +14,11 @@ pub(crate) struct GlobArgs {
     #[schemars(
         description = "Glob pattern matched against workspace-relative paths, for example \"**/*.rs\"."
     )]
+    #[serde(alias = "query", alias = "glob")]
     pattern: String,
 
     #[schemars(description = "Directory to search. Defaults to the workspace root.")]
+    #[serde(alias = "dir", alias = "file_path")]
     path: Option<String>,
 }
 

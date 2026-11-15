@@ -2,7 +2,6 @@ use std::sync::{OnceLock, RwLock};
 
 use meerai_common::settings::ThemeSettings;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
@@ -176,17 +175,6 @@ pub fn label() -> Style {
 
 pub fn heading() -> Style {
     Style::default().fg(p().accent).add_modifier(Modifier::BOLD)
-}
-
-pub fn dialog(title: &str) -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(p().border))
-        .style(Style::default().bg(p().surface))
-        .title(ratatui::text::Span::styled(
-            title.to_string(),
-            Style::default().fg(p().muted).add_modifier(Modifier::BOLD),
-        ))
 }
 
 #[cfg(test)]

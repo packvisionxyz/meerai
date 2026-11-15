@@ -51,11 +51,14 @@ struct GoToDefinitionArgs {
     #[schemars(
         description = "Path to the source file (workspace-relative or absolute inside workspace)."
     )]
+    #[serde(alias = "file", alias = "file_path")]
     path: String,
     #[schemars(description = "1-based line number.")]
+    #[serde(alias = "line_number")]
     #[serde(deserialize_with = "meerai_core::lenient::u32_value")]
     line: u32,
     #[schemars(description = "1-based character (column) offset.")]
+    #[serde(alias = "column")]
     #[serde(deserialize_with = "meerai_core::lenient::u32_value")]
     character: u32,
 }
@@ -65,11 +68,14 @@ struct FindReferencesArgs {
     #[schemars(
         description = "Path to the source file (workspace-relative or absolute inside workspace)."
     )]
+    #[serde(alias = "file", alias = "file_path")]
     path: String,
     #[schemars(description = "1-based line number.")]
+    #[serde(alias = "line_number")]
     #[serde(deserialize_with = "meerai_core::lenient::u32_value")]
     line: u32,
     #[schemars(description = "1-based character (column) offset.")]
+    #[serde(alias = "column")]
     #[serde(deserialize_with = "meerai_core::lenient::u32_value")]
     character: u32,
     #[schemars(description = "Include the declaration itself in references (defaults to true).")]

@@ -9,6 +9,7 @@ const DEFAULT_LIMIT: usize = 2000;
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct ReadFileArgs {
     #[schemars(description = "File path, relative to the workspace root or absolute.")]
+    #[serde(alias = "file", alias = "file_path", alias = "filename")]
     path: String,
 
     #[schemars(description = "1-based line number to start reading from. Defaults to 1.")]

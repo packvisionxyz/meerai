@@ -10,12 +10,15 @@ const MAX_REPORTED_LINES: usize = 20;
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct EditFileArgs {
     #[schemars(description = "File path, relative to the workspace root or absolute.")]
+    #[serde(alias = "file", alias = "file_path", alias = "filename")]
     path: String,
 
     #[schemars(description = "Exact text to replace, including indentation and newlines.")]
+    #[serde(alias = "old_text", alias = "old")]
     old_string: String,
 
     #[schemars(description = "Replacement text for old_string.")]
+    #[serde(alias = "new_text", alias = "new")]
     new_string: String,
 
     #[schemars(description = "Replace every occurrence instead of requiring a unique match.")]

@@ -897,6 +897,7 @@ fn write_fake_session(root: &Path, id: &str, updated_at_ms: u64) {
         forked_from: None,
         inherited_event_count: None,
         parent_session_id: None,
+        approval_mode: None,
     };
     std::fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
 }

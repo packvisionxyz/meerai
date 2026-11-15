@@ -8,9 +8,11 @@ use crate::code::{CodeTools, ToolRun, diff, failure_run, success_run};
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct WriteFileArgs {
     #[schemars(description = "File path, relative to the workspace root or absolute.")]
+    #[serde(alias = "file", alias = "file_path", alias = "filename")]
     path: String,
 
     #[schemars(description = "Full file content to write. Parent directories are created.")]
+    #[serde(alias = "text", alias = "contents")]
     content: String,
 }
 

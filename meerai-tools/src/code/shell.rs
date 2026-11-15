@@ -61,6 +61,7 @@ pub(crate) struct ShellArgs {
             description = "Shell command to run with `cmd /C`, using the workspace root as cwd."
         )
     )]
+    #[serde(alias = "cmd")]
     command: String,
 
     #[schemars(description = "Timeout in milliseconds. Defaults to 120000.")]

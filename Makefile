@@ -20,6 +20,8 @@ endif
 BIN_NAME := meerai
 BIN_PKG  := meerai-cli
 DIST_DIR := dist
+COLOR    ?= never
+CARGO    := CARGO_TERM_COLOR=$(COLOR) cargo
 
 UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)
 UNAME_M := $(shell uname -m 2>/dev/null || echo x86_64)
@@ -58,9 +60,9 @@ BUILD_TARGET := $(if $(target),$(target),$(HOST_TARGET))
 ##@ Help & Information
 
 help: ## Show this help message
-	@awk 'BEGIN {FS = ":.*##"; printf "\n\033[1mUsage:\033[0m make \033[36m<target>\033[0m\n"} \
-		/^[a-zA-Z0-9_-]+:.*?##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 } \
-		/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage: make <target>\n"} \
+		/^[a-zA-Z0-9_-]+:.*?##/ { printf "  %-20s %s\n", $$1, $$2 } \
+		/^##@/ { printf "\n%s\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
 check: ## Check required toolchain commands
 	@command -v rustup >/dev/null 2>&1 || { echo "rustup is not installed"; exit 1; }
@@ -75,27 +77,27 @@ check: ## Check required toolchain commands
 ##@ Development
 
 dev: ## Run meerai locally in development mode (pass flags via ARGS="...")
-	cargo run -p $(BIN_PKG) -- $(ARGS)
+	$(CARGO) run -p $(BIN_PKG) -- $(ARGS)
 
 run: dev ## Alias for dev
 
 watch: ## Watch source changes and rerun meerai (requires cargo-watch)
 	@command -v cargo-watch >/dev/null 2>&1 || { echo "Install cargo-watch first: cargo install cargo-watch"; exit 1; }
-	cargo watch -x "run -p $(BIN_PKG) -- $(ARGS)"
+	$(CARGO) watch -x "run -p $(BIN_PKG) -- $(ARGS)"
 
 fmt: ## Format all workspace Rust crates
-	cargo fmt --all
+	$(CARGO) fmt --all
 
 format: fmt ## Alias for fmt
 
 fmt-check: ## Check workspace formatting without modifying files
-	cargo fmt --all -- --check
+	$(CARGO) fmt --all -- --check
 
 lint: ## Run clippy across all workspace targets
-	cargo clippy --workspace --all-targets
+	$(CARGO) clippy --workspace --all-targets
 
 test: ## Run all workspace tests
-	cargo test --workspace
+	$(CARGO) test --workspace
 
 ci: fmt-check lint test ## Run local CI verification (fmt-check -> lint -> test)
 
@@ -108,19 +110,19 @@ verify: ci ## Alias for ci, matching the CI "verify" job
 ##@ Build & Packaging
 
 build: ## Build release binary (optional target=<triple>, e.g. target=x86_64-unknown-linux-gnu)
-	cargo build --release --locked -p $(BIN_PKG) $(if $(target),--target $(target),) $(ARGS)
+	$(CARGO) build --release --locked -p $(BIN_PKG) $(if $(target),--target $(target),) $(ARGS)
 	@BIN_PATH="target/$(if $(target),$(target)/,)release/$(BIN_NAME)$(BIN_EXT)"; \
 	echo "Built binary: $$BIN_PATH"
 
 build-debug: ## Build debug binary
-	cargo build -p $(BIN_PKG) $(ARGS)
+	$(CARGO) build -p $(BIN_PKG) $(ARGS)
 
 install: ## Install meerai locally into Cargo bin directory
-	cargo install --path $(BIN_PKG) --locked
+	$(CARGO) install --path $(BIN_PKG) --locked
 
 package: ## Build and package release archive + SHA256 into dist/ (optional target=<triple>)
 	@mkdir -p $(DIST_DIR)
-	cargo build --release --locked -p $(BIN_PKG) --target $(BUILD_TARGET) $(ARGS)
+	$(CARGO) build --release --locked -p $(BIN_PKG) --target $(BUILD_TARGET) $(ARGS)
 	@ARCHIVE_BASE="$(BIN_NAME)-$(BUILD_TARGET)"; \
 	if [[ "$(BUILD_TARGET)" == *windows* ]]; then \
 		ARCHIVE="$$ARCHIVE_BASE.zip"; \
@@ -146,7 +148,7 @@ package: ## Build and package release archive + SHA256 into dist/ (optional targ
 ##@ Cleanup
 
 clean: clean-dist ## Clean Cargo build and release artifacts
-	cargo clean
+	$(CARGO) clean
 
 clean-dist: ## Remove packaged release artifacts in dist/
 	rm -rf $(DIST_DIR)

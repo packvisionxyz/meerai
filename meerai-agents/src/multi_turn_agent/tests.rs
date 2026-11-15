@@ -5246,3 +5246,421 @@ async fn apply_skill_screens_flagged_instructions() {
 
     let _ = cmd_tx.send(AgentCommand::Quit);
 }
+
+#[tokio::test]
+async fn harness_requests_include_previous_assistant_turn_and_tool_results() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(text_end("first reply"))],
+        vec![ChatStreamEvent::End(text_end("second reply"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![],
+        "system",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("first", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    agent
+        .prompt_streaming("second", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let reqs = streamer.requests.lock().unwrap();
+    let debug = format!("{:?}", reqs[1].messages);
+    println!("REQ1: {debug}");
+    assert!(
+        debug.contains("first reply"),
+        "missing assistant reply: {debug}"
+    );
+    assert!(debug.contains("second"), "missing new prompt: {debug}");
+    assert_eq!(reqs[1].messages.len(), 3, "{debug}");
+}
+
+#[tokio::test]
+async fn harness_tool_step_requests_include_calls_and_results() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+            call_id: "c1".to_string(),
+            fn_name: "echo-say".to_string(),
+            fn_arguments: serde_json::json!({"text": "hi"}),
+            thought_signatures: None,
+        }]))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![Box::new(EchoToolset)],
+        "system",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let reqs = streamer.requests.lock().unwrap();
+    let debug = format!("{:?}", reqs[1].messages);
+    println!("TOOL REQ: {debug}");
+    assert!(debug.contains("echoed:hi"), "{debug}");
+    assert!(debug.contains("ToolCall"), "{debug}");
+    assert_eq!(reqs[1].messages.len(), 3, "{debug}");
+}
+
+#[tokio::test]
+async fn harness_two_tool_calls_pair_both_results() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![
+            ToolCall {
+                call_id: "c1".to_string(),
+                fn_name: "echo-say".to_string(),
+                fn_arguments: serde_json::json!({"text": "one"}),
+                thought_signatures: None,
+            },
+            ToolCall {
+                call_id: "c2".to_string(),
+                fn_name: "echo-say".to_string(),
+                fn_arguments: serde_json::json!({"text": "two"}),
+                thought_signatures: None,
+            },
+        ]))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![Box::new(EchoToolset)],
+        "system",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let reqs = streamer.requests.lock().unwrap();
+    let debug = format!("{:?}", reqs[1].messages);
+    println!("TWO REQ: {debug}");
+    assert!(debug.contains("echoed:one"), "{debug}");
+    assert!(debug.contains("echoed:two"), "{debug}");
+    assert_eq!(reqs[1].messages.len(), 4, "{debug}");
+}
+
+#[tokio::test]
+async fn failed_tool_result_is_persisted_and_sent_next_step() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+            call_id: "c1".to_string(),
+            fn_name: "echo-say".to_string(),
+            fn_arguments: serde_json::json!({"text": "fail"}),
+            thought_signatures: None,
+        }]))],
+        vec![ChatStreamEvent::End(text_end("after failure"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![Box::new(EchoToolset)],
+        "system",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "after failure");
+
+    let events = session_events(&session);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::AssistantMessage { tool_calls, .. } if !tool_calls.is_empty()
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::ToolResult { output, .. } if output.render().contains("soft failure")
+    )));
+
+    let reqs = streamer.requests.lock().unwrap();
+    let debug = format!("{:?}", reqs[1].messages);
+    assert!(debug.contains("soft failure"), "{debug}");
+    assert!(debug.contains("ToolCall"), "{debug}");
+}
+
+#[tokio::test]
+async fn repeated_identical_tool_batches_end_with_loop_detected() {
+    let batch = || {
+        vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+            call_id: "c1".to_string(),
+            fn_name: "echo-say".to_string(),
+            fn_arguments: serde_json::json!({"text": "hi"}),
+            thought_signatures: None,
+        }]))]
+    };
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        batch(),
+        batch(),
+        batch(),
+        batch(),
+        batch(),
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![Box::new(EchoToolset)],
+        "system",
+        &session,
+        yolo(),
+        HarnessConfig {
+            max_steps_per_turn: 10,
+            ..HarnessConfig::default()
+        },
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .expect_err("loop must fail");
+    assert!(session_events(&session).iter().any(|event| matches!(
+        event,
+        SessionEvent::Error {
+            code: ErrorCode::LoopDetected,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn tool_call_chunks_execute_when_capture_is_empty() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![
+            ChatStreamEvent::ToolCallChunk(genai::chat::ToolChunk {
+                tool_call: ToolCall {
+                    call_id: "chunk-call".to_string(),
+                    fn_name: "echo-say".to_string(),
+                    fn_arguments: serde_json::json!({"text": "chunked"}),
+                    thought_signatures: None,
+                },
+            }),
+            ChatStreamEvent::End(StreamEnd::default()),
+        ],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![Box::new(EchoToolset)],
+        "system",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "done");
+
+    let events = session_events(&session);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::ToolResult { output, .. } if output.render().contains("echoed:chunked")
+    )));
+}
+
+#[tokio::test]
+async fn later_tool_call_chunks_replace_earlier_partial_arguments() {
+    let partial = genai::chat::ToolChunk {
+        tool_call: ToolCall {
+            call_id: "chunk-call".to_string(),
+            fn_name: "echo-say".to_string(),
+            fn_arguments: serde_json::Value::String(String::new()),
+            thought_signatures: None,
+        },
+    };
+    let complete = genai::chat::ToolChunk {
+        tool_call: ToolCall {
+            call_id: "chunk-call".to_string(),
+            fn_name: "echo-say".to_string(),
+            fn_arguments: serde_json::json!({"text": "chunked"}),
+            thought_signatures: None,
+        },
+    };
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![
+            ChatStreamEvent::ToolCallChunk(partial),
+            ChatStreamEvent::ToolCallChunk(complete),
+            ChatStreamEvent::End(StreamEnd::default()),
+        ],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![Box::new(EchoToolset)],
+        "system",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "done");
+
+    let events = session_events(&session);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::ToolResult { output, .. } if output.render().contains("echoed:chunked")
+    )));
+}
+
+#[tokio::test]
+async fn double_encoded_tool_arguments_are_normalized() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+            call_id: "c1".to_string(),
+            fn_name: "echo-say".to_string(),
+            fn_arguments: serde_json::Value::String(r#"{"text":"hi"}"#.to_string()),
+            thought_signatures: None,
+        }]))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![Box::new(EchoToolset)],
+        "system",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "done");
+
+    let events = session_events(&session);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::ToolCall { args, .. } if args == r#"{"text":"hi"}"#
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::ToolResult { output, .. } if output.render().contains("echoed:hi")
+    )));
+}
+
+struct WrongArgsToolset {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Toolset for WrongArgsToolset {
+    fn name(&self) -> String {
+        "wrong".to_string()
+    }
+
+    fn definition(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            r#type: "function".to_string(),
+            name: "wrong-call".to_string(),
+            description: "always fails to parse".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }]
+    }
+
+    fn contain(&self, fn_name: &str) -> bool {
+        fn_name == "wrong-call"
+    }
+
+    async fn invoke(&self, _fn_name: &str, _args: &str) -> Result<ToolOutput, ToolError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Err(ToolError::WrongArguments(
+            serde_json::from_str::<u32>("not a number").unwrap_err(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn argument_parse_errors_are_not_retried() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let toolset = WrongArgsToolset {
+        calls: calls.clone(),
+    };
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+            call_id: "c1".to_string(),
+            fn_name: "wrong-call".to_string(),
+            fn_arguments: serde_json::json!({}),
+            thought_signatures: None,
+        }]))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        vec![Box::new(toolset)],
+        "system",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn requests_include_tool_schemas() {
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("hi"),
+    )]]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![Box::new(EchoToolset)],
+        "system",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let reqs = streamer.requests.lock().unwrap();
+    let tools = reqs[0].tools.as_ref().expect("tools sent");
+    let echo = tools
+        .iter()
+        .find(|tool| tool.name.to_string() == "echo-say")
+        .expect("echo-say tool");
+    let schema = echo.schema.as_ref().expect("schema");
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["properties"]["text"]["type"], "string");
+}

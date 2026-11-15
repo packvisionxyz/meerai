@@ -13,7 +13,7 @@ use tokio::time::{self, MissedTickBehavior};
 
 use crate::app::{AppState, FileChangeEntry, PendingSessionAction, TranscriptEntry};
 use crate::diff::list_git_changes;
-use crate::terminal::TerminalGuard;
+use crate::terminal::{self, TerminalGuard};
 use crate::{OpenedSession, SessionOpener, ui};
 
 const TICK_INTERVAL: Duration = Duration::from_millis(80);
@@ -55,6 +55,7 @@ pub async fn run_event_loop(
     let (loop_tx, mut loop_rx) = mpsc::unbounded_channel::<LoopMsg>();
     spawn_tab_forwarder(app.tab().tab_id, event_rx, loop_tx.clone());
 
+    let mut last_status: Option<terminal::TerminalStatus> = None;
     let (git_tx, mut git_rx) = mpsc::unbounded_channel::<Vec<FileChangeEntry>>();
     let mut git_in_flight = false;
     let mut ticks_since_git = 0usize;
@@ -132,6 +133,18 @@ pub async fn run_event_loop(
                     );
                 }
             }
+        }
+
+        let desired_status = if app.tabs.iter().any(|tab| !tab.pending_approvals.is_empty()) {
+            terminal::TerminalStatus::Approval
+        } else if app.tabs.iter().any(|tab| tab.is_running) {
+            terminal::TerminalStatus::Working
+        } else {
+            terminal::TerminalStatus::Idle
+        };
+        if last_status != Some(desired_status) {
+            terminal::set_status(desired_status);
+            last_status = Some(desired_status);
         }
 
         if app.pending_reload {
@@ -337,12 +350,8 @@ fn handle_loop_msg(
 ) -> bool {
     match msg {
         LoopMsg::Agent { tab_id, event } => {
-            match &event {
-                AgentEvent::ApprovalRequested { .. } => crate::terminal::notify_approval(),
-                AgentEvent::ApprovalResolved { .. } | AgentEvent::TurnCompleted { .. } => {
-                    crate::terminal::clear_notification();
-                }
-                _ => {}
+            if matches!(event, AgentEvent::ApprovalRequested { .. }) {
+                crate::terminal::notify_approval();
             }
             let touches = event_touches_workspace(&event);
             app.handle_tab_agent_event(tab_id, event);

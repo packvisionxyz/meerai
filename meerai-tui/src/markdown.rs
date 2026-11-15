@@ -270,12 +270,17 @@ fn plain_text<'a>(node: &'a AstNode<'a>) -> String {
     let mut text = String::new();
     for child in node.descendants() {
         match &child.data.borrow().value {
-            NodeValue::Text(value)
-            | NodeValue::Code(comrak::nodes::NodeCode { literal: value, .. }) => {
+            NodeValue::Text(value) => {
                 if !text.is_empty() {
                     text.push(' ');
                 }
                 text.push_str(value);
+            }
+            NodeValue::Code(comrak::nodes::NodeCode { literal, .. }) => {
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                text.push_str(literal);
             }
             NodeValue::SoftBreak | NodeValue::LineBreak => text.push(' '),
             _ => {}

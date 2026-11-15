@@ -11,7 +11,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use regex::Regex;
 
 use crate::app::{
@@ -228,7 +228,7 @@ fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
         height: area.height.saturating_sub(2),
     };
 
-    let raw_lines = build_transcript_lines(app, inner.width as usize);
+    let raw_lines = build_transcript_lines(app);
     let mut wrapped = if inner.width > 0 {
         wrap_tagged_lines(raw_lines, inner.width as usize)
     } else {
@@ -711,7 +711,7 @@ fn digest_line(digest: &TurnDigest, running: bool, spinner: &str) -> Option<Line
     ]))
 }
 
-fn build_transcript_lines(app: &AppState, width: usize) -> Vec<TaggedTranscriptLine> {
+fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
     let mut lines = build_header_lines(app);
     let transcript = &app.tab().transcript;
     if transcript.is_empty() {
@@ -728,25 +728,16 @@ fn build_transcript_lines(app: &AppState, width: usize) -> Vec<TaggedTranscriptL
         }
         match entry {
             TranscriptEntry::User { text } => {
-                let mut header = vec![Span::styled(
+                let header = vec![Span::styled(
                     "▌ you",
                     Style::default()
                         .fg(theme::p().accent)
                         .add_modifier(Modifier::BOLD),
                 )];
-                if app.hovered_entry == Some(idx) {
-                    const ACTIONS: &str = "Revert  Copy  Fork";
-                    let used = 5usize;
-                    let pad = width.saturating_sub(used + ACTIONS.len());
-                    header.push(Span::raw(" ".repeat(pad)));
-                    let action_style = Style::default().fg(theme::p().faint);
-                    header.push(Span::styled("Revert", action_style));
-                    header.push(Span::styled("  ", action_style));
-                    header.push(Span::styled("Copy", action_style));
-                    header.push(Span::styled("  ", action_style));
-                    header.push(Span::styled("Fork", action_style));
-                }
-                lines.push(with_hover(banded_line(Line::from(header), None, 2), idx));
+                lines.push(with_hover(
+                    banded_line(Line::from(header), Some(idx), 2),
+                    idx,
+                ));
                 for line in text.split('\n') {
                     lines.push(with_hover(
                         banded_line(
@@ -757,7 +748,7 @@ fn build_transcript_lines(app: &AppState, width: usize) -> Vec<TaggedTranscriptL
                                     Style::default().fg(theme::p().text),
                                 ),
                             ]),
-                            None,
+                            Some(idx),
                             2,
                         ),
                         idx,
@@ -1188,6 +1179,7 @@ fn build_transcript_lines(app: &AppState, width: usize) -> Vec<TaggedTranscriptL
 }
 
 fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
+    app.composer_block_area = area;
     frame.render_widget(
         Block::default().style(Style::default().bg(theme::p().surface)),
         area,
@@ -1248,6 +1240,31 @@ fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
 
     frame.render_widget(lines, content);
 
+    if let Some((start, end)) = app.composer_selection.filter(|(start, end)| start < end) {
+        let input = app.tab().input.clone();
+        let (start_line, start_col) = display_pos_for_byte(&input, start, &app.agents, &app.skills);
+        let (end_line, end_col) = display_pos_for_byte(&input, end, &app.agents, &app.skills);
+        let highlight = theme::p().surface_high;
+        let buf = frame.buffer_mut();
+        for line in start_line..=end_line {
+            if line < scroll_y || line >= scroll_y + content.height as usize {
+                continue;
+            }
+            let y = content.y + (line - scroll_y) as u16;
+            let from = if line == start_line { start_col } else { 0 };
+            let to = if line == end_line {
+                end_col
+            } else {
+                content.width as usize
+            };
+            for col in from..to {
+                if let Some(cell) = buf.cell_mut((content.x + col as u16, y)) {
+                    cell.set_bg(highlight);
+                }
+            }
+        }
+    }
+
     if app.modal.is_none()
         && app.mode == InputMode::Insert
         && content.width > 0
@@ -1260,6 +1277,40 @@ fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
         let y = (content.y + rel_row as u16).min(max_y);
         frame.set_cursor_position(Position::new(x, y));
     }
+}
+
+fn display_width_of(line: &str, agents: &[AgentDefinition], skills: &[SkillDefinition]) -> usize {
+    let mut width = 0usize;
+    let mut index = 0usize;
+    while index < line.len() {
+        if let Some((kind, id, end)) = parse_mention_token(line, index)
+            && mention_is_known(kind, id, agents, skills)
+        {
+            width += id.chars().count();
+            index = end;
+            continue;
+        }
+        let Some(ch) = line[index..].chars().next() else {
+            break;
+        };
+        width += 1;
+        index += ch.len_utf8();
+    }
+    width
+}
+
+fn display_pos_for_byte(
+    input: &str,
+    byte: usize,
+    agents: &[AgentDefinition],
+    skills: &[SkillDefinition],
+) -> (usize, usize) {
+    let clamped = byte.min(input.len());
+    let before = &input[..clamped];
+    let line = before.matches('\n').count();
+    let line_start = before.rfind('\n').map(|index| index + 1).unwrap_or(0);
+    let width = display_width_of(&input[line_start..clamped], agents, skills);
+    (line, width)
 }
 
 fn render_composer_line(
@@ -1389,7 +1440,7 @@ fn render_completion_popup(
     }
 
     let max_visible = (transcript_area.height.saturating_sub(2) as usize).clamp(1, 8);
-    let height = (items.len().min(max_visible) as u16) + 2;
+    let height = items.len().min(max_visible) as u16 + 2;
     let width = composer_area.width.saturating_sub(2).min(64);
 
     let x = composer_area.x + 1;
@@ -1399,21 +1450,17 @@ fn render_completion_popup(
     let title = match app.completion.kind() {
         Some(CompletionKind::SlashCommand) => {
             format!(
-                " Commands ({}/{}) ",
+                "Commands ({}/{})",
                 app.completion.selected() + 1,
                 items.len()
             )
         }
         Some(CompletionKind::Model) => {
-            format!(
-                " Models ({}/{}) ",
-                app.completion.selected() + 1,
-                items.len()
-            )
+            format!("Models ({}/{})", app.completion.selected() + 1, items.len())
         }
         Some(CompletionKind::File) => {
             format!(
-                " Mentions ({}/{}) ",
+                "Mentions ({}/{})",
                 app.completion.selected() + 1,
                 items.len()
             )
@@ -1426,7 +1473,9 @@ fn render_completion_popup(
         .map(|item| {
             let mut spans = vec![Span::styled(
                 item.label.clone(),
-                Style::default().add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme::p().text)
+                    .add_modifier(Modifier::BOLD),
             )];
             if let Some(badge) = item.item_kind.badge() {
                 let color = match item.item_kind {
@@ -1451,17 +1500,10 @@ fn render_completion_popup(
     let mut list_state = ListState::default();
     list_state.select(Some(app.completion.selected()));
 
-    let list = List::new(list_items)
-        .block(theme::dialog(&title))
-        .highlight_style(
-            Style::default()
-                .bg(theme::p().surface_high)
-                .fg(theme::p().text)
-                .add_modifier(Modifier::BOLD),
-        );
+    let inner = dialog_frame(frame, popup_area, &title);
+    let list = List::new(list_items).highlight_style(selection_style());
 
-    frame.render_widget(Clear, popup_area);
-    frame.render_stateful_widget(list, popup_area, &mut list_state);
+    frame.render_stateful_widget(list, inner, &mut list_state);
 }
 
 fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
@@ -1475,14 +1517,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
     match modal {
         ActiveModal::ProviderSelect { filter, selected } => {
             let popup = cap_width(centered_rect(area, 66, 68, 42, 10), 64);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::p().border))
-                .style(Style::default().bg(theme::p().surface))
-                .title(" Connect Provider (/connect) ");
-            let inner = block.inner(popup);
-            frame.render_widget(Clear, popup);
-            frame.render_widget(block, popup);
+            let inner = dialog_frame(frame, popup, "Connect Provider (/connect)");
 
             let rows = Layout::vertical([
                 Constraint::Length(1),
@@ -1492,14 +1527,20 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             .split(inner);
 
             let filter_line = Line::from(vec![
-                Span::styled("Filter: ", Style::default().fg(theme::p().warning)),
-                Span::raw(if filter.is_empty() {
-                    "(type to filter)"
+                Span::styled(
+                    "Filter ",
+                    Style::default()
+                        .fg(theme::p().muted)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                if filter.is_empty() {
+                    Span::styled("(type to filter)", Style::default().fg(theme::p().faint))
                 } else {
-                    filter.as_str()
-                }),
+                    Span::styled(filter.clone(), Style::default().fg(theme::p().text))
+                },
             ]);
-            frame.render_widget(Paragraph::new(filter_line), rows[0]);
+            let filter_area = input_band(frame, rows[0]);
+            frame.render_widget(Paragraph::new(filter_line), filter_area);
 
             let providers = app.filtered_providers(filter);
             let active_provider = &app.tab().active_provider;
@@ -1509,10 +1550,15 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                     let (badge, color) = key_status_style(status);
                     let active_mark = if p.id == *active_provider { "*" } else { " " };
                     ListItem::new(Line::from(vec![
-                        Span::raw(format!("{active_mark} ")),
+                        Span::styled(
+                            format!("{active_mark} "),
+                            Style::default().fg(theme::p().faint),
+                        ),
                         Span::styled(
                             p.display_name.clone(),
-                            Style::default().add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(theme::p().text)
+                                .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             format!(" ({}) ", p.id),
@@ -1527,16 +1573,11 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             if !providers.is_empty() {
                 state.select(Some((*selected).min(providers.len() - 1)));
             }
-            let list = List::new(list_items).highlight_style(
-                Style::default()
-                    .bg(theme::p().surface_high)
-                    .fg(theme::p().text)
-                    .add_modifier(Modifier::BOLD),
-            );
+            let list = List::new(list_items).highlight_style(selection_style());
             frame.render_stateful_widget(list, rows[1], &mut state);
 
             let footer = Paragraph::new(Line::from(Span::styled(
-                "Enter:configure  Up/Down:move  Type:filter  Esc:close",
+                "Enter configure · Up/Down move · Type filter · Esc close",
                 Style::default().fg(theme::p().faint),
             )));
             frame.render_widget(footer, rows[2]);
@@ -1551,15 +1592,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             error,
         } => {
             let popup = centered_rect_fixed(area, 64, 13);
-            let title = format!(" Connect {provider_name} ({provider_id}) ");
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::p().border))
-                .style(Style::default().bg(theme::p().surface))
-                .title(title);
-            let inner = block.inner(popup);
-            frame.render_widget(Clear, popup);
-            frame.render_widget(block, popup);
+            let title = format!("Connect {provider_name} ({provider_id})");
+            let inner = dialog_frame(frame, popup, &title);
 
             let (badge, badge_color) = key_status_style(existing_key_status);
             let masked_key = if api_key.is_empty() {
@@ -1583,32 +1617,37 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
 
             let key_label_style = if !editing_base_url {
                 Style::default()
-                    .fg(theme::p().success)
+                    .fg(theme::p().interactive)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme::p().faint)
+                Style::default().fg(theme::p().muted)
             };
             let url_label_style = if *editing_base_url {
                 Style::default()
-                    .fg(theme::p().success)
+                    .fg(theme::p().interactive)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme::p().faint)
+                Style::default().fg(theme::p().muted)
             };
 
             let mut lines = vec![
                 Line::from(vec![
-                    Span::raw("Status: "),
+                    Span::styled(
+                        "Status    ",
+                        Style::default()
+                            .fg(theme::p().muted)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(format!("[{badge}]"), Style::default().fg(badge_color)),
                 ]),
                 Line::default(),
                 Line::from(vec![
-                    Span::styled("API Key : ", key_label_style),
-                    Span::raw(masked_key),
+                    Span::styled("API key   ", key_label_style),
+                    Span::styled(masked_key, Style::default().fg(theme::p().text)),
                 ]),
                 Line::from(vec![
-                    Span::styled("Base URL: ", url_label_style),
-                    Span::raw(url_display),
+                    Span::styled("Base URL  ", url_label_style),
+                    Span::styled(url_display, Style::default().fg(theme::p().text)),
                 ]),
                 Line::default(),
             ];
@@ -1625,7 +1664,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 )));
             }
             lines.push(Line::from(Span::styled(
-                "Enter:save  Tab:switch field  Ctrl-d:delete key  Esc:back",
+                "Enter save · Tab switch field · Ctrl-d delete key · Esc back",
                 Style::default().fg(theme::p().faint),
             )));
 
@@ -1645,15 +1684,8 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 (8 + recent.len().min(8)) as u16
             };
             let popup = centered_rect_fixed(area, 60, height);
-            let title = format!(" Set Model [{active_provider}] (/model) ");
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::p().border))
-                .style(Style::default().bg(theme::p().surface))
-                .title(title);
-            let inner = block.inner(popup);
-            frame.render_widget(Clear, popup);
-            frame.render_widget(block, popup);
+            let title = format!("Set Model [{active_provider}] (/model)");
+            let inner = dialog_frame(frame, popup, &title);
 
             let rows = Layout::vertical([
                 Constraint::Length(2),
@@ -1669,21 +1701,28 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             let input_display = if input.is_empty() {
                 Span::styled(placeholder, Style::default().fg(theme::p().faint))
             } else {
-                Span::raw(input.as_str())
+                Span::styled(
+                    input.as_str().to_string(),
+                    Style::default().fg(theme::p().text),
+                )
             };
-            let input_lines = vec![
-                Line::from(vec![
-                    Span::styled(
-                        "Model: ",
-                        Style::default()
-                            .fg(theme::p().success)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    input_display,
-                ]),
-                Line::default(),
-            ];
-            frame.render_widget(Paragraph::new(input_lines), rows[0]);
+            let input_lines = vec![Line::from(vec![
+                Span::styled(
+                    "Model  ",
+                    Style::default()
+                        .fg(theme::p().interactive)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                input_display,
+            ])];
+            let input_area = input_band(
+                frame,
+                Rect {
+                    height: 1,
+                    ..rows[0]
+                },
+            );
+            frame.render_widget(Paragraph::new(input_lines), input_area);
 
             if recent.is_empty() {
                 frame.render_widget(
@@ -1699,8 +1738,16 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                     .map(|m| {
                         let active_mark = if m == active_model { "*" } else { " " };
                         ListItem::new(Line::from(vec![
-                            Span::raw(format!("{active_mark} ")),
-                            Span::styled(m.clone(), Style::default().add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                format!("{active_mark} "),
+                                Style::default().fg(theme::p().faint),
+                            ),
+                            Span::styled(
+                                m.clone(),
+                                Style::default()
+                                    .fg(theme::p().text)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
                         ]))
                     })
                     .collect();
@@ -1708,12 +1755,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 if let Some(idx) = selected_recent {
                     state.select(Some((*idx).min(recent.len() - 1)));
                 }
-                let list = List::new(list_items).highlight_style(
-                    Style::default()
-                        .bg(theme::p().surface_high)
-                        .fg(theme::p().text)
-                        .add_modifier(Modifier::BOLD),
-                );
+                let list = List::new(list_items).highlight_style(selection_style());
                 frame.render_stateful_widget(list, rows[1], &mut state);
             }
 
@@ -1731,7 +1773,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             let footer_lines = vec![
                 status_line,
                 Line::from(Span::styled(
-                    "Enter:apply  Up/Down:recent  Ctrl-u:clear  Esc:close",
+                    "Enter apply · Up/Down recent · Ctrl-u clear · Esc close",
                     Style::default().fg(theme::p().faint),
                 )),
             ];
@@ -1749,37 +1791,26 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 format!(" [{}/{}]", file_index + 1, app.file_changes.len())
             };
             let title = format!(
-                " Diff: {} ({}) +{} -{}{file_pos} ",
+                "Diff: {} ({}) +{} -{}{file_pos}",
                 diff.path, diff.status, diff.additions, diff.deletions
             );
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::p().border))
-                .style(Style::default().bg(theme::p().surface))
-                .title(title);
-            let inner = block.inner(popup);
-            frame.render_widget(Clear, popup);
-            frame.render_widget(block, popup);
+            let inner = dialog_frame(frame, popup, &title);
 
             let rows = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(inner);
-            let panes =
-                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(rows[0]);
+            let panes = Layout::horizontal([
+                Constraint::Percentage(50),
+                Constraint::Length(1),
+                Constraint::Percentage(50),
+            ])
+            .split(rows[0]);
 
-            let left_block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::p().border))
-                .style(Style::default().bg(theme::p().surface))
-                .title(format!(" Original (a/{}) ", diff.path));
-            let right_block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::p().border))
-                .style(Style::default().bg(theme::p().surface))
-                .title(format!(" Working Tree (b/{}) ", diff.path));
+            let left_header = pane_header(frame, panes[0], &format!("Original (a/{})", diff.path));
+            let right_header =
+                pane_header(frame, panes[2], &format!("Working Tree (b/{})", diff.path));
 
-            let left_inner_w = left_block.inner(panes[0]).width as usize;
-            let right_inner_w = right_block.inner(panes[1]).width as usize;
-            let view_h = left_block.inner(panes[0]).height.max(1) as usize;
+            let left_inner_w = left_header.width as usize;
+            let right_inner_w = right_header.width as usize;
+            let view_h = left_header.height.max(1) as usize;
             let max_scroll = diff.rows.len().saturating_sub(view_h);
             let effective_scroll = (*scroll).min(max_scroll);
 
@@ -1800,11 +1831,11 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 ));
             }
 
-            frame.render_widget(Paragraph::new(left_lines).block(left_block), panes[0]);
-            frame.render_widget(Paragraph::new(right_lines).block(right_block), panes[1]);
+            frame.render_widget(Paragraph::new(left_lines), left_header);
+            frame.render_widget(Paragraph::new(right_lines), right_header);
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    "j/k:scroll  Ctrl-d/u:page  g/G:top/bot  Tab/[:]:next/prev file  Esc/q:close",
+                    "j/k scroll · Ctrl-d/u page · g/G top/bot · Tab/[/] next/prev file · Esc/q close",
                     Style::default().fg(theme::p().faint),
                 ))),
                 rows[1],
@@ -1820,21 +1851,14 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
         } => {
             let popup = centered_rect(area, 90, 82, 60, 14);
             let title = format!(
-                " Search [{}] ({} matches) (/search) ",
+                "Search [{}] ({} matches) (/search)",
                 mode.label(),
                 results.len()
             );
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::p().border))
-                .style(Style::default().bg(theme::p().surface))
-                .title(title);
-            let inner = block.inner(popup);
-            frame.render_widget(Clear, popup);
-            frame.render_widget(block, popup);
+            let inner = dialog_frame(frame, popup, &title);
 
             let layout = Layout::vertical([
-                Constraint::Length(3),
+                Constraint::Length(1),
                 Constraint::Min(5),
                 Constraint::Length(1),
             ])
@@ -1848,12 +1872,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 SearchMode::Files => "(type to fuzzy-match file paths)",
                 SearchMode::Content => "(type query to search content with ripgrep)",
             };
-            let query_block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::p().border))
-                .style(Style::default().bg(theme::p().surface))
-                .title(" Query ");
-            let query_inner = query_block.inner(layout[0]);
+            let query_inner = input_band(frame, layout[0]);
             let input_box = Paragraph::new(Line::from(vec![
                 Span::styled(
                     format!("[{}] ", mode.label()),
@@ -1862,11 +1881,10 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 if query.is_empty() {
                     Span::styled(placeholder, Style::default().fg(theme::p().faint))
                 } else {
-                    Span::raw(query.as_str())
+                    Span::styled(query.clone(), Style::default().fg(theme::p().text))
                 },
-            ]))
-            .block(query_block);
-            frame.render_widget(input_box, layout[0]);
+            ]));
+            frame.render_widget(input_box, query_inner);
             if query_inner.width > 0 && query_inner.height > 0 {
                 let prefix_chars = mode.label().chars().count() + 3;
                 let query_chars = query.chars().count();
@@ -1875,16 +1893,15 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 frame.set_cursor_position(Position::new(cursor_x, query_inner.y));
             }
 
-            let panes =
-                Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
-                    .split(layout[1]);
+            let panes = Layout::horizontal([
+                Constraint::Percentage(45),
+                Constraint::Length(1),
+                Constraint::Percentage(55),
+            ])
+            .split(layout[1]);
 
-            let results_block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::p().border))
-                .style(Style::default().bg(theme::p().surface))
-                .title(" Results ");
-            let results_inner_w = results_block.inner(panes[0]).width as usize;
+            let results_inner = pane_header(frame, panes[0], "Results");
+            let results_inner_w = results_inner.width as usize;
 
             let list_items: Vec<ListItem<'_>> = results
                 .iter()
@@ -1904,24 +1921,14 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             if !results.is_empty() {
                 list_state.select(Some((*selected).min(results.len() - 1)));
             }
-            let list = List::new(list_items).block(results_block).highlight_style(
-                Style::default()
-                    .bg(theme::p().surface_high)
-                    .fg(theme::p().text)
-                    .add_modifier(Modifier::BOLD),
-            );
-            frame.render_stateful_widget(list, panes[0], &mut list_state);
+            let list = List::new(list_items).highlight_style(selection_style());
+            frame.render_stateful_widget(list, results_inner, &mut list_state);
 
             let preview_title = preview
                 .as_ref()
-                .map(|p| format!(" Preview: {} ", p.title))
-                .unwrap_or_else(|| " Preview ".to_string());
-            let preview_block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::p().border))
-                .style(Style::default().bg(theme::p().surface))
-                .title(preview_title);
-            let preview_inner = preview_block.inner(panes[1]);
+                .map(|p| format!("Preview: {}", p.title))
+                .unwrap_or_else(|| "Preview".to_string());
+            let preview_inner = pane_header(frame, panes[2], &preview_title);
             let preview_w = preview_inner.width as usize;
             let preview_h = preview_inner.height.max(1) as usize;
 
@@ -1960,7 +1967,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                             } else {
                                 Line::from(vec![
                                     Span::styled(gutter, Style::default().fg(theme::p().faint)),
-                                    Span::raw(body),
+                                    Span::styled(body, Style::default().fg(theme::p().text)),
                                 ])
                             }
                         })
@@ -1971,11 +1978,11 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                     Style::default().fg(theme::p().faint),
                 ))],
             };
-            frame.render_widget(Paragraph::new(preview_lines).block(preview_block), panes[1]);
+            frame.render_widget(Paragraph::new(preview_lines), preview_inner);
 
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    "Tab:Files/Content  Up/Down:select  PgUp/PgDn:scroll preview  Enter:insert @file  Esc:close",
+                    "Tab Files/Content · Up/Down select · PgUp/PgDn scroll preview · Enter insert @file · Esc close",
                     Style::default().fg(theme::p().faint),
                 ))),
                 layout[2],
@@ -1986,10 +1993,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             selected,
         } => {
             let popup = centered_rect_fixed(area, 40, 8);
-            let block = theme::dialog(" Message ");
-            let inner = block.inner(popup);
-            frame.render_widget(Clear, popup);
-            frame.render_widget(block, popup);
+            let inner = dialog_frame(frame, popup, "Message");
 
             let rows = Layout::vertical([
                 Constraint::Length(3),
@@ -2015,11 +2019,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 .collect();
             let mut state = ListState::default();
             state.select(Some((*selected).min(2)));
-            let list = List::new(list_items).highlight_style(
-                Style::default()
-                    .bg(theme::p().surface_high)
-                    .add_modifier(Modifier::BOLD),
-            );
+            let list = List::new(list_items).highlight_style(selection_style());
             frame.render_stateful_widget(list, rows[0], &mut state);
             let _ = entry_idx;
 
@@ -2038,10 +2038,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 width: popup.width.min(58),
                 ..popup
             };
-            let block = theme::dialog(" Commands (Ctrl-p) ");
-            let inner = block.inner(popup);
-            frame.render_widget(Clear, popup);
-            frame.render_widget(block, popup);
+            let inner = dialog_frame(frame, popup, "Commands (Ctrl-p)");
 
             let rows = Layout::vertical([
                 Constraint::Length(1),
@@ -2051,14 +2048,20 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             .split(inner);
 
             let filter_line = Line::from(vec![
-                Span::styled("> ", Style::default().fg(theme::p().interactive)),
+                Span::styled(
+                    "> ",
+                    Style::default()
+                        .fg(theme::p().interactive)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 if filter.is_empty() {
                     Span::styled("filter commands", Style::default().fg(theme::p().faint))
                 } else {
                     Span::styled(filter.clone(), Style::default().fg(theme::p().text))
                 },
             ]);
-            frame.render_widget(Paragraph::new(filter_line), rows[0]);
+            let filter_area = input_band(frame, rows[0]);
+            frame.render_widget(Paragraph::new(filter_line), filter_area);
 
             let commands = crate::app::filtered_commands(filter);
             let width = rows[1].width as usize;
@@ -2097,11 +2100,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                 let idx = (*selected).min(commands.len() - 1);
                 state.select(Some(command_rows[idx]));
             }
-            let list = List::new(items).highlight_style(
-                Style::default()
-                    .bg(theme::p().surface_high)
-                    .add_modifier(Modifier::BOLD),
-            );
+            let list = List::new(items).highlight_style(selection_style());
             frame.render_stateful_widget(list, rows[1], &mut state);
 
             let footer = if commands.is_empty() {
@@ -2127,18 +2126,18 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             };
             let popup = cap_width(centered_rect(area, 64, 46, 46, 12), 72);
             let title = if queue.len() > 1 {
-                format!(" Approval required ({}) ", queue.len())
+                format!("Approval required ({})", queue.len())
             } else {
-                " Approval required ".to_string()
+                "Approval required".to_string()
             };
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::p().error))
-                .style(Style::default().bg(theme::p().surface))
-                .title(title);
-            let inner = block.inner(popup);
-            frame.render_widget(Clear, popup);
-            frame.render_widget(block, popup);
+            let inner = dialog_frame_styled(
+                frame,
+                popup,
+                &title,
+                Style::default()
+                    .fg(theme::p().error)
+                    .add_modifier(Modifier::BOLD),
+            );
 
             let rows = Layout::vertical([
                 Constraint::Length(2),
@@ -2186,13 +2185,21 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                     .map(|line| Line::from(line.to_string()))
                     .collect()
             };
-            frame.render_widget(Paragraph::new(detail).wrap(Wrap { trim: false }), rows[1]);
+            frame.render_widget(
+                Paragraph::new(detail)
+                    .style(Style::default().fg(theme::p().text))
+                    .wrap(Wrap { trim: false }),
+                rows[1],
+            );
 
             let footer = if *editing_reason {
                 vec![
                     Line::from(vec![
-                        Span::styled("Reason: ", Style::default().fg(theme::p().warning)),
-                        Span::raw(reason.as_str()),
+                        Span::styled("Reason  ", Style::default().fg(theme::p().warning)),
+                        Span::styled(
+                            reason.as_str().to_string(),
+                            Style::default().fg(theme::p().text),
+                        ),
                         Span::styled("█", Style::default().fg(theme::p().warning)),
                     ]),
                     Line::from(Span::styled(
@@ -2219,14 +2226,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             error,
         } => {
             let popup = cap_width(centered_rect(area, 66, 72, 46, 12), 68);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::p().border))
-                .style(Style::default().bg(theme::p().surface))
-                .title(" Switch Session (/sessions) ");
-            let inner = block.inner(popup);
-            frame.render_widget(Clear, popup);
-            frame.render_widget(block, popup);
+            let inner = dialog_frame(frame, popup, "Switch Session (/sessions)");
 
             let rows = Layout::vertical([
                 Constraint::Length(1),
@@ -2236,14 +2236,23 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             .split(inner);
 
             let filter_line = Line::from(vec![
-                Span::styled("Filter: ", Style::default().fg(theme::p().warning)),
-                Span::raw(if filter.is_empty() {
-                    "(type to filter by id, title, or model)"
+                Span::styled(
+                    "Filter ",
+                    Style::default()
+                        .fg(theme::p().muted)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                if filter.is_empty() {
+                    Span::styled(
+                        "(type to filter by id, title, or model)",
+                        Style::default().fg(theme::p().faint),
+                    )
                 } else {
-                    filter.as_str()
-                }),
+                    Span::styled(filter.clone(), Style::default().fg(theme::p().text))
+                },
             ]);
-            frame.render_widget(Paragraph::new(filter_line), rows[0]);
+            let filter_area = input_band(frame, rows[0]);
+            frame.render_widget(Paragraph::new(filter_line), filter_area);
 
             let filtered = app.filtered_sessions(sessions, filter);
             if *loading && filtered.is_empty() {
@@ -2301,7 +2310,9 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
                             .as_deref()
                             .is_some_and(|t| !t.trim().is_empty())
                         {
-                            Style::default().add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(theme::p().text)
+                                .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(theme::p().faint)
                         };
@@ -2333,12 +2344,7 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
 
                 let mut state = ListState::default();
                 state.select(Some((*selected).min(filtered.len() - 1)));
-                let list = List::new(list_items).highlight_style(
-                    Style::default()
-                        .bg(theme::p().surface_high)
-                        .fg(theme::p().text)
-                        .add_modifier(Modifier::BOLD),
-                );
+                let list = List::new(list_items).highlight_style(selection_style());
                 frame.render_stateful_widget(list, rows[1], &mut state);
             }
 
@@ -2348,11 +2354,11 @@ fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             let confirming = app.session_delete_confirm.is_some()
                 && app.session_delete_confirm.as_ref() == selected_id.as_ref();
             let footer_text = if *loading {
-                "Refreshing...  Enter:switch  Up/Down:move  Esc:close"
+                "Refreshing... · Enter switch · Up/Down move · Esc close"
             } else if confirming {
-                "Press Ctrl-d again to delete  ·  Esc:cancel"
+                "Press Ctrl-d again to delete · Esc cancel"
             } else {
-                "Enter:switch  Ctrl-d:delete  Up/Down:move  Type:filter  Esc:close"
+                "Enter switch · Ctrl-d delete · Up/Down move · Type filter · Esc close"
             };
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
@@ -2681,6 +2687,103 @@ fn centered_rect_fixed(area: Rect, max_w: u16, max_h: u16) -> Rect {
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     Rect::new(x, y, width, height)
+}
+
+fn dialog_frame(frame: &mut Frame<'_>, popup: Rect, title: &str) -> Rect {
+    dialog_frame_styled(
+        frame,
+        popup,
+        title,
+        Style::default()
+            .fg(theme::p().text)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn dialog_frame_styled(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    title: &str,
+    title_style: Style,
+) -> Rect {
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::p().surface)),
+        popup,
+    );
+    if popup.width > 2 {
+        let band = Rect {
+            x: popup.x,
+            y: popup.y,
+            width: popup.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Block::default().style(Style::default().bg(theme::p().surface_high)),
+            band,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(title.to_string(), title_style))),
+            Rect {
+                x: popup.x.saturating_add(1),
+                y: popup.y,
+                width: popup.width.saturating_sub(2),
+                height: 1,
+            },
+        );
+    }
+    Rect {
+        x: popup.x.saturating_add(1),
+        y: popup.y.saturating_add(1),
+        width: popup.width.saturating_sub(2),
+        height: popup.height.saturating_sub(2),
+    }
+}
+
+fn selection_style() -> Style {
+    Style::default()
+        .bg(theme::p().surface_high)
+        .fg(theme::p().text)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn input_band(frame: &mut Frame<'_>, area: Rect) -> Rect {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::p().surface_high)),
+        area,
+    );
+    Rect {
+        x: area.x.saturating_add(1),
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: area.height,
+    }
+}
+
+fn pane_header(frame: &mut Frame<'_>, area: Rect, title: &str) -> Rect {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::p().surface_high)),
+        area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(theme::p().muted)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        Rect {
+            x: area.x.saturating_add(1),
+            y: area.y,
+            width: area.width.saturating_sub(2),
+            height: area.height,
+        },
+    );
+    Rect {
+        y: area.y.saturating_add(1),
+        height: area.height.saturating_sub(1),
+        ..area
+    }
 }
 
 fn cursor_row_col(input: &str, cursor: usize) -> (usize, usize) {
@@ -3125,6 +3228,63 @@ mod tests {
         )));
     }
 
+    fn mouse(
+        kind: crossterm::event::MouseEventKind,
+        column: u16,
+        row: u16,
+    ) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn composer_drag_selects_text_and_delete_removes_it() {
+        let mut app = test_app();
+        app.tab_mut().input = "hello world".to_string();
+        app.tab_mut().cursor = 0;
+        render_to_string(&mut app);
+
+        let input_area = app.composer_input_area;
+        assert!(input_area.width > 0);
+        assert!(app.composer_block_area.height > 0);
+
+        assert!(app.handle_mouse_event(mouse(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            input_area.x,
+            input_area.y,
+        )));
+        assert!(app.handle_mouse_event(mouse(
+            crossterm::event::MouseEventKind::Moved,
+            input_area.x + 6,
+            input_area.y,
+        )));
+        assert!(app.handle_mouse_event(mouse(
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            input_area.x + 6,
+            input_area.y,
+        )));
+        assert_eq!(app.composer_selection, Some((0, 6)));
+
+        let backend = TestBackend::new(120, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let cell = terminal
+            .backend()
+            .buffer()
+            .cell((input_area.x, input_area.y))
+            .unwrap();
+        assert_eq!(cell.bg, theme::p().surface_high);
+
+        assert!(app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
+        assert_eq!(app.tab().input, "world");
+        assert_eq!(app.tab().cursor, 0);
+        assert_eq!(app.composer_selection, None);
+    }
+
     #[test]
     fn sidebar_shows_the_workspace_without_duplicated_metrics() {
         let mut app = test_app();
@@ -3194,7 +3354,7 @@ mod tests {
             error: None,
         });
         let rendered = render_to_string(&mut app);
-        assert!(rendered.contains("Ctrl-d:delete"));
+        assert!(rendered.contains("Ctrl-d delete"));
 
         app.session_delete_confirm = Some(meerai_session::SessionId::from_raw("ses-old"));
         let confirming = render_to_string(&mut app);
@@ -3717,7 +3877,7 @@ mod tests {
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
         let editing = render_to_string(&mut app);
-        assert!(editing.contains("Reason:"));
+        assert!(editing.contains("Reason"));
         assert!(editing.contains("Enter:send decline reason"));
 
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -3791,7 +3951,12 @@ mod tests {
         assert!(collapsed.contains("meerai-tui/src/ui.rs"));
         assert!(!app.thinking_hit_zones.is_empty());
 
-        let zone = app.thinking_hit_zones[0];
+        let zone = app
+            .thinking_hit_zones
+            .iter()
+            .find(|zone| zone.entry_idx == 1)
+            .copied()
+            .expect("thinking hit zone");
         let click_row = app.transcript_inner_area.y + zone.start_line as u16;
         let click_col = app.transcript_inner_area.x + 2;
         assert!(app.toggle_entry_at(click_col, click_row));

@@ -1,7 +1,7 @@
 const SAFE_PROGRAMS: &[&str] = &[
-    "bat", "cat", "cd", "cmp", "cut", "date", "df", "diff", "du", "echo", "false", "file", "find",
-    "grep", "head", "jq", "ls", "printf", "pwd", "rg", "sed", "sort", "stat", "tail", "tree",
-    "true", "uname", "uniq", "wc", "which", "whoami",
+    "awk", "bat", "cat", "cd", "cmp", "cut", "date", "df", "diff", "du", "echo", "false", "file",
+    "find", "grep", "head", "jq", "ls", "printf", "pwd", "rg", "sed", "sort", "stat", "tail",
+    "tree", "true", "uname", "uniq", "wc", "which", "whoami",
 ];
 
 pub fn command_is_safe(command: &str) -> bool {
@@ -124,6 +124,7 @@ fn single_command_is_safe(trimmed: &str) -> bool {
             .iter()
             .any(|arg| arg.starts_with("-s") || arg.starts_with("--set")),
         "sed" => sed_is_safe(&args),
+        "awk" => awk_is_safe(trimmed),
         _ => true,
     }
 }
@@ -162,6 +163,50 @@ fn sed_is_safe(args: &[&str]) -> bool {
             || line.contains("/w")
             || line.contains("/W")
     })
+}
+
+fn awk_is_safe(command: &str) -> bool {
+    if command.contains(" -f") || command.contains("--file") {
+        return false;
+    }
+    let Some(script) = first_quoted(command) else {
+        return false;
+    };
+    script.split("&&").map(str::trim).all(nr_condition)
+}
+
+fn nr_condition(condition: &str) -> bool {
+    let Some(rest) = condition.trim().strip_prefix("NR") else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    let rest = if let Some(rest) = rest.strip_prefix(">=") {
+        rest
+    } else if let Some(rest) = rest.strip_prefix("<=") {
+        rest
+    } else if let Some(rest) = rest.strip_prefix("==") {
+        rest
+    } else if let Some(rest) = rest.strip_prefix("!=") {
+        rest
+    } else if let Some(rest) = rest.strip_prefix('>') {
+        rest
+    } else if let Some(rest) = rest.strip_prefix('<') {
+        rest
+    } else {
+        return false;
+    };
+    rest.trim().parse::<u64>().is_ok()
+}
+
+fn first_quoted(command: &str) -> Option<&str> {
+    let bytes = command.as_bytes();
+    let start = bytes
+        .iter()
+        .position(|byte| *byte == b'\'' || *byte == b'"')?;
+    let quote = bytes[start];
+    let rest = &command[start + 1..];
+    let end = rest.as_bytes().iter().position(|byte| *byte == quote)?;
+    Some(&rest[..end])
 }
 
 fn git_is_safe(args: &[&str]) -> bool {
@@ -209,6 +254,10 @@ mod tests {
             "sed 's/a/b/' file.txt",
             "grep -n \"render_active_modal\\|Revert\\|click for actions\" meerai-tui/src/ui.rs | head -30; sed -n '95,140p' meerai-tui/src/ui.rs",
             "grep -n 'a|b' src | head -5",
+            "awk 'NR>=714 && NR<=1190' meerai-tui/src/ui.rs | grep -n \"width\"",
+            "awk 'NR>=700 && NR<=760' meerai-tui/src/ui.rs",
+            "grep -rn \"Revert\\b\" meerai-tui/src/ui.rs | head",
+            "grep -n \"Message \\\"\\|centered_rect_fixed\" meerai-tui/src/ui.rs | head",
         ] {
             assert!(command_is_safe(command), "expected safe: {command}");
         }
@@ -240,6 +289,10 @@ mod tests {
             "ls &",
             "cargo test",
             "date -s '2020-01-01'",
+            "awk '{system(\"rm -rf x\")}' f",
+            "awk 'BEGIN{print > \"out\"}'",
+            "awk -f script.awk data.txt",
+            "awk '{print $1}' data.txt",
             "",
         ] {
             assert!(!command_is_safe(command), "expected unsafe: {command}");

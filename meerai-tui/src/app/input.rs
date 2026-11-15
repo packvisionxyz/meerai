@@ -137,6 +137,10 @@ impl AppState {
         }
 
         if mouse.kind == MouseEventKind::Moved {
+            if let Some(anchor) = self.composer_drag_anchor {
+                self.extend_composer_drag(anchor, mouse.column, mouse.row);
+                return true;
+            }
             let hovered = self.hovered_entry_at(pos);
             if hovered != self.hovered_entry {
                 self.hovered_entry = hovered;
@@ -157,11 +161,13 @@ impl AppState {
                     self.doc_selection = None;
                     return true;
                 }
-                if self.modal.is_none() && self.composer_click_to_cursor(mouse.column, mouse.row) {
+                if self.modal.is_none() && self.composer_pointer_down(mouse.column, mouse.row) {
                     self.selection = None;
                     self.doc_selection = None;
                     return true;
                 }
+                self.composer_selection = None;
+                self.composer_drag_anchor = None;
 
                 self.pending_toggle = self.entry_at(mouse.column, mouse.row);
 
@@ -200,6 +206,10 @@ impl AppState {
                 return true;
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(anchor) = self.composer_drag_anchor {
+                    self.extend_composer_drag(anchor, mouse.column, mouse.row);
+                    return true;
+                }
                 if let Some(mut sel) = self.doc_selection
                     && sel.active
                 {
@@ -231,6 +241,16 @@ impl AppState {
                 return false;
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                self.composer_drag_anchor = None;
+                if self
+                    .composer_selection
+                    .is_some_and(|(start, end)| start >= end)
+                {
+                    self.composer_selection = None;
+                }
+                if self.composer_selection.is_some() {
+                    return true;
+                }
                 let mut was_click = true;
                 if let Some(mut sel) = self.doc_selection.take()
                     && sel.active
@@ -718,22 +738,43 @@ impl AppState {
         true
     }
 
-    fn composer_click_to_cursor(&mut self, column: u16, row: u16) -> bool {
-        let area = self.composer_input_area;
-        if area.width == 0
-            || area.height == 0
-            || column < area.x
-            || column >= area.x + area.width
-            || row < area.y
-            || row >= area.y + area.height
-        {
+    fn composer_pointer_down(&mut self, column: u16, row: u16) -> bool {
+        let Some(cursor) = self.composer_cursor_at(column, row) else {
             return false;
+        };
+        let cursor = cursor.min(self.tab().input.len());
+        self.composer_selection = None;
+        self.composer_drag_anchor = Some(cursor);
+        self.tab_mut().cursor = cursor;
+        self.mode = InputMode::Insert;
+        self.update_completion();
+        true
+    }
+
+    fn composer_cursor_at(&self, column: u16, row: u16) -> Option<usize> {
+        let block = self.composer_block_area;
+        if block.width == 0
+            || block.height == 0
+            || column < block.x
+            || column >= block.x + block.width
+            || row < block.y
+            || row >= block.y + block.height
+        {
+            return None;
+        }
+        let area = self.composer_input_area;
+        if area.width == 0 || area.height == 0 {
+            return Some(self.tab().cursor);
         }
         let input = self.tab().input.clone();
         let lines: Vec<&str> = input.split('\n').collect();
-        let line_idx =
-            (self.composer_scroll + (row - area.y) as usize).min(lines.len().saturating_sub(1));
-        let display_col = (column - area.x) as usize;
+        let line_idx = if row < area.y {
+            0
+        } else {
+            let relative = (row - area.y) as usize;
+            (self.composer_scroll + relative).min(lines.len().saturating_sub(1))
+        };
+        let display_col = column.saturating_sub(area.x) as usize;
         let char_idx =
             display_col_to_char_index(lines[line_idx], display_col, &self.agents, &self.skills);
         let line_start: usize = input
@@ -746,9 +787,32 @@ impl AppState {
             .nth(char_idx)
             .map(|(idx, _)| idx)
             .unwrap_or(lines[line_idx].len());
+        Some((line_start + byte_in_line).min(input.len()))
+    }
+
+    fn extend_composer_drag(&mut self, anchor: usize, column: u16, row: u16) {
+        let head = self.composer_cursor_at(column, row).unwrap_or(anchor);
+        let (start, end) = if anchor <= head {
+            (anchor, head)
+        } else {
+            (head, anchor)
+        };
+        self.composer_selection = (start < end).then_some((start, end));
+        self.tab_mut().cursor = head;
+    }
+
+    fn delete_composer_selection(&mut self) -> bool {
+        let Some((start, end)) = self.composer_selection.take() else {
+            return false;
+        };
+        if start >= end {
+            return false;
+        }
         let tab = self.tab_mut();
-        tab.cursor = (line_start + byte_in_line).min(tab.input.len());
-        self.mode = InputMode::Insert;
+        let start = start.min(tab.input.len());
+        let end = end.min(tab.input.len());
+        tab.input.replace_range(start..end, "");
+        tab.cursor = start;
         self.update_completion();
         true
     }
@@ -1221,6 +1285,7 @@ impl AppState {
     }
 
     fn insert_char(&mut self, c: char) {
+        self.delete_composer_selection();
         let tab = self.tab_mut();
         tab.input.insert(tab.cursor, c);
         tab.cursor += c.len_utf8();
@@ -1240,6 +1305,7 @@ impl AppState {
     }
 
     pub(super) fn insert_str(&mut self, text: &str) {
+        self.delete_composer_selection();
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         let tab = self.tab_mut();
         tab.input.insert_str(tab.cursor, &normalized);
@@ -1247,6 +1313,9 @@ impl AppState {
     }
 
     fn backspace(&mut self) {
+        if self.delete_composer_selection() {
+            return;
+        }
         let tab = self.tab_mut();
         if tab.cursor == 0 {
             return;
@@ -1260,6 +1329,9 @@ impl AppState {
     }
 
     fn delete_forward(&mut self) {
+        if self.delete_composer_selection() {
+            return;
+        }
         let tab = self.tab_mut();
         if tab.cursor >= tab.input.len() {
             return;
@@ -1272,6 +1344,7 @@ impl AppState {
     }
 
     fn move_left(&mut self) {
+        self.composer_selection = None;
         let tab = self.tab_mut();
         if tab.cursor > 0 {
             tab.cursor = floor_char_boundary(
@@ -1282,6 +1355,7 @@ impl AppState {
     }
 
     fn move_right(&mut self) {
+        self.composer_selection = None;
         let tab = self.tab_mut();
         if tab.cursor < tab.input.len() {
             tab.cursor = ceil_char_boundary(
@@ -1292,12 +1366,14 @@ impl AppState {
     }
 
     fn move_home(&mut self) {
+        self.composer_selection = None;
         let tab = self.tab_mut();
         let before = &tab.input[..tab.cursor];
         tab.cursor = before.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
     }
 
     fn move_end(&mut self) {
+        self.composer_selection = None;
         let tab = self.tab_mut();
         let after = &tab.input[tab.cursor..];
         if let Some(rel) = after.find('\n') {
@@ -1308,6 +1384,7 @@ impl AppState {
     }
 
     fn move_up(&mut self) {
+        self.composer_selection = None;
         let tab = self.tab_mut();
         let before = &tab.input[..tab.cursor];
         let Some(cur_line_break) = before.rfind('\n') else {
@@ -1323,6 +1400,7 @@ impl AppState {
     }
 
     fn move_down(&mut self) {
+        self.composer_selection = None;
         let tab = self.tab_mut();
         let before = &tab.input[..tab.cursor];
         let cur_line_start = before.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
