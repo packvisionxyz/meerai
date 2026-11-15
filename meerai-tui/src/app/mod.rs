@@ -100,6 +100,14 @@ pub struct ToolCallEntry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubagentEntry {
+    pub id: String,
+    pub agent: String,
+    pub status: ToolCallStatus,
+    pub report: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileChangeEntry {
     pub status: String,
     pub path: String,
@@ -137,6 +145,7 @@ pub enum TranscriptEntry {
         reasoning_expanded: bool,
     },
     ToolCall(ToolCallEntry),
+    Subagent(SubagentEntry),
     System {
         text: String,
     },
@@ -240,6 +249,7 @@ pub struct AppState {
     pending_assistant_idx: Option<usize>,
     assistant_items: HashMap<ItemId, usize>,
     tool_items: HashMap<ItemId, String>,
+    subagent_items: HashMap<ItemId, usize>,
     pending_g: bool,
     last_ctrl_c: Option<Instant>,
     cmd_tx: mpsc::UnboundedSender<AgentCommand>,
@@ -343,6 +353,7 @@ impl AppState {
             pending_assistant_idx: None,
             assistant_items: HashMap::new(),
             tool_items: HashMap::new(),
+            subagent_items: HashMap::new(),
             pending_g: false,
             last_ctrl_c: None,
             cmd_tx,

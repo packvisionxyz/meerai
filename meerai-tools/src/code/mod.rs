@@ -3,9 +3,9 @@ mod edit_file;
 mod glob;
 mod grep;
 mod list_dir;
-mod paths;
+pub(crate) mod paths;
 mod read_file;
-mod shell;
+pub(crate) mod shell;
 mod write_file;
 
 use std::path::{Path, PathBuf};
@@ -34,6 +34,7 @@ pub struct CodeTools {
     writable_roots: Vec<PathBuf>,
     readable_roots: Vec<PathBuf>,
     sensitive_env_vars: Vec<String>,
+    allowed_tools: Option<Vec<&'static str>>,
 }
 
 impl CodeTools {
@@ -43,6 +44,7 @@ impl CodeTools {
             writable_roots: Vec::new(),
             readable_roots: Vec::new(),
             sensitive_env_vars: Vec::new(),
+            allowed_tools: None,
         }
     }
 
@@ -63,6 +65,17 @@ impl CodeTools {
             .filter(|v| !v.is_empty())
             .collect();
         self
+    }
+
+    pub fn with_allowed_tools(mut self, allowed: impl IntoIterator<Item = &'static str>) -> Self {
+        self.allowed_tools = Some(allowed.into_iter().collect());
+        self
+    }
+
+    fn is_allowed(&self, tool: &str) -> bool {
+        self.allowed_tools
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(&tool))
     }
 
     pub fn workspace_root(&self) -> &Path {
@@ -90,7 +103,7 @@ fn bare_name(fn_name: &str) -> Option<&str> {
     fn_name.strip_prefix(TOOLSET_NAME)?.strip_prefix('-')
 }
 
-fn parse_args<T: serde::de::DeserializeOwned>(args: &str) -> Result<T, ToolError> {
+pub(crate) fn parse_args<T: serde::de::DeserializeOwned>(args: &str) -> Result<T, ToolError> {
     serde_json::from_str(args).map_err(ToolError::WrongArguments)
 }
 
@@ -142,19 +155,33 @@ impl Toolset for CodeTools {
     }
 
     fn definition(&self) -> Vec<ToolDefinition> {
-        vec![
-            read_file::definition(&runtime_name("read_file")),
-            write_file::definition(&runtime_name("write_file")),
-            edit_file::definition(&runtime_name("edit_file")),
-            list_dir::definition(&runtime_name("list_dir")),
-            grep::definition(&runtime_name("grep")),
-            glob::definition(&runtime_name("glob")),
-            shell::definition(&runtime_name("shell")),
-        ]
+        let mut defs = Vec::new();
+        if self.is_allowed("read_file") {
+            defs.push(read_file::definition(&runtime_name("read_file")));
+        }
+        if self.is_allowed("write_file") {
+            defs.push(write_file::definition(&runtime_name("write_file")));
+        }
+        if self.is_allowed("edit_file") {
+            defs.push(edit_file::definition(&runtime_name("edit_file")));
+        }
+        if self.is_allowed("list_dir") {
+            defs.push(list_dir::definition(&runtime_name("list_dir")));
+        }
+        if self.is_allowed("grep") {
+            defs.push(grep::definition(&runtime_name("grep")));
+        }
+        if self.is_allowed("glob") {
+            defs.push(glob::definition(&runtime_name("glob")));
+        }
+        if self.is_allowed("shell") {
+            defs.push(shell::definition(&runtime_name("shell")));
+        }
+        defs
     }
 
     fn contain(&self, fn_name: &str) -> bool {
-        bare_name(fn_name).is_some_and(|tool| TOOL_NAMES.contains(&tool))
+        bare_name(fn_name).is_some_and(|tool| TOOL_NAMES.contains(&tool) && self.is_allowed(tool))
     }
 
     fn effect_of(&self, fn_name: &str) -> EffectClass {
@@ -196,6 +223,9 @@ impl Toolset for CodeTools {
         let Some(tool) = bare_name(fn_name) else {
             return Err(ToolError::InvalidFunctionName(fn_name.to_string()));
         };
+        if !self.is_allowed(tool) {
+            return Err(ToolError::InvalidFunctionName(fn_name.to_string()));
+        }
 
         match tool {
             "read_file" => Ok(self.read_file(parse_args(args)?).await),

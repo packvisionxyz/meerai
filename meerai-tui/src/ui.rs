@@ -399,6 +399,17 @@ fn build_header_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)> {
     ]
 }
 
+fn tool_status_badge(status: &ToolCallStatus) -> (&'static str, Color) {
+    match status {
+        ToolCallStatus::Proposed => ("proposed", Color::Yellow),
+        ToolCallStatus::Running => ("running", Color::Yellow),
+        ToolCallStatus::Succeeded => ("ok", Color::Green),
+        ToolCallStatus::Failed => ("fail", Color::Red),
+        ToolCallStatus::Stopped => ("stop", Color::Magenta),
+        ToolCallStatus::Cancelled => ("cancelled", Color::Magenta),
+    }
+}
+
 fn build_transcript_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)> {
     let mut lines = build_header_lines(app);
     if app.transcript.is_empty() {
@@ -492,14 +503,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)>
                 }
             }
             TranscriptEntry::ToolCall(tc) => {
-                let (badge, color) = match tc.status {
-                    ToolCallStatus::Proposed => ("proposed", Color::Yellow),
-                    ToolCallStatus::Running => ("running", Color::Yellow),
-                    ToolCallStatus::Succeeded => ("ok", Color::Green),
-                    ToolCallStatus::Failed => ("fail", Color::Red),
-                    ToolCallStatus::Stopped => ("stop", Color::Magenta),
-                    ToolCallStatus::Cancelled => ("cancelled", Color::Magenta),
-                };
+                let (badge, color) = tool_status_badge(&tc.status);
                 let args_preview = truncate_single_line(&tc.args, 60);
                 lines.push((
                     Line::from(vec![
@@ -532,6 +536,43 @@ fn build_transcript_lines(app: &AppState) -> Vec<(Line<'static>, Option<usize>)>
                 ));
                 if let Some(output) = &tc.output {
                     let preview = truncate_single_line(output, 120);
+                    if !preview.is_empty() {
+                        lines.push((
+                            Line::from(Span::styled(
+                                format!("  {preview}"),
+                                Style::default().fg(Color::Gray).bg(TOOL_ROW_BG),
+                            ))
+                            .style(Style::default().bg(TOOL_ROW_BG)),
+                            None,
+                        ));
+                    }
+                }
+            }
+            TranscriptEntry::Subagent(sub) => {
+                let (badge, color) = tool_status_badge(&sub.status);
+                lines.push((
+                    Line::from(vec![
+                        Span::styled(
+                            "▸ [subagent] ",
+                            Style::default().fg(Color::Cyan).bg(TOOL_ROW_BG),
+                        ),
+                        Span::styled(
+                            sub.agent.clone(),
+                            Style::default()
+                                .bg(TOOL_ROW_BG)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" ", Style::default().bg(TOOL_ROW_BG)),
+                        Span::styled(
+                            format!("[{badge}]"),
+                            Style::default().fg(color).bg(TOOL_ROW_BG),
+                        ),
+                    ])
+                    .style(Style::default().bg(TOOL_ROW_BG)),
+                    None,
+                ));
+                if let Some(report) = &sub.report {
+                    let preview = truncate_single_line(report, 120);
                     if !preview.is_empty() {
                         lines.push((
                             Line::from(Span::styled(

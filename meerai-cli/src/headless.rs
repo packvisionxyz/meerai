@@ -131,6 +131,130 @@ impl HeadlessExit {
     }
 }
 
+pub(crate) struct PlainEventPrinter {
+    item_labels: HashMap<ItemId, String>,
+    streamed_text: HashSet<ItemId>,
+    line_open: bool,
+}
+
+impl PlainEventPrinter {
+    pub(crate) fn new() -> Self {
+        Self {
+            item_labels: HashMap::new(),
+            streamed_text: HashSet::new(),
+            line_open: false,
+        }
+    }
+
+    fn close_open_line(&mut self, out: &mut impl io::Write) -> Result<()> {
+        if self.line_open {
+            writeln!(out)?;
+            self.line_open = false;
+        }
+        Ok(())
+    }
+
+    fn write_status_line(
+        &mut self,
+        out: &mut impl io::Write,
+        label: &str,
+        status: ItemStatus,
+    ) -> Result<()> {
+        self.close_open_line(out)?;
+        writeln!(out, "▸ {label} {}", item_status_label(status))?;
+        out.flush()?;
+        Ok(())
+    }
+
+    pub(crate) fn handle(&mut self, event: &AgentEvent, out: &mut impl io::Write) -> Result<()> {
+        match event {
+            AgentEvent::ItemStarted {
+                item:
+                    SessionItem::ToolCall {
+                        id, name, status, ..
+                    },
+            } => {
+                self.item_labels.insert(id.clone(), name.clone());
+                self.write_status_line(out, name, *status)?;
+            }
+            AgentEvent::ItemStarted {
+                item:
+                    SessionItem::SubagentRun {
+                        id, agent, status, ..
+                    },
+            } => {
+                let label = format!("subagent {agent}");
+                self.item_labels.insert(id.clone(), label.clone());
+                self.write_status_line(out, &label, *status)?;
+            }
+            AgentEvent::ItemDelta {
+                item_id,
+                delta: meerai_agents::ItemDelta::AgentText(chunk),
+            } => {
+                if !chunk.is_empty() {
+                    self.streamed_text.insert(item_id.clone());
+                    write!(out, "{chunk}")?;
+                    out.flush()?;
+                    self.line_open = !chunk.ends_with('\n');
+                }
+            }
+            AgentEvent::ItemCompleted {
+                item: SessionItem::AgentMessage { id, text },
+            } => {
+                if !self.streamed_text.remove(id) && !text.is_empty() {
+                    self.close_open_line(out)?;
+                    writeln!(out, "{text}")?;
+                    out.flush()?;
+                }
+            }
+            AgentEvent::ItemDelta {
+                item_id,
+                delta: meerai_agents::ItemDelta::StatusChanged(status),
+            } => {
+                if let Some(label) = self.item_labels.get(item_id).cloned() {
+                    self.write_status_line(out, &label, *status)?;
+                }
+            }
+            AgentEvent::ItemCompleted {
+                item:
+                    SessionItem::ToolCall {
+                        id, name, status, ..
+                    },
+            } => {
+                self.item_labels.remove(id);
+                self.write_status_line(out, name, *status)?;
+            }
+            AgentEvent::ItemCompleted {
+                item:
+                    SessionItem::SubagentRun {
+                        id, agent, status, ..
+                    },
+            } => {
+                self.item_labels.remove(id);
+                self.write_status_line(out, &format!("subagent {agent}"), *status)?;
+            }
+            AgentEvent::Error { message, .. } => {
+                self.close_open_line(out)?;
+                eprintln!("error: {message}");
+            }
+            AgentEvent::TurnCompleted { reason, .. } => {
+                self.close_open_line(out)?;
+                if let meerai_agents::TurnEndReason::Failed { error } = reason {
+                    eprintln!("error: {error}");
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(&mut self, out: &mut impl io::Write) -> Result<()> {
+        self.close_open_line(out)?;
+        out.flush()?;
+        Ok(())
+    }
+}
+
 pub(crate) async fn run_headless(
     mut agent: MultiTurnAgent,
     prompt: String,
@@ -151,10 +275,8 @@ pub(crate) async fn run_headless(
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    let mut tool_names: HashMap<ItemId, String> = HashMap::new();
-    let mut streamed_text: HashSet<ItemId> = HashSet::new();
+    let mut printer = PlainEventPrinter::new();
     let mut exit = HeadlessExit::new();
-    let mut line_open = false;
     let mut last_usage: Option<meerai_agents::Usage> = None;
 
     while let Some(event) = event_rx.recv().await {
@@ -179,98 +301,13 @@ pub(crate) async fn run_headless(
             continue;
         }
 
-        match &event {
-            AgentEvent::ItemStarted {
-                item:
-                    SessionItem::ToolCall {
-                        id, name, status, ..
-                    },
-            } => {
-                tool_names.insert(id.clone(), name.clone());
-                if line_open {
-                    writeln!(out)?;
-                    line_open = false;
-                }
-                writeln!(out, "▸ {name} {}", item_status_label(*status))?;
-                out.flush()?;
-            }
-            AgentEvent::ItemDelta {
-                item_id,
-                delta: meerai_agents::ItemDelta::AgentText(chunk),
-            } => {
-                if !chunk.is_empty() {
-                    streamed_text.insert(item_id.clone());
-                    write!(out, "{chunk}")?;
-                    out.flush()?;
-                    line_open = !chunk.ends_with('\n');
-                }
-            }
-            AgentEvent::ItemCompleted {
-                item: SessionItem::AgentMessage { id, text },
-            } => {
-                if !streamed_text.remove(id) && !text.is_empty() {
-                    if line_open {
-                        writeln!(out)?;
-                    }
-                    writeln!(out, "{text}")?;
-                    out.flush()?;
-                    line_open = false;
-                }
-            }
-            AgentEvent::ItemDelta {
-                item_id,
-                delta: meerai_agents::ItemDelta::StatusChanged(status),
-            } => {
-                if let Some(name) = tool_names.get(item_id) {
-                    if line_open {
-                        writeln!(out)?;
-                        line_open = false;
-                    }
-                    writeln!(out, "▸ {name} {}", item_status_label(*status))?;
-                    out.flush()?;
-                }
-            }
-            AgentEvent::ItemCompleted {
-                item:
-                    SessionItem::ToolCall {
-                        id, name, status, ..
-                    },
-            } => {
-                tool_names.remove(id);
-                if line_open {
-                    writeln!(out)?;
-                    line_open = false;
-                }
-                writeln!(out, "▸ {name} {}", item_status_label(*status))?;
-                out.flush()?;
-            }
-            AgentEvent::Error { message, .. } => {
-                if line_open {
-                    writeln!(out)?;
-                    line_open = false;
-                }
-                eprintln!("error: {message}");
-            }
-            AgentEvent::TurnCompleted { reason, .. } => {
-                if line_open {
-                    writeln!(out)?;
-                    line_open = false;
-                }
-                if let meerai_agents::TurnEndReason::Failed { error } = reason {
-                    eprintln!("error: {error}");
-                }
-            }
-            AgentEvent::UsageUpdated { cumulative, .. } => {
-                last_usage = Some(*cumulative);
-            }
-            _ => {}
+        if let AgentEvent::UsageUpdated { cumulative, .. } = &event {
+            last_usage = Some(*cumulative);
         }
+        printer.handle(&event, &mut out)?;
     }
 
-    if line_open {
-        writeln!(out)?;
-    }
-    out.flush()?;
+    printer.finish(&mut out)?;
     drop(out);
 
     match turn.await {

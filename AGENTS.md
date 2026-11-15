@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rust workspace for Pack Vision's terminal coding-agent harness: nine library crates plus the `meerai` binary (built by `meerai-cli`). Milestones M1–M5 of `docs/harness-spec.md` are landed: session log, `AgentEvent` v2 item protocol, coding tools, policy engine, context engine, and prompt composition. Project-root config discovery, TUI session replay, configurable session retention (`sessions.auto_prune_days`), tool-output redaction, and M12 agents/skills discovery are also landed. The repo is distribution-hardened: Apache-2.0 license, CI on push/PR, tag-driven release builds, and GitHub Pages. The security backlog (OS sandbox, dependency audit, signing, threat model, injection screening, keychain) is **M11** in the spec (§9.6).
+Rust workspace for Pack Vision's terminal coding-agent harness: nine library crates plus the `meerai` binary (built by `meerai-cli`). Milestones M1–M5, M8–M10, and M12 of `docs/harness-spec.md` are landed: session log, `AgentEvent` v2 item protocol, coding & retrieval tools (`repo_map`, `lsp`, `search_as_code`), policy engine, context engine, prompt composition, subagent runtime (`subagent-run` + built-in/custom child sessions), CLI session forking (`--fork`, `sessions fork`), project-root config discovery, TUI session replay, configurable session retention (`sessions.auto_prune_days`), tool-output redaction, and agents/skills discovery. The repo is distribution-hardened: Apache-2.0 license, CI on push/PR, tag-driven release builds, and GitHub Pages. Checkpoints (M6), hooks (M7), and the security backlog (OS sandbox, dependency audit, signing, threat model, injection screening, keychain — **M11** in §9.6) remain unimplemented.
 
 ## Commands
 
@@ -24,16 +24,16 @@ make verify                                    # fmt --check + clippy + test (al
 
 Dependency spine: `core -> macros`, `core -> session -> agents -> cli`, `core -> policy -> agents/common/tui`, `core -> meerai-tools -> tui/cli`, `common -> providers -> tui/cli`. Target layout is in `docs/architecture.md`.
 
-- `meerai-core` — `Toolset` trait (`effect_of`, `permission_spec`, `should_spill_output`, `invoke_structured`), `ToolOutput::{Text,Fail,Stop}`, `ToolError`, `EffectClass`, `PermissionAction`, `ApprovalPreview`, `GrantScope`, `ToolObservation`, `ToolRun`, `FileDiff`, shared `text`/`env`/`fs_perms` helpers; re-exports `genai`, `async_trait`, `schemars::JsonSchema`. `doctest = false`.
+- `meerai-core` — `Toolset` trait (`effect_of`, `effect_of_call`, `permission_spec`, `should_spill_output`, `invoke_structured`), `ToolOutput::{Text,Fail,Stop}`, `ToolError`, `EffectClass`, `PermissionAction`, `ApprovalPreview`, `GrantScope`, `ToolObservation`, `ToolRun`, `FileDiff`, shared `text`/`env`/`fs_perms` helpers; re-exports `genai`, `async_trait`, `schemars::JsonSchema`. `doctest = false`.
 - `meerai-macros` — proc-macros `#[tool]` and `#[derive(Toolset)]` (darling + syn + quote; test-only deps are dev-dependencies).
-- `meerai-session` — append-only `SessionEvent` log (`session.v<N>.jsonl` sealed to `.jsonl.zstd`), `meta.json`, crash recovery, `derive_messages`, fork/revert, blob store, spill, compaction primitives, session listing/deletion/pruning.
+- `meerai-session` — append-only `SessionEvent` log (`session.v<N>.jsonl` sealed to `.jsonl.zstd`), `meta.json`, crash recovery, `derive_messages`, fork/revert (`latest_closed_turn`, `fork_latest`, `create_child`), blob store, spill, compaction primitives, session listing/deletion/pruning.
 - `meerai-policy` — `PolicyEngine`: ordered action/resource/effect rules (globset, last match wins), `ApprovalMode`, grants, YAML parsing.
-- `meerai-tools` — `code` module: `CodeTools` with `read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `shell`; path guards, unified diffs, `ToolRun` observations, secret env scrub, shared `workspace_search`.
+- `meerai-tools` — `code` (`CodeTools` with `read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `shell`, path guards, unified diffs, `ToolRun` observations, secret env scrub, shared `workspace_search`), `repo_map` (`RepoMapToolset` / `retrieval-repo_map` tree-sitter + PageRank), `lsp` (`LspToolset` / `lsp-*` stdio JSON-RPC), and `search_as_code` (`SearchAsCodeToolset` / `sac-run_script`).
 - `meerai-common` — `AppSettings` (`settings.yml`), project-root discovery (`find_project_root`) plus project settings load/merge (`load_project_settings`, `merge_project_settings`), markdown agent/skill discovery (`definitions`: `load_definitions`, `AgentDefinition`, `SkillDefinition`, `DefinitionSource`).
 - `meerai-providers` — provider catalog + `genai` client factory (`providers.yml`), `auth.json` secret store.
-- `meerai-agents` — `MultiTurnAgent`, `AgentHarness`/`HarnessConfig`, `AgentEvent` v2, `prompt::{BASE_SYSTEM_PROMPT, compose_system_prompt}`, `spawn_worker`, and tool-output redaction (`redact.rs`).
-- `meerai-tui` — modal TUI library with transcript replay, `/agent`/`/skill`, and the `@` Mentions popup.
-- `meerai-cli` — `meerai` binary: CLI flags, headless runner, `auth`/`sessions` subcommands, and TUI launcher.
+- `meerai-agents` — `MultiTurnAgent`, `AgentHarness`/`HarnessConfig`, `AgentEvent` v2, `prompt::{BASE_SYSTEM_PROMPT, compose_system_prompt}`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins `build`/`plan`/`explore`/`general`, child sessions, forwarded approvals), and tool-output redaction (`redact.rs`).
+- `meerai-tui` — modal TUI library with transcript replay, subagent items, `/agent`/`/skill`, and the `@` Mentions popup.
+- `meerai-cli` — `meerai` binary: CLI flags (`--fork`), headless runner, `auth`/`sessions` (`list`/`rm`/`prune`/`fork`) subcommands, and TUI launcher.
 
 ## Tool macro conventions (non-obvious)
 
@@ -58,7 +58,7 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`, `core ->
 - Key resolution order: stored `auth.json` → configured `api_key` → the provider's `env_vars` from the bundled `meerai-providers/providers.yml` (for example `OPENROUTER_API_KEY`/`OPEN_ROUTER_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`). No API-key assert exists; a missing required key fails in the genai auth resolver.
 - `settings.yml` secrets support `${VAR|default}` and `{env:VAR}` expansion (`settings::expand_config_secret`).
 - Sessions default to `<dirs::data_dir()>/meerai/sessions/<id>/` (on macOS `~/Library/Application Support/meerai/sessions`); `MEERAI_SESSION_DIR` overrides the root. `SessionConfig { project_local: true }` uses `<workspace>/.meerai/sessions` instead and writes a `.gitignore`. `meerai-cli/src/main.rs` uses the global root.
-- Session directories are `0700` and session files are `0600` on Unix; `meta.json` records cwd, git branch/SHA, title, model, and created/updated times. `meerai sessions list|rm|prune` manages them; `--continue` picks the most recently updated session. `--continue`/`--resume <ID>` work with or without `--prompt`: with `--prompt` they run headless, without it they start the TUI and replay the transcript.
+- Session directories are `0700` and session files are `0600` on Unix; `meta.json` records cwd, git branch/SHA, title, model, optional `parent_session_id`, and created/updated times. `meerai sessions list|rm|prune|fork` manages them; `--continue` picks the most recently updated non-child session; `--fork <ID>` forks and immediately resumes. `--continue`/`--resume <ID>`/`--fork <ID>` work with or without `--prompt`: with `--prompt` they run headless, without it they start the TUI and replay the transcript.
 - Headless non-`--json` runs print `tokens: prompt=… completion=… total=…` on stderr after the turn. The counters are cumulative for the session and are seeded on resume from the last logged `UsageUpdated` entry.
 - The agent sets the session title from the first user prompt (first non-empty line, 80 chars) and skips a session that already has a user message.
 - `MEERAI_PROVIDER` / `MEERAI_MODEL` set default provider/model; CLI flags win.

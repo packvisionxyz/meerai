@@ -1328,6 +1328,125 @@ fn transcript_from_events_marks_unmatched_tool_calls_cancelled() {
 }
 
 #[test]
+fn transcript_from_events_excludes_reverted_turns() {
+    use meerai_core::ToolObservation;
+    use meerai_session::{
+        CallId, CompactionId, ContentBlock, InputSource, LoggedEvent, Seq, SeqRange, SessionEvent,
+        TurnTrigger,
+    };
+
+    let events = vec![
+        LoggedEvent {
+            seq: Seq(1),
+            event: SessionEvent::UserMessage {
+                source: InputSource::User,
+                content: vec![ContentBlock::Text("keep prompt".to_string())],
+            },
+        },
+        LoggedEvent {
+            seq: Seq(2),
+            event: SessionEvent::AssistantMessage {
+                provider: "gemini".to_string(),
+                model: "gemini-3.8-flash".to_string(),
+                content: vec![ContentBlock::Text("keep reply".to_string())],
+                tool_calls: Vec::new(),
+                usage: Usage::default(),
+                stream_digest: meerai_session::StreamDigest::default(),
+            },
+        },
+        LoggedEvent {
+            seq: Seq(3),
+            event: SessionEvent::TurnStarted {
+                turn_id: TurnId::from_raw("turn-reverted"),
+                trigger: TurnTrigger::UserPrompt,
+            },
+        },
+        LoggedEvent {
+            seq: Seq(4),
+            event: SessionEvent::UserMessage {
+                source: InputSource::User,
+                content: vec![ContentBlock::Text("reverted prompt".to_string())],
+            },
+        },
+        LoggedEvent {
+            seq: Seq(5),
+            event: SessionEvent::ToolCall {
+                call_id: CallId::from_raw("call-reverted"),
+                name: "code-write_file".to_string(),
+                args: "{}".to_string(),
+            },
+        },
+        LoggedEvent {
+            seq: Seq(6),
+            event: SessionEvent::ToolResult {
+                call_id: CallId::from_raw("call-reverted"),
+                output: ToolObservation::success("written"),
+            },
+        },
+        LoggedEvent {
+            seq: Seq(7),
+            event: SessionEvent::AssistantMessage {
+                provider: "gemini".to_string(),
+                model: "gemini-3.8-flash".to_string(),
+                content: vec![ContentBlock::Text("reverted reply".to_string())],
+                tool_calls: Vec::new(),
+                usage: Usage::default(),
+                stream_digest: meerai_session::StreamDigest::default(),
+            },
+        },
+        LoggedEvent {
+            seq: Seq(8),
+            event: SessionEvent::RevertApplied {
+                turn_id: TurnId::from_raw("turn-reverted"),
+                replaced: SeqRange {
+                    start: Seq(3),
+                    end_inclusive: Seq(7),
+                },
+            },
+        },
+        LoggedEvent {
+            seq: Seq(9),
+            event: SessionEvent::CompactionSummary {
+                compaction_id: CompactionId::from_raw("cmp-keep"),
+                replaced: SeqRange {
+                    start: Seq(1),
+                    end_inclusive: Seq(2),
+                },
+                summary: "summary".to_string(),
+            },
+        },
+        LoggedEvent {
+            seq: Seq(10),
+            event: SessionEvent::UserMessage {
+                source: InputSource::User,
+                content: vec![ContentBlock::Text("after revert".to_string())],
+            },
+        },
+    ];
+
+    assert_eq!(
+        transcript_from_events(&events),
+        vec![
+            TranscriptEntry::User {
+                text: "keep prompt".to_string(),
+            },
+            TranscriptEntry::Assistant {
+                text: "keep reply".to_string(),
+                reasoning: String::new(),
+                streaming: false,
+                reasoning_expanded: false,
+            },
+            TranscriptEntry::System {
+                text: "Compacted history".to_string(),
+            },
+            TranscriptEntry::User {
+                text: "after revert".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
 fn session_usage_from_events_returns_last_cumulative_usage() {
     use meerai_session::{LoggedEvent, Seq, SessionEvent};
 
@@ -1789,4 +1908,137 @@ fn drag_selection_auto_copies_within_pane_and_normal_yank_works() {
     assert_eq!(encode_base64(b"foo"), "Zm9v");
     assert_eq!(encode_base64(b"fo"), "Zm8=");
     assert_eq!(encode_base64(b"f"), "Zg==");
+}
+
+#[test]
+fn subagent_run_lifecycle_folds_and_renders() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut app, _rx, _secrets) = test_app();
+    app.handle_agent_event(AgentEvent::TurnStarted {
+        turn_id: TurnId::from_raw("turn-subagent"),
+        model: "gemini::gemini-3.8-flash".to_string(),
+    });
+
+    let subagent_id = ItemId::from_raw("item-sub-1");
+    app.handle_agent_event(AgentEvent::ItemStarted {
+        item: SessionItem::SubagentRun {
+            id: subagent_id.clone(),
+            agent: "reviewer".to_string(),
+            status: ItemStatus::Proposed,
+            report: None,
+        },
+    });
+    assert_eq!(
+        app.transcript.last(),
+        Some(&TranscriptEntry::Subagent(SubagentEntry {
+            id: "item-sub-1".to_string(),
+            agent: "reviewer".to_string(),
+            status: ToolCallStatus::Proposed,
+            report: None,
+        }))
+    );
+
+    app.handle_agent_event(AgentEvent::ItemDelta {
+        item_id: subagent_id.clone(),
+        delta: ItemDelta::StatusChanged(ItemStatus::InProgress),
+    });
+    assert_eq!(
+        app.transcript.last(),
+        Some(&TranscriptEntry::Subagent(SubagentEntry {
+            id: "item-sub-1".to_string(),
+            agent: "reviewer".to_string(),
+            status: ToolCallStatus::Running,
+            report: None,
+        }))
+    );
+
+    app.handle_agent_event(AgentEvent::ItemCompleted {
+        item: SessionItem::SubagentRun {
+            id: subagent_id,
+            agent: "reviewer".to_string(),
+            status: ItemStatus::Succeeded,
+            report: Some("Line one\nLine two".to_string()),
+        },
+    });
+    assert_eq!(
+        app.transcript.last(),
+        Some(&TranscriptEntry::Subagent(SubagentEntry {
+            id: "item-sub-1".to_string(),
+            agent: "reviewer".to_string(),
+            status: ToolCallStatus::Succeeded,
+            report: Some("Line one\nLine two".to_string()),
+        }))
+    );
+
+    let backend = TestBackend::new(120, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::ui::render(frame, &mut app))
+        .unwrap();
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("▸ [subagent] reviewer [ok]"));
+    assert!(rendered.contains("Line one Line two"));
+}
+
+#[test]
+fn subagent_entry_finalizes_on_parent_turn_failure_and_abort() {
+    let (mut app, _rx, _secrets) = test_app();
+
+    app.handle_agent_event(AgentEvent::TurnStarted {
+        turn_id: TurnId::from_raw("t-abort"),
+        model: "gemini::gemini-3.8-flash".to_string(),
+    });
+    app.handle_agent_event(AgentEvent::ItemStarted {
+        item: SessionItem::SubagentRun {
+            id: ItemId::from_raw("sub-abort"),
+            agent: "explore".to_string(),
+            status: ItemStatus::InProgress,
+            report: None,
+        },
+    });
+    app.handle_agent_event(AgentEvent::TurnCompleted {
+        turn_id: TurnId::from_raw("t-abort"),
+        reason: TurnEndReason::Aborted {
+            cause: AbortCause::User,
+        },
+    });
+    assert!(app.transcript.iter().any(|entry| {
+        matches!(
+            entry,
+            TranscriptEntry::Subagent(s) if s.id == "sub-abort" && s.status == ToolCallStatus::Cancelled
+        )
+    }));
+
+    app.handle_agent_event(AgentEvent::TurnStarted {
+        turn_id: TurnId::from_raw("t-fail"),
+        model: "gemini::gemini-3.8-flash".to_string(),
+    });
+    app.handle_agent_event(AgentEvent::ItemStarted {
+        item: SessionItem::SubagentRun {
+            id: ItemId::from_raw("sub-fail"),
+            agent: "build".to_string(),
+            status: ItemStatus::InProgress,
+            report: None,
+        },
+    });
+    app.handle_agent_event(AgentEvent::TurnCompleted {
+        turn_id: TurnId::from_raw("t-fail"),
+        reason: TurnEndReason::Failed {
+            error: "budget exceeded".to_string(),
+        },
+    });
+    assert!(app.transcript.iter().any(|entry| {
+        matches!(
+            entry,
+            TranscriptEntry::Subagent(s) if s.id == "sub-fail" && s.status == ToolCallStatus::Failed
+        )
+    }));
 }

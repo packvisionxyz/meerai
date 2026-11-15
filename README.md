@@ -5,15 +5,14 @@ autonomous and interactive software engineering in the terminal with a
 selection-first, modal TUI and a scriptable headless CLI.
 
 **Status:** early-stage, distribution-hardened. The workspace has nine library
-crates plus the `meerai` binary (built by `meerai-cli`). Milestones M1–M5 of the
-[harness specification](docs/harness-spec.md) are landed: session log, `AgentEvent`
-v2 item protocol, coding tools, policy engine, context engine, and prompt
-composition. Project-root config discovery, TUI session replay, configurable
-session retention, tool-output redaction, and agents and skills discovery
-(**M12**) have also landed. CI, tag-driven release builds, installers, and an
-Apache-2.0 license are in place. Checkpoints, hooks, the subagent runtime, and
-an OS sandbox do not exist yet; the security backlog is tracked as **M11** in
-the spec (see [Security roadmap](#security-roadmap)).
+crates plus the `meerai` binary (built by `meerai-cli`). Milestones M1–M5,
+**M8** (subagent runtime), **M9** (`meerai-cli` + session fork), **M10**
+(retrieval v2/v3: `repo_map`, LSP tools, search-as-code), and **M12** (agents
+and skills discovery) of the [harness specification](docs/harness-spec.md) have
+landed. CI, tag-driven release builds, installers, and an Apache-2.0 license are
+in place. Checkpoints (M6), hooks (M7), `meerai export`, and an OS sandbox do
+not exist yet; the security backlog is tracked as **M11** in the spec (see
+[Security roadmap](#security-roadmap)).
 
 ## Install
 
@@ -106,18 +105,29 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 - **Policy engine (`meerai-policy`):** ordered `action/resource/effect` rules
   (globset, last match wins), `ApprovalMode` presets (`plan`, `ask`, `auto-edit`,
   `yolo`), turn and session grants, and YAML rule parsing.
-- **Coding tools (`meerai-tools`):** the `code` module's `CodeTools` with the seven `code-*`
-  tools (`read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`,
-  `shell`), workspace path guards, unified diffs, `ToolObservation`/`ToolRun`
-  results, per-tool `EffectClass`, and provider-secret environment scrubbing
-  from child processes.
+- **Subagent runtime (`meerai-agents::subagent`):** `SubagentToolset`
+  (`subagent-run`) launches isolated depth-1 child sessions (`parent_session_id`),
+  supporting built-in profiles (`explore`, `plan`, `build`, `general`) with
+  typed tool subsets and read-only execution for M12 custom markdown definitions,
+  forwarded parent approval prompts, usage rollup into parent counters, and
+  `SubagentRun` TUI/headless items.
+- **Coding and retrieval tools (`meerai-tools`):** `CodeTools` with the seven
+  `code-*` tools (`read_file`, `write_file`, `edit_file`, `list_dir`, `grep`,
+  `glob`, `shell`), workspace path guards, unified diffs, `ToolObservation`/`ToolRun`
+  results, per-tool `EffectClass`, and provider-secret environment scrubbing; plus
+  `RepoMapToolset` (`retrieval-repo_map` via tree-sitter + PageRank),
+  `LspToolset` (`lsp-go_to_definition`, `lsp-find_references`,
+  `lsp-get_diagnostics` over stdio JSON-RPC), and `SearchAsCodeToolset`
+  (`sac-run_script` running `python3 -I` or `node -e` with env scrubbing and
+  `EffectClass::Execute` policy gating).
 - **Modal TUI (`meerai-tui`) and CLI/headless runner (`meerai-cli`):** modal
-  transcript (including a session replayed by `--continue`/`--resume`), provider
-  and model pickers, sidebar with file changes, diff and search views, approval
-  overlay, `/compact`, `/mode`, `/agent`/`/skill`, and a `@` Mentions popup for
-  agents, skills, and files; one-shot headless turns with a token summary on
-  stderr, NDJSON event stream, `sessions list|rm|prune` management, and opt-in
-  startup retention (`sessions.auto_prune_days`).
+  transcript (including a session replayed by `--continue`/`--resume`/`--fork`),
+  provider and model pickers, sidebar with file changes, subagent items, diff
+  and search views, approval overlay, `/compact`, `/mode`, `/agent`/`/skill`,
+  and a `@` Mentions popup for agents, skills, and files; one-shot headless
+  turns with a token summary on stderr, NDJSON event stream, `sessions
+  list|rm|prune|fork` management, `--fork <ID>`, and opt-in startup retention
+  (`sessions.auto_prune_days`).
 - **Config (`meerai-common`) and providers (`meerai-providers`):** a `genai`
   0.7 client factory over a provider catalog (bundled `providers.yml` plus user
   overrides), `auth.json` storage, `settings.yml` plus a project
@@ -130,17 +140,17 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 
 ### Not implemented yet
 
-- OS sandbox (macOS Seatbelt / Linux bubblewrap) — shell runs with your
-  privileges after approval.
-- Checkpoints and rewind (M6), hooks (M7), and the subagent runtime (M8):
-  child sessions, isolation, and the `subagent` tool. M12 loads markdown agent
-  and skill definitions, but applies them as instructions only.
+- OS sandbox (macOS Seatbelt / Linux bubblewrap) — `code-shell` and
+  `sac-run_script` run with your privileges after approval.
+- Checkpoints and rewind (M6), hooks (M7, including automatic post-edit LSP
+  diagnostics), `meerai export`, and TUI `/fork`.
 - Tool or permission mapping from agent definitions, MCP servers, and skill
-  supporting files. M12 reads only `SKILL.md`.
+  supporting files. M12 reads only `SKILL.md` and custom subagent runs stay
+  read-only.
 - Projection caching and frozen messages; per-model context windows.
 - USD cost and pricing: the harness reports token counts only, and
   `est_cost_usd` is always `None`. Pricing-data collection is the blocker.
-- Progressive tool disclosure, LSP tools, repository maps, and an OS keychain.
+- Progressive tool disclosure and an OS keychain.
 - ACP integration (M13 client, M14 agent). Design in [docs/acp.md](docs/acp.md).
   An ACP backend runs an external agent with its own tools; meerai policy does
   not apply to it.
@@ -159,10 +169,10 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 | `meerai-providers` | Provider catalog plus `genai` client factory (`providers.yml`), `auth.json` secret store |
 | `meerai-session` | `Session` append-only event log: JSONL/zstd generations, `derive_messages`, fork/revert, blob + spill, compaction primitives, listing, deletion, and pruning support |
 | `meerai-policy` | `PolicyEngine`: ordered permission rules, approval modes, turn/session grants |
-| `meerai-tools` | `code` module: `CodeTools`, the seven `code-*` tools with path guards, unified diffs, and observations |
-| `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent` v2, `prompt::{BASE_SYSTEM_PROMPT, compose_system_prompt}`, `spawn_worker`, and best-effort tool-output redaction |
-| `meerai-tui` | Modal terminal UI library (`ratatui` + `crossterm`) with transcript replay and approval overlay |
-| `meerai-cli` | Binary crate (`meerai`): CLI flags, headless runner, `auth` and `sessions` subcommands, TUI launcher |
+| `meerai-tools` | `code` (`CodeTools`, seven `code-*` tools with path guards, unified diffs, observations), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`), `search_as_code` (`SearchAsCodeToolset`) |
+| `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent` v2, `prompt::{BASE_SYSTEM_PROMPT, compose_system_prompt}`, `spawn_worker`, `subagent` (`SubagentToolset` + child sessions), and best-effort tool-output redaction |
+| `meerai-tui` | Modal terminal UI library (`ratatui` + `crossterm`) with transcript replay, subagent items, and approval overlay |
+| `meerai-cli` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth` and `sessions` (`list|rm|prune|fork`) subcommands, TUI launcher |
 
 ## Usage
 
@@ -170,6 +180,7 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 meerai                                          # full-screen modal TUI
 meerai --continue                               # TUI with the last session replayed
 meerai --resume <ID>                            # TUI with a session replayed
+meerai --fork <ID>                              # fork a session and resume it
 meerai --prompt "explain this repository"       # one headless turn
 meerai --prompt "..." --json                    # one NDJSON AgentEvent per line
 meerai --prompt "..." --continue                # resume the last session headless
@@ -180,7 +191,8 @@ meerai --agent reviewer --prompt "review this change"  # apply an agent
 meerai --skill orchestrate                      # apply a skill (repeatable)
 meerai --env-file .env.local                    # load variables from a file
 meerai auth list|login|logout                   # inspect, save, remove API keys
-meerai sessions list|rm|prune                   # list, delete, or prune sessions
+meerai sessions list|rm|prune|fork              # list, delete, prune, or fork sessions
+meerai sessions fork <ID> --turn <TURN_ID>      # fork from a specific closed turn
 meerai sessions prune --days 30 --keep 5        # delete old sessions, keep 5 newest
 meerai --version                                # print version (-V)
 ```

@@ -84,6 +84,8 @@ pub struct SessionMeta {
     pub updated_at_ms: u64,
     pub forked_from: Option<SessionId>,
     pub inherited_event_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<SessionId>,
 }
 
 impl SessionMeta {
@@ -100,6 +102,7 @@ impl SessionMeta {
             updated_at_ms: now,
             forked_from: None,
             inherited_event_count: None,
+            parent_session_id: None,
         }
     }
 }
@@ -113,6 +116,7 @@ pub struct SessionSummary {
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub bytes: u64,
+    pub parent_session_id: Option<SessionId>,
 }
 
 #[derive(Debug, Default)]
@@ -210,6 +214,7 @@ pub struct Session {
 struct SessionInner {
     id: SessionId,
     dir: Option<PathBuf>,
+    config: Option<SessionConfig>,
     events: RwLock<Vec<LoggedEvent>>,
     meta: RwLock<SessionMeta>,
     next_seq: AtomicU64,
@@ -226,6 +231,7 @@ impl Session {
                 meta: RwLock::new(SessionMeta::new(id.clone(), cwd)),
                 id,
                 dir: None,
+                config: None,
                 events: RwLock::new(Vec::new()),
                 next_seq: AtomicU64::new(1),
                 generation: AtomicU64::new(0),
@@ -318,6 +324,7 @@ impl Session {
             inner: Arc::new(SessionInner {
                 id,
                 dir: Some(dir),
+                config: Some(config.clone()),
                 events: RwLock::new(log.events),
                 meta: RwLock::new(meta),
                 next_seq: AtomicU64::new(next_seq),
@@ -375,6 +382,10 @@ impl Session {
 
     pub fn dir(&self) -> Option<&Path> {
         self.inner.dir.as_deref()
+    }
+
+    pub fn config(&self) -> Option<&SessionConfig> {
+        self.inner.config.as_ref()
     }
 
     pub fn meta(&self) -> SessionMeta {
@@ -458,6 +469,48 @@ impl Session {
             .await?;
 
         Ok(session)
+    }
+
+    pub fn latest_closed_turn(&self) -> Option<TurnId> {
+        self.events()
+            .into_iter()
+            .rev()
+            .find_map(|logged| match logged.event {
+                SessionEvent::TurnEnded { turn_id, .. } => Some(turn_id),
+                _ => None,
+            })
+    }
+
+    pub async fn fork_latest(config: &SessionConfig, source: &Session) -> Result<Session> {
+        let boundary = source.latest_closed_turn().ok_or_else(|| {
+            anyhow::anyhow!("session has no closed turns to fork: {}", source.id())
+        })?;
+        Self::fork(config, source, &boundary).await
+    }
+
+    pub async fn create_child(
+        &self,
+        model: Option<String>,
+        title: Option<String>,
+    ) -> Result<Session> {
+        let parent_id = self.id().clone();
+        let cwd = self.meta().cwd;
+        let child = match self.config() {
+            Some(config) => Self::open_or_create(config, SessionId::new(), cwd).await?,
+            None => Self::memory(SessionId::new(), cwd),
+        };
+        child
+            .update_meta(|meta| {
+                meta.parent_session_id = Some(parent_id);
+                if model.is_some() {
+                    meta.model = model;
+                }
+                if title.is_some() {
+                    meta.title = title;
+                }
+            })
+            .await?;
+        Ok(child)
     }
 
     pub async fn revert(&self, turn_id: &TurnId) -> Result<()> {
@@ -712,6 +765,7 @@ pub fn list_sessions(root: &Path) -> Result<Vec<SessionSummary>> {
             created_at_ms: meta.created_at_ms,
             updated_at_ms: meta.updated_at_ms,
             bytes,
+            parent_session_id: meta.parent_session_id,
         });
     }
 
@@ -725,7 +779,12 @@ pub fn list_sessions(root: &Path) -> Result<Vec<SessionSummary>> {
 }
 
 pub fn latest_session(root: &Path) -> Result<Option<SessionSummary>> {
-    Ok(list_sessions(root)?.into_iter().next())
+    let sessions = list_sessions(root)?;
+    Ok(sessions
+        .iter()
+        .find(|summary| summary.parent_session_id.is_none())
+        .cloned()
+        .or_else(|| sessions.into_iter().next()))
 }
 
 pub fn delete_session(root: &Path, id: &SessionId) -> Result<bool> {
@@ -1739,6 +1798,42 @@ mod tests {
         }
         assert_eq!(mode_of(&blob_path), 0o600);
         assert_eq!(mode_of(blobs.dir()), 0o700);
+
+        fs::remove_dir_all(&root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_child_links_parent_and_latest_session_skips_children() {
+        let root = temp_root("child-session");
+        let config = SessionConfig {
+            root: root.clone(),
+            workspace: root.clone(),
+            project_local: false,
+        };
+        let parent_id = SessionId::from_raw("parent-1");
+        let parent = Session::open_or_create(&config, parent_id.clone(), root.clone())
+            .await
+            .unwrap();
+        let child = parent
+            .create_child(Some("small-model".to_string()), Some("explore".to_string()))
+            .await
+            .unwrap();
+
+        assert_eq!(child.meta().parent_session_id, Some(parent_id.clone()));
+        assert_eq!(child.meta().model.as_deref(), Some("small-model"));
+        assert_eq!(child.meta().title.as_deref(), Some("explore"));
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        child
+            .append(SessionEvent::TurnEnded {
+                turn_id: TurnId::from_raw("t-child"),
+                reason: TurnEndReason::Completed,
+            })
+            .await
+            .unwrap();
+
+        let latest = latest_session(&root).unwrap().unwrap();
+        assert_eq!(latest.id, parent_id);
 
         fs::remove_dir_all(&root).await.unwrap();
     }

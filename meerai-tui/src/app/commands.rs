@@ -125,6 +125,7 @@ impl AppState {
                 self.pending_assistant_idx = None;
                 self.assistant_items.clear();
                 self.tool_items.clear();
+                self.subagent_items.clear();
                 self.scroll_offset = 0;
                 self.total_lines = 0;
                 self.auto_follow = true;
@@ -134,6 +135,7 @@ impl AppState {
                 self.pending_assistant_idx = None;
                 self.assistant_items.clear();
                 self.tool_items.clear();
+                self.subagent_items.clear();
                 self.turn_id = None;
                 self.usage = UsageStats::default();
                 self.metrics = TurnMetrics::default();

@@ -348,6 +348,7 @@ pub(super) enum StepFailure {
 pub struct MultiTurnAgent {
     pub(super) streamer: Arc<dyn ChatStreamer>,
     pub(super) model: String,
+    pub(super) shared_model: Arc<std::sync::RwLock<String>>,
     pub(super) session_id: String,
     pub(super) chat_history: Vec<ChatMessage>,
     pub(super) tools: Vec<Box<dyn Toolset>>,
@@ -417,9 +418,12 @@ impl MultiTurnAgent {
         system_prompt: impl Into<String>,
         config: MultiTurnAgentConfig,
     ) -> Self {
+        let model = model.into();
+        let shared_model = Arc::new(std::sync::RwLock::new(model.clone()));
         Self {
             streamer,
-            model: model.into(),
+            model,
+            shared_model,
             session_id: generate_opencode_session_id(),
             chat_history: Vec::new(),
             tools,
@@ -448,12 +452,24 @@ impl MultiTurnAgent {
         self.tools.extend(tools);
     }
 
+    pub fn streamer(&self) -> Arc<dyn ChatStreamer> {
+        self.streamer.clone()
+    }
+
+    pub fn model_handle(&self) -> Arc<std::sync::RwLock<String>> {
+        self.shared_model.clone()
+    }
+
     pub fn model(&self) -> &str {
         &self.model
     }
 
     pub fn set_model(&mut self, model: impl Into<String>) {
         self.model = model.into();
+        *self
+            .shared_model
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.model.clone();
     }
 
     pub fn set_permission_mode(&mut self, mode: ApprovalMode) {
@@ -484,6 +500,19 @@ impl MultiTurnAgent {
 
     pub fn harness(&self) -> Option<&AgentHarness> {
         self.harness.as_ref()
+    }
+
+    pub(crate) fn set_max_session_tokens(&mut self, max_tokens: Option<u64>) {
+        if let Some(harness) = &mut self.harness {
+            harness.config.max_session_tokens = max_tokens;
+        }
+    }
+
+    pub(crate) fn cumulative_usage_tokens(&self) -> u64 {
+        self.cumulative_usage
+            .total_tokens
+            .map(|tokens| tokens.max(0) as u64)
+            .unwrap_or(0)
     }
 
     pub(super) fn new_session_title(&self, prompt: &str) -> Option<String> {

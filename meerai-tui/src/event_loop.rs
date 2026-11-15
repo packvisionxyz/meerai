@@ -123,6 +123,7 @@ fn event_touches_workspace(event: &AgentEvent) -> bool {
                 item: SessionItem::ToolCall { .. }
                     | SessionItem::CommandRun { .. }
                     | SessionItem::FileChange { .. }
+                    | SessionItem::SubagentRun { .. }
             }
     )
 }

@@ -1,4 +1,6 @@
 use super::*;
+use crate::harness::HarnessConfig;
+use crate::subagent::{ForwardedApproval, SUBAGENT_BRIDGE, SubagentBridge, SubagentBudgetUpdate};
 
 #[derive(Default)]
 pub(super) struct FailureTracker {
@@ -156,7 +158,7 @@ impl MultiTurnAgent {
                 .tools
                 .iter()
                 .find(|tool| tool.contain(&tc.fn_name))
-                .map(|tool| tool.effect_of(&tc.fn_name))
+                .map(|tool| tool.effect_of_call(&tc.fn_name, &args_str))
                 .unwrap_or(EffectClass::Read);
             let item_id = ItemId::new();
 
@@ -212,7 +214,21 @@ impl MultiTurnAgent {
             });
         }
 
-        let this: &Self = self;
+        let tools = &self.tools;
+        let timeout_ms = self
+            .harness
+            .as_ref()
+            .map(|harness| harness.config.tool_timeout_ms);
+        let max_retries = self.config.max_retries;
+        let mut ctx = DecisionCtx {
+            harness: &mut self.harness,
+            pending_steers: &mut self.pending_steers,
+            pending_compact: &mut self.pending_compact,
+            chat_history: &mut self.chat_history,
+            model: &mut self.model,
+            shared_model: &self.shared_model,
+            cumulative_usage: &mut self.cumulative_usage,
+        };
         let mut halted = false;
         let mut cursor = 0;
 
@@ -223,22 +239,19 @@ impl MultiTurnAgent {
 
             if !plans[cursor].authorized() || plans[cursor].effect != EffectClass::Read {
                 if plans[cursor].authorized() {
-                    let plan = &plans[cursor];
-                    let result = match clock.remaining() {
-                        Some(remaining) => match tokio::time::timeout(
-                            remaining,
-                            this.run_tool(&plan.tool_call.fn_name, &plan.args, cancel),
+                    let result = {
+                        let fn_name = &plans[cursor].tool_call.fn_name;
+                        let args = &plans[cursor].args;
+                        run_with_bridge(
+                            &mut ctx,
+                            event_tx,
+                            cancel,
+                            inbox.as_deref_mut(),
+                            clock,
+                            run_tool_from(tools, timeout_ms, max_retries, fn_name, args, cancel),
                         )
                         .await
-                        {
-                            Ok(result) => result,
-                            Err(_) => Ok(tool_budget_exceeded(clock.max_secs)),
-                        },
-                        None if clock.max_secs != 0 => Ok(tool_budget_exceeded(clock.max_secs)),
-                        None => {
-                            this.run_tool(&plan.tool_call.fn_name, &plan.args, cancel)
-                                .await
-                        }
+                        .unwrap_or_else(|()| Ok(tool_budget_exceeded(clock.max_secs)))
                     };
                     halted =
                         matches!(&result, Ok(run) if matches!(run.output, ToolOutput::Stop(_)));
@@ -259,28 +272,30 @@ impl MultiTurnAgent {
                 end += 1;
             }
 
-            let reads = (cursor..end).map(|index| {
-                let plan = &plans[index];
-                async move {
-                    let result = this
-                        .run_tool(&plan.tool_call.fn_name, &plan.args, cancel)
-                        .await;
-                    (index, result)
-                }
-            });
-            let results = match clock.remaining() {
-                Some(remaining) => match tokio::time::timeout(remaining, join_all(reads)).await {
-                    Ok(results) => results,
-                    Err(_) => {
-                        let timeout = tool_budget_exceeded(clock.max_secs);
-                        for plan in plans.iter_mut().take(end).skip(cursor) {
-                            plan.outcome = Some(CallOutcome::Run(timeout.clone()));
-                        }
-                        cursor = end;
-                        continue;
+            let results = {
+                let reads = (cursor..end).map(|index| {
+                    let fn_name = &plans[index].tool_call.fn_name;
+                    let args = &plans[index].args;
+                    async move {
+                        let result =
+                            run_tool_from(tools, timeout_ms, max_retries, fn_name, args, cancel)
+                                .await;
+                        (index, result)
                     }
-                },
-                None if clock.max_secs != 0 => {
+                });
+                run_with_bridge(
+                    &mut ctx,
+                    event_tx,
+                    cancel,
+                    inbox.as_deref_mut(),
+                    clock,
+                    join_all(reads),
+                )
+                .await
+            };
+            let results = match results {
+                Ok(results) => results,
+                Err(()) => {
                     let timeout = tool_budget_exceeded(clock.max_secs);
                     for plan in plans.iter_mut().take(end).skip(cursor) {
                         plan.outcome = Some(CallOutcome::Run(timeout.clone()));
@@ -288,7 +303,6 @@ impl MultiTurnAgent {
                     cursor = end;
                     continue;
                 }
-                None => join_all(reads).await,
             };
             for (index, result) in results {
                 halted = halted
@@ -618,63 +632,9 @@ impl MultiTurnAgent {
         cancel: &CancellationToken,
         inbox: Option<&mut mpsc::UnboundedReceiver<AgentCommand>>,
     ) -> ApprovalOutcome {
-        let Some(receiver) = inbox else {
-            self.resolve_approval(request_id, ApprovalDecision::Decline, None, event_tx)
-                .await;
-            return ApprovalOutcome::new(ApprovalDecision::Decline, None);
-        };
-
-        loop {
-            let command = tokio::select! {
-                _ = cancel.cancelled() => {
-                    self.resolve_approval(
-                        request_id,
-                        ApprovalDecision::Cancel,
-                        None,
-                        event_tx,
-                    )
-                    .await;
-                    return ApprovalOutcome::new(ApprovalDecision::Cancel, None);
-                }
-                command = receiver.recv() => command,
-            };
-            let Some(command) = command else {
-                cancel.cancel();
-                self.resolve_approval(request_id, ApprovalDecision::Cancel, None, event_tx)
-                    .await;
-                return ApprovalOutcome::new(ApprovalDecision::Cancel, None);
-            };
-
-            match command {
-                AgentCommand::Approve {
-                    request_id: id,
-                    decision,
-                    scope,
-                } => {
-                    if &id != request_id {
-                        continue;
-                    }
-                    self.resolve_approval(request_id, decision.clone(), scope, event_tx)
-                        .await;
-                    return ApprovalOutcome::new(decision, scope);
-                }
-                AgentCommand::Cancel | AgentCommand::Quit => {
-                    cancel.cancel();
-                    self.resolve_approval(request_id, ApprovalDecision::Cancel, None, event_tx)
-                        .await;
-                    return ApprovalOutcome::new(ApprovalDecision::Cancel, None);
-                }
-                AgentCommand::Steer(_)
-                | AgentCommand::SetPermissionMode(_)
-                | AgentCommand::Compact
-                | AgentCommand::ApplyAgent { .. }
-                | AgentCommand::ApplySkill { .. } => {
-                    self.handle_live_command(command, event_tx).await;
-                }
-                AgentCommand::SubmitPrompt(_) | AgentCommand::SetModel(_) | AgentCommand::Reset => {
-                }
-            }
-        }
+        self.decision_ctx()
+            .await_decision(request_id, event_tx, cancel, inbox)
+            .await
     }
 
     pub(super) async fn handle_live_command(
@@ -682,55 +642,21 @@ impl MultiTurnAgent {
         command: AgentCommand,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) {
-        match command {
-            AgentCommand::Steer(text) => self.pending_steers.push_back(text),
-            AgentCommand::SetPermissionMode(mode) => {
-                if let Some(harness) = &mut self.harness {
-                    harness.policy.set_mode(mode);
-                }
-            }
-            AgentCommand::Compact => self.pending_compact = true,
-            AgentCommand::ApplyAgent {
-                name,
-                instructions,
-                model,
-            } => {
-                self.apply_agent_instructions(&name, &instructions, model, event_tx)
-                    .await;
-            }
-            AgentCommand::ApplySkill { name, instructions } => {
-                self.apply_skill_instructions(&name, &instructions, event_tx)
-                    .await;
-            }
-            AgentCommand::Approve { .. }
-            | AgentCommand::SubmitPrompt(_)
-            | AgentCommand::SetModel(_)
-            | AgentCommand::Reset
-            | AgentCommand::Cancel
-            | AgentCommand::Quit => {}
-        }
+        self.decision_ctx()
+            .handle_live_command(command, event_tx)
+            .await;
     }
 
-    async fn resolve_approval(
-        &self,
-        request_id: &RequestId,
-        decision: ApprovalDecision,
-        scope: Option<GrantScope>,
-        event_tx: &mpsc::UnboundedSender<AgentEvent>,
-    ) {
-        let scope = effective_scope(&decision, scope);
-        self.log_event(
-            event_tx,
-            SessionEvent::ApprovalDecided {
-                request_id: request_id.clone(),
-                decision,
-                scope,
-            },
-        )
-        .await;
-        let _ = event_tx.send(AgentEvent::ApprovalResolved {
-            request_id: request_id.clone(),
-        });
+    fn decision_ctx(&mut self) -> DecisionCtx<'_> {
+        DecisionCtx {
+            harness: &mut self.harness,
+            pending_steers: &mut self.pending_steers,
+            pending_compact: &mut self.pending_compact,
+            chat_history: &mut self.chat_history,
+            model: &mut self.model,
+            shared_model: &self.shared_model,
+            cumulative_usage: &mut self.cumulative_usage,
+        }
     }
 
     async fn spill_observation(
@@ -795,60 +721,425 @@ impl MultiTurnAgent {
         .await;
         observation
     }
+}
 
-    async fn run_tool(
-        &self,
-        name: &str,
-        args: &str,
+struct DecisionCtx<'a> {
+    harness: &'a mut Option<AgentHarness>,
+    pending_steers: &'a mut VecDeque<String>,
+    pending_compact: &'a mut bool,
+    chat_history: &'a mut Vec<ChatMessage>,
+    model: &'a mut String,
+    shared_model: &'a Arc<std::sync::RwLock<String>>,
+    cumulative_usage: &'a mut Usage,
+}
+
+impl DecisionCtx<'_> {
+    async fn await_decision(
+        &mut self,
+        request_id: &RequestId,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
         cancel: &CancellationToken,
-    ) -> Result<ToolRun> {
-        let tool = self
-            .tools
-            .iter()
-            .find(|tool| tool.contain(name))
-            .ok_or_else(|| anyhow!("Tool not found: {name}"))?;
+        inbox: Option<&mut mpsc::UnboundedReceiver<AgentCommand>>,
+    ) -> ApprovalOutcome {
+        let Some(receiver) = inbox else {
+            self.resolve_approval(request_id, ApprovalDecision::Decline, None, event_tx)
+                .await;
+            return ApprovalOutcome::new(ApprovalDecision::Decline, None);
+        };
 
-        let timeout_ms = self
-            .harness
-            .as_ref()
-            .map(|harness| harness.config.tool_timeout_ms);
-        let max_attempts = self.config.max_retries.max(1);
-
-        for attempt in 1..=max_attempts {
-            if cancel.is_cancelled() {
-                return Err(anyhow!("Tool execution cancelled"));
-            }
-
-            let invocation = tool.invoke_structured(name, args);
-            let result = match timeout_ms {
-                Some(ms) => match tokio::time::timeout(Duration::from_millis(ms), invocation).await
-                {
-                    Ok(result) => result,
-                    Err(_) => {
-                        return Ok(ToolRun::from_output(ToolOutput::Fail(format!(
-                            "tool timed out after {ms}ms"
-                        ))));
-                    }
-                },
-                None => invocation.await,
+        loop {
+            let command = tokio::select! {
+                _ = cancel.cancelled() => {
+                    self.resolve_approval(
+                        request_id,
+                        ApprovalDecision::Cancel,
+                        None,
+                        event_tx,
+                    )
+                    .await;
+                    return ApprovalOutcome::new(ApprovalDecision::Cancel, None);
+                }
+                command = receiver.recv() => command,
+            };
+            let Some(command) = command else {
+                cancel.cancel();
+                self.resolve_approval(request_id, ApprovalDecision::Cancel, None, event_tx)
+                    .await;
+                return ApprovalOutcome::new(ApprovalDecision::Cancel, None);
             };
 
-            match result {
-                Ok(run) => return Ok(run),
-                Err(err) if attempt == max_attempts => {
-                    return Err(anyhow!(
-                        "Failed to invoke tool '{name}' after {max_attempts} attempts: {err}"
-                    ));
-                }
-                Err(_) => {
-                    tokio::select! {
-                        _ = cancel.cancelled() => return Err(anyhow!("Tool execution cancelled")),
-                        _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            match command {
+                AgentCommand::Approve {
+                    request_id: id,
+                    decision,
+                    scope,
+                } => {
+                    if &id != request_id {
+                        continue;
                     }
+                    self.resolve_approval(request_id, decision.clone(), scope, event_tx)
+                        .await;
+                    return ApprovalOutcome::new(decision, scope);
+                }
+                AgentCommand::Cancel | AgentCommand::Quit => {
+                    cancel.cancel();
+                    self.resolve_approval(request_id, ApprovalDecision::Cancel, None, event_tx)
+                        .await;
+                    return ApprovalOutcome::new(ApprovalDecision::Cancel, None);
+                }
+                AgentCommand::Steer(_)
+                | AgentCommand::SetPermissionMode(_)
+                | AgentCommand::Compact
+                | AgentCommand::ApplyAgent { .. }
+                | AgentCommand::ApplySkill { .. } => {
+                    self.handle_live_command(command, event_tx).await;
+                }
+                AgentCommand::SubmitPrompt(_) | AgentCommand::SetModel(_) | AgentCommand::Reset => {
                 }
             }
         }
-
-        unreachable!("loop always returns on final attempt")
     }
+
+    async fn handle_live_command(
+        &mut self,
+        command: AgentCommand,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        match command {
+            AgentCommand::Steer(text) => self.pending_steers.push_back(text),
+            AgentCommand::SetPermissionMode(mode) => {
+                if let Some(harness) = self.harness.as_mut() {
+                    harness.policy.set_mode(mode);
+                }
+            }
+            AgentCommand::Compact => *self.pending_compact = true,
+            AgentCommand::ApplyAgent {
+                name,
+                instructions,
+                model,
+            } => {
+                self.apply_instructions(
+                    format!("Agent instructions ({name}):\n\n{instructions}"),
+                    model,
+                    event_tx,
+                )
+                .await;
+            }
+            AgentCommand::ApplySkill { name, instructions } => {
+                self.apply_instructions(
+                    format!("Skill instructions ({name}):\n\n{instructions}"),
+                    None,
+                    event_tx,
+                )
+                .await;
+            }
+            AgentCommand::Approve { .. }
+            | AgentCommand::SubmitPrompt(_)
+            | AgentCommand::SetModel(_)
+            | AgentCommand::Reset
+            | AgentCommand::Cancel
+            | AgentCommand::Quit => {}
+        }
+    }
+
+    async fn apply_instructions(
+        &mut self,
+        text: String,
+        model: Option<String>,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        log_harness_event(
+            self.harness.as_ref(),
+            event_tx,
+            SessionEvent::UserMessage {
+                source: InputSource::System,
+                content: vec![ContentBlock::Text(text.clone())],
+            },
+        )
+        .await;
+        self.chat_history.push(ChatMessage::user(text));
+        if let Some(model) = model {
+            *self.model = model.clone();
+            *self
+                .shared_model
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = model;
+        }
+    }
+
+    async fn resolve_approval(
+        &self,
+        request_id: &RequestId,
+        decision: ApprovalDecision,
+        scope: Option<GrantScope>,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        let scope = effective_scope(&decision, scope);
+        log_harness_event(
+            self.harness.as_ref(),
+            event_tx,
+            SessionEvent::ApprovalDecided {
+                request_id: request_id.clone(),
+                decision,
+                scope,
+            },
+        )
+        .await;
+        let _ = event_tx.send(AgentEvent::ApprovalResolved {
+            request_id: request_id.clone(),
+        });
+    }
+}
+
+async fn log_harness_event(
+    harness: Option<&AgentHarness>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    event: SessionEvent,
+) {
+    let Some(harness) = harness else {
+        return;
+    };
+    if let Err(error) = harness.session.append(event).await {
+        let _ = event_tx.send(AgentEvent::Error {
+            code: ErrorCode::Internal,
+            message: format!("failed to append session event: {error:#}"),
+        });
+    }
+}
+
+fn record_child_usage(
+    usage: Usage,
+    cumulative_usage: &mut Usage,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    cumulative_usage.add(usage);
+    let _ = event_tx.send(AgentEvent::UsageUpdated {
+        usage,
+        cumulative: *cumulative_usage,
+        est_cost_usd: None,
+    });
+}
+
+fn drain_child_usage(
+    usage_rx: &mut mpsc::UnboundedReceiver<Usage>,
+    cumulative_usage: &mut Usage,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    while let Ok(usage) = usage_rx.try_recv() {
+        record_child_usage(usage, cumulative_usage, event_tx);
+    }
+}
+
+fn drain_child_harness_updates(
+    grant_rx: &mut mpsc::UnboundedReceiver<meerai_policy::Grant>,
+    budget_rx: &mut mpsc::UnboundedReceiver<SubagentBudgetUpdate>,
+    harness: Option<&mut AgentHarness>,
+) {
+    let Some(harness) = harness else {
+        return;
+    };
+    while let Ok(grant) = grant_rx.try_recv() {
+        harness.policy.record_grant(grant);
+    }
+    while let Ok(update) = budget_rx.try_recv() {
+        match update {
+            SubagentBudgetUpdate::Unlimited => harness.config.max_session_tokens = None,
+            SubagentBudgetUpdate::Increase(delta) => {
+                if let Some(cap) = harness.config.max_session_tokens {
+                    harness.config.max_session_tokens = Some(cap.saturating_add(delta));
+                }
+            }
+        }
+    }
+}
+
+async fn run_with_bridge<F, T>(
+    ctx: &mut DecisionCtx<'_>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    cancel: &CancellationToken,
+    mut inbox: Option<&mut mpsc::UnboundedReceiver<AgentCommand>>,
+    clock: TurnClock,
+    fut: F,
+) -> std::result::Result<T, ()>
+where
+    F: std::future::Future<Output = T>,
+{
+    if clock.max_secs != 0 && clock.remaining().is_none() {
+        return Err(());
+    }
+
+    let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ForwardedApproval>();
+    let (usage_tx, mut usage_rx) = mpsc::unbounded_channel::<Usage>();
+    let (grant_tx, mut grant_rx) = mpsc::unbounded_channel::<meerai_policy::Grant>();
+    let (budget_tx, mut budget_rx) = mpsc::unbounded_channel::<SubagentBudgetUpdate>();
+    let bridge_cancel = cancel.child_token();
+    let bridge = SubagentBridge {
+        event_tx: event_tx.clone(),
+        approval_tx,
+        usage_tx,
+        grant_tx,
+        budget_tx,
+        cancel: bridge_cancel.clone(),
+        parent_session: ctx.harness.as_ref().map(|h| h.session.clone()),
+        parent_policy_mode: ctx
+            .harness
+            .as_ref()
+            .map_or(ApprovalMode::Ask, |h| h.policy.mode()),
+        parent_policy_rules: ctx
+            .harness
+            .as_ref()
+            .map_or_else(Vec::new, |h| h.policy.rules().to_vec()),
+        parent_policy_grants: ctx
+            .harness
+            .as_ref()
+            .map_or_else(Vec::new, |h| h.policy.grants()),
+        workspace_root: ctx.harness.as_ref().map_or_else(
+            || PathBuf::from("."),
+            |h| h.policy.workspace_root().to_path_buf(),
+        ),
+        parent_harness_config: ctx
+            .harness
+            .as_ref()
+            .map_or_else(HarnessConfig::default, |h| h.config.clone()),
+        parent_used_tokens: ctx
+            .cumulative_usage
+            .total_tokens
+            .map(|tokens| tokens.max(0) as u64)
+            .unwrap_or(0),
+    };
+
+    let mut scoped = std::pin::pin!(SUBAGENT_BRIDGE.scope(bridge, fut));
+    let has_deadline = clock.max_secs != 0;
+    let deadline = clock
+        .remaining()
+        .map(|left| tokio::time::Instant::now() + left)
+        .unwrap_or_else(tokio::time::Instant::now);
+    let sleep = tokio::time::sleep_until(deadline);
+    tokio::pin!(sleep);
+
+    let mut approval_open = true;
+    let mut usage_open = true;
+
+    let result = loop {
+        tokio::select! {
+            res = &mut scoped => break Ok(res),
+            _ = &mut sleep, if has_deadline => {
+                bridge_cancel.cancel();
+                let shutdown = async {
+                    loop {
+                        tokio::select! {
+                            _ = &mut scoped => break,
+                            maybe_req = approval_rx.recv(), if approval_open => {
+                                match maybe_req {
+                                    Some(req) => {
+                                        let _ = req.reply.send((ApprovalDecision::Cancel, None));
+                                    }
+                                    None => approval_open = false,
+                                }
+                            }
+                        }
+                    }
+                };
+                let _ = tokio::time::timeout(Duration::from_secs(2), shutdown).await;
+                break Err(());
+            }
+            maybe_req = approval_rx.recv(), if approval_open => {
+                match maybe_req {
+                    Some(req) => {
+                        let _ = event_tx.send(AgentEvent::ApprovalRequested {
+                            request: req.request.clone(),
+                        });
+                        log_harness_event(
+                            ctx.harness.as_ref(),
+                            event_tx,
+                            SessionEvent::ApprovalRequested {
+                                request_id: req.request.request_id.clone(),
+                                kind: req.request.kind,
+                                preview: req.request.preview.clone(),
+                            },
+                        )
+                        .await;
+                        let outcome = ctx
+                            .await_decision(
+                                &req.request.request_id,
+                                event_tx,
+                                cancel,
+                                inbox.as_deref_mut(),
+                            )
+                            .await;
+                        let _ = req.reply.send((outcome.decision, outcome.scope));
+                        drain_child_usage(&mut usage_rx, ctx.cumulative_usage, event_tx);
+                    }
+                    None => approval_open = false,
+                }
+            }
+            maybe_usage = usage_rx.recv(), if usage_open => {
+                match maybe_usage {
+                    Some(usage) => record_child_usage(usage, ctx.cumulative_usage, event_tx),
+                    None => usage_open = false,
+                }
+            }
+        }
+    };
+
+    drain_child_usage(&mut usage_rx, ctx.cumulative_usage, event_tx);
+    drain_child_harness_updates(&mut grant_rx, &mut budget_rx, ctx.harness.as_mut());
+    result
+}
+
+async fn run_tool_from(
+    tools: &[Box<dyn Toolset>],
+    timeout_ms: Option<u64>,
+    max_retries: usize,
+    name: &str,
+    args: &str,
+    cancel: &CancellationToken,
+) -> Result<ToolRun> {
+    let tool = tools
+        .iter()
+        .find(|tool| tool.contain(name))
+        .ok_or_else(|| anyhow!("Tool not found: {name}"))?;
+
+    let max_attempts = max_retries.max(1);
+    let effective_timeout = if name.starts_with("subagent-") {
+        None
+    } else {
+        timeout_ms
+    };
+
+    for attempt in 1..=max_attempts {
+        if cancel.is_cancelled() {
+            return Err(anyhow!("Tool execution cancelled"));
+        }
+
+        let invocation = tool.invoke_structured(name, args);
+        let result = match effective_timeout {
+            Some(ms) => match tokio::time::timeout(Duration::from_millis(ms), invocation).await {
+                Ok(result) => result,
+                Err(_) => {
+                    return Ok(ToolRun::from_output(ToolOutput::Fail(format!(
+                        "tool timed out after {ms}ms"
+                    ))));
+                }
+            },
+            None => invocation.await,
+        };
+
+        match result {
+            Ok(run) => return Ok(run),
+            Err(err) if attempt == max_attempts => {
+                return Err(anyhow!(
+                    "Failed to invoke tool '{name}' after {max_attempts} attempts: {err}"
+                ));
+            }
+            Err(_) => {
+                tokio::select! {
+                    _ = cancel.cancelled() => return Err(anyhow!("Tool execution cancelled")),
+                    _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                }
+            }
+        }
+    }
+
+    unreachable!("loop always returns on final attempt")
 }

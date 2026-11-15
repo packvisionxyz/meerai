@@ -23,13 +23,15 @@ SWE-grep line shows RL-tuned search subagents returning only `file:start-end` sp
 materially cut retrieval cost. Both patterns are adopted in §12.
 
 Implementation status is tracked in §15.1. Sections that describe unimplemented
-behavior — OS sandboxing (§8.3 phase 2), checkpoints (§9.1), hooks (§9.2),
-subagent execution (§10.2), retrieval v2/v3 (§12), progressive disclosure
-(§7.7), and prompt-injection screening (§9.5) — are targets, not current
-behavior. Secret redaction (§9.5) ships as best-effort pattern replacement.
-Agent and skill discovery (§10.1) ships for `.agents` and `.claude` as
-prompt-only instructions (M12); it is not a subagent runtime. The security
-landed/backlog split is in §9.6 (M11).
+behavior — OS sandboxing (§8.3 phase 2), checkpoints (§9.1), hooks (§9.2,
+including post-edit LSP hooks), progressive disclosure (§7.7), `meerai export`
+(§13), definition tool/permission mapping (§10.1), and prompt-injection
+screening (§9.5) — are targets, not current behavior. Secret redaction (§9.5)
+ships as best-effort pattern replacement. Subagent execution (§10.2), CLI
+forking (§13), and retrieval v2/v3 (`repo_map`, LSP tools, search-as-code in
+§12) are landed; M12 agent/skill discovery (§10.1) still applies `.agents` and
+`.claude` markdown definitions as prompt-only text (custom agents run read-only
+under M8). The security landed/backlog split is in §9.6 (M11).
 
 ---
 
@@ -808,8 +810,12 @@ Review the current changes. List findings by severity with file:line references.
 - Model precedence: `--model` → `MEERAI_MODEL` → agent `model` →
   settings/provider default. An agent `model` containing `:` would change
   provider and is ignored with a warning.
-- No subagent runtime: an applied agent gets no child session, tool subset, or
-  permission set. §10.2 remains backlog.
+- M12 prompt application gives no custom tool subset or custom permission set
+  when applied via `--agent` or `/agent`. When executed as a child via
+  `subagent-run` (M8), built-ins (`build`, `plan`, `explore`, `general`) get
+  their typed tool subsets and budgets, whereas `.agents`/`.claude` custom
+  agents stay read-only (`ApprovalMode::Plan`, read-only tools) regardless of
+  frontmatter `tools`/`permissions`/`allowed-tools`.
 
 ### 10.2 Subagent execution
 
@@ -955,9 +961,9 @@ Extends the roadmap in [architecture.md](architecture.md); each milestone keeps
 | D1 | **Distribution hardening** | Apache-2.0 license, workspace metadata, CI gate, tag-driven 5-target release, Pages installers | repo root, `.github/`, `site/` | landed |
 | M6 | **Checkpoints + rewind** | per-turn snapshots, `/rewind` menu, restore-code/conversation flows | `meerai-policy`, TUI | backlog |
 | M7 | **Hooks** | v1 event set, JSON stdin/exit-2 contract, trust gate, `HookFired` logging | `meerai-policy`, `meerai-agents` | backlog |
-| M8 | **Subagent runtime** | child sessions, isolation, built-ins (`build`/`plan`/`explore`/`general`), and a `subagent` tool. M12 loads `.agents`/`.claude` definitions as prompt text only; it does not create subagents | `meerai-agents`, `meerai-session` | backlog |
-| M9 | **CLI + resume/fork** | `meerai-cli`: `--prompt`, `--json`, `--continue`, `--resume <id>`, `fork`, config/env wiring | new crate | partial: headless and TUI `--continue`/`--resume`, `sessions list|rm|prune`, and TUI transcript replay landed in `meerai-tui`; no `meerai-cli` crate, no fork CLI |
-| M10 | **Retrieval v2/v3** | repository map (tree-sitter tags + ranking), LSP tools, search-as-code | `meerai-tools`, `meerai-agents` | backlog |
+| M8 | **Subagent runtime** | child sessions (`parent_session_id`), depth-1 isolation, built-ins (`build`/`plan`/`explore`/`general`), `subagent-run` tool, forwarded child approvals, usage rollup, `SubagentRun` items, read-only `Plan` execution for M12 custom definitions | `meerai-agents`, `meerai-session`, `meerai-tui` | landed (M8): child sessions and `SubagentToolset` landed; M12 frontmatter `tools`/`permissions` remain prompt-only |
+| M9 | **CLI + resume/fork** | `meerai-cli` crate: `--prompt`, `--json`, `--continue`, `--resume <id>`, `--fork <id>`, `sessions fork <id> [--turn <turn-id>]`, `auth`/`sessions`, config/env wiring | `meerai-cli`, `meerai-session` | landed (M9): `meerai-cli`, `sessions fork`, and `--fork` landed (`-p` stays `--provider`); `export` and TUI `/fork` are not built |
+| M10 | **Retrieval v2/v3** | `RepoMapToolset` (`retrieval-repo_map` via tree-sitter + PageRank), `LspToolset` (`lsp-go_to_definition`, `lsp-find_references`, `lsp-get_diagnostics`), `SearchAsCodeToolset` (`sac-run_script`) | `meerai-tools`, `meerai-cli` | landed (M10): repo map, LSP stdio tools, and search-as-code landed; automatic post-edit diagnostics waits on M7 hooks |
 | M11 | **Security & supply chain** | landed: path guards, `plan` hard read-only, approval gates with headless fail-fast, provider-secret env scrub, best-effort output/diff/error redaction, session file permissions, configurable retention, session/turn token budgets. Backlog (§9.6): OS sandbox (`ExecutionWorld`: macOS Seatbelt, Linux bubblewrap/Landlock, network denied by default), dependency audit in CI (`cargo audit`/`cargo deny`), signed and notarized macOS/Windows artifacts, a written threat model (repo instructions, model output, hooks, MCP, subagents), prompt-injection screening, OS keychain | `meerai-tools`, `meerai-policy`, `.github/workflows/`, TUI | partial: guards, approvals, redaction, permissions, retention, and budgets landed; sandbox, audit, signing, threat model, screening, and keychain are backlog |
 | M12 | **Agents & skills discovery** | read-only markdown discovery: `.agents/agents/*.md` + `.agents/skills/*/SKILL.md` over `.claude/...`; duplicate ids resolve to `.agents`; frontmatter `name`/`description`/`model`/`steps`/`mode`; startup `--agent`/`--skill`; TUI `/agent`/`/skill`, the `@` Mentions popup, and composer chips | `meerai-common` (`definitions`), `meerai-tui`, `meerai-agents` (`ApplyAgent`/`ApplySkill`) | landed (R5): prompt instructions only. No subagent runtime (M8), no tool/permission mapping, no MCP, and no supporting skill files |
 | M13 | **ACP client (external harnesses)** | adapter presets in user config only; spawn via `AcpAgent`; `session/new`/`session/prompt`/`session/cancel`; map chunks, tool calls, plans, usage, and permission requests to `AgentEvent`; `--acp`/`/acp`; `acp doctor`. Target order: Antigravity (`agy acp`), then OpenCode (`opencode acp`), then Gemini/Claude/Codex. Design in [acp.md](acp.md) | new `meerai-acp` crate, `meerai-tui`, `meerai-session` (meta fields) | backlog (P0 spike first). External agents keep their own tools and policy: meerai rules, path guards, and redaction do not apply; permission requests are advisory |
@@ -1393,6 +1399,29 @@ the Post-M5 R5 note).
   `cargo clippy --workspace --all-targets` clean except the two accepted
   pre-existing warnings, and `cargo test --workspace` **348 passed / 0 failed**.
   The same count came from a clean copy of the tree with no `target/` directory.
+
+### 15.7 Milestone M8, M9, and M10 delivery notes
+
+- **M8 (Subagent runtime):** `meerai-agents::subagent` implements
+  `SubagentToolset` (`subagent-run`) with built-ins `explore` (4 steps, read),
+  `plan` (16 steps, read), `build` (32 steps, write), and `general` (16 steps,
+  write), depth-1 isolation (`ChildToolsetFilter`), child sessions linked via
+  `parent_session_id` (`Session::create_child`), forwarded `ApprovalRequested`
+  prompts, parent `cumulative_usage` rollup, `SessionItem::SubagentRun` items,
+  and TUI/headless rendering. Custom M12 definitions execute under read-only
+  `Plan` defaults with prompt instructions only.
+- **M9 (CLI fork):** `meerai-cli` implements `meerai sessions fork <id> [--turn <turn-id>]`
+  and top-level `--fork <id>` (fork and resume immediately). `meerai-session`
+  adds `latest_closed_turn` and `fork_latest`; `latest_session` skips child
+  sessions when selecting `--continue`. `-p` remains `--provider`; `meerai export`
+  and TUI `/fork` remain backlog.
+- **M10 (Retrieval v2/v3):** `meerai-tools` adds `RepoMapToolset`
+  (`retrieval-repo_map`, tree-sitter Rust/TS/TSX/JS/Python/Go + personalized
+  PageRank), `LspToolset` (`lsp-go_to_definition`, `lsp-find_references`,
+  `lsp-get_diagnostics` over stdio JSON-RPC), and `SearchAsCodeToolset`
+  (`sac-run_script` running `python3 -I` / `node -e` with env scrubbing and
+  `EffectClass::Execute` policy gating). Automatic post-edit LSP diagnostics
+  remains queued behind M7 hooks.
 
 ---
 

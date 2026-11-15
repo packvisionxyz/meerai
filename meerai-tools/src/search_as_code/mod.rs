@@ -1,0 +1,357 @@
+use std::path::{Path, PathBuf};
+use std::process::{Output, Stdio};
+use std::time::Duration;
+
+use meerai_core::{
+    EffectClass, ObservationStatus, PermissionAction, ToolDefinition, ToolError, ToolObservation,
+    ToolOutput, ToolPermissionSpec, ToolRun, Toolset, async_trait,
+};
+
+use crate::code::shell::scrub_command_env;
+use crate::code::{CodeTools, definition_for, failure_run, parse_args, truncate_middle};
+
+const TOOLSET_NAME: &str = "sac";
+const RUN_SCRIPT_TOOL: &str = "sac-run_script";
+const DEFAULT_TIMEOUT_MS: u64 = 15_000;
+const MAX_TIMEOUT_MS: u64 = 60_000;
+const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum ScriptLanguage {
+    Python,
+    Javascript,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct RunScriptArgs {
+    #[schemars(
+        description = "Script runtime language: `python` (`python3 -I -c`) or `javascript` (`node -e`)."
+    )]
+    language: ScriptLanguage,
+    #[schemars(description = "Script source code to execute in the workspace root.")]
+    script: String,
+    #[schemars(description = "Timeout in milliseconds (default 15000, max 60000).")]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchAsCodeToolset {
+    workspace_root: PathBuf,
+    sensitive_env_vars: Vec<String>,
+}
+
+impl SearchAsCodeToolset {
+    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
+        Self {
+            workspace_root: workspace_root.into(),
+            sensitive_env_vars: Vec::new(),
+        }
+    }
+
+    pub fn with_sensitive_env_vars(mut self, vars: Vec<String>) -> Self {
+        self.sensitive_env_vars = vars
+            .into_iter()
+            .map(|v| v.trim().to_ascii_uppercase())
+            .filter(|v| !v.is_empty())
+            .collect();
+        self
+    }
+
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
+    async fn run_script(&self, args: RunScriptArgs) -> ToolRun {
+        let cwd = CodeTools::new(&self.workspace_root)
+            .canonical_workspace_root()
+            .await;
+        match tokio::fs::metadata(&cwd).await {
+            Ok(meta) if meta.is_dir() => {}
+            _ => {
+                return failure_run(format!(
+                    "workspace root is not a directory: {}",
+                    cwd.display()
+                ));
+            }
+        }
+
+        let timeout_ms = args
+            .timeout_ms
+            .unwrap_or(DEFAULT_TIMEOUT_MS)
+            .clamp(1, MAX_TIMEOUT_MS);
+
+        let (program, argv): (&str, Vec<&str>) = match args.language {
+            ScriptLanguage::Python => ("python3", vec!["-I", "-c", &args.script]),
+            ScriptLanguage::Javascript => ("node", vec!["-e", &args.script]),
+        };
+
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.args(argv)
+            .current_dir(&cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        scrub_command_env(&mut cmd, &self.sensitive_env_vars);
+
+        let child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                return failure_run(format!("cannot start {program}: {error}"));
+            }
+        };
+
+        match tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait_with_output())
+            .await
+        {
+            Err(_) => {
+                let mut run = failure_run(format!(
+                    "script timed out after {timeout_ms} ms and was killed"
+                ));
+                run.observation.hint =
+                    Some("Narrow the script scope, or raise timeout_ms (up to 60000).".to_string());
+                run
+            }
+            Ok(Err(error)) => failure_run(format!("script failed: {error}")),
+            Ok(Ok(output)) => complete(output),
+        }
+    }
+}
+
+fn complete(output: Output) -> ToolRun {
+    let exit_code = output.status.code();
+    let stdout = truncate_middle(&String::from_utf8_lossy(&output.stdout), MAX_OUTPUT_BYTES);
+    let stderr = truncate_middle(&String::from_utf8_lossy(&output.stderr), MAX_OUTPUT_BYTES);
+    let combined = truncate_middle(&combine(&stdout, &stderr), MAX_OUTPUT_BYTES);
+    let succeeded = output.status.success();
+
+    let observation = ToolObservation {
+        status: if succeeded {
+            ObservationStatus::Success
+        } else {
+            ObservationStatus::Error
+        },
+        exit_code,
+        stdout,
+        stderr,
+        hint: None,
+    };
+
+    if succeeded {
+        let text = if combined.is_empty() {
+            "(no output)".to_string()
+        } else {
+            combined
+        };
+        ToolRun {
+            output: ToolOutput::Text(text),
+            observation,
+            file_changes: Vec::new(),
+        }
+    } else {
+        let status = exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let mut text = format!("script failed with exit code {status}");
+        if !combined.is_empty() {
+            text.push('\n');
+            text.push_str(&combined);
+        }
+        ToolRun {
+            output: ToolOutput::Fail(text),
+            observation,
+            file_changes: Vec::new(),
+        }
+    }
+}
+
+fn combine(stdout: &str, stderr: &str) -> String {
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => stdout.to_string(),
+        (true, false) => stderr.to_string(),
+        (false, false) => format!("{stdout}\n{stderr}"),
+    }
+}
+
+#[async_trait]
+impl Toolset for SearchAsCodeToolset {
+    fn name(&self) -> String {
+        TOOLSET_NAME.to_string()
+    }
+
+    fn definition(&self) -> Vec<ToolDefinition> {
+        vec![definition_for::<RunScriptArgs>(
+            RUN_SCRIPT_TOOL,
+            "Run a short Python or JavaScript analysis script in the workspace root with sensitive environment variables scrubbed.",
+        )]
+    }
+
+    fn contain(&self, fn_name: &str) -> bool {
+        fn_name == RUN_SCRIPT_TOOL
+    }
+
+    fn effect_of(&self, _fn_name: &str) -> EffectClass {
+        EffectClass::Execute
+    }
+
+    fn permission_spec(&self, fn_name: &str) -> Option<ToolPermissionSpec> {
+        (fn_name == RUN_SCRIPT_TOOL).then_some(ToolPermissionSpec {
+            action: PermissionAction::Shell,
+            resource_arg: None,
+        })
+    }
+
+    fn should_spill_output(&self, _fn_name: &str) -> bool {
+        true
+    }
+
+    async fn invoke(&self, fn_name: &str, args: &str) -> Result<ToolOutput, ToolError> {
+        Ok(self.invoke_structured(fn_name, args).await?.output)
+    }
+
+    async fn invoke_structured(&self, fn_name: &str, args: &str) -> Result<ToolRun, ToolError> {
+        if fn_name != RUN_SCRIPT_TOOL {
+            return Err(ToolError::InvalidFunctionName(fn_name.to_string()));
+        }
+        Ok(self.run_script(parse_args(args)?).await)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+    use tokio::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+    fn command_available(program: &str) -> bool {
+        std::process::Command::new(program)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, val);
+            }
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prev {
+                    Some(val) => std::env::set_var(self.key, val),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn executes_python_script_in_workspace() {
+        if !command_available("python3") {
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("sample.txt"), "hello sac").unwrap();
+
+        let toolset = SearchAsCodeToolset::new(dir.path());
+        let run = toolset
+            .invoke_structured(
+                RUN_SCRIPT_TOOL,
+                r#"{"language": "python", "script": "print(open('sample.txt').read())"}"#,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(run.observation.status, ObservationStatus::Success);
+        assert_eq!(run.observation.exit_code, Some(0));
+        assert_eq!(run.observation.stdout.trim(), "hello sac");
+    }
+
+    #[tokio::test]
+    async fn executes_javascript_script_in_workspace() {
+        if !command_available("node") {
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("data.json"), r#"{"ok":true}"#).unwrap();
+
+        let toolset = SearchAsCodeToolset::new(dir.path());
+        let run = toolset
+            .invoke_structured(
+                RUN_SCRIPT_TOOL,
+                r#"{"language": "javascript", "script": "const fs = require('fs'); console.log(JSON.parse(fs.readFileSync('data.json', 'utf8')).ok);"}"#,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(run.observation.status, ObservationStatus::Success);
+        assert_eq!(run.observation.exit_code, Some(0));
+        assert_eq!(run.observation.stdout.trim(), "true");
+    }
+
+    #[tokio::test]
+    async fn enforces_timeout_and_kills_process() {
+        if !command_available("python3") {
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        let toolset = SearchAsCodeToolset::new(dir.path());
+        let run = toolset
+            .invoke_structured(
+                RUN_SCRIPT_TOOL,
+                r#"{"language": "python", "script": "import time; time.sleep(5)", "timeout_ms": 100}"#,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(run.observation.status, ObservationStatus::Error);
+        assert!(
+            run.observation.stderr.contains("timed out"),
+            "unexpected stderr: {}",
+            run.observation.stderr
+        );
+    }
+
+    #[tokio::test]
+    async fn scrubs_sensitive_env_vars_from_child() {
+        if !command_available("python3") {
+            return;
+        }
+        let _lock = ENV_LOCK.lock().await;
+        let _guard = EnvGuard::set("OPENAI_API_KEY", "sk-secret-value-123");
+        let _extra = EnvGuard::set("CUSTOM_TOOL_TOKEN", "tok-secret-456");
+
+        let dir = TempDir::new().unwrap();
+        let toolset = SearchAsCodeToolset::new(dir.path())
+            .with_sensitive_env_vars(vec!["CUSTOM_TOOL_TOKEN".to_string()]);
+        let run = toolset
+            .invoke_structured(
+                RUN_SCRIPT_TOOL,
+                r#"{"language": "python", "script": "import os; print(os.environ.get('OPENAI_API_KEY', 'MISSING'), os.environ.get('CUSTOM_TOOL_TOKEN', 'MISSING'))"}"#,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(run.observation.status, ObservationStatus::Success);
+        assert_eq!(run.observation.stdout.trim(), "MISSING MISSING");
+    }
+}

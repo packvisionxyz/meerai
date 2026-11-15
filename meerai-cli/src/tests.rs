@@ -724,6 +724,7 @@ fn session_rows_prefer_title_then_model() {
         created_at_ms: 1,
         updated_at_ms: 2,
         bytes: 3,
+        parent_session_id: None,
     };
     assert_eq!(format_session_row(&base), "ses-1\t2\t3\tFix build");
 
@@ -778,6 +779,7 @@ fn session_summary(id: &str, updated_at_ms: u64) -> SessionSummary {
         created_at_ms: updated_at_ms,
         updated_at_ms,
         bytes: 0,
+        parent_session_id: None,
     }
 }
 
@@ -894,6 +896,7 @@ fn write_fake_session(root: &Path, id: &str, updated_at_ms: u64) {
         updated_at_ms,
         forked_from: None,
         inherited_event_count: None,
+        parent_session_id: None,
     };
     std::fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
 }
@@ -986,4 +989,285 @@ fn formats_token_summary_and_omits_missing_fields() {
         format_token_summary(&partial).as_deref(),
         Some("tokens: completion=4")
     );
+}
+
+#[test]
+fn parses_sessions_fork_and_top_level_fork_flags() {
+    let sessions = |args: &[&str]| -> Vec<String> {
+        std::iter::once("sessions".to_string())
+            .chain(args.iter().map(|arg| arg.to_string()))
+            .collect()
+    };
+
+    assert_eq!(
+        parse_args(sessions(&["fork", "ses-123"]))
+            .unwrap()
+            .subcommand,
+        Some(CliSubcommand::Sessions(SessionsCommand::Fork {
+            id: "ses-123".to_string(),
+            turn: None,
+        }))
+    );
+    assert_eq!(
+        parse_args(sessions(&["fork", "ses-123", "--turn", "turn-2"]))
+            .unwrap()
+            .subcommand,
+        Some(CliSubcommand::Sessions(SessionsCommand::Fork {
+            id: "ses-123".to_string(),
+            turn: Some("turn-2".to_string()),
+        }))
+    );
+    assert_eq!(
+        parse_args(sessions(&["fork", "ses-123", "--turn=turn-3"]))
+            .unwrap()
+            .subcommand,
+        Some(CliSubcommand::Sessions(SessionsCommand::Fork {
+            id: "ses-123".to_string(),
+            turn: Some("turn-3".to_string()),
+        }))
+    );
+    assert!(parse_args(sessions(&["fork", "--help"])).unwrap().show_help);
+    assert!(parse_args(sessions(&["fork"])).is_err());
+    assert!(parse_args(sessions(&["fork", "ses-123", "--turn"])).is_err());
+    assert!(parse_args(sessions(&["fork", "ses-123", "--bogus"])).is_err());
+    assert!(parse_args(sessions(&["fork", "ses-123", "extra"])).is_err());
+
+    let spaced = parse_args(vec!["--fork".to_string(), "ses-abc".to_string()]).unwrap();
+    assert_eq!(spaced.fork.as_deref(), Some("ses-abc"));
+    assert!(!spaced.continue_session);
+    assert_eq!(spaced.resume, None);
+
+    let equals = parse_args(vec!["--fork=ses-xyz".to_string()]).unwrap();
+    assert_eq!(equals.fork.as_deref(), Some("ses-xyz"));
+
+    assert!(parse_args(vec!["--fork".to_string()]).is_err());
+
+    let fork_continue = parse_args(vec![
+        "--fork".to_string(),
+        "ses-abc".to_string(),
+        "--continue".to_string(),
+    ])
+    .unwrap_err();
+    assert!(fork_continue.to_string().contains("cannot be combined"));
+
+    let fork_resume = parse_args(vec![
+        "--fork=ses-abc".to_string(),
+        "--resume".to_string(),
+        "ses-def".to_string(),
+    ])
+    .unwrap_err();
+    assert!(fork_resume.to_string().contains("cannot be combined"));
+
+    assert!(HELP_TEXT.contains("sessions fork <ID> [--turn <TURN_ID>]"));
+    assert!(HELP_TEXT.contains("--fork <ID>"));
+}
+
+#[tokio::test]
+async fn fork_session_helper_forks_latest_or_explicit_turn_and_rejects_missing() {
+    use meerai_session::{
+        ContentBlock, InputSource, SessionEvent, TurnEndReason, TurnId, TurnTrigger,
+    };
+
+    let root = std::env::temp_dir().join(format!("meerai-m9-fork-{}", SessionId::new()));
+    let config = SessionConfig {
+        root: root.clone(),
+        workspace: root.clone(),
+        project_local: false,
+    };
+
+    let empty_id = SessionId::new();
+    let _empty = Session::open_or_create(&config, empty_id.clone(), root.clone())
+        .await
+        .unwrap();
+    let no_closed = fork_session(&root, &root, empty_id.as_str(), None)
+        .await
+        .err()
+        .expect("empty session cannot fork");
+    assert!(no_closed.to_string().contains("no closed turns"));
+
+    let source_id = SessionId::new();
+    let source = Session::open_or_create(&config, source_id.clone(), root.clone())
+        .await
+        .unwrap();
+    let turn_1 = TurnId::from_raw("turn-1");
+    let turn_2 = TurnId::from_raw("turn-2");
+
+    source
+        .append(SessionEvent::TurnStarted {
+            turn_id: turn_1.clone(),
+            trigger: TurnTrigger::UserPrompt,
+        })
+        .await
+        .unwrap();
+    source
+        .append(SessionEvent::UserMessage {
+            source: InputSource::User,
+            content: vec![ContentBlock::Text("first".to_string())],
+        })
+        .await
+        .unwrap();
+    source
+        .append(SessionEvent::TurnEnded {
+            turn_id: turn_1.clone(),
+            reason: TurnEndReason::Completed,
+        })
+        .await
+        .unwrap();
+
+    source
+        .append(SessionEvent::TurnStarted {
+            turn_id: turn_2.clone(),
+            trigger: TurnTrigger::UserPrompt,
+        })
+        .await
+        .unwrap();
+    source
+        .append(SessionEvent::UserMessage {
+            source: InputSource::User,
+            content: vec![ContentBlock::Text("second".to_string())],
+        })
+        .await
+        .unwrap();
+    source
+        .append(SessionEvent::TurnEnded {
+            turn_id: turn_2.clone(),
+            reason: TurnEndReason::Completed,
+        })
+        .await
+        .unwrap();
+
+    let latest = fork_session(&root, &root, source_id.as_str(), None)
+        .await
+        .unwrap();
+    assert_ne!(latest.id(), &source_id);
+    assert_eq!(latest.meta().forked_from.as_ref(), Some(&source_id));
+    assert_eq!(latest.meta().inherited_event_count, Some(6));
+    assert_eq!(latest.events().len(), 6);
+
+    let explicit = fork_session(&root, &root, source_id.as_str(), Some("turn-1"))
+        .await
+        .unwrap();
+    assert_ne!(explicit.id(), &source_id);
+    assert_ne!(explicit.id(), latest.id());
+    assert_eq!(explicit.meta().forked_from.as_ref(), Some(&source_id));
+    assert_eq!(explicit.meta().inherited_event_count, Some(3));
+    assert_eq!(explicit.events().len(), 3);
+
+    let missing_turn = fork_session(&root, &root, source_id.as_str(), Some("turn-missing"))
+        .await
+        .err()
+        .expect("unknown turn cannot fork");
+    assert!(missing_turn.to_string().contains("unknown turn"));
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn plain_event_printer_renders_subagent_run_lifecycle() {
+    use meerai_agents::{ItemDelta, ItemId, ItemStatus, SessionItem};
+
+    let mut printer = PlainEventPrinter::new();
+    let mut out = Vec::new();
+    let item_id = ItemId::from_raw("item-subagent");
+
+    printer
+        .handle(
+            &AgentEvent::ItemDelta {
+                item_id: ItemId::from_raw("item-msg"),
+                delta: ItemDelta::AgentText("Working".to_string()),
+            },
+            &mut out,
+        )
+        .unwrap();
+    printer
+        .handle(
+            &AgentEvent::ItemStarted {
+                item: SessionItem::SubagentRun {
+                    id: item_id.clone(),
+                    agent: "explore".to_string(),
+                    status: ItemStatus::InProgress,
+                    report: None,
+                },
+            },
+            &mut out,
+        )
+        .unwrap();
+    printer
+        .handle(
+            &AgentEvent::ItemDelta {
+                item_id: item_id.clone(),
+                delta: ItemDelta::StatusChanged(ItemStatus::Pending),
+            },
+            &mut out,
+        )
+        .unwrap();
+    printer
+        .handle(
+            &AgentEvent::ItemCompleted {
+                item: SessionItem::SubagentRun {
+                    id: item_id,
+                    agent: "explore".to_string(),
+                    status: ItemStatus::Succeeded,
+                    report: Some("done".to_string()),
+                },
+            },
+            &mut out,
+        )
+        .unwrap();
+    printer.finish(&mut out).unwrap();
+
+    let rendered = String::from_utf8(out).unwrap();
+    assert_eq!(
+        rendered,
+        "Working\n▸ subagent explore in-progress\n▸ subagent explore pending\n▸ subagent explore succeeded\n"
+    );
+}
+
+#[test]
+fn build_workspace_toolsets_exposes_all_and_filters_read_only() {
+    let root = std::env::temp_dir().join(format!("meerai-toolsets-{}", SessionId::new()));
+    let code_tools = CodeTools::new(root.clone());
+    let repo_map = RepoMapToolset::new(root.clone());
+    let lsp = LspToolset::new(root.clone());
+    let sac = SearchAsCodeToolset::new(root.clone());
+
+    let full_names: Vec<String> =
+        build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, false)
+            .into_iter()
+            .flat_map(|toolset| {
+                toolset
+                    .definition()
+                    .into_iter()
+                    .map(|def| def.name)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+    assert!(full_names.contains(&"code-read_file".to_string()));
+    assert!(full_names.contains(&"code-write_file".to_string()));
+    assert!(full_names.contains(&"code-shell".to_string()));
+    assert!(full_names.contains(&"retrieval-repo_map".to_string()));
+    assert!(full_names.contains(&"lsp-go_to_definition".to_string()));
+    assert!(full_names.contains(&"lsp-find_references".to_string()));
+    assert!(full_names.contains(&"lsp-get_diagnostics".to_string()));
+    assert!(full_names.contains(&"sac-run_script".to_string()));
+
+    let ro_names: Vec<String> = build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, true)
+        .into_iter()
+        .flat_map(|toolset| {
+            toolset
+                .definition()
+                .into_iter()
+                .map(|def| def.name)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(ro_names.contains(&"code-read_file".to_string()));
+    assert!(ro_names.contains(&"retrieval-repo_map".to_string()));
+    assert!(ro_names.contains(&"lsp-go_to_definition".to_string()));
+    assert!(!ro_names.contains(&"code-write_file".to_string()));
+    assert!(!ro_names.contains(&"code-edit_file".to_string()));
+    assert!(!ro_names.contains(&"code-shell".to_string()));
+    assert!(!ro_names.contains(&"sac-run_script".to_string()));
+
+    std::fs::remove_dir_all(&root).ok();
 }

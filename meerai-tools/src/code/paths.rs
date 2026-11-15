@@ -27,24 +27,7 @@ impl CodeTools {
     }
 
     pub(crate) async fn resolve_for_read(&self, raw: &str) -> Result<PathBuf, PathIssue> {
-        let workspace = self.canonical_workspace_root().await;
-        let candidate = join(&workspace, raw);
-        let (resolved, exists) = locate(&candidate).await?;
-
-        let mut readable = vec![workspace];
-        for root in self.readable_roots() {
-            readable.push(canonicalize_or_keep(root).await);
-        }
-
-        if !readable.iter().any(|root| resolved.starts_with(root)) {
-            return Err(PathIssue::Escape(format!("path escapes workspace: {raw}")));
-        }
-
-        if exists {
-            Ok(resolved)
-        } else {
-            Err(PathIssue::Missing(format!("path does not exist: {raw}")))
-        }
+        resolve_read_path(&self.workspace_root, self.readable_roots(), raw).await
     }
 
     pub(crate) async fn resolve_for_write(&self, raw: &str) -> Result<PathBuf, PathIssue> {
@@ -131,7 +114,32 @@ fn join(root: &Path, raw: &str) -> PathBuf {
     }
 }
 
-async fn canonicalize_or_keep(path: &Path) -> PathBuf {
+pub(crate) async fn resolve_read_path(
+    workspace_root: &Path,
+    readable_roots: &[PathBuf],
+    raw: &str,
+) -> Result<PathBuf, PathIssue> {
+    let workspace = canonicalize_or_keep(workspace_root).await;
+    let candidate = join(&workspace, raw);
+    let (resolved, exists) = locate(&candidate).await?;
+
+    let mut readable = vec![workspace];
+    for root in readable_roots {
+        readable.push(canonicalize_or_keep(root).await);
+    }
+
+    if !readable.iter().any(|root| resolved.starts_with(root)) {
+        return Err(PathIssue::Escape(format!("path escapes workspace: {raw}")));
+    }
+
+    if exists {
+        Ok(resolved)
+    } else {
+        Err(PathIssue::Missing(format!("path does not exist: {raw}")))
+    }
+}
+
+pub(crate) async fn canonicalize_or_keep(path: &Path) -> PathBuf {
     tokio::fs::canonicalize(path)
         .await
         .unwrap_or_else(|_| path.to_path_buf())

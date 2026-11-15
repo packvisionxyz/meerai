@@ -10,12 +10,15 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Result, bail};
-use meerai_agents::{AgentHarness, HarnessConfig, MultiTurnAgent, spawn_worker};
+use meerai_agents::{
+    AgentHarness, HarnessConfig, MultiTurnAgent, SubagentToolFactory, SubagentToolset, spawn_worker,
+};
 use meerai_common::definitions::{AgentDefinition, SkillDefinition, load_definitions};
 use meerai_common::settings::{
     default_config_dir, default_data_dir, find_project_root, load_project_settings,
     load_settings_from, merge_project_settings,
 };
+use meerai_core::Toolset;
 use meerai_policy::{ApprovalMode, PolicyEngine, parse_approval_mode, rules_from_yaml};
 use meerai_providers::providers::{
     ProviderCatalog, RuntimeProviderState, build_genai_client, canonical_provider_id,
@@ -23,13 +26,13 @@ use meerai_providers::providers::{
 };
 use meerai_providers::secrets::{auth_file_path, default_secret_store};
 use meerai_session::{Session, SessionConfig, SessionId, default_sessions_root};
-use meerai_tools::CodeTools;
+use meerai_tools::{CodeTools, LspToolset, RepoMapToolset, SearchAsCodeToolset};
 use meerai_tui::{TuiLaunchConfig, transcript_from_events};
 
 use auth_cmd::run_auth;
 use cli::{CliSubcommand, HELP_TEXT, parse_args};
 use headless::run_headless;
-use sessions_cmd::{auto_prune_sessions, continue_session_id, run_sessions};
+use sessions_cmd::{auto_prune_sessions, continue_session_id, fork_session, run_sessions};
 
 const FALLBACK_PROVIDER: &str = "opencode-go";
 
@@ -154,6 +157,31 @@ fn build_policy(
         policy = policy.with_rules(rules_from_yaml(value)?);
     }
     Ok(policy.with_workspace_root(workspace.to_path_buf()))
+}
+
+fn build_workspace_toolsets(
+    code_tools: &CodeTools,
+    repo_map: &RepoMapToolset,
+    lsp: &LspToolset,
+    sac: &SearchAsCodeToolset,
+    read_only: bool,
+) -> Vec<Box<dyn Toolset>> {
+    let code = if read_only {
+        code_tools
+            .clone()
+            .with_allowed_tools(["read_file", "list_dir", "grep", "glob"])
+    } else {
+        code_tools.clone()
+    };
+    let mut toolsets: Vec<Box<dyn Toolset>> = vec![
+        Box::new(code),
+        Box::new(repo_map.clone()),
+        Box::new(lsp.clone()),
+    ];
+    if !read_only {
+        toolsets.push(Box::new(sac.clone()));
+    }
+    toolsets
 }
 
 #[tokio::main]
@@ -329,6 +357,9 @@ async fn main() -> Result<()> {
     } else if let Some(raw) = cli.resume.as_deref() {
         let id = SessionId::parse(raw)?;
         Session::open(&session_config, id, workspace_root.clone()).await?
+    } else if let Some(raw) = cli.fork.as_deref() {
+        let root = default_sessions_root();
+        fork_session(&root, &workspace_root, raw, None).await?
     } else {
         Session::open_or_create(&session_config, SessionId::new(), workspace_root.clone()).await?
     };
@@ -348,15 +379,27 @@ async fn main() -> Result<()> {
     }
     let code_tools = CodeTools::new(workspace_root.clone())
         .with_writable_roots(vec![workspace_root.clone()])
-        .with_readable_roots(readable_roots)
+        .with_readable_roots(readable_roots.clone())
+        .with_sensitive_env_vars(sensitive_env_vars.clone());
+    let repo_map =
+        RepoMapToolset::new(workspace_root.clone()).with_readable_roots(readable_roots.clone());
+    let lsp = LspToolset::new(workspace_root.clone()).with_readable_roots(readable_roots);
+    let sac = SearchAsCodeToolset::new(workspace_root.clone())
         .with_sensitive_env_vars(sensitive_env_vars);
+    let initial_tools = build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, false);
+    let subagent_factory: SubagentToolFactory = Arc::new(move |read_only| {
+        build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, read_only)
+    });
 
     let system = compose_definition_prompt(
         meerai_agents::compose_system_prompt(&cli.system, &workspace_root).await,
         &selected_skills,
         selected_agent,
     );
-    let mut agent = MultiTurnAgent::new(client, model_spec, vec![Box::new(code_tools)], system);
+    let mut agent = MultiTurnAgent::new(client, model_spec, initial_tools, system);
+    let subagent_tool = SubagentToolset::from_agent(&agent, subagent_factory)
+        .with_custom_agents(definitions.agents.clone());
+    agent.add_tool(subagent_tool);
     agent.set_harness(AgentHarness {
         session,
         policy,

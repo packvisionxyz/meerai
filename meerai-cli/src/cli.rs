@@ -2,12 +2,12 @@ use anyhow::{Result, bail};
 
 pub(crate) const HELP_TEXT: &str = "Usage:\n  \
     meerai [-p|--provider <PROVIDER>] [-m|--model <MODEL>] [--system <INSTRUCTIONS>]\n          \
-    [--mode <plan|ask|auto-edit|yolo>] [--continue | --resume <ID>] [--env-file <PATH>]\n          \
+    [--mode <plan|ask|auto-edit|yolo>] [--continue | --resume <ID> | --fork <ID>] [--env-file <PATH>]\n          \
     [--agent <ID>] [--skill <ID>]... [-h|--help] [-V|--version]\n  \
-    meerai --prompt <TEXT> [--json] [--continue | --resume <ID>] [--mode <MODE>]\n          \
+    meerai --prompt <TEXT> [--json] [--continue | --resume <ID> | --fork <ID>] [--mode <MODE>]\n          \
     [--agent <ID>] [--skill <ID>]...\n  \
     meerai auth <list|login|logout>\n  \
-    meerai sessions <list|rm|prune>\n\
+    meerai sessions <list|rm|prune|fork>\n\
     \n\
     Commands:\n  \
     auth list                       Show credentials across auth.json, config, and env\n  \
@@ -17,7 +17,9 @@ pub(crate) const HELP_TEXT: &str = "Usage:\n  \
     sessions rm <ID>                Delete one session\n  \
     sessions rm --all               Delete every saved session\n  \
     sessions prune [--days N] [--keep N]\n                                              \
-    Delete sessions older than N days (default 30), keeping the newest N (default 0)\n\
+    Delete sessions older than N days (default 30), keeping the newest N (default 0)\n  \
+    sessions fork <ID> [--turn <TURN_ID>]\n                                              \
+    Fork a session at a closed turn (default: latest closed turn)\n\
     \n\
     TUI commands:\n  \
     /agent <id>                     Apply an agent by id (or mention @agent/<id>)\n  \
@@ -30,6 +32,7 @@ pub(crate) const HELP_TEXT: &str = "Usage:\n  \
         --prompt, --print <TEXT>  Run one headless turn (no TUI)\n  \
         --continue             Resume the most recent session (TUI or headless)\n  \
         --resume <ID>          Resume a session by id (TUI or headless)\n  \
+        --fork <ID>            Fork a session from its latest closed turn and open it\n  \
         --json                 Print one NDJSON AgentEvent per line (with --prompt)\n  \
         --mode <MODE>          Approval mode: plan, ask, auto-edit, yolo\n  \
         --agent <ID>           Apply a markdown agent by id\n  \
@@ -61,6 +64,7 @@ pub(crate) enum SessionsCommand {
     List,
     Remove { target: SessionTarget },
     Prune { days: u64, keep: usize },
+    Fork { id: String, turn: Option<String> },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -81,6 +85,7 @@ pub(crate) struct CliArgs {
     pub(crate) env_file: Option<String>,
     pub(crate) continue_session: bool,
     pub(crate) resume: Option<String>,
+    pub(crate) fork: Option<String>,
     pub(crate) agents: Vec<String>,
     pub(crate) skills: Vec<String>,
     pub(crate) show_help: bool,
@@ -113,6 +118,7 @@ where
     let mut env_file = None;
     let mut continue_session = false;
     let mut resume = None;
+    let mut fork = None;
     let mut agents = Vec::new();
     let mut skills = Vec::new();
     let mut show_help = false;
@@ -266,8 +272,47 @@ where
                         keep,
                     }));
                 }
+                Some("fork") => {
+                    let mut id = None;
+                    let mut turn = None;
+                    let mut help = false;
+                    while let Some(arg) = iter.next() {
+                        match arg.as_str() {
+                            "-h" | "--help" => help = true,
+                            "--turn" => {
+                                let value = iter
+                                    .next()
+                                    .ok_or_else(|| anyhow::anyhow!("missing value for --turn"))?;
+                                turn = Some(value);
+                            }
+                            flag if flag.starts_with("--turn=") => {
+                                turn = Some(flag["--turn=".len()..].to_string());
+                            }
+                            flag if flag.starts_with('-') => {
+                                bail!("unknown option for sessions fork: {flag}")
+                            }
+                            _ => {
+                                if id.is_some() {
+                                    bail!("unexpected argument for sessions fork: {arg}");
+                                }
+                                id = Some(arg);
+                            }
+                        }
+                    }
+                    if help {
+                        show_help = true;
+                        continue;
+                    }
+                    let id = id.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "sessions fork needs a session id\n\
+                             usage: meerai sessions fork <ID> [--turn <TURN_ID>]"
+                        )
+                    })?;
+                    subcommand = Some(CliSubcommand::Sessions(SessionsCommand::Fork { id, turn }));
+                }
                 Some(other) => {
-                    bail!("unknown sessions subcommand: {other}. Expected: list, rm, prune");
+                    bail!("unknown sessions subcommand: {other}. Expected: list, rm, prune, fork");
                 }
             },
             "-p" | "--provider" => {
@@ -305,6 +350,12 @@ where
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("missing value for --resume"))?;
                 resume = Some(value);
+            }
+            "--fork" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("missing value for --fork"))?;
+                fork = Some(value);
             }
             "--mode" => {
                 let value = iter
@@ -354,6 +405,9 @@ where
             _ if arg.starts_with("--resume=") => {
                 resume = Some(arg["--resume=".len()..].to_string());
             }
+            _ if arg.starts_with("--fork=") => {
+                fork = Some(arg["--fork=".len()..].to_string());
+            }
             _ if arg.starts_with("--mode=") => {
                 mode = Some(arg["--mode=".len()..].to_string());
             }
@@ -373,8 +427,10 @@ where
     if json && prompt.is_none() {
         bail!("--json requires --prompt or --print");
     }
-    if continue_session && resume.is_some() {
-        bail!("--continue and --resume cannot be combined");
+    let session_selectors =
+        usize::from(continue_session) + usize::from(resume.is_some()) + usize::from(fork.is_some());
+    if session_selectors > 1 {
+        bail!("--continue, --resume, and --fork cannot be combined");
     }
     if prompt.is_some() && subcommand.is_some() {
         bail!("--prompt/--print cannot be combined with a subcommand");
@@ -394,6 +450,7 @@ where
         env_file,
         continue_session,
         resume,
+        fork,
         agents,
         skills,
         show_help,

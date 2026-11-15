@@ -22,10 +22,10 @@ Nine library crates plus the `meerai` binary (built by `meerai-cli`):
 | `meerai-providers` | Provider catalog + `genai` client factory (`providers.yml`), `auth.json` secret store |
 | `meerai-session` | Append-only `SessionEvent` log, JSONL/zstd generations, `meta.json`, recovery, `derive_messages`, fork/revert, blob store, spill, compaction primitives, session list/delete/prune support |
 | `meerai-policy` | `PolicyEngine`: ordered rules, `ApprovalMode` presets, turn/session grants, YAML parsing |
-| `meerai-tools` | `code` module: `CodeTools` with seven `code-*` tools, path guards, unified diffs, observations, shared `workspace_search` helpers |
-| `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent` v2, `prompt`, `spawn_worker`, tool-output redaction |
-| `meerai-tui` | Modal terminal UI (`ratatui` + `crossterm`) with transcript replay and approval overlay |
-| `meerai-cli` | Binary crate (`meerai`): CLI flags, headless runner, `auth`/`sessions` subcommands, TUI launcher |
+| `meerai-tools` | `code` (`CodeTools` with seven `code-*` tools, path guards, unified diffs, observations, `workspace_search`), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`), `search_as_code` (`SearchAsCodeToolset`) |
+| `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent` v2, `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins + custom read-only child sessions), tool-output redaction |
+| `meerai-tui` | Modal terminal UI (`ratatui` + `crossterm`) with transcript replay, subagent cards, and approval overlay |
+| `meerai-cli` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions` (`list`/`rm`/`prune`/`fork`) subcommands, TUI launcher |
 
 Dependency direction today:
 
@@ -207,8 +207,9 @@ Application is prompt-only:
   and `/skills` do not exist.
 
 Definitions are untrusted repository prompt text. They grant no tools,
-permissions, scripts, MCP, or sandbox. The subagent runtime (M8) is separate and
-still backlog.
+permissions, scripts, MCP, or sandbox. Under M8 (`subagent-run`), built-in
+agents (`build`, `plan`, `explore`, `general`) get typed tool subsets, while
+custom M12 definitions execute read-only (`ApprovalMode::Plan`, read-only tools).
 
 ## Current coding tools (`meerai-tools`)
 
@@ -313,9 +314,8 @@ The enums are frozen additively; these are future variants, not current code.
 
 - `ChatCompletion`-style provider trait in `meerai-providers` (today the
   abstraction is the `genai` client plus the catalog).
-- `AgentCommand::Rewind(turn_id)` and `Fork` for M6/M9.
-- `SessionItem::SubagentRun` and `Plan` payloads are already reserved in the
-  enum but no producer exists.
+- `AgentCommand::Rewind(turn_id)` and TUI `Fork` command for M6/future TUI UX (CLI `--fork` / `sessions fork` are shipped).
+- `SessionItem::SubagentRun` is emitted by `SubagentToolset`; `Plan` item payloads remain reserved without a dedicated producer.
 - A `meerai serve` JSON-RPC/SSE wrapper over the same event enum.
 
 ## Target harness capabilities (not built)
@@ -323,12 +323,11 @@ The enums are frozen additively; these are future variants, not current code.
 - **Checkpoints and rewind (M6):** per-turn snapshots, `/rewind`, restore code
   or conversation.
 - **Hooks (M7):** deterministic lifecycle commands with JSON stdin and exit-2
-  blocking.
-- **Subagent runtime (M8):** child sessions, isolation, built-in agents, and a
-  `subagent` tool. M12 loads `.agents`/`.claude` definitions as prompt
-  instructions; it does not create subagents.
+  blocking (including post-edit LSP diagnostics hooks).
+- **CLI export & TUI `/fork`:** `meerai export` and interactive `/fork` remain backlog (`sessions fork` and `--fork` CLI flags are shipped).
 - **Definition mapping (M12 follow-ups):** map definition `tools`/`permissions`,
-  load supporting skill files, and add MCP. Today definitions are prompt-only.
+  load supporting skill files, and add MCP. Today definitions are prompt-only
+  and custom subagent runs stay read-only.
 - **Security & supply chain (M11):** landed now — path guards, `plan` hard
   read-only, approval gates, headless fail-fast, provider-secret env scrub,
   best-effort redaction, session file permissions, configurable retention,
@@ -337,7 +336,6 @@ The enums are frozen additively; these are future variants, not current code.
   audit in CI (`cargo audit`/`cargo deny`), signed and notarized artifacts, a
   written threat model, prompt-injection screening, and an OS keychain. See
   `docs/harness-spec.md` §9.6.
-- **Retrieval v2/v3 (M10):** repository map, LSP tools, search-as-code.
 - **Context:** projection caching, frozen/shared messages, per-model context
   windows, and USD pricing (`est_cost_usd` is always `None` today; token counts
   are reported and pricing-data collection is the blocker), progressive tool
@@ -350,20 +348,19 @@ The enums are frozen additively; these are future variants, not current code.
    approvals, all-tool execution, async retries).
 3. **Common cleanup** — done: `meerai-common` holds settings/definitions;
    `meerai-providers` holds the provider catalog and secret store.
-4. **Coding toolsets** — done (`read_file`, `write_file`, `edit_file`,
-   `list_dir`, `grep`, `glob`, `shell`).
+4. **Coding & retrieval toolsets** — done (`code-*`, `retrieval-repo_map`,
+   `lsp-*`, `sac-run_script`).
 5. **CLI & headless runner** — done in `meerai-cli` (`--prompt`, `--json`,
-   `--mode`, `--continue`, `--resume`, `auth`, `sessions`).
+   `--mode`, `--continue`, `--resume`, `--fork`, `auth`, `sessions list|rm|prune|fork`).
 6. **Modal TUI** — partly done: `NOR`/`INS`, slash commands, `@file`
    completion, approval overlay with turn/session grants, sidebar, diff/search
-   modals, and resume transcript replay. The `Space` leader, Select mode, `:`
+   modals, subagent cards, and resume transcript replay. The `Space` leader, Select mode, `:`
    command mode, session picker, and transcript search are planned.
-7. **Later milestones** — session persistence is shipped; compaction is shipped;
-   agents/skills discovery (M12) ships as prompt instructions; MCP client
-   support and the subagent runtime (M8) are not. Security & supply chain (M11)
-   is partial: guards, approvals, redaction, permissions, retention, and budgets
-   landed; sandbox, audit, signing, threat model, screening, and keychain are
-   backlog (`docs/harness-spec.md` §9.6).
+7. **Later milestones** — session persistence, compaction, M12 discovery, M8
+   subagent runtime (`SubagentToolset` + built-ins + child sessions), M9 CLI fork,
+   and M10 retrieval (`repo_map`, `lsp`, `search_as_code`) are shipped; checkpoints
+   (M6), hooks (M7), MCP client support, and M11 security backlog (`ExecutionWorld`
+   sandbox, audit, signing, threat model, screening, keychain) are not.
 
 ## Non-goals
 

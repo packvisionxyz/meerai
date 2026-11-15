@@ -4,7 +4,8 @@ use anyhow::{Result, bail};
 use meerai_common::settings::AppSettings;
 use meerai_core::env::now_millis;
 use meerai_session::{
-    SessionId, SessionSummary, default_sessions_root, delete_session, latest_session, list_sessions,
+    Session, SessionConfig, SessionId, SessionSummary, TurnId, default_sessions_root,
+    delete_session, latest_session, list_sessions,
 };
 
 use crate::cli::{SessionTarget, SessionsCommand};
@@ -155,8 +156,35 @@ pub(crate) async fn run_sessions(command: &SessionsCommand) -> Result<()> {
             .await?;
             println!("removed {count} sessions");
         }
+        SessionsCommand::Fork { id, turn } => {
+            let workspace = std::env::current_dir()?;
+            let forked = fork_session(&root, &workspace, id, turn.as_deref()).await?;
+            println!("forked {} from {id}", forked.id());
+        }
     }
     Ok(())
+}
+
+pub(crate) async fn fork_session(
+    root: &Path,
+    workspace: &Path,
+    id_raw: &str,
+    turn_raw: Option<&str>,
+) -> Result<Session> {
+    let source_id = SessionId::parse(id_raw)?;
+    let config = SessionConfig {
+        root: root.to_path_buf(),
+        workspace: workspace.to_path_buf(),
+        project_local: false,
+    };
+    let source = Session::open(&config, source_id, workspace.to_path_buf()).await?;
+    match turn_raw {
+        Some(raw) => {
+            let turn_id = TurnId::from_raw(raw);
+            Session::fork(&config, &source, &turn_id).await
+        }
+        None => Session::fork_latest(&config, &source).await,
+    }
 }
 
 pub(crate) async fn continue_session_id(root: &Path) -> Result<SessionId> {

@@ -94,6 +94,14 @@ fn is_sensitive_env(name: &str) -> bool {
     is_sensitive_env_with(name, &[])
 }
 
+pub(crate) fn scrub_command_env(cmd: &mut tokio::process::Command, extra_sensitive: &[String]) {
+    for (name, _) in std::env::vars() {
+        if is_sensitive_env_with(&name, extra_sensitive) {
+            cmd.env_remove(name);
+        }
+    }
+}
+
 impl CodeTools {
     pub(crate) async fn shell(&self, args: ShellArgs) -> ToolRun {
         let cwd = self.canonical_workspace_root().await;
@@ -118,11 +126,7 @@ impl CodeTools {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        for (name, _) in std::env::vars() {
-            if is_sensitive_env_with(&name, self.sensitive_env_vars()) {
-                child.env_remove(name);
-            }
-        }
+        scrub_command_env(&mut child, self.sensitive_env_vars());
 
         let spawned = child.spawn();
 

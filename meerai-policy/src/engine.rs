@@ -171,6 +171,10 @@ impl PolicyEngine {
         &self.workspace_root
     }
 
+    pub fn rules(&self) -> &[PermissionRule] {
+        &self.rules
+    }
+
     pub fn warnings(&self) -> Vec<String> {
         self.warnings_read().clone()
     }

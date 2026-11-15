@@ -5,10 +5,9 @@ against.
 
 ## Workspace & dependency direction
 
-- **Current:** `meerai-core` is the leaf library; `meerai-macros` depends on it.
-  `session -> policy -> agents -> tui`; `tools -> tui`; `common -> tui`. The
-  `meerai` binary lives in `meerai-tui`.
-- **Target:** `core / macros` → `providers`, `common`, `tools` → `agents` → `tui` → `cli`.
+- **Current:** `core -> session -> agents -> tui -> cli`; `core -> policy -> agents`;
+  `core -> tools -> tui/cli`; `core -> common -> providers -> tui/cli`; `macros -> (consumers)`.
+  The `meerai` binary lives in `meerai-cli`.
 - Shared dependency versions live in root `Cargo.toml` under `[workspace.dependencies]` and are
   inherited with `{ workspace = true }`. Workspace metadata (`license = "Apache-2.0"`,
   `repository`, `homepage`, `rust-version = "1.100"`, `publish = false`) is inherited the same way.
@@ -47,10 +46,10 @@ Rules for all shapes:
 - Macro expansion changes must be checked against `insta` snapshots in
   `meerai-macros/src/tool/snapshots/`.
 
-## LLM providers (`meerai-common`; `meerai-providers` planned)
+## LLM providers (`meerai-providers`)
 
 - Providers are reached through `genai` 0.7: `ProviderCatalog` + `RuntimeProviderState` +
-  `build_genai_client` in `meerai-common/src/providers.rs`.
+  `build_genai_client` in `meerai-providers/src/providers.rs`.
 - Provider ids are canonicalized (`canonical_provider_id`); `MEERAI_PROVIDER` / `MEERAI_MODEL` and
   CLI flags select the active pair.
 - API-key resolution: stored `auth.json` → configured `api_key` in `settings.yml`/`providers.yml` →
@@ -186,11 +185,13 @@ Rules for all shapes:
   `.meerai/instructions.md` (32 KiB/file, 64 KiB block). Scoped `AGENTS.md` files are injected once
   per turn as `RuntimeContext` when a tool touches their directory (16 KiB, max 8 files).
 
-## Coding toolsets & modal TUI
+## Coding & retrieval toolsets & modal TUI
 
-- `meerai-tools::code::CodeTools` is the current tool surface: `read_file` (1-based offsets, line
-  numbers), `write_file`, `edit_file` (exact `old_string`, unique unless `replace_all`),
-  `list_dir` (`d name/` and `f name (bytes)`, gitignore-aware), `grep`, `glob`, and `shell`.
+- `meerai-tools` exposes `CodeTools` (`code-read_file`, `code-write_file`, `code-edit_file`,
+  `code-list_dir`, `code-grep`, `code-glob`, `code-shell`), `RepoMapToolset`
+  (`retrieval-repo_map`), `LspToolset` (`lsp-go_to_definition`, `lsp-find_references`,
+  `lsp-get_diagnostics`), and `SearchAsCodeToolset` (`sac-run_script` using `python3 -I` /
+  `node -e` with env scrubbing and `EffectClass::Execute` policy gating).
 - `shell` runs `sh -c` on Unix and `cmd /C` on Windows through `tokio::process`, with a pinned
   workspace cwd, 120 s default timeout, 32 KiB capped output, and no streaming. Provider secret
   variables are removed from the child environment.

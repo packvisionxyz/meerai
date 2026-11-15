@@ -243,6 +243,10 @@ pub trait Toolset: Send + Sync {
         EffectClass::Read
     }
 
+    fn effect_of_call(&self, fn_name: &str, _args: &str) -> EffectClass {
+        self.effect_of(fn_name)
+    }
+
     fn permission_spec(&self, _fn_name: &str) -> Option<ToolPermissionSpec> {
         None
     }

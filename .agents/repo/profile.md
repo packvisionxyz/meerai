@@ -10,28 +10,28 @@
 
 - **Product:** `meerai` (Pack Vision) — a pure, provider-agnostic terminal coding-agent harness
   written in Rust, featuring a selection-first modal TUI and a scriptable headless CLI mode.
-- **Shape:** Rust Cargo workspace (`edition = "2024"`, toolchain pinned to `1.100.0`). Eight
-  crates plus the `meerai` binary, which is built by `meerai-tui`. Milestones M1–M5 of
-  `docs/harness-spec.md` have landed; the repo has since been hardened for distribution
-  (Apache-2.0 license, CI, tag-driven releases, Pages site) and gained project-root
-  config discovery, TUI transcript replay, opt-in automatic session retention,
-  best-effort tool-output redaction, and read-only agent/skill discovery from
-  `.agents`/`.claude` (**M12**). The security backlog (OS sandbox, dependency
-  audit, signing, threat model, injection screening, keychain) is **M11** in
-  `docs/harness-spec.md` §9.6.
-- **Clients:** `meerai-tui` provides the modal terminal UI (including replay of an existing
-  session selected by `--continue`/`--resume <ID>`), the headless one-shot runner
-  (`--prompt`/`--print`, `--json`, `--continue`, `--resume <ID>`, `--agent`, `--skill`), the
-  `/agent`/`/skill` commands with the `@` Mentions popup, and the `auth` and `sessions`
-  (`list`, `rm`, `prune`) subcommands. A separate `meerai-cli` crate is still planned.
+- **Shape:** Rust Cargo workspace (`edition = "2024"`, toolchain pinned to `1.100.0`). Nine
+  library crates plus the `meerai` binary, built by `meerai-cli`. Milestones M1–M5, M8–M10, and
+  M12 of `docs/harness-spec.md` have landed; the repo is distribution-hardened (Apache-2.0
+  license, CI, tag-driven releases, Pages site) and includes project-root config discovery, TUI
+  transcript replay, opt-in automatic session retention, best-effort tool-output redaction,
+  subagent child sessions (`subagent-run`), CLI session forking, retrieval v2/v3 tools
+  (`repo_map`, `lsp`, `search_as_code`), and read-only agent/skill discovery from
+  `.agents`/`.claude` (**M12**). Checkpoints (**M6**), hooks (**M7**), and the security backlog
+  (**M11** in `docs/harness-spec.md` §9.6) remain unimplemented.
+- **Clients:** `meerai-tui` provides the modal terminal UI library (including replay of an
+  existing session selected by `--continue`/`--resume <ID>`/`--fork <ID>` and subagent items);
+  `meerai-cli` builds the `meerai` binary with CLI flag parsing, headless one-shot runner
+  (`--prompt`/`--print`, `--json`, `--continue`, `--resume <ID>`, `--fork <ID>`, `--agent`,
+  `--skill`), and `auth` / `sessions` (`list`, `rm`, `prune`, `fork`) subcommands.
 - **Data:** `settings.yml` and `providers.yml` in the config dir, an optional
   `<project-root>/.meerai/settings.yml` project overlay (root found by walking up from the CWD),
   agent/skill definitions under `<project-root>/.agents` then `.claude`, `auth.json` in the app
   data dir, and an append-only session log with `meta.json` and blobs under the platform data dir
   (`dirs::data_dir()`) or `MEERAI_SESSION_DIR`.
 - **Runtime stance:** Local-first terminal binary; outbound HTTPS only to configured LLM providers
-  (a `genai` 0.7 client over the provider catalog in `meerai-common`). No OS sandbox, telemetry, or
-  credential service.
+  (a `genai` 0.7 client over the provider catalog in `meerai-providers`). No OS sandbox,
+  telemetry, or credential service.
 
 ## 2. Layout
 
@@ -39,14 +39,16 @@
 
 | Path | Responsibility |
 | :--- | :--- |
-| `meerai-core/` | `Toolset` trait (`effect_of`, `invoke_structured`), `ToolOutput`, `ToolError`, `EffectClass`, `ToolObservation`, `ToolRun`, `FileDiff`; re-exports `genai`, `async_trait`, `schemars::JsonSchema` |
+| `meerai-core/` | `Toolset` trait (`effect_of`, `effect_of_call`, `invoke_structured`), `ToolOutput`, `ToolError`, `EffectClass`, `ToolObservation`, `ToolRun`, `FileDiff`; re-exports `genai`, `async_trait`, `schemars::JsonSchema` |
 | `meerai-macros/` | Proc-macros `#[tool]` and `#[derive(Toolset)]` (`darling` + `syn` + `quote`), `insta` snapshot tests; test-only dependencies are dev-dependencies |
-| `meerai-session/` | `Session` append-only `SessionEvent` log (JSONL + zstd), `meta.json`, recovery, `derive_messages`, fork/revert, blob store, spill, compaction primitives, session list/delete/prune support |
+| `meerai-session/` | `Session` append-only `SessionEvent` log (JSONL + zstd), `meta.json`, recovery, `derive_messages`, fork/revert (`latest_closed_turn`, `fork_latest`, `create_child`), blob store, spill, compaction primitives, session list/delete/prune support |
 | `meerai-policy/` | `PolicyEngine`: ordered permission rules, `ApprovalMode`, turn/session grants, YAML parsing |
-| `meerai-tools/` | `code` module: `CodeTools` with seven `code-*` tools, path guards, unified diffs, `ToolRun` observations, secret env scrub |
-| `meerai-common/` | `AppSettings` (`settings.yml`), project-root discovery (`find_project_root`) plus project settings load/merge (`load_project_settings`, `merge_project_settings`), markdown agent/skill discovery (`definitions`: `load_definitions`, `AgentDefinition`, `SkillDefinition`, `DefinitionSource`), provider catalog + `genai` client factory, `auth.json` secret store |
-| `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig`, `AgentEvent` v2, `prompt` module, `spawn_worker`, `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
-| `meerai-tui/` | Modal TUI (`ratatui` + `crossterm`) with transcript replay, `/agent`/`/skill` and the `@` Mentions popup, headless runner, `auth`/`sessions` subcommands, and the `meerai` binary |
+| `meerai-tools/` | `code` (`CodeTools`, seven `code-*` tools, path guards, unified diffs, `ToolRun` observations, secret env scrub), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`), `search_as_code` (`SearchAsCodeToolset`) |
+| `meerai-common/` | `AppSettings` (`settings.yml`), project-root discovery (`find_project_root`) plus project settings load/merge (`load_project_settings`, `merge_project_settings`), markdown agent/skill discovery (`definitions`: `load_definitions`, `AgentDefinition`, `SkillDefinition`, `DefinitionSource`) |
+| `meerai-providers/` | Provider catalog + `genai` client factory (`providers.yml`), `auth.json` secret store |
+| `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig`, `AgentEvent` v2, `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins + read-only custom child runs), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
+| `meerai-tui/` | Modal TUI library (`ratatui` + `crossterm`) with transcript replay, subagent items, `/agent`/`/skill` and the `@` Mentions popup |
+| `meerai-cli/` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions` (`list`, `rm`, `prune`, `fork`) subcommands, and TUI launcher |
 | `.agents/agents/`, `.agents/skills/` | Default agent (`*.md`) and skill (`*/SKILL.md`) definitions, read at runtime |
 | `.claude/agents/`, `.claude/skills/` | Lower-priority agent and skill definitions, same format |
 | `docs/` | Architecture, harness specification (`docs/harness-spec.md`), and modal TUI spec |
@@ -55,12 +57,9 @@
 | `LICENSE`, `Cargo.toml` | Apache-2.0; workspace metadata (`license`, `repository`, `homepage`, `rust-version = 1.100`, `publish = false`) |
 | `AGENTS.md` | Authoritative repo guide for coding agents (commands, macro rules, known traps) |
 
-### Planned crates (see `docs/architecture.md`, `docs/harness-spec.md` §15.1)
+### Planned crates (see `docs/architecture.md`, `docs/harness-spec.md` §15.1, `docs/acp.md`)
 
-- `meerai-providers/` — split from `meerai-core`, adding streaming & config-driven provider factory
-- `meerai-cli/` — dedicated binary crate for config/dotenv wiring and a dedicated CLI surface; the
-  `meerai` binary, headless `--continue`/`--resume`/`--env-file`, and TUI resume/replay already live
-  in `meerai-tui` today
+- `meerai-acp/` — ACP client & agent integration (M13/M14); backlog.
 
 ## 3. Commands
 
@@ -68,7 +67,7 @@
 | :--- | :--- |
 | Bootstrap | Rustup installs toolchain `1.100.0` automatically via `rust-toolchain.toml` |
 | Install / build | `cargo build --workspace` |
-| Install binary | `cargo install --path meerai-tui --bin meerai` |
+| Install binary | `cargo install --path meerai-cli --bin meerai` |
 | Dev | `cargo check --workspace --all-targets` |
 | Format | `cargo fmt --all` (check only: `cargo fmt --all -- --check`) |
 | Lint | `cargo clippy --workspace --all-targets` |
@@ -118,7 +117,7 @@ Notes:
    string/newtype variants. Internally tagged enums (`tag` only) cannot represent bare strings.
 8. **TUI-safe library output:** Do not add `println!` / `eprintln!` progress output in library
    crates; the agent loop emits `AgentEvent`. Startup diagnostics (`settings` warnings, project
-   config warnings, prune reports) are printed by `meerai-tui/src/main.rs`, the binary.
+   config warnings, prune reports) are printed by `meerai-cli/src/main.rs`, the binary.
 9. **Async hygiene:** No blocking sleeps (`std::thread::sleep`) inside `async fn`; use `tokio::time`.
    Async file paths use `tokio::fs`; `BlobStore::put` uses blocking `std::fs` and is called through
    `tokio::task::spawn_blocking` in `apply_spill`.
@@ -355,20 +354,21 @@ Detail in [`infra.md`](infra.md). Summary:
 | Question | Start |
 | :--- | :--- |
 | How are tool calls and observations modeled? | `meerai-core/src/tools.rs` |
-| How are providers, auth, and the genai client built? | `meerai-common/src/providers.rs`, `settings.rs`, `secrets.rs` |
-| How are agent and skill definitions discovered, deduplicated, and applied? | `meerai-common/src/definitions.rs`, `meerai-tui/src/main.rs` (`load_definitions`, `select_definition`, `compose_definition_prompt`, model precedence), `meerai-tui/src/app.rs` (`/agent`, `/skill`, `parse_mentions`, `apply_mentions`), `meerai-agents/src/multi_turn_agent.rs` (`apply_instructions`) |
+| How are providers, auth, and the genai client built? | `meerai-providers/src/providers.rs`, `secrets.rs`, `meerai-common/src/settings.rs` |
+| How are agent and skill definitions discovered, deduplicated, and applied? | `meerai-common/src/definitions.rs`, `meerai-cli/src/main.rs` (`load_definitions`, `select_definition`, `compose_definition_prompt`, model precedence), `meerai-tui/src/app/` (`/agent`, `/skill`, `parse_mentions`, `apply_mentions`), `meerai-agents/src/multi_turn_agent/mod.rs` (`apply_instructions`) |
+| How do subagent child sessions and built-in agent subsets work? | `meerai-agents/src/subagent.rs`, `meerai-agents/src/multi_turn_agent/tools.rs`, `meerai-session/src/session.rs` (`create_child`) |
 | How are `#[tool]` and `#[derive(Toolset)]` expanded? | `meerai-macros/src/tool/` |
 | Where is runtime YAML config loaded, how is the project root found, and how is project config merged? | `meerai-common/src/settings.rs` (`load_settings_from`, `find_project_root`, `load_project_settings`, `merge_project_settings`) |
 | How does the session log persist and project? | `meerai-session/src/session.rs`, `projection.rs`, `storage.rs` |
-| How are session dirs/files secured, listed, and pruned? | `meerai-session/src/perms.rs`, `session.rs` (`list_sessions`, `delete_session`), `meerai-tui/src/main.rs` (`select_prunable`, `auto_prune_sessions`, `transcript_from_events`) |
+| How are session dirs/files secured, listed, forked, and pruned? | `meerai-session/src/perms.rs`, `session.rs` (`list_sessions`, `delete_session`, `fork_latest`), `meerai-cli/src/{main.rs,sessions_cmd.rs}` (`fork_session`, `select_prunable`, `auto_prune_sessions`), `meerai-tui/src/app/events.rs` (`transcript_from_events`) |
 | How are session spill blobs and compaction planned? | `meerai-session/src/blob.rs`, `compaction.rs` |
 | How are permission decisions made? | `meerai-policy/src/engine.rs` (`decide`, `Plan`/`Yolo` branches, `record_grant`) |
-| How are coding tools guarded, diffed, and sandboxed? | `meerai-tools/src/code/mod.rs`, `code/paths.rs`, `code/diff.rs`, `code/shell.rs` |
-| How is the system prompt composed and scoped instructions injected? | `meerai-agents/src/prompt.rs`, `multi_turn_agent.rs` (`inject_scoped_instructions`) |
-| How does the agent loop and harness work? | `meerai-agents/src/multi_turn_agent.rs`, `harness.rs`, `events.rs` |
-| How is tool output redacted, titled, and summarized? | `meerai-agents/src/redact.rs`, `multi_turn_agent.rs` (`new_session_title`, `record_summary_usage`, summarizer selection) |
+| How are coding and retrieval tools guarded, diffed, and executed? | `meerai-tools/src/code/`, `meerai-tools/src/repo_map/`, `meerai-tools/src/lsp/`, `meerai-tools/src/search_as_code/` |
+| How is the system prompt composed and scoped instructions injected? | `meerai-agents/src/prompt.rs`, `multi_turn_agent/mod.rs` (`inject_scoped_instructions`) |
+| How does the agent loop and harness work? | `meerai-agents/src/multi_turn_agent/`, `harness.rs`, `events.rs` |
+| How is tool output redacted, titled, and summarized? | `meerai-agents/src/redact.rs`, `multi_turn_agent/mod.rs` (`new_session_title`, `record_summary_usage`, summarizer selection) |
 | How will ACP integrate external harnesses or expose meerai to editors? | `docs/acp.md` (M13 client, M14 agent, trust boundary); not implemented |
-| How do TUI approvals, slash commands, and transcript replay work? | `meerai-tui/src/app.rs` (`ActiveModal::Approval`, `transcript_from_events`, `/compact`, `/mode`) |
-| How are CLI flags parsed, sessions resumed, pruned, and headless output printed? | `meerai-tui/src/main.rs` (`parse_args`, `run_sessions`, `select_prunable`, `run_headless`, `format_token_summary`) |
-| How do `.env` opt-in and env scrubbing work? | `meerai-tui/src/main.rs` (`load_dotenv`), `meerai-tools/src/code/shell.rs` |
+| How do TUI approvals, slash commands, and transcript replay work? | `meerai-tui/src/app/` (`ActiveModal::Approval`, `transcript_from_events`, `/compact`, `/mode`) |
+| How are CLI flags parsed, sessions resumed/forked, pruned, and headless output printed? | `meerai-cli/src/{cli.rs,main.rs,sessions_cmd.rs,headless.rs}` (`parse_args`, `run_sessions`, `select_prunable`, `run_headless`, `format_token_summary`) |
+| How do `.env` opt-in and env scrubbing work? | `meerai-cli/src/main.rs` (`load_dotenv`), `meerai-tools/src/code/shell.rs` |
 | What is the target crate & migration plan? | `docs/architecture.md`, `docs/harness-spec.md` §15 |

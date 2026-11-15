@@ -4,7 +4,9 @@ use meerai_agents::{
     AgentEvent, ErrorCode, ItemDelta, ItemId, ItemStatus, SessionItem, TurnEndReason,
 };
 use meerai_core::ObservationStatus;
-use meerai_session::{ContentBlock, InputSource, LoggedEvent, SessionEvent, join_text_blocks};
+use meerai_session::{
+    ContentBlock, InputSource, LoggedEvent, SeqRange, SessionEvent, join_text_blocks,
+};
 
 use super::*;
 
@@ -26,6 +28,7 @@ impl AppState {
                 self.pending_assistant_idx = None;
                 self.assistant_items.clear();
                 self.tool_items.clear();
+                self.subagent_items.clear();
             }
             AgentEvent::ItemStarted { item } => match item {
                 SessionItem::AgentMessage { id, .. } => {
@@ -63,6 +66,23 @@ impl AppState {
                         }));
                     self.tool_items.insert(id, call_id);
                 }
+                SessionItem::SubagentRun {
+                    id,
+                    agent,
+                    status,
+                    report,
+                } => {
+                    self.finalize_pending_assistant();
+                    let idx = self.transcript.len();
+                    self.transcript
+                        .push(TranscriptEntry::Subagent(SubagentEntry {
+                            id: id.to_string(),
+                            agent,
+                            status: map_item_status(status),
+                            report,
+                        }));
+                    self.subagent_items.insert(id, idx);
+                }
                 SessionItem::Compaction { freed_tokens, .. } => {
                     self.transcript.push(TranscriptEntry::System {
                         text: format!("Compaction freed {freed_tokens} tokens"),
@@ -90,10 +110,16 @@ impl AppState {
                     }
                 }
                 ItemDelta::StatusChanged(status) => {
+                    let mapped = map_item_status(status);
                     if let Some(call_id) = self.tool_items.get(&item_id).cloned()
                         && let Some(entry) = self.find_tool_call_mut(&call_id)
                     {
-                        entry.status = map_item_status(status);
+                        entry.status = mapped;
+                    } else if let Some(&idx) = self.subagent_items.get(&item_id)
+                        && let Some(TranscriptEntry::Subagent(entry)) = self.transcript.get_mut(idx)
+                        && entry.id == item_id.as_str()
+                    {
+                        entry.status = mapped;
                     }
                 }
                 ItemDelta::CommandOutput(_) | ItemDelta::PlanUpdated(_) => {}
@@ -180,6 +206,48 @@ impl AppState {
                         self.active_tool = None;
                     }
                 }
+                SessionItem::SubagentRun {
+                    id,
+                    agent,
+                    status,
+                    report,
+                } => {
+                    let status = map_completed_item_status(status);
+                    let id_str = id.to_string();
+                    let target_idx = self
+                        .subagent_items
+                        .remove(&id)
+                        .filter(|&i| {
+                            matches!(
+                                self.transcript.get(i),
+                                Some(TranscriptEntry::Subagent(entry)) if entry.id == id_str
+                            )
+                        })
+                        .or_else(|| {
+                            self.transcript.iter().rposition(|entry| match entry {
+                                TranscriptEntry::Subagent(entry) => entry.id == id_str,
+                                _ => false,
+                            })
+                        });
+                    if let Some(TranscriptEntry::Subagent(entry)) =
+                        target_idx.and_then(|i| self.transcript.get_mut(i))
+                    {
+                        entry.agent = agent;
+                        entry.status = status;
+                        if report.is_some() {
+                            entry.report = report;
+                        }
+                    } else {
+                        self.finalize_pending_assistant();
+                        self.transcript
+                            .push(TranscriptEntry::Subagent(SubagentEntry {
+                                id: id_str,
+                                agent,
+                                status,
+                                report,
+                            }));
+                    }
+                }
                 SessionItem::Compaction { freed_tokens, .. } => {
                     self.transcript.push(TranscriptEntry::System {
                         text: format!("Compaction freed {freed_tokens} tokens"),
@@ -239,21 +307,25 @@ impl AppState {
                     TurnEndReason::Completed => {
                         self.metrics.update_speed(self.usage.completion_tokens);
                         self.finalize_pending_assistant();
+                        self.finalize_pending_subagents(ToolCallStatus::Failed);
                     }
                     TurnEndReason::Aborted { .. } => {
                         self.finalize_pending_assistant();
+                        self.finalize_pending_subagents(ToolCallStatus::Cancelled);
                         self.transcript.push(TranscriptEntry::System {
                             text: "Turn cancelled.".to_string(),
                         });
                     }
                     TurnEndReason::Failed { error } => {
                         self.finalize_pending_assistant();
+                        self.finalize_pending_subagents(ToolCallStatus::Failed);
                         if !matches!(self.transcript.last(), Some(TranscriptEntry::Error { .. })) {
                             self.push_error(format!("turn failed: {error}"));
                         }
                     }
                     _ => {
                         self.finalize_pending_assistant();
+                        self.finalize_pending_subagents(ToolCallStatus::Failed);
                     }
                 }
             }
@@ -265,6 +337,7 @@ impl AppState {
                 }
                 self.metrics.turn_started_at = None;
                 self.finalize_pending_assistant();
+                self.finalize_pending_subagents(ToolCallStatus::Failed);
                 let text = format!("{} error: {message}", error_code_label(code));
                 self.push_error(text);
             }
@@ -316,6 +389,20 @@ impl AppState {
         }
     }
 
+    fn finalize_pending_subagents(&mut self, fallback: ToolCallStatus) {
+        let indices: Vec<usize> = self.subagent_items.drain().map(|(_, idx)| idx).collect();
+        for idx in indices {
+            if let Some(TranscriptEntry::Subagent(entry)) = self.transcript.get_mut(idx)
+                && matches!(
+                    entry.status,
+                    ToolCallStatus::Proposed | ToolCallStatus::Running
+                )
+            {
+                entry.status = fallback.clone();
+            }
+        }
+    }
+
     fn find_tool_call_mut(&mut self, call_id: &str) -> Option<&mut ToolCallEntry> {
         self.transcript
             .iter_mut()
@@ -345,8 +432,18 @@ fn map_completed_item_status(status: ItemStatus) -> ToolCallStatus {
 }
 
 pub fn transcript_from_events(events: &[LoggedEvent]) -> Vec<TranscriptEntry> {
+    let reverted: Vec<SeqRange> = events
+        .iter()
+        .filter_map(|logged| match &logged.event {
+            SessionEvent::RevertApplied { replaced, .. } => Some(*replaced),
+            _ => None,
+        })
+        .collect();
     let mut transcript = Vec::new();
     for logged in events {
+        if reverted.iter().any(|range| range.contains(logged.seq)) {
+            continue;
+        }
         match &logged.event {
             SessionEvent::UserMessage {
                 source: InputSource::User | InputSource::Steering,
