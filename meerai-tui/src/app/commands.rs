@@ -1,8 +1,8 @@
 use meerai_agents::AgentCommand;
+use meerai_client::providers::format_auth_list;
+use meerai_client::secrets::auth_file_path;
 use meerai_common::definitions::{AgentDefinition, SkillDefinition, validate_agent_model};
 use meerai_common::settings::default_data_dir;
-use meerai_providers::providers::format_auth_list;
-use meerai_providers::secrets::auth_file_path;
 
 use super::*;
 use crate::search::SearchMode;
@@ -221,6 +221,18 @@ impl AppState {
                             });
                         }
                     }
+                }
+            }
+            "/rewind" => {
+                if self.tab().is_running {
+                    self.status_notice = Some("Cannot rewind while a turn is running".to_string());
+                } else if let Some(turn_id) = self.latest_user_turn() {
+                    self.modal = Some(ActiveModal::RewindMenu {
+                        turn_id,
+                        selected: 0,
+                    });
+                } else {
+                    self.status_notice = Some("No closed turn to rewind".to_string());
                 }
             }
             "/reload" => {

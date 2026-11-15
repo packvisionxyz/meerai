@@ -1,5 +1,6 @@
 use super::*;
 use crate::harness::HarnessConfig;
+use crate::question::{QUESTION_TOOL, format_answers, parse_questions};
 use crate::subagent::{ForwardedApproval, SUBAGENT_BRIDGE, SubagentBridge, SubagentBudgetUpdate};
 
 #[derive(Default)]
@@ -137,10 +138,12 @@ impl CallPlan {
 }
 
 impl MultiTurnAgent {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_tool_calls(
         &mut self,
         tool_calls: &[ToolCall],
         turn_id: &TurnId,
+        step_index: usize,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
         cancel: &CancellationToken,
         mut inbox: Option<&mut mpsc::UnboundedReceiver<AgentCommand>>,
@@ -214,6 +217,72 @@ impl MultiTurnAgent {
             });
         }
 
+        let questions_registered = self.tools.iter().any(|tool| tool.contain(QUESTION_TOOL));
+        for plan in plans.iter_mut() {
+            if questions_registered && plan.authorized() && plan.tool_call.fn_name == QUESTION_TOOL
+            {
+                let run = self
+                    .ask_questions(
+                        &plan.tool_call,
+                        turn_id,
+                        event_tx,
+                        cancel,
+                        inbox.as_deref_mut(),
+                    )
+                    .await;
+                plan.outcome = Some(CallOutcome::Run(run));
+            }
+        }
+
+        if let Some(store) = self
+            .harness
+            .as_ref()
+            .and_then(|harness| harness.session.snapshot_store())
+        {
+            let workspace = self
+                .harness
+                .as_ref()
+                .map(|harness| harness.policy.workspace_root().to_path_buf());
+            if let Some(workspace) = workspace {
+                for plan in plans.iter_mut() {
+                    if !plan.authorized() || plan.effect != EffectClass::Write {
+                        continue;
+                    }
+                    let Some(path) = tool_write_path(&plan.args) else {
+                        continue;
+                    };
+                    match store
+                        .capture(turn_id, &workspace, std::path::Path::new(&path))
+                        .await
+                    {
+                        Ok(Some(full)) => {
+                            self.log_event(
+                                event_tx,
+                                SessionEvent::CheckpointCreated {
+                                    checkpoint_id: meerai_session::CheckpointId::new(),
+                                    turn_id: turn_id.clone(),
+                                    paths: vec![full],
+                                },
+                            )
+                            .await;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            self.log_event(
+                                event_tx,
+                                SessionEvent::Error {
+                                    code: ErrorCode::Internal,
+                                    message: format!("checkpoint failed: {error:#}"),
+                                    retryable: false,
+                                },
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+        }
+
         let tools = &self.tools;
         let timeout_ms = self
             .harness
@@ -235,6 +304,11 @@ impl MultiTurnAgent {
         while cursor < plans.len() && !halted {
             if cancel.is_cancelled() {
                 break;
+            }
+
+            if plans[cursor].outcome.is_some() {
+                cursor += 1;
+                continue;
             }
 
             if !plans[cursor].authorized() || plans[cursor].effect != EffectClass::Read {
@@ -266,6 +340,7 @@ impl MultiTurnAgent {
 
             let mut end = cursor;
             while end < plans.len()
+                && plans[end].outcome.is_none()
                 && plans[end].authorized()
                 && plans[end].effect == EffectClass::Read
             {
@@ -437,6 +512,25 @@ impl MultiTurnAgent {
                     },
                 };
 
+            let outcome = ToolOutcome {
+                turn_id: turn_id.clone(),
+                step_index,
+                tool_name: tool_call.fn_name.clone(),
+                call_id: tool_call.call_id.clone(),
+                status,
+                observation: observation.clone(),
+            };
+            for feedback in self.run_after_tool(&outcome) {
+                self.log_event(
+                    event_tx,
+                    SessionEvent::UserMessage {
+                        source: InputSource::RuntimeContext,
+                        content: vec![ContentBlock::Text(feedback)],
+                    },
+                )
+                .await;
+            }
+
             self.log_event(
                 event_tx,
                 SessionEvent::ToolResult {
@@ -549,6 +643,77 @@ impl MultiTurnAgent {
         }
 
         Ok(stop_reason)
+    }
+
+    async fn ask_questions(
+        &mut self,
+        tool_call: &ToolCall,
+        turn_id: &TurnId,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+        cancel: &CancellationToken,
+        inbox: Option<&mut mpsc::UnboundedReceiver<AgentCommand>>,
+    ) -> ToolRun {
+        if self.question_cancels >= 2 {
+            return ToolRun::from_output(ToolOutput::Fail(
+                "question-ask is disabled after repeated cancellations; ask in plain text or proceed with a stated assumption"
+                    .to_string(),
+            ));
+        }
+        let args = normalized_tool_args(&tool_call.fn_arguments);
+        let questions = match parse_questions(&args) {
+            Ok(questions) => questions,
+            Err(error) => {
+                return ToolRun::from_output(ToolOutput::Fail(format!(
+                    "invalid question arguments: {error}"
+                )));
+            }
+        };
+        let request_id = RequestId::new();
+        let request = QuestionRequest {
+            request_id: request_id.clone(),
+            turn_id: turn_id.clone(),
+            questions: questions.clone(),
+        };
+        let _ = event_tx.send(AgentEvent::QuestionAsked {
+            request: request.clone(),
+        });
+        self.log_event(
+            event_tx,
+            SessionEvent::QuestionAsked {
+                request_id: request_id.clone(),
+                questions,
+            },
+        )
+        .await;
+
+        let answers = self
+            .await_answer(&request_id, event_tx, cancel, inbox)
+            .await;
+
+        let _ = event_tx.send(AgentEvent::QuestionResolved {
+            request_id: request_id.clone(),
+        });
+        self.log_event(
+            event_tx,
+            SessionEvent::QuestionAnswered {
+                request_id,
+                answers: answers.clone(),
+            },
+        )
+        .await;
+
+        match answers {
+            Some(answers) => {
+                self.question_cancels = 0;
+                ToolRun::from_output(ToolOutput::Text(format_answers(&answers)))
+            }
+            None => {
+                self.question_cancels += 1;
+                ToolRun::from_output(ToolOutput::Fail(
+                    "question cancelled by the user".to_string(),
+                ))
+            }
+        }
     }
 
     async fn authorize(
@@ -698,6 +863,18 @@ impl MultiTurnAgent {
     ) -> ApprovalOutcome {
         self.decision_ctx()
             .await_decision(request_id, event_tx, cancel, inbox)
+            .await
+    }
+
+    pub(super) async fn await_answer(
+        &mut self,
+        request_id: &RequestId,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+        cancel: &CancellationToken,
+        inbox: Option<&mut mpsc::UnboundedReceiver<AgentCommand>>,
+    ) -> Option<Vec<crate::events::QuestionAnswer>> {
+        self.decision_ctx()
+            .await_answer(request_id, event_tx, cancel, inbox)
             .await
     }
 
@@ -859,10 +1036,60 @@ impl DecisionCtx<'_> {
                 | AgentCommand::Reload { .. } => {
                     self.handle_live_command(command, event_tx).await;
                 }
-                AgentCommand::SubmitPrompt(_)
+                AgentCommand::AnswerQuestion { .. }
+                | AgentCommand::Rewind { .. }
+                | AgentCommand::SubmitPrompt(_)
                 | AgentCommand::SetModel(_)
-                | AgentCommand::Revert { .. }
                 | AgentCommand::Reset => {}
+            }
+        }
+    }
+
+    async fn await_answer(
+        &mut self,
+        request_id: &RequestId,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+        cancel: &CancellationToken,
+        inbox: Option<&mut mpsc::UnboundedReceiver<AgentCommand>>,
+    ) -> Option<Vec<crate::events::QuestionAnswer>> {
+        let receiver = inbox?;
+
+        loop {
+            let command = tokio::select! {
+                _ = cancel.cancelled() => return None,
+                command = receiver.recv() => command,
+            };
+            let Some(command) = command else {
+                cancel.cancel();
+                return None;
+            };
+
+            match command {
+                AgentCommand::AnswerQuestion {
+                    request_id: id,
+                    answers,
+                } => {
+                    if &id == request_id {
+                        return answers;
+                    }
+                }
+                AgentCommand::Cancel | AgentCommand::Quit => {
+                    cancel.cancel();
+                    return None;
+                }
+                AgentCommand::Approve { .. }
+                | AgentCommand::Rewind { .. }
+                | AgentCommand::SubmitPrompt(_)
+                | AgentCommand::SetModel(_)
+                | AgentCommand::Reset => {}
+                AgentCommand::Steer(_)
+                | AgentCommand::SetPermissionMode(_)
+                | AgentCommand::Compact
+                | AgentCommand::ApplyAgent { .. }
+                | AgentCommand::ApplySkill { .. }
+                | AgentCommand::Reload { .. } => {
+                    self.handle_live_command(command, event_tx).await;
+                }
             }
         }
     }
@@ -903,9 +1130,10 @@ impl DecisionCtx<'_> {
             }
             AgentCommand::Reload { .. } => {}
             AgentCommand::Approve { .. }
+            | AgentCommand::AnswerQuestion { .. }
+            | AgentCommand::Rewind { .. }
             | AgentCommand::SubmitPrompt(_)
             | AgentCommand::SetModel(_)
-            | AgentCommand::Revert { .. }
             | AgentCommand::Reset
             | AgentCommand::Cancel
             | AgentCommand::Quit => {}
@@ -1217,6 +1445,16 @@ async fn run_tool_from(
     }
 
     unreachable!("loop always returns on final attempt")
+}
+
+fn tool_write_path(args: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(args).ok()?;
+    ["path", "file", "file_path"]
+        .iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
 }
 
 fn outside_workspace(workspace: &std::path::Path, resource: &str) -> Option<std::path::PathBuf> {

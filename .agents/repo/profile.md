@@ -10,15 +10,15 @@
 
 - **Product:** `meerai` (Pack Vision) — a pure, provider-agnostic terminal coding-agent harness
   written in Rust, featuring a selection-first modal TUI and a scriptable headless CLI mode.
-- **Shape:** Rust Cargo workspace (`edition = "2024"`, toolchain pinned to `1.100.0`). Nine
+- **Shape:** Rust Cargo workspace (`edition = "2024"`, toolchain pinned to `1.100.0`). Ten
   library crates plus the `meerai` binary, built by `meerai-cli`. Milestones M1–M5, M8–M10, and
   M12 of `docs/harness-spec.md` have landed; the repo is distribution-hardened (Apache-2.0
   license, CI, tag-driven releases, Pages site) and includes project-root config discovery, TUI
   transcript replay, opt-in automatic session retention, best-effort tool-output redaction,
   subagent child sessions (`subagent-run`), CLI session forking, retrieval v2/v3 tools
   `repo_map`, `lsp`, `search_as_code`), security & supply-chain controls (**M11**),
-  and read-only agent/skill discovery from `.agents`/`.claude` (**M12**). Checkpoints
-  (**M6**) and hooks (**M7**) remain unimplemented.
+  and read-only agent/skill discovery from `.agents`/`.claude` (**M12**). Checkpoints/rewind (**M6**) v1 and user questions are landed; hooks (**M7**) remain
+  unimplemented.
 - **Clients:** `meerai-tui` provides the modal terminal UI library (including replay of an
   existing session selected by `--continue`/`--resume <ID>`/`--fork <ID>` and subagent items);
   `meerai-cli` builds the `meerai` binary with CLI flag parsing, headless one-shot runner
@@ -30,8 +30,9 @@
   data dir, and an append-only session log with `meta.json` and blobs under the platform data dir
   (`dirs::data_dir()`) or `MEERAI_SESSION_DIR`.
 - **Runtime stance:** Local-first terminal binary; outbound HTTPS only to configured LLM providers
-  (a `genai` 0.7 client over the provider catalog in `meerai-providers`). No OS sandbox,
-  telemetry, or credential service.
+  (a `genai` 0.7 client over the provider catalog in `meerai-providers`) and an optional update
+  check. `ExecutionWorld` provides best-effort Seatbelt/bubblewrap sandboxing with a host fallback.
+  No telemetry and no credential service.
 
 ## 2. Layout
 
@@ -41,13 +42,14 @@
 | :--- | :--- |
 | `meerai-core/` | `Toolset` trait (`effect_of`, `effect_of_call`, `invoke_structured`), `ToolOutput`, `ToolError`, `EffectClass`, `ToolObservation`, `ToolRun`, `FileDiff`; re-exports `genai`, `async_trait`, `schemars::JsonSchema` |
 | `meerai-macros/` | Proc-macros `#[tool]` and `#[derive(Toolset)]` (`darling` + `syn` + `quote`), `insta` snapshot tests; test-only dependencies are dev-dependencies |
-| `meerai-session/` | `Session` append-only `SessionEvent` log (JSONL + zstd), `meta.json`, recovery, `derive_messages`, fork/revert (`latest_closed_turn`, `fork_latest`, `create_child`), blob store, spill, compaction primitives, session list/delete/prune support |
+| `meerai-session/` | `Session` append-only `SessionEvent` log (JSONL + zstd), `meta.json`, recovery, `derive_messages`, fork/rewind (`latest_closed_turn`, `fork_latest`, `create_child`), snapshot store (`SnapshotStore`, `snapshots/<turn-id>/`), blob store, spill, compaction primitives, session list/delete/prune support |
 | `meerai-policy/` | `PolicyEngine`: ordered permission rules, `ApprovalMode`, turn/session grants, YAML parsing |
 | `meerai-tools/` | `code` (`CodeTools`, seven `code-*` tools, path guards, unified diffs, `ToolRun` observations, secret env scrub), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`), `search_as_code` (`SearchAsCodeToolset`) |
 | `meerai-common/` | `AppSettings` (`settings.yml`), project-root discovery (`find_project_root`) plus project settings load/merge (`load_project_settings`, `merge_project_settings`), markdown agent/skill discovery (`definitions`: `load_definitions`, `AgentDefinition`, `SkillDefinition`, `DefinitionSource`) |
-| `meerai-providers/` | Provider catalog + `genai` client factory (`providers.yml`), `auth.json` secret store |
-| `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig`, `AgentEvent` v2, `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins + read-only custom child runs), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
-| `meerai-tui/` | Modal TUI library (`ratatui` + `crossterm`) with transcript replay, subagent items, `/agent`/`/skill` and the `@` Mentions popup |
+| `meerai-client/` | Client-facing provider surface: `ProviderCatalog` + `providers.yml`, `ModelInfo`, `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract, `MemorySecretStore`, auth listing |
+| `meerai-providers/` | `genai` client factory + native secret stores (`auth.json`, OS keychain); re-exports the client surface |
+| `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig` (+ `TokenPricing`), `AgentEvent` v2, `intercept` (`Interceptor`/`StepPlan`/`ToolOutcome`), `question-ask` (`QuestionAsked`/`AnswerQuestion`, not an approval), `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins + read-only custom child runs), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
+| `meerai-tui/` | Modal TUI library (`ratatui` + `crossterm`) split into `ui/` panels and `app/` modules, transcript replay, tabs, subagent items, `/agent`/`/skill`, the `@` Mentions popup, and `workspace::WorkspaceQuery` (local walker + grep; no `meerai-tools` or `meerai-providers` dependency) |
 | `meerai-cli/` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions` (`list`, `rm`, `prune`, `fork`) subcommands, and TUI launcher |
 | `.agents/agents/`, `.agents/skills/` | Default agent (`*.md`) and skill (`*/SKILL.md`) definitions, read at runtime |
 | `.claude/agents/`, `.claude/skills/` | Lower-priority agent and skill definitions, same format |
@@ -75,6 +77,8 @@
 | Test (single file) | `cargo test -p meerai-macros --test derive_toolset_pass` |
 | Test (single test) | `cargo test -p meerai-macros test_snapshot` |
 | Update macro snapshots | `cargo insta test --review` or `INSTA_UPDATE=always cargo test -p meerai-macros` |
+| Headless surface | `cargo check -p meerai-cli --no-default-features` |
+| TUI without update | `cargo check -p meerai-tui --no-default-features` |
 | Local gate | `make verify` (alias of `make ci`) |
 | CI | `.github/workflows/ci.yml` on push/PR to `main`: fmt check, clippy, tests on `ubuntu-24.04` |
 | Release | `.github/workflows/release.yml` on `v*` tags: verify, build 5 targets, tag/version gate, GitHub Release |
@@ -159,7 +163,7 @@ Notes:
     `transcript_from_events` (user/steering, assistant text/reasoning, tool calls/results,
     compaction markers); runtime/system events are skipped and unmatched tool calls become
     `Cancelled`. `set_harness` and `session_usage_from_events` seed token counters from the last
-    logged `UsageUpdated`. `AgentCommand` still has no `Rewind`/`Fork` variant.
+    logged `UsageUpdated`. `AgentCommand` has `Rewind` and no `Revert`/`Fork` variant; conversation shadowing is internal.
 20. **Security roadmap (M11):** landed — path guards, sensitive-file blocks (`is_sensitive_path` and
     `PolicyEngine::default_sensitive_rules`), `plan` hard read-only, approval gates, headless
     fail-fast, provider-secret env scrub, best-effort output/diff/error redaction, heuristic
@@ -202,7 +206,10 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 | Policy decision | `PolicyEngine::decide` + `ApprovalMode` tier defaults + grants | `meerai-policy/src/engine.rs` |
 | Coding tools | `CodeTools` `Toolset` impl + `resolve_for_read`/`resolve_for_write` guards | `meerai-tools/src/code/mod.rs`, `code/paths.rs` |
 | Prompt | `BASE_SYSTEM_PROMPT` + `compose_system_prompt` + scoped `AGENTS.md` injection | `meerai-agents/src/prompt.rs`, `multi_turn_agent.rs` |
-| Agent loop | v2 item protocol + `AgentHarness` (session dual-write, `derive_messages` requests, policy + approvals, spill, compaction, budgets, breakers) | `meerai-agents/src/multi_turn_agent.rs`, `harness.rs` |
+| Agent loop | v2 item protocol + `AgentHarness` (session dual-write, `derive_messages` requests, policy + approvals, spill, compaction, budgets, breakers) | `meerai-agents/src/multi_turn_agent/`, `harness.rs` |
+| Loop extension | `Interceptor` chain (`before_step`, `after_tool`, `turn_stopping`) registered on the agent | `meerai-agents/src/intercept.rs` |
+| User questions | `question-ask` tool + `QuestionAsked`/`QuestionResolved` events + `AnswerQuestion`; TUI overlay; headless auto-cancel | `meerai-agents/src/question.rs`, `meerai-tui/src/app/modals.rs` |
+| Rewind | capture before write tools, `Rewind { turn_id, scope }`, `/rewind` menu, one `RewindApplied` event | `meerai-session/src/snapshot.rs`, `meerai-agents/src/multi_turn_agent/tools.rs`, `meerai-tui/src/app/modals.rs` |
 | TUI overlay | `ActiveModal` variant + `handle_agent_event` queue + key handler | `meerai-tui/src/app.rs` (`ActiveModal::Approval`) |
 
 ## 6. Generated and vendored paths
@@ -318,8 +325,26 @@ Detail in [`infra.md`](infra.md). Summary:
   ignored.
 - Redaction: best-effort regex redaction of known secret shapes before spill/log/UI/model; the
   original secret is discarded, diffs are redacted, paths are not. No entropy screen and no
-  guarantee. Cost tracking is token-only: `est_cost_usd` is always `None`; USD pricing is deferred
-  until pricing metadata exists.
+  guarantee. Cost tracking is token-only by default: `est_cost_usd` is computed from
+  `ProviderCatalog` model pricing when both per-million prices exist; the bundled catalog ships
+  context windows only.
+- Rewind only: the TUI sends `RewindScope::Both` (message menu and `/rewind` default);
+  `Conversation` is an internal scope; `Code` restores snapshot blobs; `Both` runs code then
+  conversation. `Session::rewind` appends one `RewindApplied` event and never a `RevertApplied`
+  event. Capture happens before write-class tools only; shell edits, gitignored
+  files, symlinks, and files over 2 MiB are not restored.
+- Questions are not approvals. `question-ask` is read-classified, runs before the rest of the
+  batch, uses `QuestionAsked`/`AnswerQuestion`, records no grant, and is not registered for
+  subagents. Headless auto-cancels with a hint.
+- Loop extension: M6/M7 must register a `meerai_agents::intercept::Interceptor`, not add branches
+  to `turn.rs`. `SessionEvent::HookFired` keeps its `event`/`decision` strings and adds
+  `detail: Option<HookDetail>`.
+- Build surfaces: `meerai-tui` defaults `update` (reqwest); `meerai-cli` defaults `tui`.
+  `--no-default-features` drops ratatui, git2, comrak, and the TUI crate; genai still pulls
+  reqwest.
+- TUI client seam: `WorkspaceQuery` supplies file listing and content search; the local
+  implementation lives in `meerai-tui/src/workspace.rs` and is injectable through
+  `TuiLaunchConfig::workspace_query`. Do not re-add `meerai-tools` to the TUI.
 - Session titles: first user prompt, single line, 80 chars; no retitle when the session already has
   a user message. `context.summarizer_model` overrides the compaction model (default: session
   model); summarizer usage counts toward the session token cap.

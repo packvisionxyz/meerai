@@ -18,17 +18,17 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use meerai_agents::events::ApprovalRequest;
+use meerai_agents::events::{ApprovalRequest, QuestionRequest};
 use meerai_agents::{AgentCommand, ItemId, TurnId};
+use meerai_client::providers::{
+    KeyStatus, ProviderInfo, RuntimeProviderState, canonical_provider_id, check_key_status,
+};
+use meerai_client::secrets::SecretStore;
 use meerai_common::definitions::{AgentDefinition, SkillDefinition};
 use meerai_common::settings::AppSettings;
 use meerai_core::text::truncate_single_line;
 use meerai_policy::ApprovalMode;
 pub use meerai_policy::{approval_mode_badge, approval_mode_label, parse_approval_mode};
-use meerai_providers::providers::{
-    KeyStatus, ProviderInfo, RuntimeProviderState, canonical_provider_id, check_key_status,
-};
-use meerai_providers::secrets::SecretStore;
 use meerai_session::{LoggedEvent, SessionId, SessionSummary};
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
@@ -36,6 +36,7 @@ use tokio::sync::mpsc;
 use crate::completion::CompletionEngine;
 use crate::diff::FileDiffView;
 use crate::search::{SearchMatch, SearchMode, SearchPreview};
+use crate::workspace::{WorkspaceQuery, local_workspace};
 use crate::{OpenedSession, SessionOpener};
 
 const DOUBLE_CTRL_C_WINDOW: Duration = Duration::from_secs(2);
@@ -85,6 +86,16 @@ pub enum ActiveModal {
         reason: String,
         editing_reason: bool,
     },
+    Question {
+        request: QuestionRequest,
+        answers: Vec<Vec<usize>>,
+        current: usize,
+        focus: usize,
+    },
+    RewindMenu {
+        turn_id: TurnId,
+        selected: usize,
+    },
     SessionSelect {
         filter: String,
         selected: usize,
@@ -125,7 +136,7 @@ pub enum TabHitKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserAction {
-    Revert,
+    Rewind,
     Copy,
     Fork,
 }
@@ -312,6 +323,7 @@ pub struct SessionTab {
     pub total_lines: usize,
     pub has_unread: bool,
     pub pending_approvals: Vec<ApprovalRequest>,
+    pub pending_questions: Vec<QuestionRequest>,
     pub(super) pending_assistant_idx: Option<usize>,
     pub(super) assistant_items: HashMap<ItemId, usize>,
     pub(super) tool_items: HashMap<ItemId, String>,
@@ -344,6 +356,7 @@ impl SessionTab {
             metrics: TurnMetrics::default(),
             is_running: false,
             queued: Vec::new(),
+            pending_questions: Vec::new(),
             user_turns: HashMap::new(),
             turn_id: None,
             active_tool: None,
@@ -416,6 +429,7 @@ pub(super) fn normalize_tab_title(raw: String) -> Option<String> {
 pub struct AppState {
     pub mode: InputMode,
     pub workspace_root: PathBuf,
+    pub workspace: Arc<dyn WorkspaceQuery>,
     pub tabs: Vec<SessionTab>,
     pub active_tab: usize,
     pub completion: CompletionEngine,
@@ -470,6 +484,11 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn set_workspace_query(&mut self, workspace: Arc<dyn WorkspaceQuery>) {
+        self.workspace = workspace.clone();
+        self.completion.set_workspace(workspace);
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         active_provider: impl Into<String>,
@@ -535,6 +554,7 @@ impl AppState {
 
         Self {
             mode: InputMode::Insert,
+            workspace: local_workspace(workspace_root.clone()),
             workspace_root,
             tabs: vec![tab],
             active_tab: 0,
@@ -680,6 +700,7 @@ impl AppState {
             rt.active_provider = provider;
         }
         self.sync_completion_models();
+        self.open_pending_question();
 
         if self.modal.is_none() && !self.tabs[index].pending_approvals.is_empty() {
             let queue = std::mem::take(&mut self.tabs[index].pending_approvals);
@@ -747,6 +768,7 @@ impl AppState {
             rt.active_provider = provider;
         }
         self.sync_completion_models();
+        self.open_pending_question();
 
         if self.modal.is_none() && !self.tabs[self.active_tab].pending_approvals.is_empty() {
             let queue = std::mem::take(&mut self.tabs[self.active_tab].pending_approvals);
@@ -801,6 +823,7 @@ impl AppState {
                 rt.active_provider = provider;
             }
             self.sync_completion_models();
+            self.open_pending_question();
             self.persist_tabs();
         } else {
             self.tabs.push(tab);
@@ -947,7 +970,16 @@ impl AppState {
         }
     }
 
+    pub(super) fn latest_user_turn(&self) -> Option<TurnId> {
+        self.tab()
+            .user_turns
+            .iter()
+            .max_by_key(|(index, _)| *index)
+            .map(|(_, turn_id)| turn_id.clone())
+    }
+
     pub fn on_tick(&mut self) {
+        self.open_pending_question();
         if self.tabs.iter().any(|tab| tab.is_running) {
             self.spinner_tick = self.spinner_tick.wrapping_add(1);
         }

@@ -6,12 +6,15 @@ zero-memorization keyboard ergonomics tailored for inspecting multi-step tool
 execution, reviewing code diffs, and steering long coding sessions in the
 terminal.
 
-**Status:** sections marked **Current** match `meerai-tui/src/app.rs` and
-`ui.rs`. Sections marked **Planned** are design, not implemented. Today the TUI
-has `NOR` and `INS` modes, slash commands, approvals, a sidebar with file
-changes, diff/search modals, transcript replay for a resumed session, and a
-config-driven color palette. It has no Select mode, `Space` leader, `:` command
-mode, transcript search, or `/rewind`.
+**Status:** sections marked **Current** match `meerai-tui/src/app/` and
+`meerai-tui/src/ui/`. Sections marked **Planned** are design, not implemented.
+Today the TUI has `NOR` and `INS` modes, slash commands, a `Ctrl-p` command
+palette, multi-session tabs, approvals, user-choice questions, a sidebar with
+file changes, diff/search modals, transcript replay for a resumed session, a `@`
+mentions popup, and a config-driven color palette. It has no Select mode, `Space` leader, `:`
+command mode, transcript search, or `/rewind`. Workspace file listing and content
+search go through the `WorkspaceQuery` trait so a future remote client can
+replace the local walker.
 
 ## Core Interaction Principles
 
@@ -120,6 +123,12 @@ Typing `/` opens completion. The implemented command set is:
 | `/search [query]`, `/grep [query]` | Open file/content search |
 | `/diff [path]` | Open the diff view |
 | `/sidebar` | Toggle the sidebar |
+| `/sessions [id]` | Open the session picker or switch to an id |
+| `/new` | Open a new session tab |
+| `/close` | Close the active session tab |
+| `/rewind` | Restore code and/or conversation for the latest turn |
+| `/reload` | Re-read settings, theme, definitions, policy, and prompt |
+| `/update` | Print the install hint |
 | `/clear` | Clear the transcript view |
 | `/reset` | Reset the conversation (session log is kept) |
 | `/cancel` | Cancel the running turn |
@@ -164,7 +173,37 @@ When the policy returns `Ask` for a tool call (for example `write_file`,
 - There is no `e` key and no "inspect full file context" key; open the sidebar
   or diff modal before deciding if you need context.
 
-### 5. Session replay — current
+### 5. Question Overlay (`QST`) — current
+
+The model can call `question-ask` when it needs a product or configuration
+choice. The overlay shows the header, the question, and the options:
+
+- `Up` / `Down` — move the option focus.
+- `Space` — toggle an option when `multiple` is true; otherwise select it.
+- `Tab` / `Right` — next question when a call contains several.
+- `Left` — previous question.
+- `Enter` — submit on the last question (or advance to the next).
+- `Esc` — cancel the request; the model receives a structured refusal.
+
+Pending questions queue per tab like approvals. A question is not a permission
+prompt: it never records a grant and it never changes the approval mode. While a
+question is open, normal transcript input is blocked, but transcript scrolling
+still works. Headless runs auto-cancel the question and print a hint on stderr.
+
+### 6. Rewind menu (`RWD`) — current
+
+`/rewind` opens a menu for the latest user turn:
+
+- **Rewind code + conversation** — restore files from the turn snapshots, then
+  shadow the conversation through the turn boundary. This is the default.
+- **Rewind code only** — restore files and keep the conversation.
+
+`Up` / `Down` moves, `Enter` applies, `Esc` cancels. Rewinding the conversation
+truncates the visible transcript before the turn. The menu refuses to open while
+a turn is running. Shell-only edits and files over 2 MiB are not restored; there
+is no `Summarize from here` option yet.
+
+### 7. Session replay — current
 
 Starting `meerai --continue` or `meerai --resume <ID>` without `--prompt` opens
 the session and starts the TUI with its transcript replayed. Replay covers user
@@ -175,7 +214,7 @@ Replay reads the session log; it has no separate retention UI. Opt-in startup
 pruning (`sessions.auto_prune_days`) always spares the session being replayed,
 so a resumed transcript cannot disappear underneath the TUI.
 
-### 6. Planned keybindings (not implemented)
+### 8. Planned keybindings (not implemented)
 
 - **Select mode (`v` / `x`)**: range/block selection, `y` yank, `q` quote into
   the composer.
@@ -184,8 +223,8 @@ so a resumed transcript cannot disappear underneath the TUI.
 - **`:` command mode**: `:model`, `:provider`, `:mode`, `:compact`, `:session`,
   `:export`, `:theme`, `:q`.
 - **Transcript search** with `n`/`N` (the current `/` searches the workspace).
-- `/rewind` and a session picker.
-- Themes and an inline viewport option.
+- A per-message rewind entry and `Summarize from here`.
+- An inline viewport option.
 
 ---
 
@@ -213,14 +252,20 @@ Current single-row status bar, left to right:
 
 ## Rust Implementation Architecture (`meerai-tui`)
 
-Current dependencies: `ratatui` + `crossterm`, `tokio` + `tokio-util`,
-`meerai-agents`/`meerai-session`/`meerai-policy`/`meerai-tools`/
-`meerai-common`, `grep-*` + `ignore` for search, `anyhow`, `serde_json`,
-`serde_yaml`, `dotenvy`, `futures`, `regex`.
+Current dependencies: `ratatui` + `crossterm`, `tokio`, `meerai-agents`/
+`meerai-session`/`meerai-policy`/`meerai-client`/`meerai-common`, `grep-*` +
+`ignore` for search, `git2` for the change sidebar, `comrak` for markdown,
+`similar`, `anyhow`, `serde_json`, `futures`, `regex`. `reqwest` is behind the
+default `update` feature. The crate does not depend on `meerai-tools`; file
+listing and content search go through `workspace::WorkspaceQuery`, implemented
+locally by `LocalWorkspace` and injectable through `TuiLaunchConfig`.
 
 - **Rendering & terminal I/O:** `ratatui` + `crossterm`. `TerminalGuard`
   restores raw mode and the alternate screen in `Drop` and installs a panic
-  hook. Only fullscreen mode exists; inline viewport is planned.
+  hook. Only fullscreen mode exists; inline viewport is planned. Rendering is
+  split by panel under `src/ui/` (`transcript`, `sidebar`, `composer`,
+  `modals`, `statusline`, `selection`); `AppState` lives under `src/app/` with
+  key handling, modals, commands, palette, and reload in separate modules.
 - **Completion:** a custom scorer in `completion.rs` (no `nucleo`). It covers
   slash commands, `@file` paths, and model ids.
 - **Text buffer:** plain `String` plus cursor helpers (no `ropey`).

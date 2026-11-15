@@ -70,3 +70,22 @@ providers:
     adapter: ollama
     env_vars: []
     requires_api_key: false
+models:
+  - provider: opencode-go
+    id: deepseek-v4.1-flash
+    context_window: 128000
+  - provider: anthropic
+    id: claude-sonnet-4-5
+    context_window: 200000
+  - provider: openai
+    id: gpt-5
+    context_window: 400000
+  - provider: gemini
+    id: gemini-2.5-pro
+    context_window: 1048576
+  - provider: openrouter
+    id: deepseek/deepseek-chat
+    context_window: 163840
+  - provider: ollama
+    id: llama3.2
+    context_window: 131072

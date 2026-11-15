@@ -2,15 +2,14 @@ use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use meerai_agents::AgentCommand;
-use meerai_agents::events::{ApprovalDecision, GrantScope};
+use meerai_agents::events::{ApprovalDecision, GrantScope, QuestionAnswer, RewindScope};
+use meerai_client::providers::canonical_provider_id;
 use meerai_common::settings::save_settings_to;
-use meerai_providers::providers::canonical_provider_id;
 
 use super::*;
 use crate::diff::build_file_diff;
 use crate::search::{
-    SearchMatch, SearchMode, SearchPreview, build_search_preview, discover_workspace_files,
-    search_content, search_files,
+    SearchMatch, SearchMode, SearchPreview, build_search_preview, search_content, search_files,
 };
 
 impl AppState {
@@ -27,12 +26,13 @@ impl AppState {
     }
 
     pub fn open_search_modal(&mut self, mode: SearchMode, initial_query: &str) {
-        let workspace_files = discover_workspace_files(&self.workspace_root);
+        let workspace_files = self.workspace.list_files();
         let query = initial_query.trim().to_string();
         let mut results = Vec::new();
         let mut selected = 0;
         let mut preview = None;
         Self::refresh_search(
+            self.workspace.as_ref(),
             &self.workspace_root,
             mode,
             &workspace_files,
@@ -51,7 +51,9 @@ impl AppState {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn refresh_search(
+        workspace: &dyn crate::workspace::WorkspaceQuery,
         workspace_root: &Path,
         mode: SearchMode,
         workspace_files: &[String],
@@ -62,7 +64,7 @@ impl AppState {
     ) {
         *results = match mode {
             SearchMode::Files => search_files(workspace_files, query),
-            SearchMode::Content => search_content(workspace_root, workspace_files, query),
+            SearchMode::Content => search_content(workspace, workspace_files, query),
         };
         *selected = 0;
         *preview = results
@@ -532,6 +534,7 @@ impl AppState {
                 KeyCode::Tab | KeyCode::BackTab => {
                     mode = mode.toggle();
                     Self::refresh_search(
+                        self.workspace.as_ref(),
                         &self.workspace_root,
                         mode,
                         &workspace_files,
@@ -619,6 +622,7 @@ impl AppState {
                 KeyCode::Char('u') if has_ctrl => {
                     query.clear();
                     Self::refresh_search(
+                        self.workspace.as_ref(),
                         &self.workspace_root,
                         mode,
                         &workspace_files,
@@ -639,6 +643,7 @@ impl AppState {
                 KeyCode::Backspace => {
                     query.pop();
                     Self::refresh_search(
+                        self.workspace.as_ref(),
                         &self.workspace_root,
                         mode,
                         &workspace_files,
@@ -680,6 +685,7 @@ impl AppState {
                 KeyCode::Char(c) if !has_ctrl && !has_alt => {
                     query.push(c);
                     Self::refresh_search(
+                        self.workspace.as_ref(),
                         &self.workspace_root,
                         mode,
                         &workspace_files,
@@ -779,6 +785,154 @@ impl AppState {
                     editing_reason,
                 });
             }
+            ActiveModal::Question {
+                request,
+                mut answers,
+                mut current,
+                mut focus,
+            } => {
+                let prompt = &request.questions[current];
+                let last = current + 1 >= request.questions.len();
+                match key.code {
+                    KeyCode::Esc => {
+                        let _ = self.tab().cmd_tx.send(AgentCommand::AnswerQuestion {
+                            request_id: request.request_id.clone(),
+                            answers: None,
+                        });
+                        self.modal = None;
+                        self.open_pending_question();
+                        return true;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        focus = focus.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        focus = (focus + 1).min(prompt.options.len().saturating_sub(1));
+                    }
+                    KeyCode::Char(' ') => {
+                        if prompt.multiple {
+                            if let Some(index) = answers[current].iter().position(|i| *i == focus) {
+                                answers[current].remove(index);
+                            } else {
+                                answers[current].push(focus);
+                                answers[current].sort_unstable();
+                            }
+                        } else {
+                            answers[current] = vec![focus];
+                        }
+                    }
+                    KeyCode::Tab | KeyCode::Right => {
+                        if !last {
+                            current += 1;
+                            focus = 0;
+                        }
+                    }
+                    KeyCode::Left => {
+                        if current > 0 {
+                            current -= 1;
+                            focus = 0;
+                        }
+                    }
+                    KeyCode::Char(c @ '1'..='9') => {
+                        let index = c.to_digit(10).unwrap_or(1) as usize - 1;
+                        if index < prompt.options.len() {
+                            focus = index;
+                            if prompt.multiple {
+                                if !answers[current].contains(&index) {
+                                    answers[current].push(index);
+                                    answers[current].sort_unstable();
+                                }
+                            } else {
+                                answers[current] = vec![index];
+                            }
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if answers[current].is_empty() {
+                            answers[current] = vec![focus];
+                        }
+                        if last {
+                            let collected: Vec<QuestionAnswer> = request
+                                .questions
+                                .iter()
+                                .enumerate()
+                                .map(|(index, prompt)| QuestionAnswer {
+                                    header: prompt.header.clone(),
+                                    selected: answers[index]
+                                        .iter()
+                                        .filter_map(|i| prompt.options.get(*i))
+                                        .map(|option| option.label.clone())
+                                        .collect(),
+                                })
+                                .collect();
+                            let _ = self.tab().cmd_tx.send(AgentCommand::AnswerQuestion {
+                                request_id: request.request_id.clone(),
+                                answers: Some(collected),
+                            });
+                            self.modal = None;
+                            self.open_pending_question();
+                            return true;
+                        }
+                        current += 1;
+                        focus = 0;
+                    }
+                    _ => {}
+                }
+                self.modal = Some(ActiveModal::Question {
+                    request,
+                    answers,
+                    current,
+                    focus,
+                });
+            }
+            ActiveModal::RewindMenu {
+                turn_id,
+                mut selected,
+            } => match key.code {
+                KeyCode::Esc => {
+                    self.modal = None;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    selected = selected.saturating_sub(1);
+                    self.modal = Some(ActiveModal::RewindMenu { turn_id, selected });
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    selected = (selected + 1).min(2);
+                    self.modal = Some(ActiveModal::RewindMenu { turn_id, selected });
+                }
+                KeyCode::Enter => {
+                    let scope = match selected {
+                        0 => RewindScope::Both,
+                        _ => RewindScope::Code,
+                    };
+                    {
+                        let index = self
+                            .tab()
+                            .user_turns
+                            .iter()
+                            .find_map(|(index, turn)| (turn == &turn_id).then_some(*index));
+                        if let Some(index) = index {
+                            let tab = self.tab_mut();
+                            tab.transcript.truncate(index);
+                            tab.user_turns.retain(|idx, _| *idx < index);
+                            tab.is_running = false;
+                            tab.turn_id = None;
+                            tab.queued.clear();
+                            tab.auto_follow = true;
+                        }
+                    }
+                    let _ = self
+                        .tab()
+                        .cmd_tx
+                        .send(AgentCommand::Rewind { turn_id, scope });
+                    self.modal = None;
+                    self.status_notice = Some("Rewinding...".to_string());
+                    return true;
+                }
+                _ => {
+                    self.modal = Some(ActiveModal::RewindMenu { turn_id, selected });
+                }
+            },
             ActiveModal::SessionSelect {
                 mut filter,
                 mut selected,
@@ -919,7 +1073,7 @@ impl AppState {
                 entry_idx,
                 mut selected,
             } => {
-                let actions = [UserAction::Revert, UserAction::Copy, UserAction::Fork];
+                let actions = [UserAction::Rewind, UserAction::Copy, UserAction::Fork];
                 let run = |state: &mut Self, action| {
                     state.modal = None;
                     state.run_user_action(entry_idx, action);
@@ -943,7 +1097,7 @@ impl AppState {
                         });
                     }
                     KeyCode::Enter => run(self, actions[selected.min(2)]),
-                    KeyCode::Char('r') if !has_ctrl => run(self, UserAction::Revert),
+                    KeyCode::Char('w') if !has_ctrl => run(self, UserAction::Rewind),
                     KeyCode::Char('c') if !has_ctrl => run(self, UserAction::Copy),
                     KeyCode::Char('f') if !has_ctrl => run(self, UserAction::Fork),
                     _ => {

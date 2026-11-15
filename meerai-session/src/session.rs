@@ -13,8 +13,8 @@ use tokio::io::AsyncWriteExt;
 use crate::blob::{BLOB_DIR_NAME, BlobStore};
 use crate::compaction::{COMPACTION_INTERRUPTED, open_compactions, open_turns, turn_start};
 use crate::event::{
-    AbortCause, CompactionResult, InputSource, LoggedEvent, Seq, SeqRange, SessionEvent,
-    TurnEndReason,
+    AbortCause, CompactionResult, InputSource, LoggedEvent, RewindScope, Seq, SeqRange,
+    SessionEvent, TurnEndReason,
 };
 use crate::ids::{SessionId, TurnId};
 use crate::projection::{ProjectionPolicy, derive_messages};
@@ -388,6 +388,11 @@ impl Session {
         self.inner.dir.as_deref()
     }
 
+    pub fn snapshot_store(&self) -> Option<crate::SnapshotStore> {
+        self.dir()
+            .map(|dir| crate::SnapshotStore::new(dir.join("snapshots")))
+    }
+
     pub fn config(&self) -> Option<&SessionConfig> {
         self.inner.config.as_ref()
     }
@@ -526,33 +531,43 @@ impl Session {
         Ok(child)
     }
 
-    pub async fn revert(&self, turn_id: &TurnId) -> Result<()> {
-        let events = self.events();
-        let start = turn_start(&events, turn_id)
-            .ok_or_else(|| anyhow::anyhow!("unknown turn: {turn_id}"))?;
-
-        for open in open_turns(&events) {
-            self.append(SessionEvent::TurnEnded {
-                turn_id: open,
-                reason: TurnEndReason::Aborted {
-                    cause: AbortCause::User,
-                },
-            })
-            .await?;
-        }
-
-        let end_inclusive = self
-            .events()
-            .last()
-            .map(|logged| logged.seq)
-            .unwrap_or(start);
-
-        self.append(SessionEvent::RevertApplied {
-            turn_id: turn_id.clone(),
-            replaced: SeqRange {
+    pub async fn rewind(
+        &self,
+        turn_id: &TurnId,
+        scope: RewindScope,
+        restored: Vec<PathBuf>,
+    ) -> Result<()> {
+        let replaced = if matches!(scope, RewindScope::Both | RewindScope::Conversation) {
+            let events = self.events();
+            let start = turn_start(&events, turn_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown turn: {turn_id}"))?;
+            for open in open_turns(&events) {
+                self.append(SessionEvent::TurnEnded {
+                    turn_id: open,
+                    reason: TurnEndReason::Aborted {
+                        cause: AbortCause::User,
+                    },
+                })
+                .await?;
+            }
+            let end_inclusive = self
+                .events()
+                .last()
+                .map(|logged| logged.seq)
+                .unwrap_or(start);
+            Some(SeqRange {
                 start,
                 end_inclusive,
-            },
+            })
+        } else {
+            None
+        };
+
+        self.append(SessionEvent::RewindApplied {
+            turn_id: turn_id.clone(),
+            scope,
+            restored,
+            replaced,
         })
         .await
         .map(|_| ())
@@ -1315,8 +1330,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revert_shadows_projected_range() {
-        let root = temp_root("revert");
+    async fn rewind_shadows_projected_range() {
+        let root = temp_root("rewind");
         let config = config(&root);
         let session =
             Session::open_or_create(&config, SessionId::new(), PathBuf::from("/tmp/workspace"))
@@ -1332,17 +1347,26 @@ mod tests {
         session.append(user("two")).await.unwrap();
         session.append(ended(&second)).await.unwrap();
 
-        session.revert(&second).await.unwrap();
+        session
+            .rewind(&second, RewindScope::Conversation, Vec::new())
+            .await
+            .unwrap();
 
         let events = session.events();
         assert_eq!(events.len(), 7);
         match &events[6].event {
-            SessionEvent::RevertApplied { turn_id, replaced } => {
+            SessionEvent::RewindApplied {
+                turn_id,
+                scope,
+                replaced: Some(replaced),
+                ..
+            } => {
                 assert_eq!(turn_id, &second);
+                assert_eq!(*scope, RewindScope::Conversation);
                 assert_eq!(replaced.start, Seq(4));
                 assert_eq!(replaced.end_inclusive, Seq(6));
             }
-            other => panic!("expected RevertApplied, got {other:?}"),
+            other => panic!("expected RewindApplied, got {other:?}"),
         }
 
         let messages = session.derive_messages(&ProjectionPolicy::default());
@@ -1356,7 +1380,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(reopened.events().len(), 7, "revert never deletes events");
+        assert_eq!(reopened.events().len(), 7, "rewind never deletes events");
         assert_eq!(
             reopened.derive_messages(&ProjectionPolicy::default()).len(),
             1
@@ -1366,13 +1390,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revert_closes_open_turn_before_shadowing() {
+    async fn rewind_closes_open_turn_before_shadowing() {
         let session = Session::memory(SessionId::new(), PathBuf::from("/tmp/workspace"));
         let turn = TurnId::new();
         session.append(started(&turn)).await.unwrap();
         session.append(user("abandoned")).await.unwrap();
 
-        session.revert(&turn).await.unwrap();
+        session
+            .rewind(&turn, RewindScope::Conversation, Vec::new())
+            .await
+            .unwrap();
 
         let events = session.events();
         assert_eq!(events.len(), 4);
@@ -1386,11 +1413,16 @@ mod tests {
             }
         ));
         match &events[3].event {
-            SessionEvent::RevertApplied { replaced, .. } => {
+            SessionEvent::RewindApplied {
+                scope,
+                replaced: Some(replaced),
+                ..
+            } => {
+                assert_eq!(*scope, RewindScope::Conversation);
                 assert_eq!(replaced.start, Seq(1));
                 assert_eq!(replaced.end_inclusive, Seq(3));
             }
-            other => panic!("expected RevertApplied, got {other:?}"),
+            other => panic!("expected RewindApplied, got {other:?}"),
         }
         assert!(
             session
@@ -1400,11 +1432,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revert_rejects_unknown_turn() {
+    async fn rewind_rejects_unknown_conversation_turn() {
         let session = Session::memory(SessionId::new(), PathBuf::from("/tmp/workspace"));
         session.append(user("hello")).await.unwrap();
 
-        assert!(session.revert(&TurnId::from("missing")).await.is_err());
+        assert!(
+            session
+                .rewind(
+                    &TurnId::from("missing"),
+                    RewindScope::Conversation,
+                    Vec::new()
+                )
+                .await
+                .is_err()
+        );
     }
 
     #[cfg(unix)]

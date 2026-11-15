@@ -1,13 +1,12 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use meerai_common::definitions::{AgentDefinition, DefinitionSource, SkillDefinition};
 use meerai_core::text::floor_char_boundary;
-use meerai_tools::workspace_search::list_workspace_files;
 
-const MAX_SCAN_DEPTH: usize = 16;
-const MAX_SCAN_FILES: usize = 10_000;
+use crate::workspace::{WorkspaceQuery, local_workspace};
+
 const MAX_VISIBLE_ITEMS: usize = 50;
-const SKIPPED_DIRS: &[&str] = &[".git", "target", "node_modules"];
 
 pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
     ("/help", "Show available commands and keybindings", false),
@@ -53,6 +52,11 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
         "/mode",
         "Show or set approval mode (plan|ask|auto-edit|auto-approve|yolo)",
         true,
+    ),
+    (
+        "/rewind",
+        "Restore code and/or conversation for the last turn",
+        false,
     ),
     (
         "/reload",
@@ -127,7 +131,7 @@ struct MentionEntry {
 
 #[derive(Debug)]
 pub struct CompletionEngine {
-    workspace_root: PathBuf,
+    workspace: Arc<dyn WorkspaceQuery>,
     cached_files: Option<Vec<String>>,
     provider_models: Vec<(String, String)>,
     agent_mentions: Vec<MentionEntry>,
@@ -142,8 +146,12 @@ pub struct CompletionEngine {
 
 impl CompletionEngine {
     pub fn new(workspace_root: PathBuf) -> Self {
+        Self::with_workspace(local_workspace(workspace_root))
+    }
+
+    pub fn with_workspace(workspace: Arc<dyn WorkspaceQuery>) -> Self {
         Self {
-            workspace_root,
+            workspace,
             cached_files: None,
             provider_models: Vec::new(),
             agent_mentions: Vec::new(),
@@ -210,7 +218,16 @@ impl CompletionEngine {
     }
 
     pub fn refresh_files(&mut self) {
-        self.cached_files = Some(scan_workspace_files(&self.workspace_root));
+        self.cached_files = Some(self.workspace.list_files());
+    }
+
+    pub fn workspace(&self) -> Arc<dyn WorkspaceQuery> {
+        self.workspace.clone()
+    }
+
+    pub fn set_workspace(&mut self, workspace: Arc<dyn WorkspaceQuery>) {
+        self.workspace = workspace;
+        self.cached_files = None;
     }
 
     pub fn dismiss(&mut self) {
@@ -612,10 +629,6 @@ pub(crate) fn score_candidate(candidate: &str, query: &str) -> Option<MatchRank>
     }
 
     None
-}
-
-pub(crate) fn scan_workspace_files(root: &Path) -> Vec<String> {
-    list_workspace_files(root, SKIPPED_DIRS, MAX_SCAN_DEPTH, MAX_SCAN_FILES)
 }
 
 #[cfg(test)]

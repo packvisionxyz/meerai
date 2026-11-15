@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -9,6 +9,8 @@ use anyhow::{Context, Result};
 use meerai_core::fs_perms::{create_private_dir_sync, write_private_sync};
 use serde::{Deserialize, Serialize};
 
+pub use meerai_client::secrets::{MemorySecretStore, SecretStore, auth_file_path};
+
 const AUTH_FILE_NAME: &str = "auth.json";
 const LEGACY_AUTH_FILE_NAME: &str = "auth.yml";
 const KEYCHAIN_SERVICE: &str = "meerai";
@@ -17,17 +19,6 @@ const DISABLE_KEYCHAIN_ENV: &str = "MEERAI_DISABLE_KEYCHAIN";
 
 #[cfg(target_os = "macos")]
 const MACOS_SECURITY_BIN: &str = "/usr/bin/security";
-
-pub fn auth_file_path(data_dir: &Path) -> PathBuf {
-    data_dir.join(AUTH_FILE_NAME)
-}
-
-pub trait SecretStore: Send + Sync {
-    fn get_key(&self, provider_id: &str) -> Result<Option<String>>;
-    fn set_key(&self, provider_id: &str, api_key: &str) -> Result<()>;
-    fn delete_key(&self, provider_id: &str) -> Result<()>;
-    fn list_providers(&self) -> Result<Vec<String>>;
-}
 
 #[derive(Debug, Serialize)]
 struct ApiAuthEntry<'a> {
@@ -661,67 +652,9 @@ pub fn default_secret_store(data_dir: Option<&Path>) -> Arc<dyn SecretStore> {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct MemorySecretStore {
-    entries: Mutex<HashMap<String, String>>,
-}
-
-impl MemorySecretStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl SecretStore for MemorySecretStore {
-    fn get_key(&self, provider_id: &str) -> Result<Option<String>> {
-        let guard = self.entries.lock().unwrap();
-        Ok(guard.get(provider_id).cloned())
-    }
-
-    fn set_key(&self, provider_id: &str, api_key: &str) -> Result<()> {
-        let trimmed = api_key.trim();
-        if trimmed.is_empty() {
-            anyhow::bail!("API key cannot be empty");
-        }
-        let mut guard = self.entries.lock().unwrap();
-        guard.insert(provider_id.to_string(), trimmed.to_string());
-        Ok(())
-    }
-
-    fn delete_key(&self, provider_id: &str) -> Result<()> {
-        let mut guard = self.entries.lock().unwrap();
-        guard.remove(provider_id);
-        Ok(())
-    }
-
-    fn list_providers(&self) -> Result<Vec<String>> {
-        let guard = self.entries.lock().unwrap();
-        let mut keys: Vec<String> = guard.keys().cloned().collect();
-        keys.sort();
-        Ok(keys)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn memory_secret_store_roundtrip() {
-        let store = MemorySecretStore::new();
-        assert_eq!(store.get_key("openai").unwrap(), None);
-
-        store.set_key("openai", "  sk-test-123  ").unwrap();
-        assert_eq!(
-            store.get_key("openai").unwrap().as_deref(),
-            Some("sk-test-123")
-        );
-
-        assert!(store.set_key("openai", "   ").is_err());
-
-        store.delete_key("openai").unwrap();
-        assert_eq!(store.get_key("openai").unwrap(), None);
-    }
 
     #[test]
     fn file_secret_store_roundtrip_writes_opencode_auth_json() {

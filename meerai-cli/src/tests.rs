@@ -1419,6 +1419,7 @@ async fn build_workspace_toolsets_blocks_sensitive_files_and_attaches_execution_
     std::fs::remove_dir_all(&root).ok();
 }
 
+#[cfg(feature = "tui")]
 #[tokio::test]
 async fn cli_session_host_lists_creates_and_opens_sessions() {
     let root = std::env::temp_dir().join(format!("meerai-cli-host-{}", SessionId::new()));
@@ -1433,8 +1434,8 @@ async fn cli_session_host_lists_creates_and_opens_sessions() {
     )));
     let expected_provider = runtime.read().unwrap().active_provider.clone();
     let expected_model = "test-model".to_string();
-    let secrets: Arc<dyn meerai_providers::secrets::SecretStore> =
-        Arc::new(meerai_providers::secrets::MemorySecretStore::new());
+    let secrets: Arc<dyn meerai_client::secrets::SecretStore> =
+        Arc::new(meerai_client::secrets::MemorySecretStore::new());
     let client = build_genai_client(runtime.clone(), secrets).unwrap();
 
     let mut session_config = SessionConfig::new(workspace_root.clone());
@@ -1531,4 +1532,36 @@ async fn empty_session_cleanup_removes_unused_sessions_only() {
     assert!(!remaining.contains(&unused_id.to_string()));
 
     std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn headless_question_cancel_builds_answer_command() {
+    use meerai_agents::{QuestionOption, QuestionPrompt, QuestionRequest};
+
+    let request = QuestionRequest {
+        request_id: RequestId::from_raw("q-1"),
+        turn_id: TurnId::new(),
+        questions: vec![QuestionPrompt {
+            header: "DB".to_string(),
+            question: "Which?".to_string(),
+            options: vec![
+                QuestionOption {
+                    label: "a".to_string(),
+                    description: None,
+                },
+                QuestionOption {
+                    label: "b".to_string(),
+                    description: None,
+                },
+            ],
+            multiple: false,
+        }],
+    };
+    assert_eq!(
+        question_cancel_command(&request),
+        AgentCommand::AnswerQuestion {
+            request_id: RequestId::from_raw("q-1"),
+            answers: None,
+        }
+    );
 }

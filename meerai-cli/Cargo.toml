@@ -14,15 +14,20 @@ publish.workspace = true
 name = "meerai"
 path = "src/main.rs"
 
+[features]
+default = ["tui"]
+tui = ["dep:meerai-tui"]
+
 [dependencies]
 meerai-agents = { path = "../meerai-agents/" }
+meerai-client = { path = "../meerai-client/" }
 meerai-common = { path = "../meerai-common/" }
 meerai-core = { path = "../meerai-core/" }
 meerai-policy = { path = "../meerai-policy/" }
 meerai-providers = { path = "../meerai-providers/" }
 meerai-session = { path = "../meerai-session/" }
 meerai-tools = { path = "../meerai-tools/" }
-meerai-tui = { path = "../meerai-tui/" }
+meerai-tui = { path = "../meerai-tui/", optional = true }
 
 anyhow = { workspace = true }
 dotenvy = { workspace = true }

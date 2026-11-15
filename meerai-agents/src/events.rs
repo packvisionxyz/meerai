@@ -5,8 +5,8 @@ use meerai_core::{EffectClass, FileDiff};
 use meerai_policy::{ApprovalMode, PermissionRule};
 pub use meerai_session::{
     AbortCause, ApprovalDecision, ApprovalKind, ApprovalPreview, CallId, CompactionTrigger,
-    ContentBlock, ErrorCode, GrantScope, ItemId, RequestId, StepFinish, TurnEndReason, TurnId,
-    TurnTrigger, Usage,
+    ContentBlock, ErrorCode, GrantScope, ItemId, QuestionAnswer, QuestionOption, QuestionPrompt,
+    RequestId, RewindScope, StepFinish, TurnEndReason, TurnId, TurnTrigger, Usage,
 };
 use serde::{Deserialize, Serialize};
 
@@ -131,6 +131,14 @@ pub struct ApprovalRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionRequest {
+    pub request_id: RequestId,
+    pub turn_id: TurnId,
+    pub questions: Vec<QuestionPrompt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum AgentEvent {
     TurnStarted {
@@ -152,6 +160,18 @@ pub enum AgentEvent {
     },
     ApprovalResolved {
         request_id: RequestId,
+    },
+    QuestionAsked {
+        request: QuestionRequest,
+    },
+    QuestionResolved {
+        request_id: RequestId,
+    },
+    RewindCompleted {
+        turn_id: TurnId,
+        scope: RewindScope,
+        restored: Vec<String>,
+        error: Option<String>,
     },
     UsageUpdated {
         usage: Usage,
@@ -179,6 +199,15 @@ pub enum AgentCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<GrantScope>,
     },
+    AnswerQuestion {
+        request_id: RequestId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answers: Option<Vec<QuestionAnswer>>,
+    },
+    Rewind {
+        turn_id: TurnId,
+        scope: RewindScope,
+    },
     SetModel(String),
     SetPermissionMode(ApprovalMode),
     Compact,
@@ -196,9 +225,6 @@ pub enum AgentCommand {
         rules: Option<Vec<PermissionRule>>,
         context: Option<ContextSettings>,
         system_prompt: String,
-    },
-    Revert {
-        turn_id: TurnId,
     },
     Cancel,
     Reset,

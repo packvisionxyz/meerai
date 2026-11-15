@@ -70,6 +70,39 @@ impl AppState {
                     self.tabs[tab_idx].pending_approvals.push(request);
                 }
             }
+            AgentEvent::RewindCompleted {
+                restored, error, ..
+            } => {
+                if is_active {
+                    self.status_notice = Some(match error {
+                        Some(error) => format!("Rewind failed: {error}"),
+                        None => format!("Rewind restored {} file(s)", restored.len()),
+                    });
+                }
+            }
+            AgentEvent::QuestionAsked { request } => {
+                if is_active && self.modal.is_none() {
+                    self.open_question(request);
+                } else {
+                    self.tabs[tab_idx].pending_questions.push(request);
+                }
+            }
+            AgentEvent::QuestionResolved { request_id } => {
+                self.tabs[tab_idx]
+                    .pending_questions
+                    .retain(|request| request.request_id != request_id);
+                if is_active {
+                    let close = matches!(
+                        &self.modal,
+                        Some(ActiveModal::Question { request, .. })
+                            if request.request_id == request_id
+                    );
+                    if close {
+                        self.modal = None;
+                        self.open_pending_question();
+                    }
+                }
+            }
             AgentEvent::ApprovalResolved { request_id } => {
                 self.tabs[tab_idx]
                     .pending_approvals
@@ -98,6 +131,29 @@ impl AppState {
                     self.tabs[tab_idx].has_unread = true;
                 }
             }
+        }
+    }
+}
+
+impl AppState {
+    pub(super) fn open_question(&mut self, request: QuestionRequest) {
+        let answers = vec![Vec::new(); request.questions.len()];
+        self.modal = Some(ActiveModal::Question {
+            request,
+            answers,
+            current: 0,
+            focus: 0,
+        });
+    }
+
+    pub(super) fn open_pending_question(&mut self) {
+        if self.modal.is_some() {
+            return;
+        }
+        let tab = &mut self.tabs[self.active_tab];
+        if let Some(request) = tab.pending_questions.first().cloned() {
+            tab.pending_questions.remove(0);
+            self.open_question(request);
         }
     }
 }
@@ -358,6 +414,9 @@ impl SessionTab {
                 _ => {}
             },
             AgentEvent::ApprovalRequested { .. } | AgentEvent::ApprovalResolved { .. } => {}
+            AgentEvent::QuestionAsked { .. }
+            | AgentEvent::QuestionResolved { .. }
+            | AgentEvent::RewindCompleted { .. } => {}
             AgentEvent::UsageUpdated {
                 usage, cumulative, ..
             } => {
@@ -532,16 +591,19 @@ fn map_completed_item_status(status: ItemStatus) -> ToolCallStatus {
 }
 
 pub fn transcript_from_events(events: &[LoggedEvent]) -> Vec<TranscriptEntry> {
-    let reverted: Vec<SeqRange> = events
+    let shadowed: Vec<SeqRange> = events
         .iter()
         .filter_map(|logged| match &logged.event {
-            SessionEvent::RevertApplied { replaced, .. } => Some(*replaced),
+            SessionEvent::RewindApplied {
+                replaced: Some(replaced),
+                ..
+            } => Some(*replaced),
             _ => None,
         })
         .collect();
     let mut transcript = Vec::new();
     for logged in events {
-        if reverted.iter().any(|range| range.contains(logged.seq)) {
+        if shadowed.iter().any(|range| range.contains(logged.seq)) {
             continue;
         }
         match &logged.event {

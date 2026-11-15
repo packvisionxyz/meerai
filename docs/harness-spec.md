@@ -22,16 +22,17 @@ and reports 76–92% fewer LLM calls and 74–99% lower inference cost. Cognitio
 SWE-grep line shows RL-tuned search subagents returning only `file:start-end` spans
 materially cut retrieval cost. Both patterns are adopted in §12.
 
-Implementation status is tracked in §15.1. Sections that describe unimplemented
-behavior — OS sandboxing (§8.3 phase 2), checkpoints (§9.1), hooks (§9.2,
-including post-edit LSP hooks), progressive disclosure (§7.7), `meerai export`
-(§13), definition tool/permission mapping (§10.1), and prompt-injection
-screening (§9.5) — are targets, not current behavior. Secret redaction (§9.5)
-ships as best-effort pattern replacement. Subagent execution (§10.2), CLI
-forking (§13), and retrieval v2/v3 (`repo_map`, LSP tools, search-as-code in
-§12) are landed; M12 agent/skill discovery (§10.1) still applies `.agents` and
-`.claude` markdown definitions as prompt-only text (custom agents run read-only
-under M8). The security landed/backlog split is in §9.6 (M11).
+Implementation status is tracked in §15.1. Landed: the session log and
+projection (§3), `AgentEvent` v2 (§4), the ordered step interceptor seam (§5),
+coding tools and retrieval v1–v3 (§12), policy and approvals (§8), the context
+engine v1 (§7), OS sandboxing (§8.3), the subagent runtime (§10.2), CLI forking
+(§13), user questions/choices (§4.1), M11 security (§9.6), M12 definitions
+(§10.1), and per-model context and pricing metadata in the provider catalog
+(§7.1). Checkpoints/rewind (§9.1, v1) are
+landed. Still targets: hooks (§9.2, including post-edit LSP diagnostics),
+progressive tool disclosure (§7.7), `meerai export` (§13), definition
+tool/permission mapping, and ACP (§15.1 M13/M14). Prompt-injection screening and secret redaction ship as
+best-effort heuristics (§9.5).
 
 ---
 
@@ -70,8 +71,8 @@ context keeps only what the next inference step needs.
 ## 2. Layered architecture
 
 The diagram below is the **target** layered view. Crate boundaries exist now;
-the sandbox, hooks, checkpoint service, and `meerai-cli` boxes do not. Landing
-status is tracked in §15.1.
+the hook runner and checkpoint service boxes do not. The sandbox and
+`meerai-cli` boxes landed in M9/M11. Landing status is tracked in §15.1.
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -224,10 +225,12 @@ pub fn derive_messages(log: &[SessionEvent], policy: &ProjectionPolicy) -> Vec<C
   open (or unknown) is rejected, not silently clipped (dsh rule). The
   `TurnEndReason::Forked` variant exists but fork does **not** write it; a fork
   always stops at a closed turn, so no closer is needed.
-- Powers (future): OpenCode-style message-level fork, "try a different
-  approach" flows, subagent seeding (§10), and eval branch runs. No CLI or TUI
-  fork command exists today.
-- `revert(turn_id)` — user-facing rewind: log a `TurnEnded { Aborted }` for the
+- Powers (landed in part): `--fork <ID>` and `sessions fork <ID> [--turn
+  <ID>]` fork at a closed turn, and the TUI message menu forks a session and
+  seeds the new composer. Message-level arbitrary fork, subagent seeding (§10),
+  and eval branch runs remain targets. There is no `/fork` or `/rewind`
+  command.
+- `rewind(turn_id, scope)` — user-facing rewind: log a `TurnEnded { Aborted }` for the
   open turn and treat later turns as shadowed (kept in the log, excluded from
   the surface by a replacement range), never deleted.
 
@@ -246,6 +249,8 @@ pub enum AgentEvent {
     ItemCompleted { item: SessionItem },                 // authoritative final state
     ApprovalRequested { request: ApprovalRequest },      // needs a client decision
     ApprovalResolved  { request_id: RequestId },
+    QuestionAsked     { request: QuestionRequest },      // needs a client choice
+    QuestionResolved  { request_id: RequestId },
     UsageUpdated  { usage: Usage, cumulative: Usage, est_cost_usd: Option<f64> },
     TurnCompleted { turn_id: TurnId, reason: TurnEndReason },
     Error         { code: ErrorCode, message: String },
@@ -302,15 +307,69 @@ Contract rules:
    into `AppState`. One protocol, three clients (TUI, headless, future server).
 4. `AgentCommand` stays the client→loop channel: `SubmitPrompt`, `Steer`
    (append input to the in-flight turn, dsh inbox / Codex `turn/steer`),
-   `Approve`, `SetModel`, `SetPermissionMode`, `Compact`, `Cancel`, `Reset`,
-   `Quit`. `Rewind(turn_id)` and `Fork` are **not** variants; checkpoints and
-   fork UX are future work (M6/M9). `spawn_worker` handles `SetPermissionMode`
-   and `Compact` even while no turn is running, so idle `/mode` and `/compact`
-   take effect.
+   `Approve`, `AnswerQuestion`, `Rewind`, `SetModel`, `SetPermissionMode`,
+   `Compact`, `Cancel`, `Reset`, `Quit`. `Fork` is **not** a variant; fork UX is
+   future work (M9). There is no `Revert` command: `/rewind` sends `Rewind`, and
+   the conversation-only path is an internal `RewindScope::Conversation`.
+   `spawn_worker` handles `SetPermissionMode` and `Compact` even while no turn
+   is running, so idle `/mode` and `/compact` take effect.
+5. `QuestionAsked` is an interaction request, not a permission. The loop
+   suspends the `question-ask` tool call until the client answers via
+   `AgentCommand::AnswerQuestion { request_id, answers }`, where `answers: None`
+   means cancelled. A question never consults the policy engine and never
+   records a grant.
 
 A future `meerai serve` (optional milestone) wraps this protocol in JSON-RPC over
 stdio like Codex app-server, or OpenAPI+SSE like OpenCode; the enum is designed
 to serialize cleanly to either.
+
+### 4.1 Questions and choices
+
+Approvals are yes/no. A plain assistant question ends the turn and forces the
+user to retype context. The `question-ask` tool adds a real choice channel:
+
+```json
+{
+  "questions": [
+    {
+      "header": "Database",
+      "question": "Which database should the change target?",
+      "options": [
+        { "label": "Postgres", "description": "existing production store" },
+        { "label": "SQLite", "description": "local tests only" }
+      ],
+      "multiple": false
+    }
+  ]
+}
+```
+
+- **Tool.** `meerai-agents::question::QuestionToolset` registers
+  `question-ask` (`EffectClass::Read`). Its `invoke` is a fallback failure; the
+  harness handles the call before dispatch. Up to four questions per call, two
+  to eight options per question, `header` at most 24 characters. `multiple`
+  allows several labels per question.
+- **Protocol.** The harness emits `QuestionAsked { request }`, logs
+  `SessionEvent::QuestionAsked`, and awaits `AnswerQuestion`. The answer is
+  logged as `SessionEvent::QuestionAnswered` and returned to the model as a
+  JSON `ToolResult`:
+  `{"answers":[{"header":"Database","selected":["Postgres"]}]}`. A cancelled or
+  channel-less request returns a structured refusal, so the model can ask in
+  plain text or choose a default.
+- **Ordering.** Question calls are executed before other tool calls in the same
+  batch and never run concurrently. A question does not stop the turn.
+- **TUI.** `ActiveModal::Question` shows the header, question, and options.
+  Up/Down moves, Space toggles (multiple) or selects (single), Tab/Right and
+  Left move between questions, Enter submits, Esc cancels. Pending questions
+  queue per tab like approvals.
+- **Headless.** There is no interactive channel. `--prompt` auto-cancels the
+  question, prints a hint to stderr, and lets the turn continue. NDJSON emits
+  the same `QuestionAsked`/`QuestionResolved` events.
+- **Subagents.** Child agents do not receive `question-ask` in v1; they must
+  return a report instead of blocking on the parent's user.
+- **Logging.** `QuestionAsked` and `QuestionAnswered` are log-only session
+  events; the authoritative model-visible record stays the `ToolCall`/`ToolResult`
+  pair. Replay renders the tool call and its answer.
 
 ---
 
@@ -346,11 +405,15 @@ turn/start (log)
 turn/end (log, structured reason)
 ```
 
-Rust realization of "waterfalls": a small ordered middleware chain per
-interception point (`type PreStepHook = Arc<dyn Fn(&mut StepPlan) -> Decision + Send + Sync>`),
-registered by the binary at composition time. This keeps dsh's
-extensibility shape without a dynamic plugin runtime; hot-swappable plugins are
-explicitly out of scope (§14).
+Landed seam: `meerai_agents::intercept` defines `StepPlan`, `ToolOutcome`,
+`StepAction`, `TurnStopAction`, and the `Interceptor` trait (`before_step`,
+`after_tool`, `turn_stopping`). `MultiTurnAgent::add_interceptor` and
+`add_shared_interceptor` register interceptors at composition time;
+`before_step` can stop a turn, `after_tool` can add a model-visible follow-up,
+and `turn_stopping` can continue the turn once. The other interception points
+(`build_request`, `tools/pre_execute`, the full `turn_stop` waterfall) remain
+targets. This keeps dsh's extensibility shape without a dynamic plugin runtime;
+hot-swappable plugins are explicitly out of scope (§14).
 
 Invariants kept from current code: `CancellationToken` per turn shared into
 every await (stream, tool, hook, retry sleep); all retries via
@@ -387,6 +450,14 @@ Per-model context budget comes from `ProviderCatalog`. The engine targets:
 | `spill_max_inline_tokens` | 12 500 | per-tool-result retention budget (§7.2) |
 | `verbatim_window_k` | 4 turns | recent turns never compacted |
 | `reasoning_pruning` | on | strip pre-1-step reasoning from projections (§7.3) |
+
+Resolution: the CLI asks `ProviderCatalog::model_info(provider, model)` for the
+active model. A model `context_window` replaces the configured default only when
+`context.context_window_tokens` is unset; explicit settings and project overrides
+always win. `input_cost_per_mtok` and `output_cost_per_mtok` fill
+`HarnessConfig::token_pricing` and make `UsageUpdated.est_cost_usd` non-`None`.
+Bundled metadata carries context windows only, so no unverified price is
+reported.
 
 ### 7.2 Tool-output spill (pointer swapping)
 
@@ -619,24 +690,30 @@ context:
 
 ## 9. Safety nets: checkpoints, hooks, budgets, guardrails
 
-### 9.1 Checkpoints & undo (Claude Code + OpenCode snapshots)
+### 9.1 Checkpoints & undo (M6 v1, landed)
 
-- Before each **turn**, the checkpoint service snapshots every file the harness
-  is about to mutate: first snapshot per file per turn into
-  `sessions/<id>/snapshots/<turn-id>/` (copy-on-write; hardlink-free; skip
-  symlinks; skip files > 2 MiB and git-ignored files — OpenCode scope rules).
-- In a clean git tree, prefer `git stash create`-style object capture over file
-  copies; snapshot metadata (path → blob) is logged as `CheckpointCreated`.
-- `AgentCommand::Rewind(turn_id)` → TUI `/rewind` menu (source-spec + Claude Code):
-  **Restore code + conversation | Restore conversation | Restore code |
-  Summarize from here**. Code restore rewrites files from snapshots and logs a
-  revert event; conversation restore uses §3.4 shadowing. Restored prompt text
-  returns to the composer.
-- Documented limits (Claude Code's, adopted verbatim as ours): shell-only file
-  changes and external edits are not tracked; checkpoints are session recovery,
-  not version control.
-- Retention: last 100 checkpoints per session; sweep with session GC (default
-  30 days).
+- The snapshot store lives at `sessions/<id>/snapshots/<turn-id>/`. A turn
+  directory holds `manifest.json` plus one blob per captured file. The manifest
+  maps workspace-relative paths to `{ blob, existed }`.
+- Capture runs in `execute_tool_calls` before a write-class tool executes
+  (`write_file`, `edit_file`). It captures the original bytes once per file per
+  turn, skips symlinks and files over 2 MiB, and records `existed: false` for a
+  file that did not exist. Each capture logs `CheckpointCreated`. Capture is
+  best-effort: a failure logs a session error and never fails the turn.
+- `AgentCommand::Rewind { turn_id, scope }` with `RewindScope::{Both, Code,
+  Conversation}`. Code restore rewrites or deletes files from the manifest.
+  `Session::rewind` closes open turns and appends one `RewindApplied { scope,
+  restored, replaced }` event; `replaced` drives conversation shadowing. Both
+  run in that order.
+- The TUI `/rewind` menu targets the latest user turn and offers **Rewind code +
+  conversation | Rewind code only**. The message menu's **Rewind** action sends
+  `RewindScope::Both` for the selected turn. Conversation restore truncates the
+  visible transcript before the turn. `Summarize from here` is not implemented.
+- Documented limits: shell-only changes, external edits, gitignored files, files
+  over 2 MiB, and symlinks are not tracked. Checkpoints are session recovery,
+  not version control. Retention keeps the newest 100 turn directories,
+  pruned best-effort on capture. Session GC still follows
+  `sessions.auto_prune_days`.
 
 ### 9.2 Hooks (Claude Code pattern, Codex-compatible event names)
 
@@ -678,9 +755,9 @@ Enforced by the budget gate in §5, all configurable per session:
 - wall-clock caps per tool invocation (default 120 s for `shell`) and per turn,
 - cumulative token cap per session (`context.max_session_tokens`); hitting the
   cap emits an approval-style pause ("continue spending?") instead of a hard
-  kill. USD spend caps are deferred: `est_cost_usd` stays `None` until
-  `ProviderCatalog` carries pricing metadata. Token counts are reported, but
-  cost tracking does not exist.
+  kill. `est_cost_usd` is computed from `UsageUpdated` when the provider catalog
+  carries input/output pricing for the active model; otherwise it stays `None`.
+  USD spend caps remain deferred.
 - **circuit breakers**: 3 identical failing tool calls, repeated identical
   edits, or N consecutive steps without surface progress → log
   `CircuitBreaker`, inject a structured diagnostic user message, and either
@@ -886,7 +963,7 @@ Source spec §4 retained in full; staged by cost/benefit for this workspace.
 | --- | --- | --- |
 | v1 | `read_file(offset,limit)`, `grep` (ripgrep-style, line-bounded), `glob`, `list_dir` | Implemented in `meerai-tools`; spill stubs keep big hits cheap |
 | v1 | Hierarchical `AGENTS.md` | Root always in prefix (§7.5); per-directory `AGENTS.md` injected as ephemera only when the turn touches matching paths |
-| v2 | `explore` subagent (§10.2) | parallel read-only calls; returns spans only |
+| v2 | `explore` subagent (§10.2) | landed: parallel read-only calls; returns spans only |
 | v2 | AST repo map (Aider pattern) | `tree-sitter` symbol extraction + PageRank over the reference graph; render top symbols as an abbreviated tree inside a 1–2k token budget; regenerate on file-change, cache per session |
 | v3 | LSP tools | `go_to_definition`, `find_references`, `get_diagnostics` via `rust-analyzer`/`tsserver`/`gopls`; post-edit diagnostics as a `PostToolUse` hook on edit tools |
 | v3 | Search-as-Code | `run_script` tool: sandboxed script (Python/JS) for multi-step search/filter/AST analysis; output spilled like any tool result (Perplexity SaC pattern; source spec §5) |
@@ -906,10 +983,11 @@ the `explore` budget viable once subagents land.
 
 ## 13. Observability & evals (source spec §2.6)
 
-- **Traces**: the log *is* the trace. `meerai export <session> --json` emits
-  events; `--md` renders the human transcript projection. Per-turn rollups:
-  token usage, wall time, `git diff` stat at `TurnEnded`. `est_cost_usd` is
-  reserved but always `None` until pricing metadata lands.
+- **Traces**: the log *is* the trace. `meerai export <session> --json` is
+  planned, not built; `transcript_from_events` already renders the human
+  projection. Per-turn rollups: token usage, wall time, `git diff` stat at
+  `TurnEnded`. `est_cost_usd` is computed from the provider catalog's
+  per-million prices when both are configured; otherwise it is `None`.
 - **Replay/evals**: `derive_messages` purity means an offline runner can replay
   any logged session against a new model/harness version (recorded provider
   streams enable deterministic re-projection); regression suite over golden
@@ -930,7 +1008,7 @@ the `explore` budget viable once subagents land.
 - Vector databases / embedding indexes (§12 rationale).
 - Web/desktop GUIs, actor frameworks, bot integrations (per architecture.md).
 - Windows sandbox parity in v1 (phase-1 guards only).
-- Rewriting history destructively: revert/compaction always shadow, never delete.
+- Rewriting history destructively: rewind/compaction always shadow, never delete.
 
 ---
 
@@ -949,7 +1027,7 @@ Extends the roadmap in [architecture.md](architecture.md); each milestone keeps
 | M4 | **Policy engine + approvals** | `meerai-policy`: ordered rules, approval request/response loop, TUI approval overlay wired to `ApprovalRequested`, session grants | new crate, TUI | landed (R1–R3) |
 | M5 | **Context engine v1** | spill policy, ephemera/reasoning pruning, prefix ordering, watermark compaction with bracket lock + `:compact` | `meerai-session`, `meerai-agents` | landed (R1–R3); prefix ordering partial: root `AGENTS.md` + `.meerai/instructions.md` + scoped per-turn injection are implemented; full static-first multi-section prefix remains future work |
 | D1 | **Distribution hardening** | Apache-2.0 license, workspace metadata, CI gate, tag-driven 5-target release, Pages installers | repo root, `.github/`, `site/` | landed |
-| M6 | **Checkpoints + rewind** | per-turn snapshots, `/rewind` menu, restore-code/conversation flows | `meerai-policy`, TUI | backlog |
+| M6 | **Checkpoints + rewind** | per-turn snapshots, `/rewind` menu, restore-code/conversation flows | `meerai-session`, `meerai-agents`, TUI | landed v1: capture before write tools, `RewindScope::{Both,Code,Conversation}`, `/rewind` menu. Shell-only edits, gitignored files, and summarize-from-here remain backlog |
 | M7 | **Hooks** | v1 event set, JSON stdin/exit-2 contract, trust gate, `HookFired` logging | `meerai-policy`, `meerai-agents` | backlog |
 | M8 | **Subagent runtime** | child sessions (`parent_session_id`), depth-1 isolation, built-ins (`build`/`plan`/`explore`/`general`), `subagent-run` tool, forwarded child approvals, usage rollup, `SubagentRun` items, read-only `Plan` execution for M12 custom definitions | `meerai-agents`, `meerai-session`, `meerai-tui` | landed (M8): child sessions and `SubagentToolset` landed; M12 frontmatter `tools`/`permissions` remain prompt-only |
 | M9 | **CLI + resume/fork** | `meerai-cli` crate: `--prompt`, `--json`, `--continue`, `--resume <id>`, `--fork <id>`, `sessions fork <id> [--turn <turn-id>]`, `auth`/`sessions`, config/env wiring | `meerai-cli`, `meerai-session` | landed (M9): `meerai-cli`, `sessions fork`, and `--fork` landed (`-p` stays `--provider`); `export` and TUI `/fork` are not built |
@@ -972,7 +1050,7 @@ orchestrator runs the authoritative workspace gate after every round.
 | Round | Workstream | Owned files | Delivers |
 | --- | --- | --- | --- |
 | R0 | Contracts (orchestrator) | `docs/harness-spec.md`, root `Cargo.toml`, `meerai-core/src/tools.rs`+`lib.rs`, crate skeletons (`meerai-session`, `meerai-policy`, `meerai-tools`), `meerai-agents/src/events.rs` | `EffectClass`, `ToolObservation`, `ToolRun`, `Toolset::{effect_of, invoke_structured}` (default methods — no proc-macro codegen change); frozen `SessionEvent` vocabulary + ids; frozen `AgentEvent` v2; frozen policy types; new workspace deps (`zstd`, `globset`, `similar`, `insta`) |
-| R1a | WS-SESSION | `meerai-session/**` | M1: JSONL persistence (+zstd rotation), `meta.json`, crash recovery, `derive_messages` + `ProjectionPolicy` + insta snapshots, fork/revert, blob store, spill primitives, compaction primitives (M5 lib half) |
+| R1a | WS-SESSION | `meerai-session/**` | M1: JSONL persistence (+zstd rotation), `meta.json`, crash recovery, `derive_messages` + `ProjectionPolicy` + insta snapshots, fork/rewind, blob store, spill primitives, compaction primitives (M5 lib half) |
 | R1b | WS-TOOLS | `meerai-tools/**` | M3: `read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `shell`; path guards; unified diffs via `similar`; `ToolObservation`/`FileDiff` results; per-tool `EffectClass` |
 | R1c | WS-POLICY | `meerai-policy/**` | M4 lib half: ordered `action/resource/effect` rules (glob via `globset`, last match wins), `ApprovalMode` presets, tier defaults, session grants, YAML config parsing |
 | R1d | WS-MIGRATE | `meerai-agents/src/multi_turn_agent.rs`, `meerai-tui/**` | M2 mechanical: loop emits v2 item lifecycle; TUI folds items into the existing transcript; tests updated; behavior preserved (no session/policy yet) |
@@ -994,7 +1072,7 @@ contention is normal, not a hang.
 - [x] Append-only JSONL at `<sessions-root>/<id>/session.v0.jsonl`; sealed generations rotate to `.zstd`; committed generations never rewritten.
 - [x] Crash recovery: unsealed trailing turn gets a synthesized `TurnEnded { Interrupted }`; earlier events intact (test).
 - [x] `derive_messages(log, policy)` pure + deterministic; insta snapshots cover: plain transcript, ephemera stripping, reasoning pruning, empty-assistant skip, compaction shadowing.
-- [x] `fork()` only at turn-end boundaries (mid-turn prefix rejected, test); `revert()` shadows, never deletes.
+- [x] `fork()` only at turn-end boundaries (mid-turn prefix rejected, test); rewind shadows, never deletes.
 - [x] Agent loop dual-writes: in-memory history kept, every model-visible message logged (R2).
 
 **M2 — Item protocol**
@@ -1037,14 +1115,42 @@ contention is normal, not a hang.
 - **Headless flag.** `-p` already means `--provider` in the current binary; the
   spec's `meerai -p "<prompt>"` would collide. Headless ships as
   `--prompt`/`--print` (+ `--json`); flag unification is deferred to `meerai-cli` (M9).
-- **Token accounting and cost stance.** No model metadata (context
-  window/pricing) exists in `ProviderCatalog` yet. Budgets use a configured
-  `context_window_tokens` (default 128 000) with a ~4-chars/token heuristic
-  estimate. Cumulative token usage is reported: headless non-`--json` prints
+- **Token accounting and cost stance.** `ProviderCatalog` carries optional
+  per-model metadata (`models:` in `providers.yml` or the user override):
+  `context_window`, `input_cost_per_mtok`, and `output_cost_per_mtok`. The
+  resolved model's context window replaces the configured default only when
+  `context.context_window_tokens` is unset. Budgets still use a ~4-chars/token
+  heuristic. `est_cost_usd` is computed from cumulative usage when both prices
+  are configured; otherwise it stays `None`. Bundled metadata ships context
+  windows only, so no wrong price is reported. Headless non-`--json` prints
   `tokens: prompt=… completion=… total=…` on stderr, `--json` emits
   `UsageUpdated`, and the TUI statusline shows turn and session totals.
-  `est_cost_usd` stays `None`; USD cost tracking is deferred until pricing data
-  lands. Follow-up: per-model catalog entries.
+- **Rewind is the only user-facing action.** `AgentCommand` has no `Revert`
+  variant and the log has no `RevertApplied` event. `Session::rewind` appends one
+  `RewindApplied { turn_id, scope, restored, replaced }`; `replaced` holds the
+  shadow range for conversation scopes. `RewindScope::Code` restores files from
+  the snapshot manifest. `Both` runs code then conversation. The TUI menu
+  targets the latest user turn; the message menu's Rewind action targets the
+  clicked turn.
+- **Questions are not approvals.** `question-ask` uses `QuestionAsked` /
+  `AnswerQuestion`, not the policy engine. Reusing approvals would conflate a
+  permission decision with a product choice, pollute grants, and make headless
+  exit codes wrong. A question is `EffectClass::Read`, serialized before the
+  rest of the batch, and returns a JSON answer or a structured cancellation.
+  Subagents do not get the tool.
+- **Step interceptor seam.** `meerai-agents::intercept` is the extension point
+  for M6/M7: an ordered `Vec<Arc<dyn Interceptor>>` runs `before_step`,
+  `after_tool`, and `turn_stopping` without editing the loop body. `ToolOutcome`
+  carries the post-redaction, post-spill observation. Hooks and checkpoints must
+  register here, not add branches to `turn.rs`.
+- **Provider model metadata.** `ModelInfo` lives in `ProviderCatalog`, not in
+  `HarnessConfig`. The catalog supplies only defaults; user settings and the
+  project file still win, and a project cannot raise a cap. Pricing is never
+  invented in the bundled catalog.
+- **Build surfaces.** `meerai-tui` has a default `update` feature (reqwest);
+  `meerai-cli` has a default `tui` feature. `--no-default-features` builds a
+  headless binary without ratatui, git2, comrak, or the TUI crate. genai still
+  pulls reqwest in both builds.
 - **Session root.** `dirs::data_dir()/meerai/sessions` (platform-correct),
   `MEERAI_SESSION_DIR` env override, optional project-local `.meerai/sessions`.
 - **Persistence.** Active generation is plain append-only JSONL (crash-resilient
@@ -1200,7 +1306,7 @@ the Post-M5 R5 note).
   persistence until fixed.
 - **R1 deep round running (parallel, disjoint crates):** WS-SESSION
   (generations+zstd rotation, crash recovery, projection completeness + insta
-  snapshots, fork/revert — incl. authorized additive `RevertApplied` event —
+  snapshots, fork/rewind — incl. the `RewindApplied` event —
   blob store + spill, compaction primitives), WS-TOOLS (seven `code-*` tools,
   guards, diffs, observations), WS-POLICY (globset rule matching, presets,
   grants, YAML). Each on the crate-scoped gate protocol; consolidated gate

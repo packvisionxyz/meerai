@@ -1,14 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use meerai_tools::workspace_search::{
-    build_searcher, build_smart_matcher, search_file_with_matcher,
-};
+use crate::completion::{MatchRank, score_candidate};
+use crate::workspace::{LocalWorkspace, WorkspaceQuery};
 
-use crate::completion::{MatchRank, scan_workspace_files, score_candidate};
-
-const MAX_MATCHES_PER_FILE: usize = 50;
-const MAX_SEARCH_RESULTS: usize = 100;
 const MAX_PREVIEW_LINES: usize = 500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,8 +43,14 @@ pub struct SearchPreview {
     pub scroll: usize,
 }
 
-pub fn discover_workspace_files(workspace_root: &Path) -> Vec<String> {
-    scan_workspace_files(workspace_root)
+const MAX_SEARCH_RESULTS: usize = 100;
+
+pub fn discover_workspace_files(workspace: &dyn WorkspaceQuery) -> Vec<String> {
+    workspace.list_files()
+}
+
+pub fn local_workspace_files(workspace_root: &Path) -> Vec<String> {
+    LocalWorkspace::new(workspace_root).list_files()
 }
 
 pub fn search_files(files: &[String], query: &str) -> Vec<SearchMatch> {
@@ -72,42 +73,21 @@ pub fn search_files(files: &[String], query: &str) -> Vec<SearchMatch> {
         .collect()
 }
 
-pub fn search_content(workspace_root: &Path, files: &[String], query: &str) -> Vec<SearchMatch> {
-    let trimmed = query.trim();
-    if trimmed.is_empty() {
-        return Vec::new();
-    }
-
-    let Ok(matcher) = build_smart_matcher(trimmed, true) else {
-        return Vec::new();
-    };
-
-    let mut searcher = build_searcher();
-    let mut matches = Vec::new();
-    for rel in files {
-        if matches.len() >= MAX_SEARCH_RESULTS {
-            break;
-        }
-        let full_path = workspace_root.join(rel);
-        let remaining = MAX_SEARCH_RESULTS.saturating_sub(matches.len());
-        let (hits, _) = search_file_with_matcher(
-            &mut searcher,
-            &matcher,
-            &full_path,
-            rel,
-            MAX_MATCHES_PER_FILE,
-            remaining,
-            true,
-        );
-        matches.extend(hits.into_iter().map(|hit| SearchMatch {
+pub fn search_content(
+    workspace: &dyn WorkspaceQuery,
+    files: &[String],
+    query: &str,
+) -> Vec<SearchMatch> {
+    workspace
+        .search_content(files, query)
+        .into_iter()
+        .map(|hit| SearchMatch {
             path: hit.path,
-            line: Some(hit.line),
+            line: hit.line,
             column: hit.column,
-            snippet: hit.text.trim().to_string(),
-        }));
-    }
-
-    matches
+            snippet: hit.snippet,
+        })
+        .collect()
 }
 
 pub fn build_search_preview(
@@ -174,6 +154,7 @@ pub fn build_search_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::LocalWorkspace;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -221,7 +202,7 @@ mod tests {
         ws.write("meerai-tui/src/search.rs", "pub enum SearchMode {}");
         ws.write("README.md", "# meerai");
 
-        let files = discover_workspace_files(&ws.root);
+        let files = discover_workspace_files(&LocalWorkspace::new(&ws.root));
         assert!(files.contains(&"meerai-tui/src/app.rs".to_string()));
         assert!(files.contains(&"meerai-tui/src/search.rs".to_string()));
         assert!(!files.contains(&"ignored_dir/secret.rs".to_string()));
@@ -245,25 +226,26 @@ mod tests {
         );
         ws.write("src/beta.rs", "fn beta() {\n    let Needle = 42;\n}\n");
 
-        let files = discover_workspace_files(&ws.root);
+        let files = discover_workspace_files(&LocalWorkspace::new(&ws.root));
         assert_eq!(files, vec!["src/alpha.rs", "src/beta.rs"]);
 
-        let smart_lower = search_content(&ws.root, &files, "needle");
+        let smart_lower = search_content(&LocalWorkspace::new(&ws.root), &files, "needle");
         assert_eq!(smart_lower.len(), 2);
         assert_eq!(smart_lower[0].path, "src/alpha.rs");
         assert_eq!(smart_lower[0].line, Some(2));
         assert_eq!(smart_lower[0].column, Some(15));
 
-        let smart_upper = search_content(&ws.root, &files, "Needle");
+        let smart_upper = search_content(&LocalWorkspace::new(&ws.root), &files, "Needle");
         assert_eq!(smart_upper.len(), 1);
         assert_eq!(smart_upper[0].path, "src/beta.rs");
         assert_eq!(smart_upper[0].line, Some(2));
 
-        let regex_hits = search_content(&ws.root, &files, "let\\s+Needle");
+        let regex_hits = search_content(&LocalWorkspace::new(&ws.root), &files, "let\\s+Needle");
         assert_eq!(regex_hits.len(), 1);
         assert_eq!(regex_hits[0].path, "src/beta.rs");
 
-        let unclosed_regex_hits = search_content(&ws.root, &files, "needle[0");
+        let unclosed_regex_hits =
+            search_content(&LocalWorkspace::new(&ws.root), &files, "needle[0");
         assert_eq!(unclosed_regex_hits.len(), 1);
         assert_eq!(unclosed_regex_hits[0].path, "src/alpha.rs");
 

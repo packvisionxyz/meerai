@@ -1,12 +1,16 @@
+#[cfg(feature = "update")]
 use std::time::Duration;
 
+#[cfg(feature = "update")]
 const RELEASES_URL: &str = "https://api.github.com/repos/packvisionxyz/meerai/releases/latest";
+#[cfg(feature = "update")]
 const CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub fn install_hint() -> &'static str {
     "curl -LsSf https://meerai.packvision.xyz/install.sh | sh"
 }
 
+#[cfg(feature = "update")]
 pub async fn check_latest() -> Option<String> {
     if std::env::var("MEERAI_NO_UPDATE_CHECK")
         .ok()
@@ -36,6 +40,12 @@ pub async fn check_latest() -> Option<String> {
     }
 }
 
+#[cfg(not(feature = "update"))]
+pub async fn check_latest() -> Option<String> {
+    None
+}
+
+#[cfg(feature = "update")]
 fn is_newer(candidate: &str, current: &str) -> bool {
     let parse = |value: &str| -> Vec<u64> {
         value
@@ -58,7 +68,7 @@ fn is_newer(candidate: &str, current: &str) -> bool {
     false
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "update"))]
 mod tests {
     use super::is_newer;
 

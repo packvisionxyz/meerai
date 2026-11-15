@@ -2,8 +2,8 @@ use std::io::{self, Write as _};
 use std::path::Path;
 
 use anyhow::Result;
-use meerai_providers::providers::{ProviderCatalog, canonical_provider_id, format_auth_list};
-use meerai_providers::secrets::SecretStore;
+use meerai_client::providers::{ProviderCatalog, canonical_provider_id, format_auth_list};
+use meerai_client::secrets::SecretStore;
 
 use crate::cli::AuthCommand;
 

@@ -1796,6 +1796,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "meerai-agents",
+ "meerai-client",
  "meerai-common",
  "meerai-core",
  "meerai-policy",
@@ -1807,6 +1808,17 @@ dependencies = [
  "serde_yaml",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "meerai-client"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "meerai-common",
+ "serde",
+ "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]
@@ -1870,6 +1882,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "genai",
+ "meerai-client",
  "meerai-common",
  "meerai-core",
  "serde",
@@ -1930,13 +1943,16 @@ dependencies = [
  "crossterm",
  "futures",
  "git2",
+ "grep-matcher",
+ "grep-regex",
+ "grep-searcher",
+ "ignore",
  "meerai-agents",
+ "meerai-client",
  "meerai-common",
  "meerai-core",
  "meerai-policy",
- "meerai-providers",
  "meerai-session",
- "meerai-tools",
  "ratatui",
  "regex",
  "reqwest",

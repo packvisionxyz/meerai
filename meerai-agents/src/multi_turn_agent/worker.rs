@@ -22,9 +22,10 @@ impl MultiTurnAgent {
                     self.handle_live_command(command, event_tx).await;
                 }
                 AgentCommand::Approve { .. }
+                | AgentCommand::AnswerQuestion { .. }
+                | AgentCommand::Rewind { .. }
                 | AgentCommand::SubmitPrompt(_)
                 | AgentCommand::SetModel(_)
-                | AgentCommand::Revert { .. }
                 | AgentCommand::Reset => {}
             }
         }
@@ -106,12 +107,13 @@ pub fn spawn_worker(
                                             Some(
                                                 command @ (AgentCommand::Steer(_)
                                                 | AgentCommand::Approve { .. }
+                                                | AgentCommand::AnswerQuestion { .. }
                                                 | AgentCommand::SetPermissionMode(_)
                                                 | AgentCommand::Compact
                                                 | AgentCommand::ApplyAgent { .. }
                                                 | AgentCommand::ApplySkill { .. }
                                                 | AgentCommand::Reload { .. }
-                                                | AgentCommand::Revert { .. }),
+                                                | AgentCommand::Rewind { .. }),
                                             ) => {
                                                 let _ = inbox_tx.send(command);
                                             }
@@ -164,17 +166,23 @@ pub fn spawn_worker(
                     context,
                     system_prompt,
                 } => agent.reload_config(rules, context, system_prompt),
-                AgentCommand::Revert { turn_id } => {
-                    if let Err(err) = agent.revert_to_turn(&turn_id).await {
-                        let _ = event_tx.send(AgentEvent::Error {
-                            code: ErrorCode::Internal,
-                            message: format!("revert failed: {err}"),
-                        });
-                    }
+                AgentCommand::Rewind { turn_id, scope } => {
+                    let outcome = agent.rewind(&turn_id, scope).await;
+                    let (restored, error) = match outcome {
+                        Ok(restored) => (restored, None),
+                        Err(err) => (Vec::new(), Some(format!("{err:#}"))),
+                    };
+                    let _ = event_tx.send(AgentEvent::RewindCompleted {
+                        turn_id,
+                        scope,
+                        restored,
+                        error,
+                    });
                 }
                 AgentCommand::Reset => agent.reset(),
                 AgentCommand::Cancel => {}
                 AgentCommand::Approve { .. } => {}
+                AgentCommand::AnswerQuestion { .. } => {}
                 AgentCommand::Quit => break,
             }
         }

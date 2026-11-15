@@ -4,7 +4,7 @@ Pack Vision's terminal coding-agent harness — written in Rust, designed for
 autonomous and interactive software engineering in the terminal with a
 selection-first, modal TUI and a scriptable headless CLI.
 
-**Status:** early-stage, distribution-hardened. The workspace has nine library
+**Status:** early-stage, distribution-hardened. The workspace has ten library
 crates plus the `meerai` binary (built by `meerai-cli`). Milestones M1–M5 and
 **M8–M12** (subagent runtime, `meerai-cli` + session fork, retrieval v2/v3,
 security & supply chain M11, and agents/skills discovery) of the
@@ -88,8 +88,10 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   dual-write, `derive_messages`-driven requests, approval suspend/resume, spill,
   compaction, token and wall-clock budgets, circuit breakers, cancellation,
   steering, provider retries, consecutive read-only tool batches, first-prompt
-  session titles, summarizer-model selection, and best-effort tool-output
-  redaction before spill, logging, display, and model delivery.
+  session titles, summarizer-model selection, an ordered step interceptor seam
+  (`before_step`, `after_tool`, `turn_stopping`) for checkpoints and hooks, and
+  best-effort tool-output redaction before spill, logging, display, and model
+  delivery.
 - **Prompt composition (`meerai-agents::prompt`):** `BASE_SYSTEM_PROMPT` plus
   `compose_system_prompt`, which appends `--system` text, the workspace
   `AGENTS.md`, and `.meerai/instructions.md` under byte caps. Scoped `AGENTS.md`
@@ -100,7 +102,7 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   [Agents and skills](#agents-and-skills).
 - **Session log (`meerai-session`):** append-only `SessionEvent` log in JSONL
   generations sealed to zstd, `meta.json`, crash recovery, the pure
-  `derive_messages` projection, turn-boundary `fork`, shadowing `revert`, a blob
+  `derive_messages` projection, turn-boundary `fork`, shadowing rewind, a blob
   store, and spill plus compaction primitives.
 - **Policy engine (`meerai-policy`):** ordered `action/resource/effect` rules
   (globset, last match wins), `ApprovalMode` presets (`plan`, `ask`, `auto-edit`,
@@ -111,6 +113,15 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   typed tool subsets and read-only execution for M12 custom markdown definitions,
   forwarded parent approval prompts, usage rollup into parent counters, and
   `SubagentRun` TUI/headless items.
+- **Checkpoints and rewind (M6 v1):** write-class tools capture the original
+  file before a change. `/rewind` restores code, conversation, or both for the
+  latest turn. Shell-only edits, external edits, and files over 2 MiB are not
+  tracked.
+- **User questions (`question-ask`):** the model can ask one to four
+  single- or multiple-choice questions through `QuestionAsked` /
+  `AnswerQuestion`. The TUI shows a choice overlay with keyboard navigation;
+  headless runs auto-cancel with a stderr hint and let the turn continue.
+  Questions are not approvals: they never consult policy or record grants.
 - **Coding and retrieval tools (`meerai-tools`):** `CodeTools` with the seven
   `code-*` tools (`read_file`, `write_file`, `edit_file`, `list_dir`, `grep`,
   `glob`, `shell`), workspace path guards, unified diffs, `ToolObservation`/`ToolRun`
@@ -150,14 +161,16 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 
 - OS sandbox (macOS Seatbelt / Linux bubblewrap) — `code-shell` and
   `sac-run_script` run with your privileges after approval.
-- Checkpoints and rewind (M6), hooks (M7, including automatic post-edit LSP
-  diagnostics), `meerai export`, and TUI `/fork`.
+- Hooks (M7, including automatic post-edit LSP diagnostics), `meerai export`,
+  and TUI `/fork`.
 - Tool or permission mapping from agent definitions, MCP servers, and skill
   supporting files. M12 reads only `SKILL.md` and custom subagent runs stay
   read-only.
-- Projection caching and frozen messages; per-model context windows.
-- USD cost and pricing: the harness reports token counts only, and
-  `est_cost_usd` is always `None`. Pricing-data collection is the blocker.
+- Projection caching and frozen/shared messages.
+- USD cost and pricing: token counts are always reported; `est_cost_usd` is
+  computed only when the provider catalog carries input/output prices for the
+  model. The bundled catalog ships context windows only, so cost stays `None`
+  unless a user `providers.yml` adds pricing.
 - Progressive tool disclosure.
 - ACP integration (M13 client, M14 agent). Design in [docs/acp.md](docs/acp.md).
   An ACP backend runs an external agent with its own tools; meerai policy does
@@ -175,8 +188,9 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 | `meerai-core` | `Toolset` trait (`effect_of`, `invoke_structured`), `ToolOutput`, `ToolError`, `EffectClass`, `ToolObservation`, `ToolRun`, `FileDiff`; re-exports `genai`, `async_trait`, and `schemars::JsonSchema` |
 | `meerai-macros` | Proc-macros `#[tool]` and `#[derive(Toolset)]` |
 | `meerai-common` | `AppSettings` (`settings.yml`), project-root discovery plus project settings load/merge (`find_project_root`, `load_project_settings`, `merge_project_settings`), agent and skill definition discovery (`definitions`) |
-| `meerai-providers` | Provider catalog plus `genai` client factory (`providers.yml`), `auth.json` secret store |
-| `meerai-session` | `Session` append-only event log: JSONL/zstd generations, `derive_messages`, fork/revert, blob + spill, compaction primitives, listing, deletion, and pruning support |
+| `meerai-client` | Client-facing provider surface: `ProviderCatalog` + `providers.yml` metadata, `RuntimeProviderState`, key status, `SecretStore` contract, `MemorySecretStore`, and auth listing |
+| `meerai-providers` | `genai` client factory plus native secret stores (`auth.json`, OS keychain); re-exports the `meerai-client` surface |
+| `meerai-session` | `Session` append-only event log: JSONL/zstd generations, `derive_messages`, fork/rewind, blob + spill, compaction primitives, listing, deletion, and pruning support |
 | `meerai-policy` | `PolicyEngine`: ordered permission rules, approval modes, turn/session grants |
 | `meerai-tools` | `code` (`CodeTools`, seven `code-*` tools with path guards, unified diffs, observations), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`), `search_as_code` (`SearchAsCodeToolset`) |
 | `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent` v2, `prompt::{BASE_SYSTEM_PROMPT, compose_system_prompt}`, `spawn_worker`, `subagent` (`SubagentToolset` + child sessions), and best-effort tool-output redaction |
@@ -226,7 +240,9 @@ Missing counters are omitted. `--json` reports the same data as `UsageUpdated`
 events. The TUI statusline shows the current turn (`↑… ↓… Σ…`) and running
 session totals (`session ↑… ↓… Σ…`). The counters are cumulative for the
 session: a resumed run seeds from the last logged `UsageUpdated` entry. USD cost
-is not tracked; `est_cost_usd` is always `None`.
+is reported when the provider catalog has pricing for the active model;
+otherwise `est_cost_usd` is `None`. The bundled catalog ships context windows
+only, so the default is token-only reporting.
 
 ### Approval modes
 
@@ -381,7 +397,8 @@ user message is not retitled by the agent.
 - `$XDG_CONFIG_HOME/meerai` (default `~/.config/meerai`): `settings.yml`
   (`active_provider`, `active_model`, `providers`, `approval_mode`,
   `permissions`, `context`, `sessions`, `theme`) and `providers.yml` (user
-  provider overrides).
+  provider overrides and an optional `models:` list with `context_window`,
+  `input_cost_per_mtok`, and `output_cost_per_mtok`).
 - `<project-root>/.meerai/settings.yml`: optional project settings, merged over
   the user `settings.yml`. The project root is found by walking up from the
   process CWD. See [Project config](#project-config).
@@ -536,7 +553,12 @@ cargo clippy --workspace --all-targets
 cargo test --workspace
 ```
 
-`make verify` (alias `make ci`) runs the three commands. `.github/workflows/release.yml`
+`make verify` (alias `make ci`) runs the three commands. `cargo check -p
+meerai-cli --no-default-features` builds the headless surface without ratatui,
+git2, comrak, or `meerai-tui`; `cargo check -p meerai-tui --no-default-features`
+builds the TUI without the reqwest update check. CI runs both reduced-feature
+checks. `.github/workflows/smoke.yml` runs one manual live-provider headless
+turn when `OPENROUTER_API_KEY` is set. `.github/workflows/release.yml`
 rebuilds the same gate on a `v*` tag, builds the five targets, verifies that the
 tag matches `[workspace.package] version`, and publishes archives plus SHA256
 checksums. `.github/workflows/pages.yml` deploys `site/` to GitHub Pages.
@@ -548,7 +570,7 @@ or `INSTA_UPDATE=always cargo test -p meerai-macros`.
 
 Key resolution order per provider is stored `auth.json` → `api_key` in
 `providers.yml`/`settings.yml` → the provider's environment variables. The
-bundled [providers.yml](meerai-providers/providers.yml) declares those variables,
+bundled [providers.yml](meerai-client/providers.yml) declares those variables,
 for example `OPENROUTER_API_KEY` (also `OPEN_ROUTER_API_KEY`) and
 `GEMINI_API_KEY`.
 
@@ -563,9 +585,11 @@ for example `OPENROUTER_API_KEY` (also `OPEN_ROUTER_API_KEY`) and
 
 ## Security and limits
 
-- **No OS sandbox.** Path guards are in-process checks, not a kernel boundary.
-  `shell` runs with your user privileges after approval. `plan` mode denies
-  writes and shell, but it cannot contain a command you approve in another mode.
+- **OS sandbox is best-effort.** `ExecutionWorld` runs macOS Seatbelt or Linux
+  bubblewrap when available and falls back to in-process path guards with a
+  startup warning. Path guards are policy checks, not a kernel boundary on the
+  fallback path. `plan` mode denies writes and shell, but it cannot contain a
+  command you approve in another mode.
 - **Secret handling is partial.** The shell tool removes known provider key
   variables and any variable ending in `_API_KEY`, `_API_TOKEN`,
   `_ACCESS_TOKEN`, `_SECRET`, `_SECRET_KEY`, or `_PRIVATE_KEY` from child

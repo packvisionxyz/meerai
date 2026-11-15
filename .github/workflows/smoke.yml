@@ -1,0 +1,55 @@
+name: Live provider smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    name: Headless turn against a live provider
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100.0"
+
+      - name: Cache Cargo artifacts
+        uses: swatinem/rust-cache@v2
+
+      - name: Detect provider key
+        id: key
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -n "$OPENROUTER_API_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::OPENROUTER_API_KEY is not set; skipping the live smoke test"
+          fi
+
+      - name: Run one headless turn
+        if: steps.key.outputs.present == 'true'
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          MEERAI_PROVIDER: openrouter
+          MEERAI_MODEL: ${{ vars.MEERAI_SMOKE_MODEL || 'openrouter/auto' }}
+        run: |
+          cargo run -q -p meerai-cli -- \
+            --prompt "Reply with exactly: smoke-ok" \
+            --mode plan \
+            --json | tee smoke.ndjson
+          grep -q '"type":"turnCompleted"' smoke.ndjson

@@ -15,6 +15,7 @@ impl AppState {
         match event {
             Event::Key(key) => self.handle_key_event(key),
             Event::Paste(text) => {
+                let workspace = self.workspace.clone();
                 if let Some(modal) = &mut self.modal {
                     let clean = text.replace(['\r', '\n'], "");
                     match modal {
@@ -45,7 +46,9 @@ impl AppState {
                             *selected_recent = None;
                             *error = None;
                         }
-                        ActiveModal::DiffView { .. } => {}
+                        ActiveModal::DiffView { .. }
+                        | ActiveModal::Question { .. }
+                        | ActiveModal::RewindMenu { .. } => {}
                         ActiveModal::Approval {
                             reason,
                             editing_reason,
@@ -65,6 +68,7 @@ impl AppState {
                         } => {
                             query.push_str(&clean);
                             Self::refresh_search(
+                                workspace.as_ref(),
                                 &self.workspace_root,
                                 *mode,
                                 workspace_files,
@@ -686,29 +690,31 @@ impl AppState {
                 self.status_notice = Some("Copied message".to_string());
                 true
             }
-            UserAction::Revert => self.revert_to_entry(entry_idx),
+            UserAction::Rewind => self.rewind_to_entry(entry_idx),
             UserAction::Fork => self.fork_from_entry(entry_idx, text),
         }
     }
 
-    fn revert_to_entry(&mut self, entry_idx: usize) -> bool {
+    fn rewind_to_entry(&mut self, entry_idx: usize) -> bool {
         if self.tab().is_running {
-            self.status_notice = Some("Cancel the running turn before reverting".to_string());
+            self.status_notice = Some("Cancel the running turn before rewinding".to_string());
             return true;
         }
         let turn = self.tab().user_turns.get(&entry_idx).cloned();
         let Some(turn_id) = turn else {
-            self.status_notice = Some("Revert is unavailable for this message".to_string());
+            self.status_notice = Some("Rewind is unavailable for this message".to_string());
             return true;
         };
-        let _ = self.tab().cmd_tx.send(AgentCommand::Revert {
+        let _ = self.tab().cmd_tx.send(AgentCommand::Rewind {
             turn_id: turn_id.clone(),
+            scope: meerai_agents::RewindScope::Both,
         });
         let tab = self.tab_mut();
         tab.transcript.truncate(entry_idx);
         tab.user_turns.retain(|idx, _| *idx < entry_idx);
         tab.auto_follow = true;
-        self.status_notice = Some("Reverted to before this message".to_string());
+        self.status_notice =
+            Some("Rewound code and conversation to before this message".to_string());
         true
     }
 

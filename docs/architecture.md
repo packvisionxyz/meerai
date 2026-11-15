@@ -12,36 +12,44 @@ and a scriptable headless CLI mode. The protocol and context design live in
 
 ## Current workspace
 
-Nine library crates plus the `meerai` binary (built by `meerai-cli`):
+Ten library crates plus the `meerai` binary (built by `meerai-cli`):
 
 | Crate | Current role |
 | --- | --- |
 | `meerai-core` | `Toolset` trait (`effect_of`, `permission_spec`, `should_spill_output`, `invoke_structured`), `ToolCall`, `ToolDefinition`, `ToolOutput`, `ToolError`, `EffectClass`, `PermissionAction`, `ApprovalPreview`, `GrantScope`, `ToolObservation`, `ToolRun`, `FileDiff`, shared text/env/fs-perms helpers; re-exports `genai`, `async_trait`, `schemars::JsonSchema` |
 | `meerai-macros` | `#[tool]` and `#[derive(Toolset)]` |
 | `meerai-common` | `AppSettings` (`settings.yml`), project-root discovery (`find_project_root`) and project settings merge, markdown agent/skill discovery (`definitions`) |
-| `meerai-providers` | Provider catalog + `genai` client factory (`providers.yml`), `auth.json` secret store |
-| `meerai-session` | Append-only `SessionEvent` log, JSONL/zstd generations, `meta.json`, recovery, `derive_messages`, fork/revert, blob store, spill, compaction primitives, session list/delete/prune support |
+| `meerai-client` | Client-facing provider surface: `ProviderCatalog` + `providers.yml`, `ModelInfo`, `RuntimeProviderState`, `KeyStatus`, and the `SecretStore` contract |
+| `meerai-providers` | `genai` client factory + native secret stores (`auth.json`, OS keychain); re-exports the client surface |
+| `meerai-session` | Append-only `SessionEvent` log, JSONL/zstd generations, `meta.json`, recovery, `derive_messages`, fork/rewind, snapshot store for rewind, blob store, spill, compaction primitives, session list/delete/prune support |
 | `meerai-policy` | `PolicyEngine`: ordered rules, `ApprovalMode` presets, turn/session grants, YAML parsing |
 | `meerai-tools` | `code` (`CodeTools` with seven `code-*` tools, path guards, unified diffs, observations, `workspace_search`), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`), `search_as_code` (`SearchAsCodeToolset`) |
-| `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent` v2, `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins + custom read-only child sessions), tool-output redaction |
-| `meerai-tui` | Modal terminal UI (`ratatui` + `crossterm`) with transcript replay, subagent cards, and approval overlay |
+| `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent` v2, `intercept` (`Interceptor`/`StepPlan`/`ToolOutcome`), `question-ask` (`QuestionAsked`/`AnswerQuestion`), `prompt`, `spawn_worker`, `subagent` runtime, tool-output redaction |
+| `meerai-tui` | Modal terminal UI (`ratatui` + `crossterm`, split `ui/` panels and `app/` modules) with transcript replay, tabs, subagent cards, question and rewind overlays, and the `WorkspaceQuery` seam |
 | `meerai-cli` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions` (`list`/`rm`/`prune`/`fork`) subcommands, TUI launcher |
 
 Dependency direction today:
 
 ```text
-core ──▶ session ──▶ agents ──▶ tui ──▶ cli
-  ├──▶ policy ────────┘          ▲
-  ├──▶ tools ────────────────────┼────────┘
-  └──▶ common ──▶ providers ─────┘
+core ──▶ session ──▶ agents ──▶ cli
+  ├──▶ policy ──▶ agents/common/tui
+  ├──▶ tools ──▶ cli
+  └──▶ common ──▶ client ──▶ tui ──▶ cli
+                      └──▶ providers ──▶ cli
 macros ──▶ (consumers)
 ```
 
 `meerai-agents` re-exports the session vocabulary from `events.rs`, so protocol
-code can name the types through `meerai_agents`; `meerai-tui` consumes events
-and provider runtime state (`RuntimeProviderState`) without owning CLI wiring or
-`.env`/YAML parsing. `meerai-cli` wires `providers`, `common`, `policy`,
-`session`, `tools`, `agents`, and `tui` together.
+code can name the types through `meerai_agents`; `meerai-tui` consumes events,
+provider runtime state (`RuntimeProviderState`), and a `WorkspaceQuery` for file
+listing and content search. It no longer links `meerai-tools`. `meerai-cli`
+wires `client`, `providers`, `common`, `policy`, `session`, `tools`, `agents`, and
+`tui` together.
+
+Build surfaces: `meerai-tui` has a default `update` feature (reqwest);
+`meerai-cli` has a default `tui` feature. `cargo build -p meerai-cli
+--no-default-features` produces a headless binary without ratatui, git2, comrak,
+or the TUI crate. genai still pulls reqwest in both builds.
 
 ## Current protocol and loop
 
@@ -53,9 +61,23 @@ and provider runtime state (`RuntimeProviderState`) without owning CLI wiring or
   built with `session.derive_messages(...)`, not `chat_history`; the in-memory
   history is a mirror.
 - **`AgentCommand`** is the client→loop channel: `SubmitPrompt`, `Steer`,
-  `Approve`, `SetModel`, `SetPermissionMode`, `Compact`, `ApplyAgent`,
-  `ApplySkill`, `Cancel`, `Reset`, `Quit`. There is no `Rewind` or `Fork`
-  command.
+  `Approve`, `AnswerQuestion`, `Rewind`, `SetModel`, `SetPermissionMode`,
+  `Compact`, `ApplyAgent`, `ApplySkill`, `Cancel`, `Reset`, `Quit`. There is no
+  `Revert` or `Fork` command.
+- **Checkpoints.** Write-class tools capture the original file into
+  `snapshots/<turn-id>/` before execution. `AgentCommand::Rewind { turn_id,
+  scope }` restores code and/or conversation and logs one `RewindApplied` event.
+  The TUI `/rewind` menu targets the latest user turn.
+- **Questions.** `question-ask` emits `QuestionAsked` and waits for
+  `AnswerQuestion`; the answer is logged as `QuestionAnswered` and returned as
+  JSON. Questions are not approvals: no policy decision, no grant, and headless
+  runs auto-cancel with a hint. The tool is read-classified, runs before the
+  rest of the batch, and is not registered for subagents.
+- **Step interceptors.** `meerai_agents::intercept` is an ordered
+  `Vec<Arc<dyn Interceptor>>` on the agent. `before_step` can stop a turn,
+  `after_tool` receives the post-redaction/post-spill `ToolOutcome` and can add a
+  model-visible follow-up, and `turn_stopping` can continue the turn once. This
+  is the extension point for M6 checkpoints and M7 hooks.
 - **Approvals.** `ApprovalMode` + ordered rules produce
   `Allow | Ask | Deny`. `Ask` emits `ApprovalRequested` and suspends the tool
   item; `Approve` resumes it. Without a command channel the request
@@ -73,7 +95,10 @@ and provider runtime state (`RuntimeProviderState`) without owning CLI wiring or
   message. Headless non-`--json` runs print a cumulative
   `tokens: prompt=… completion=… total=…` line on stderr; the TUI statusline adds
   running session totals. Counters are session cumulative and resume seeds them
-  from the last logged `UsageUpdated`; `est_cost_usd` stays `None`.
+  from the last logged `UsageUpdated`. `est_cost_usd` is computed when the
+  provider catalog has `input_cost_per_mtok` and `output_cost_per_mtok` for the
+  model; the bundled catalog ships context windows only, so it stays `None`
+  unless a user override adds pricing.
 - **Retries.** Provider calls: 3 attempts total, 250/500 ms, transient-only.
   Tool calls: `max_retries` (default 3) with a fixed 250 ms sleep. Context
   overflow triggers one compaction retry.
@@ -158,7 +183,7 @@ compaction summaries. The default is the session model. Its usage counts toward
 - `providers.yml` in the config directory holds user provider overrides
   (`base_url`, `model`, `api_key`, `options.apiKey`, `recent_models`).
 - API keys: stored `auth.json` → configured `api_key` → provider env vars from
-  the bundled `meerai-providers/providers.yml`. `auth.json` lives under
+  the bundled `meerai-client/providers.yml`. `auth.json` lives under
   `$XDG_DATA_HOME/meerai` (default `~/.local/share/meerai`) and is `0600` on
   Unix.
 - `.env` is **opt-in**: `MEERAI_LOAD_DOTENV=1|true|yes` or `--env-file <PATH>`.
@@ -338,10 +363,12 @@ The enums are frozen additively; these are future variants, not current code.
   audit (`deny.toml`), conditional signing in `release.yml` (inactive without
   signing secrets), and [threat-model.md](threat-model.md). See
   `docs/harness-spec.md` §9.6.
-- **Context:** projection caching, frozen/shared messages, per-model context
-  windows, and USD pricing (`est_cost_usd` is always `None` today; token counts
-  are reported and pricing-data collection is the blocker), progressive tool
-  disclosure.
+- **M6:** checkpoints/rewind v1 is current; shell-only edits, gitignored files,
+  and `Summarize from here` remain backlog.
+- **Context:** projection caching, frozen/shared messages, and per-model budget
+  auto-tuning. Per-model context windows and optional pricing now come from
+  `ProviderCatalog`; `est_cost_usd` is computed when both prices are configured.
+  Progressive tool disclosure remains a target.
 
 ## Migration roadmap (status)
 
@@ -370,4 +397,4 @@ The enums are frozen additively; these are future variants, not current code.
 - Web/desktop GUIs, actor frameworks, or bot integrations unrelated to terminal
   coding workflows.
 - Embedding-based retrieval for live code (lexical + structural only).
-- Destructive history rewrites: revert/compaction shadow, never delete.
+- Destructive history rewrites: rewind/compaction shadow, never delete.

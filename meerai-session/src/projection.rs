@@ -114,7 +114,7 @@ fn shadowed_ranges(events: &[LoggedEvent]) -> Vec<SeqRange> {
         .iter()
         .filter_map(|logged| match &logged.event {
             SessionEvent::CompactionSummary { replaced, .. } => Some(*replaced),
-            SessionEvent::RevertApplied { replaced, .. } => Some(*replaced),
+            SessionEvent::RewindApplied { replaced, .. } => *replaced,
             _ => None,
         })
         .collect()
@@ -176,7 +176,9 @@ mod tests {
     use meerai_core::{ToolCall, ToolObservation};
 
     use super::*;
-    use crate::event::{PromptSection, Seq, StreamDigest, TurnEndReason, TurnTrigger, Usage};
+    use crate::event::{
+        PromptSection, RewindScope, Seq, StreamDigest, TurnEndReason, TurnTrigger, Usage,
+    };
     use crate::ids::{CallId, TurnId};
 
     fn logged(seq: u64, event: SessionEvent) -> LoggedEvent {
@@ -498,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn revert_shadows_later_turns_without_deleting_events() {
+    fn rewind_shadows_later_turns_without_deleting_events() {
         let turn_a = TurnId::from("turn-a");
         let turn_b = TurnId::from("turn-b");
         let events = vec![
@@ -517,12 +519,14 @@ mod tests {
             turn_ended(7, &turn_b),
             logged(
                 8,
-                SessionEvent::RevertApplied {
+                SessionEvent::RewindApplied {
                     turn_id: turn_b.clone(),
-                    replaced: SeqRange {
+                    scope: RewindScope::Conversation,
+                    restored: Vec::new(),
+                    replaced: Some(SeqRange {
                         start: Seq(4),
                         end_inclusive: Seq(7),
-                    },
+                    }),
                 },
             ),
         ];
@@ -548,12 +552,14 @@ mod tests {
             logged(3, tool_result("call-1", ToolObservation::success("alpha"))),
             logged(
                 4,
-                SessionEvent::RevertApplied {
+                SessionEvent::RewindApplied {
                     turn_id: TurnId::from("turn-a"),
-                    replaced: SeqRange {
+                    scope: RewindScope::Conversation,
+                    restored: Vec::new(),
+                    replaced: Some(SeqRange {
                         start: Seq(2),
                         end_inclusive: Seq(3),
-                    },
+                    }),
                 },
             ),
             logged(5, user("after")),
@@ -660,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_revert_shadowing() {
+    fn snapshot_rewind_shadowing() {
         let turn_a = TurnId::from("turn-a");
         let turn_b = TurnId::from("turn-b");
         let events = vec![
@@ -668,21 +674,23 @@ mod tests {
             logged(2, user("keep this turn")),
             turn_ended(3, &turn_a),
             turn_started(4, &turn_b),
-            logged(5, user("reverted turn")),
+            logged(5, user("rewound turn")),
             turn_ended(6, &turn_b),
             logged(
                 7,
-                SessionEvent::RevertApplied {
+                SessionEvent::RewindApplied {
                     turn_id: turn_b,
-                    replaced: SeqRange {
+                    scope: RewindScope::Conversation,
+                    restored: Vec::new(),
+                    replaced: Some(SeqRange {
                         start: Seq(4),
                         end_inclusive: Seq(6),
-                    },
+                    }),
                 },
             ),
         ];
         let messages = derive_messages(&events, &ProjectionPolicy::default());
-        insta::assert_snapshot!("revert_shadowing", render(&messages));
+        insta::assert_snapshot!("rewind_shadowing", render(&messages));
     }
 
     #[test]

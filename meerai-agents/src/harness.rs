@@ -2,7 +2,13 @@ use meerai_common::settings::ContextSettings;
 use meerai_policy::PolicyEngine;
 use meerai_session::Session;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TokenPricing {
+    pub input_per_mtok: f64,
+    pub output_per_mtok: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct HarnessConfig {
     pub context_window_tokens: u64,
     pub high_watermark_pct: u8,
@@ -14,6 +20,7 @@ pub struct HarnessConfig {
     pub max_session_tokens: Option<u64>,
     pub max_turn_secs: u64,
     pub summarizer_model: Option<String>,
+    pub token_pricing: Option<TokenPricing>,
 }
 
 impl Default for HarnessConfig {
@@ -29,6 +36,7 @@ impl Default for HarnessConfig {
             max_session_tokens: None,
             max_turn_secs: 1_800,
             summarizer_model: None,
+            token_pricing: None,
         }
     }
 }

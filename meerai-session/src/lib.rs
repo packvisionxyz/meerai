@@ -5,6 +5,7 @@ mod ids;
 mod perms;
 mod projection;
 mod session;
+mod snapshot;
 mod storage;
 
 pub use blob::*;
@@ -13,3 +14,4 @@ pub use event::*;
 pub use ids::*;
 pub use projection::*;
 pub use session::*;
+pub use snapshot::{RestoreReport, SnapshotStore};

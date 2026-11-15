@@ -2,6 +2,7 @@ use super::compaction::*;
 use super::turn::*;
 use super::*;
 use crate::harness::HarnessConfig;
+use crate::intercept::{Interceptor, StepAction, StepPlan, ToolOutcome, TurnStopAction};
 use futures::stream;
 use genai::chat::{MessageContent, StreamChunk, Usage};
 use meerai_core::{
@@ -283,10 +284,12 @@ fn event_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::CompactionStarted { .. } => "compaction_started",
         SessionEvent::CompactionSummary { .. } => "compaction_summary",
         SessionEvent::CompactionEnded { .. } => "compaction_ended",
-        SessionEvent::RevertApplied { .. } => "revert_applied",
         SessionEvent::UsageUpdated { .. } => "usage_updated",
         SessionEvent::ApprovalRequested { .. } => "approval_requested",
         SessionEvent::ApprovalDecided { .. } => "approval_decided",
+        SessionEvent::QuestionAsked { .. } => "question_asked",
+        SessionEvent::QuestionAnswered { .. } => "question_answered",
+        SessionEvent::RewindApplied { .. } => "rewind_applied",
         SessionEvent::HookFired { .. } => "hook_fired",
         SessionEvent::CheckpointCreated { .. } => "checkpoint_created",
         SessionEvent::CircuitBreaker { .. } => "circuit_breaker",
@@ -5663,4 +5666,465 @@ async fn requests_include_tool_schemas() {
     let schema = echo.schema.as_ref().expect("schema");
     assert_eq!(schema["type"], "object");
     assert_eq!(schema["properties"]["text"]["type"], "string");
+}
+
+#[derive(Default)]
+struct RecordingInterceptor {
+    plans: Mutex<Vec<StepPlan>>,
+    outcomes: Mutex<Vec<ToolOutcome>>,
+    stop_at_step: Option<usize>,
+    feedback: Option<String>,
+    continue_turn_stop: bool,
+    turn_stop_used: Mutex<bool>,
+}
+
+impl Interceptor for RecordingInterceptor {
+    fn before_step(&self, plan: &mut StepPlan) -> StepAction {
+        self.plans.lock().unwrap().push(plan.clone());
+        if self.stop_at_step == Some(plan.step_index) {
+            StepAction::Stop {
+                reason: Some("hook stop".to_string()),
+            }
+        } else {
+            StepAction::Continue
+        }
+    }
+
+    fn after_tool(&self, outcome: &ToolOutcome) -> Option<String> {
+        self.outcomes.lock().unwrap().push(outcome.clone());
+        self.feedback.clone()
+    }
+
+    fn turn_stopping(&self, _turn_id: &TurnId, _step_index: usize) -> TurnStopAction {
+        if !self.continue_turn_stop {
+            return TurnStopAction::Finish;
+        }
+        let mut used = self.turn_stop_used.lock().unwrap();
+        if *used {
+            TurnStopAction::Finish
+        } else {
+            *used = true;
+            TurnStopAction::Continue {
+                reason: "verify before done".to_string(),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn interceptors_observe_steps_and_tool_outcomes() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![tool_call("c1", "ok")]))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        vec![Box::new(EchoToolset)],
+        "",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+    let recorder = Arc::new(RecordingInterceptor {
+        feedback: Some("hook feedback".to_string()),
+        ..Default::default()
+    });
+    agent.add_shared_interceptor(recorder.clone());
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "done");
+
+    let plans = recorder.plans.lock().unwrap();
+    assert_eq!(plans.len(), 2);
+    assert_eq!(plans[0].step_index, 0);
+    assert_eq!(plans[0].tool_count, 1);
+    assert!(!plans[0].final_step);
+    assert_eq!(plans[1].step_index, 1);
+
+    let outcomes = recorder.outcomes.lock().unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].tool_name, "echo-say");
+    assert_eq!(outcomes[0].status, ItemStatus::Succeeded);
+    assert_eq!(outcomes[0].step_index, 0);
+
+    let logged = session.events();
+    assert!(logged.iter().any(|entry| matches!(
+        &entry.event,
+        SessionEvent::UserMessage { source: InputSource::RuntimeContext, content }
+            if matches!(content.first(), Some(ContentBlock::Text(text)) if text == "hook feedback")
+    )));
+}
+
+#[tokio::test]
+async fn before_step_can_stop_the_turn() {
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("never sent"),
+    )]]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        Vec::new(),
+        "",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+    let recorder = Arc::new(RecordingInterceptor {
+        stop_at_step: Some(0),
+        ..Default::default()
+    });
+    agent.add_shared_interceptor(recorder.clone());
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "hook stop");
+    assert_eq!(recorder.plans.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn turn_stopping_can_continue_the_turn_once() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(text_end("first"))],
+        vec![ChatStreamEvent::End(text_end("second"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        Vec::new(),
+        "",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+    let recorder = Arc::new(RecordingInterceptor {
+        continue_turn_stop: true,
+        ..Default::default()
+    });
+    agent.add_shared_interceptor(recorder.clone());
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "second");
+    assert_eq!(streamer.requests.lock().unwrap().len(), 2);
+    assert_eq!(recorder.plans.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn usage_reports_estimated_cost_when_pricing_is_configured() {
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("done"),
+    )]]));
+    let session = memory_session();
+    let config = HarnessConfig {
+        token_pricing: Some(crate::harness::TokenPricing {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+        }),
+        ..HarnessConfig::default()
+    };
+    let mut agent = harness_agent(streamer, Vec::new(), "", &session, yolo(), config);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let mut cost = None;
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::UsageUpdated { est_cost_usd, .. } = event {
+            cost = est_cost_usd;
+        }
+    }
+    let cost = cost.expect("cost reported");
+    assert!((cost - 0.000105).abs() < 1e-12, "unexpected cost {cost}");
+}
+
+#[tokio::test]
+async fn question_tool_waits_for_an_answer_and_returns_json() {
+    let calls = vec![ToolCall {
+        call_id: "q1".to_string(),
+        fn_name: "question-ask".to_string(),
+        fn_arguments: serde_json::json!({
+            "questions": [{
+                "header": "DB",
+                "question": "Which database?",
+                "options": ["Postgres", "SQLite"]
+            }]
+        }),
+        thought_signatures: None,
+    }];
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(calls))],
+        vec![ChatStreamEvent::End(text_end("using Postgres"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![Box::new(crate::question::QuestionToolset)],
+        "",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+
+    let (commands_tx, mut commands_rx) = mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let driver = tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            if let AgentEvent::QuestionAsked { request } = &event {
+                assert_eq!(request.questions[0].header, "DB");
+                commands_tx
+                    .send(AgentCommand::AnswerQuestion {
+                        request_id: request.request_id.clone(),
+                        answers: Some(vec![meerai_session::QuestionAnswer {
+                            header: "DB".to_string(),
+                            selected: vec!["Postgres".to_string()],
+                        }]),
+                    })
+                    .unwrap();
+            }
+            if matches!(event, AgentEvent::TurnCompleted { .. }) {
+                break;
+            }
+        }
+    });
+
+    let out = agent
+        .prompt_streaming_with_commands("go", &event_tx, CancellationToken::new(), &mut commands_rx)
+        .await
+        .unwrap();
+    driver.await.unwrap();
+    assert_eq!(out, "using Postgres");
+
+    let logged = session.events();
+    assert!(logged.iter().any(|entry| matches!(
+        &entry.event,
+        SessionEvent::QuestionAsked { questions, .. }
+            if questions.first().is_some_and(|q| q.header == "DB")
+    )));
+    assert!(logged.iter().any(|entry| matches!(
+        &entry.event,
+        SessionEvent::QuestionAnswered { answers: Some(answers), .. }
+            if answers.first().is_some_and(|a| a.selected == vec!["Postgres".to_string()])
+    )));
+
+    let requests = streamer.requests.lock().unwrap();
+    let rendered = format!("{:?}", requests[1].messages);
+    assert!(rendered.contains("Postgres"), "rendered: {rendered}");
+}
+
+#[tokio::test]
+async fn question_without_a_channel_returns_a_refusal() {
+    let calls = vec![ToolCall {
+        call_id: "q1".to_string(),
+        fn_name: "question-ask".to_string(),
+        fn_arguments: serde_json::json!({
+            "questions": [{"header": "DB", "question": "Which?", "options": ["a", "b"]}]
+        }),
+        thought_signatures: None,
+    }];
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(calls))],
+        vec![ChatStreamEvent::End(text_end("ask in text"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        vec![Box::new(crate::question::QuestionToolset)],
+        "",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "ask in text");
+    let logged = session.events();
+    assert!(logged.iter().any(|entry| matches!(
+        &entry.event,
+        SessionEvent::QuestionAnswered { answers: None, .. }
+    )));
+}
+
+struct WritingToolset {
+    root: PathBuf,
+}
+
+#[async_trait]
+impl Toolset for WritingToolset {
+    fn name(&self) -> String {
+        "writer".to_string()
+    }
+
+    fn definition(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            r#type: "function".to_string(),
+            name: "writer-write".to_string(),
+            description: "Writes a file".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" }, "content": { "type": "string" } }
+            }),
+        }]
+    }
+
+    fn contain(&self, fn_name: &str) -> bool {
+        fn_name == "writer-write"
+    }
+
+    fn effect_of(&self, _fn_name: &str) -> EffectClass {
+        EffectClass::Write
+    }
+
+    async fn invoke(&self, _fn_name: &str, args: &str) -> Result<ToolOutput, ToolError> {
+        let value: serde_json::Value = serde_json::from_str(args)?;
+        let path = value["path"].as_str().unwrap_or_default();
+        let content = value["content"].as_str().unwrap_or_default();
+        let full = self.root.join(path);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(full, content).unwrap();
+        Ok(ToolOutput::Text("written".to_string()))
+    }
+}
+
+#[tokio::test]
+async fn rewind_restores_files_captured_before_a_write() {
+    let root = std::env::temp_dir().join(format!(
+        "meerai-rewind-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("a.txt"), "old").unwrap();
+
+    let session = persistent_session(&root).await;
+    let policy = yolo().with_workspace_root(workspace.clone());
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+            call_id: "w1".to_string(),
+            fn_name: "writer-write".to_string(),
+            fn_arguments: serde_json::json!({"path": "a.txt", "content": "new"}),
+            thought_signatures: None,
+        }]))],
+        vec![ChatStreamEvent::End(text_end("written"))],
+    ]));
+    let mut agent = harness_agent(
+        streamer,
+        vec![Box::new(WritingToolset {
+            root: workspace.clone(),
+        })],
+        "",
+        &session,
+        policy,
+        HarnessConfig::default(),
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("a.txt")).unwrap(),
+        "new"
+    );
+
+    let events = session.events();
+    assert!(
+        events
+            .iter()
+            .any(|entry| matches!(&entry.event, SessionEvent::CheckpointCreated { .. }))
+    );
+    let turn_id = events
+        .iter()
+        .find_map(|entry| match &entry.event {
+            SessionEvent::TurnStarted { turn_id, .. } => Some(turn_id.clone()),
+            _ => None,
+        })
+        .expect("turn started");
+
+    let restored = agent
+        .rewind(&turn_id, crate::events::RewindScope::Code)
+        .await
+        .unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("a.txt")).unwrap(),
+        "old"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test]
+async fn repeated_cancelled_questions_disable_the_tool() {
+    let question_call = |id: &str| ToolCall {
+        call_id: id.to_string(),
+        fn_name: "question-ask".to_string(),
+        fn_arguments: serde_json::json!({
+            "questions": [{"header": "DB", "question": "Which?", "options": ["a", "b"]}]
+        }),
+        thought_signatures: None,
+    };
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![question_call("q1")]))],
+        vec![ChatStreamEvent::End(tool_end(vec![question_call("q2")]))],
+        vec![ChatStreamEvent::End(tool_end(vec![question_call("q3")]))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        vec![Box::new(crate::question::QuestionToolset)],
+        "",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "done");
+
+    let events = session.events();
+    let asked = events
+        .iter()
+        .filter(|entry| matches!(&entry.event, SessionEvent::QuestionAsked { .. }))
+        .count();
+    assert_eq!(asked, 2);
+    let results: Vec<&ToolObservation> = events
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            SessionEvent::ToolResult { output, .. } => Some(output),
+            _ => None,
+        })
+        .collect();
+    assert!(results.iter().any(|output| {
+        output.stdout.contains("question-ask is disabled")
+            || output.stderr.contains("question-ask is disabled")
+    }));
 }

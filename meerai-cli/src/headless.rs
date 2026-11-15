@@ -62,6 +62,13 @@ pub(crate) fn format_token_summary(usage: &meerai_agents::Usage) -> Option<Strin
     (!parts.is_empty()).then(|| format!("tokens: {}", parts.join(" ")))
 }
 
+pub(crate) fn question_cancel_command(request: &meerai_agents::QuestionRequest) -> AgentCommand {
+    AgentCommand::AnswerQuestion {
+        request_id: request.request_id.clone(),
+        answers: None,
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub(crate) enum HeadlessApprovalAction {
     Cancel,
@@ -280,6 +287,17 @@ pub(crate) async fn run_headless(
     let mut last_usage: Option<meerai_agents::Usage> = None;
 
     while let Some(event) = event_rx.recv().await {
+        if let AgentEvent::QuestionAsked { request } = &event {
+            eprintln!(
+                "question required but headless mode cannot answer: {}; rerun in the TUI",
+                request
+                    .questions
+                    .first()
+                    .map(|question| question.header.as_str())
+                    .unwrap_or("question")
+            );
+            let _ = cmd_tx.send(question_cancel_command(request));
+        }
         if let AgentEvent::ApprovalRequested { request } = &event {
             let action = HeadlessApprovalAction::for_request(request);
             match &action {

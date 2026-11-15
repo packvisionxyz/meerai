@@ -36,10 +36,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::events::{
     AbortCause, AgentCommand, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalRequest, CallId,
-    ErrorCode, GrantScope, ItemDelta, ItemId, ItemStatus, RequestId, SessionItem, TurnEndReason,
-    TurnId, TurnTrigger,
+    ErrorCode, GrantScope, ItemDelta, ItemId, ItemStatus, QuestionRequest, RequestId, RewindScope,
+    SessionItem, TurnEndReason, TurnId, TurnTrigger,
 };
 use crate::harness::AgentHarness;
+use crate::intercept::{SharedInterceptor, StepAction, StepPlan, ToolOutcome, TurnStopAction};
 use crate::redact::{redact_run, redact_text};
 
 const STEP_LIMIT_NOTICE: &str =
@@ -367,6 +368,8 @@ pub struct MultiTurnAgent {
     pub(in crate::multi_turn_agent) failure_tracker: FailureTracker,
     pub(super) injected_instruction_dirs: HashSet<PathBuf>,
     pub(super) outside_grants: HashSet<PathBuf>,
+    pub(super) interceptors: Vec<SharedInterceptor>,
+    pub(super) question_cancels: usize,
 }
 
 impl std::fmt::Debug for MultiTurnAgent {
@@ -443,6 +446,8 @@ impl MultiTurnAgent {
             failure_tracker: FailureTracker::default(),
             injected_instruction_dirs: HashSet::new(),
             outside_grants: HashSet::new(),
+            interceptors: Vec::new(),
+            question_cancels: 0,
         }
     }
 
@@ -456,6 +461,55 @@ impl MultiTurnAgent {
 
     pub fn add_tools(&mut self, tools: Vec<Box<dyn Toolset>>) {
         self.tools.extend(tools);
+    }
+
+    pub fn add_interceptor(&mut self, interceptor: impl crate::intercept::Interceptor + 'static) {
+        self.interceptors.push(Arc::new(interceptor));
+    }
+
+    pub fn add_shared_interceptor(&mut self, interceptor: SharedInterceptor) {
+        self.interceptors.push(interceptor);
+    }
+
+    pub fn interceptors(&self) -> &[SharedInterceptor] {
+        &self.interceptors
+    }
+
+    pub(super) fn run_before_step(&self, plan: &mut StepPlan) -> StepAction {
+        for interceptor in &self.interceptors {
+            if let StepAction::Stop { reason } = interceptor.before_step(plan) {
+                return StepAction::Stop { reason };
+            }
+        }
+        StepAction::Continue
+    }
+
+    pub(super) fn run_after_tool(&self, outcome: &ToolOutcome) -> Vec<String> {
+        self.interceptors
+            .iter()
+            .filter_map(|interceptor| interceptor.after_tool(outcome))
+            .collect()
+    }
+
+    pub(super) fn run_turn_stopping(&self, turn_id: &TurnId, step_index: usize) -> Option<String> {
+        for interceptor in &self.interceptors {
+            if let TurnStopAction::Continue { reason } =
+                interceptor.turn_stopping(turn_id, step_index)
+            {
+                return Some(reason);
+            }
+        }
+        None
+    }
+
+    pub(super) fn estimated_cost(&self, usage: Usage) -> Option<f64> {
+        let pricing = self.harness.as_ref()?.config.token_pricing?;
+        let prompt = usage.prompt_tokens.unwrap_or(0).max(0) as f64;
+        let completion = usage.completion_tokens.unwrap_or(0).max(0) as f64;
+        Some(
+            prompt / 1_000_000.0 * pricing.input_per_mtok
+                + completion / 1_000_000.0 * pricing.output_per_mtok,
+        )
     }
 
     pub fn streamer(&self) -> Arc<dyn ChatStreamer> {
@@ -562,18 +616,48 @@ impl MultiTurnAgent {
         self.logged_system_prompt = None;
     }
 
-    pub async fn revert_to_turn(&mut self, turn_id: &TurnId) -> Result<()> {
+    pub async fn rewind(&mut self, turn_id: &TurnId, scope: RewindScope) -> Result<Vec<String>> {
         let Some(harness) = self.harness.as_ref() else {
-            anyhow::bail!("no session to revert");
+            anyhow::bail!("no session to rewind");
         };
-        harness.session.revert(turn_id).await?;
+        let workspace = harness.policy.workspace_root().to_path_buf();
+        let store = harness.session.snapshot_store();
+        let mut restored = Vec::new();
+        let mut restored_paths = Vec::new();
+
+        if matches!(scope, RewindScope::Both | RewindScope::Code)
+            && let Some(store) = store
+        {
+            let report = store.restore(turn_id, &workspace).await?;
+            restored = report
+                .restored
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect();
+            restored_paths = report.restored;
+        }
+
+        if let Some(harness) = self.harness.as_ref() {
+            harness
+                .session
+                .rewind(turn_id, scope, restored_paths)
+                .await?;
+        }
+
+        if matches!(scope, RewindScope::Both | RewindScope::Conversation) {
+            self.clear_rewind_state();
+        }
+        Ok(restored)
+    }
+
+    fn clear_rewind_state(&mut self) {
         self.chat_history.clear();
         self.pending_steers.clear();
         self.pending_compact = false;
         self.failure_tracker = FailureTracker::default();
         self.injected_instruction_dirs.clear();
         self.outside_grants.clear();
-        Ok(())
+        self.question_cancels = 0;
     }
 
     pub fn reset(&mut self) {
@@ -585,6 +669,7 @@ impl MultiTurnAgent {
         self.failure_tracker = FailureTracker::default();
         self.injected_instruction_dirs.clear();
         self.outside_grants.clear();
+        self.question_cancels = 0;
     }
 
     pub async fn prompt(&mut self, prompt: &str) -> Result<String> {

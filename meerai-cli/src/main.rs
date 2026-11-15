@@ -1,3 +1,8 @@
+#![cfg_attr(
+    not(feature = "tui"),
+    allow(dead_code, unused_imports, unused_variables)
+)]
+
 mod auth_cmd;
 mod cli;
 mod headless;
@@ -10,9 +15,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Result, bail};
+#[cfg(feature = "tui")]
+use meerai_agents::spawn_worker;
 use meerai_agents::{
-    AgentHarness, HarnessConfig, MultiTurnAgent, SubagentToolFactory, SubagentToolset, spawn_worker,
+    AgentHarness, HarnessConfig, MultiTurnAgent, QuestionToolset, SubagentToolFactory,
+    SubagentToolset, TokenPricing,
 };
+use meerai_client::providers::{
+    ProviderCatalog, RuntimeProviderState, canonical_provider_id, first_configured_provider,
+};
+use meerai_client::secrets::auth_file_path;
 use meerai_common::definitions::{AgentDefinition, SkillDefinition, load_definitions};
 use meerai_common::settings::{
     AppSettings, default_config_dir, default_data_dir, find_project_root, load_project_settings,
@@ -20,11 +32,8 @@ use meerai_common::settings::{
 };
 use meerai_core::{Toolset, async_trait};
 use meerai_policy::{ApprovalMode, PolicyEngine, parse_approval_mode, rules_from_yaml};
-use meerai_providers::providers::{
-    ProviderCatalog, RuntimeProviderState, build_genai_client, canonical_provider_id,
-    first_configured_provider,
-};
-use meerai_providers::secrets::{auth_file_path, default_secret_store};
+use meerai_providers::providers::build_genai_client;
+use meerai_providers::secrets::default_secret_store;
 use meerai_session::{
     Session, SessionConfig, SessionId, SessionSummary, TurnId, default_sessions_root,
     delete_session as delete_session_dir, list_sessions,
@@ -34,6 +43,7 @@ use meerai_tools::{
     CodeTools, ExecutionWorld, LspToolset, RepoMapToolset, SearchAsCodeToolset,
     detect_execution_world,
 };
+#[cfg(feature = "tui")]
 use meerai_tui::{OpenedSession, SessionOpener, TuiLaunchConfig, transcript_from_events};
 
 use auth_cmd::run_auth;
@@ -158,6 +168,7 @@ fn resolve_approval_mode(flag: Option<&str>, configured: Option<&str>) -> Result
     }
 }
 
+#[cfg(feature = "tui")]
 fn apply_local_theme(workspace_root: &Path, project_root: &Path, settings: &mut AppSettings) {
     if workspace_root == project_root {
         return;
@@ -276,13 +287,16 @@ async fn main() -> Result<()> {
         eprintln!("Warning: {warning}");
     }
     catalog.apply_settings(&settings);
-    apply_local_theme(&workspace_root, &project_root, &mut settings);
-    let (palette, theme_warnings) =
-        meerai_tui::theme::Palette::from_settings(&settings.theme.clone().unwrap_or_default());
-    for warning in theme_warnings {
-        eprintln!("Warning: {warning}");
+    #[cfg(feature = "tui")]
+    {
+        apply_local_theme(&workspace_root, &project_root, &mut settings);
+        let (palette, theme_warnings) =
+            meerai_tui::theme::Palette::from_settings(&settings.theme.clone().unwrap_or_default());
+        for warning in theme_warnings {
+            eprintln!("Warning: {warning}");
+        }
+        meerai_tui::theme::install(palette);
     }
-    meerai_tui::theme::install(palette);
     let secrets = default_secret_store(data_dir.as_deref());
     let auth_path = data_dir.as_deref().map(auth_file_path);
 
@@ -337,6 +351,10 @@ async fn main() -> Result<()> {
     if cli.prompt.is_none() && (!io::stdin().is_terminal() || !io::stdout().is_terminal()) {
         bail!("no terminal detected; use --prompt \"...\" for headless mode (see --help)");
     }
+    #[cfg(not(feature = "tui"))]
+    if cli.prompt.is_none() {
+        bail!("this build has no TUI support; use --prompt \"...\" for headless mode");
+    }
 
     let active_provider = cli
         .provider
@@ -389,6 +407,7 @@ async fn main() -> Result<()> {
     }
 
     let session_config = SessionConfig::new(workspace_root.clone());
+    #[cfg(feature = "tui")]
     let restore_ids = if cli.prompt.is_none()
         && !cli.continue_session
         && cli.resume.is_none()
@@ -398,6 +417,8 @@ async fn main() -> Result<()> {
     } else {
         Vec::new()
     };
+    #[cfg(not(feature = "tui"))]
+    let restore_ids: Vec<SessionId> = Vec::new();
     let session = if cli.continue_session {
         let root = default_sessions_root();
         let id = continue_session_id(&root).await?;
@@ -476,14 +497,21 @@ async fn main() -> Result<()> {
         std::process::exit(exit_code);
     }
 
+    #[cfg(feature = "tui")]
     let initial_meta = session.meta();
+    #[cfg(feature = "tui")]
     let initial_events = session.events();
+    #[cfg(feature = "tui")]
     let initial_transcript = transcript_from_events(&initial_events);
+    #[cfg(feature = "tui")]
     let agent = host.build_agent(session, &active_provider, &active_model, initial_system)?;
+    #[cfg(feature = "tui")]
     let (cmd_tx, event_rx) = spawn_worker(agent);
+    #[cfg(feature = "tui")]
     let update_available = meerai_tui::update::check_latest().await;
 
-    meerai_tui::run_tui(
+    #[cfg(feature = "tui")]
+    return meerai_tui::run_tui(
         cmd_tx,
         event_rx,
         TuiLaunchConfig {
@@ -506,9 +534,17 @@ async fn main() -> Result<()> {
             restore_sessions: restore_ids.iter().skip(1).cloned().collect(),
             launch_system: cli.system,
             launch_definitions,
+            workspace_query: None,
         },
     )
-    .await
+    .await;
+
+    #[cfg(not(feature = "tui"))]
+    {
+        let _ = session;
+        let _ = initial_system;
+        Ok(())
+    }
 }
 
 struct CliSessionHost {
@@ -589,7 +625,8 @@ impl CliSessionHost {
         if let Some(runtime) = self.script_runtime {
             sac = sac.with_runtime(runtime);
         }
-        let initial_tools = build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, false);
+        let mut initial_tools = build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, false);
+        initial_tools.push(Box::new(QuestionToolset));
         let subagent_factory: SubagentToolFactory = Arc::new(move |read_only| {
             build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, read_only)
         });
@@ -611,11 +648,38 @@ impl CliSessionHost {
         agent.set_harness(AgentHarness {
             session,
             policy,
-            config: HarnessConfig::from_context_settings(self.settings.context.as_ref()),
+            config: self.harness_config(provider, model),
         });
         Ok(agent)
     }
 
+    fn harness_config(&self, provider: &str, model: &str) -> HarnessConfig {
+        let mut config = HarnessConfig::from_context_settings(self.settings.context.as_ref());
+        let configured_window = self
+            .settings
+            .context
+            .as_ref()
+            .and_then(|context| context.context_window_tokens);
+        let runtime = self.runtime.read().unwrap();
+        if let Some(info) = runtime.catalog.model_info(provider, model) {
+            if configured_window.is_none()
+                && let Some(window) = info.context_window
+            {
+                config.context_window_tokens = window;
+            }
+            if let (Some(input), Some(output)) =
+                (info.input_cost_per_mtok, info.output_cost_per_mtok)
+            {
+                config.token_pricing = Some(TokenPricing {
+                    input_per_mtok: input,
+                    output_per_mtok: output,
+                });
+            }
+        }
+        config
+    }
+
+    #[cfg(feature = "tui")]
     fn build_opened_session(
         &self,
         session: Session,
@@ -646,6 +710,7 @@ impl CliSessionHost {
     }
 }
 
+#[cfg(feature = "tui")]
 #[async_trait]
 impl SessionOpener for CliSessionHost {
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {

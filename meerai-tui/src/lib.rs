@@ -3,12 +3,12 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use meerai_agents::{AgentCommand, AgentEvent, TurnId};
+use meerai_client::providers::RuntimeProviderState;
+use meerai_client::secrets::SecretStore;
 use meerai_common::definitions::{AgentDefinition, SkillDefinition};
 use meerai_common::settings::AppSettings;
 use meerai_core::async_trait;
 use meerai_policy::ApprovalMode;
-use meerai_providers::providers::RuntimeProviderState;
-use meerai_providers::secrets::SecretStore;
 use meerai_session::{LoggedEvent, SessionId, SessionSummary};
 use tokio::sync::mpsc;
 
@@ -23,6 +23,7 @@ pub mod terminal;
 pub mod theme;
 pub mod ui;
 pub mod update;
+pub mod workspace;
 
 pub use app::{
     ActiveModal, AppState, FileChangeEntry, HoverZone, InputMode, MIN_SIDEBAR_WIDTH,
@@ -35,6 +36,7 @@ pub use completion::{CompletionEngine, CompletionItem, CompletionItemKind, Compl
 pub use diff::{DiffCell, DiffRow, DiffRowKind, FileDiffView};
 pub use search::{SearchMatch, SearchMode, SearchPreview};
 pub use terminal::TerminalGuard;
+pub use workspace::{LocalWorkspace, WorkspaceMatch, WorkspaceQuery, local_workspace};
 
 pub struct OpenedSession {
     pub session_id: SessionId,
@@ -77,6 +79,7 @@ pub struct TuiLaunchConfig {
     pub restore_sessions: Vec<SessionId>,
     pub launch_system: String,
     pub launch_definitions: String,
+    pub workspace_query: Option<Arc<dyn WorkspaceQuery>>,
 }
 
 pub async fn run_tui(
@@ -96,6 +99,9 @@ pub async fn run_tui(
         config.config_dir,
     );
     app.tab_persistence = true;
+    if let Some(workspace) = config.workspace_query {
+        app.set_workspace_query(workspace);
+    }
     app.set_initial_session(
         config.initial_session_id,
         config.initial_session_title,

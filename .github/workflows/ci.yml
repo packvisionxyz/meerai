@@ -40,6 +40,12 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets
 
+      - name: Check headless-only build
+        run: cargo check -p meerai-cli --no-default-features
+
+      - name: Check TUI without update check
+        run: cargo check -p meerai-tui --no-default-features
+
       - name: Run tests
         run: cargo test --workspace
 

@@ -191,6 +191,50 @@ pub enum ErrorCode {
     Internal,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookDetail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_closed: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindScope {
+    Both,
+    Code,
+    Conversation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionOption {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionPrompt {
+    pub header: String,
+    pub question: String,
+    pub options: Vec<QuestionOption>,
+    #[serde(default)]
+    pub multiple: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionAnswer {
+    pub header: String,
+    pub selected: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum SessionEvent {
@@ -259,10 +303,6 @@ pub enum SessionEvent {
         compaction_id: CompactionId,
         result: CompactionResult,
     },
-    RevertApplied {
-        turn_id: TurnId,
-        replaced: SeqRange,
-    },
     UsageUpdated {
         usage: Usage,
         cumulative: Usage,
@@ -277,9 +317,26 @@ pub enum SessionEvent {
         decision: ApprovalDecision,
         scope: Option<GrantScope>,
     },
+    QuestionAsked {
+        request_id: RequestId,
+        questions: Vec<QuestionPrompt>,
+    },
+    QuestionAnswered {
+        request_id: RequestId,
+        answers: Option<Vec<QuestionAnswer>>,
+    },
+    RewindApplied {
+        turn_id: TurnId,
+        scope: RewindScope,
+        restored: Vec<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaced: Option<SeqRange>,
+    },
     HookFired {
         event: String,
         decision: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<HookDetail>,
     },
     CheckpointCreated {
         checkpoint_id: CheckpointId,
@@ -314,4 +371,91 @@ impl SessionEvent {
 pub struct LoggedEvent {
     pub seq: Seq,
     pub event: SessionEvent,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_fired_accepts_legacy_payload_without_detail() {
+        let legacy =
+            r#"{"seq":3,"event":{"type":"hook_fired","event":"PreToolUse","decision":"allow"}}"#;
+        let logged: LoggedEvent = serde_json::from_str(legacy).unwrap();
+        match logged.event {
+            SessionEvent::HookFired {
+                event,
+                decision,
+                detail,
+            } => {
+                assert_eq!(event, "PreToolUse");
+                assert_eq!(decision, "allow");
+                assert_eq!(detail, None);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_fired_round_trips_typed_detail() {
+        let logged = LoggedEvent {
+            seq: Seq(4),
+            event: SessionEvent::HookFired {
+                event: "PostToolUse".to_string(),
+                decision: "block".to_string(),
+                detail: Some(HookDetail {
+                    tool: Some("code-edit_file".to_string()),
+                    reason: Some("fmt check failed".to_string()),
+                    exit_code: Some(2),
+                    duration_ms: Some(17),
+                    fail_closed: Some(true),
+                }),
+            },
+        };
+        let encoded = serde_json::to_string(&logged).unwrap();
+        let decoded: LoggedEvent = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, logged);
+    }
+}
+
+#[cfg(test)]
+mod question_tests {
+    use super::*;
+
+    #[test]
+    fn question_events_round_trip() {
+        let questions = vec![QuestionPrompt {
+            header: "DB".to_string(),
+            question: "Which database?".to_string(),
+            options: vec![
+                QuestionOption {
+                    label: "Postgres".to_string(),
+                    description: None,
+                },
+                QuestionOption {
+                    label: "SQLite".to_string(),
+                    description: Some("local".to_string()),
+                },
+            ],
+            multiple: false,
+        }];
+        let asked = SessionEvent::QuestionAsked {
+            request_id: RequestId::new(),
+            questions: questions.clone(),
+        };
+        let encoded = serde_json::to_string(&asked).unwrap();
+        let decoded: SessionEvent = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, asked);
+
+        let answered = SessionEvent::QuestionAnswered {
+            request_id: RequestId::new(),
+            answers: Some(vec![QuestionAnswer {
+                header: "DB".to_string(),
+                selected: vec!["Postgres".to_string()],
+            }]),
+        };
+        let encoded = serde_json::to_string(&answered).unwrap();
+        let decoded: SessionEvent = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, answered);
+    }
 }

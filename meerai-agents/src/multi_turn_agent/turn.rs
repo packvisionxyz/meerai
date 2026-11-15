@@ -146,6 +146,7 @@ impl MultiTurnAgent {
             max_secs: max_turn_secs,
         };
         let mut pressured = false;
+        let mut stop_hook_used = false;
         let mut last_tool_signature: Option<String> = None;
         let mut repeated_tool_batches = 0usize;
 
@@ -175,6 +176,16 @@ impl MultiTurnAgent {
             self.apply_pending_steers(event_tx).await;
 
             let final_step = harnessed && step_index + 1 == max_steps;
+            let mut plan = StepPlan {
+                turn_id: turn_id.clone(),
+                step_index,
+                model: self.model.clone(),
+                final_step,
+                tool_count: self.tools.len(),
+            };
+            if let StepAction::Stop { reason } = self.run_before_step(&mut plan) {
+                return Ok(completed(event_tx, turn_id, reason.unwrap_or_default()));
+            }
 
             if harnessed {
                 match self
@@ -274,7 +285,7 @@ impl MultiTurnAgent {
                 let _ = event_tx.send(AgentEvent::UsageUpdated {
                     usage: step_usage,
                     cumulative: self.cumulative_usage,
-                    est_cost_usd: None,
+                    est_cost_usd: self.estimated_cost(self.cumulative_usage),
                 });
             }
 
@@ -393,6 +404,7 @@ impl MultiTurnAgent {
                     .execute_tool_calls(
                         &tool_calls,
                         turn_id,
+                        step_index,
                         event_tx,
                         &cancel,
                         inbox.as_deref_mut(),
@@ -453,6 +465,19 @@ impl MultiTurnAgent {
                     return Ok(aborted(event_tx, turn_id));
                 }
                 if self.apply_pending_steers(event_tx).await {
+                    continue;
+                }
+                if !stop_hook_used && let Some(reason) = self.run_turn_stopping(turn_id, step_index)
+                {
+                    stop_hook_used = true;
+                    self.log_event(
+                        event_tx,
+                        SessionEvent::UserMessage {
+                            source: InputSource::RuntimeContext,
+                            content: vec![ContentBlock::Text(reason)],
+                        },
+                    )
+                    .await;
                     continue;
                 }
                 return Ok(completed(event_tx, turn_id, final_text));
