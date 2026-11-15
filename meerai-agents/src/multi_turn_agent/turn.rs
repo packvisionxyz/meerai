@@ -593,8 +593,9 @@ impl MultiTurnAgent {
 
         loop {
             let mut request = ChatRequest::new(self.request_messages());
-            if !self.system_prompt.is_empty() {
-                request = request.with_system(self.system_prompt.clone());
+            let system_prompt = self.effective_system_prompt();
+            if !system_prompt.is_empty() {
+                request = request.with_system(system_prompt);
             }
             if !final_step && !tools.is_empty() {
                 request = request.with_tools(tools.to_vec());

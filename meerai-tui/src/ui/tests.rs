@@ -1085,3 +1085,225 @@ fn renders_distinct_user_thinking_tool_and_response_roles() {
     assert!(rendered.contains("name = \"meerai\""));
     assert!(!rendered.contains("```toml"));
 }
+
+#[test]
+fn sidebar_padding_hover_and_click_alignment() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    let mut app = test_app();
+    app.file_changes = vec![
+        crate::FileChangeEntry {
+            status: "M".to_string(),
+            path: "src/lib.rs".to_string(),
+        },
+        crate::FileChangeEntry {
+            status: "A".to_string(),
+            path: "src/new.rs".to_string(),
+        },
+    ];
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("draw sidebar");
+
+    let changes = app.sidebar_changes_inner_area;
+    assert!(changes.width > 0 && changes.height >= 2);
+    let header_row = {
+        let buf = terminal.backend().buffer();
+        (0..120)
+            .map(|x| buf[(x, changes.y - 2)].symbol())
+            .collect::<String>()
+    };
+    assert!(
+        header_row.contains("File Changes (2)"),
+        "expected File Changes header above row area, got {header_row:?}"
+    );
+
+    assert!(app.handle_mouse_event(mouse(MouseEventKind::Moved, changes.x, changes.y)));
+    assert_eq!(app.hovered_file_change, Some(0));
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("redraw hovered row");
+    let buf = terminal.backend().buffer();
+    assert_eq!(
+        buf[(changes.x, changes.y)].bg,
+        crate::theme::Palette::default().surface_high
+    );
+
+    assert!(app.handle_mouse_event(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        changes.x,
+        changes.y
+    )));
+    assert!(matches!(app.modal, Some(ActiveModal::DiffView { .. })));
+}
+
+#[test]
+fn renders_floating_toast_with_semantic_severity_colors() {
+    let mut app = test_app();
+    app.status_notice = Some("Copied 5 chars to clipboard".to_string());
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("draw success toast");
+
+    let palette = crate::theme::Palette::default();
+    let buf = terminal.backend().buffer();
+    let search_area = app.transcript_inner_area;
+    let mut found_toast_cell = None;
+    for y in search_area.y.saturating_sub(2)..search_area.y + search_area.height {
+        let row_text: String = (0..120).map(|x| buf[(x, y)].symbol()).collect();
+        if row_text.contains("Copied 5 chars to clipboard") {
+            let x = (search_area.x.saturating_sub(2)..search_area.x + search_area.width + 2)
+                .find(|&cx| buf[(cx, y)].symbol() == "▌")
+                .expect("toast left stripe");
+            found_toast_cell = Some((x, y));
+            break;
+        }
+    }
+    let (tx, ty) = found_toast_cell.expect("toast should appear in transcript area");
+    assert_eq!(buf[(tx, ty)].bg, palette.surface_high);
+    assert_eq!(buf[(tx, ty)].fg, palette.success);
+    let full: String = (0..28)
+        .flat_map(|y| (0..120).map(move |x| buf[(x, y)].symbol()))
+        .collect();
+    assert!(!full.contains('┌') && !full.contains('┐'));
+
+    app.status_notice = Some("Failed to load workspace".to_string());
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("draw error toast");
+    let buf = terminal.backend().buffer();
+    let (ex, ey) = (search_area.x.saturating_sub(2)..search_area.x + search_area.width + 2)
+        .find(|&cx| buf[(cx, ty)].symbol() == "▌")
+        .map(|cx| (cx, ty))
+        .expect("error toast left stripe");
+    assert_eq!(buf[(ex, ey)].bg, palette.surface_high);
+    assert_eq!(buf[(ex, ey)].fg, palette.error);
+}
+
+#[test]
+fn modal_and_completion_hover_and_click_interactions() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    let mut app = test_app();
+    assert!(app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::CommandPalette { .. })
+    ));
+
+    let _ = render_to_string(&mut app);
+    let item_zone = app
+        .modal_hit_zones
+        .iter()
+        .find(|z| matches!(z.kind, ModalHitKind::ListItem(_)))
+        .copied()
+        .expect("command palette list hit zone");
+    let close_zone = app
+        .modal_hit_zones
+        .iter()
+        .find(|z| z.kind == ModalHitKind::Close)
+        .copied()
+        .expect("modal close hit zone");
+
+    assert!(app.handle_mouse_event(mouse(
+        MouseEventKind::Moved,
+        item_zone.rect.x,
+        item_zone.rect.y
+    )));
+    assert!(app.hovered_modal_hit.is_some());
+
+    assert!(app.handle_mouse_event(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        close_zone.rect.x,
+        close_zone.rect.y
+    )));
+    assert!(app.modal.is_none());
+
+    assert!(app.handle_key_event(KeyEvent::from(KeyCode::Char('/'))));
+    let _ = render_to_string(&mut app);
+    assert!(!app.completion_hit_zones.is_empty());
+    let first = app.completion_hit_zones[0];
+    assert!(app.handle_mouse_event(mouse(MouseEventKind::Moved, first.rect.x, first.rect.y)));
+    assert_eq!(app.hovered_completion, Some(first.index));
+
+    assert!(app.handle_mouse_event(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        first.rect.x,
+        first.rect.y
+    )));
+    assert!(app.tab().input.starts_with('/'));
+    assert!(app.tab().input.len() > 1);
+}
+
+#[test]
+fn empty_transcript_quickstart_and_padded_code_blocks() {
+    let mut app = test_app();
+    let empty_rendered = render_to_string(&mut app);
+    assert!(empty_rendered.contains("Quick start"));
+    assert!(!empty_rendered.contains('┌'));
+
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "Show example".to_string(),
+    });
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: "Here is code:\n\n```rust\nlet x = 1;\n```\n".to_string(),
+        reasoning: String::new(),
+        streaming: false,
+        reasoning_expanded: false,
+    });
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("draw padded code block");
+    let buf = terminal.backend().buffer();
+    let area = app.transcript_inner_area;
+    let palette = crate::theme::Palette::default();
+
+    let code_row = (area.y..area.y + area.height)
+        .find(|&y| {
+            let text: String = (area.x..area.x + area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect();
+            text.contains("    let x = 1;")
+        })
+        .expect("indented code line");
+    assert_eq!(buf[(area.x + 2, code_row - 1)].bg, palette.surface_high);
+    assert_eq!(buf[(area.x + 2, code_row)].bg, palette.surface_high);
+    assert_eq!(buf[(area.x + 2, code_row + 1)].bg, palette.surface_high);
+}
+
+#[test]
+fn renders_logo_header_and_composer_outer_margins() {
+    let mut app = test_app();
+    let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("draw logo and composer margin");
+
+    let buf = terminal.backend().buffer();
+    let palette = crate::theme::Palette::default();
+    let full: String = (0..28)
+        .flat_map(|y| (0..120).map(move |x| buf[(x, y)].symbol()))
+        .collect();
+    assert!(full.contains("██      ██"));
+    assert!(full.contains("████  ████"));
+    assert!(full.contains("██  ██  ██"));
+    assert!(full.contains("Workspace:"));
+
+    let block = app.composer_block_area;
+    assert_eq!(block.x, 2);
+    assert_eq!(buf[(0, block.y)].bg, palette.background);
+    assert_eq!(buf[(1, block.y)].bg, palette.background);
+    assert_eq!(buf[(block.x, block.y)].bg, palette.surface);
+    assert_eq!(buf[(block.x + block.width, block.y)].bg, palette.background);
+    assert_eq!(
+        buf[(block.x, block.y + block.height)].bg,
+        palette.background
+    );
+}

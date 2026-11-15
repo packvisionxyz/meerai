@@ -6,13 +6,20 @@ pub(super) fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Re
         return;
     }
 
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::p().surface)),
+        area,
+    );
+
     let width = area.width as usize;
-    let labels: Vec<(String, Style)> = app
+    let labels: Vec<(String, Style, Color)> = app
         .tabs
         .iter()
         .enumerate()
         .map(|(idx, tab)| {
             let is_active = idx == app.active_tab;
+            let is_hovered = app.hovered_tab == Some(TabHitKind::Tab(idx))
+                || app.hovered_tab == Some(TabHitKind::CloseTab(idx));
             let indicator = if !tab.pending_approvals.is_empty() {
                 " [!]".to_string()
             } else if tab.is_running {
@@ -25,22 +32,29 @@ pub(super) fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Re
             };
             let title = truncate_single_line(&tab.display_title(), 18);
             let label = format!(" {}: {}{} ", idx + 1, title, indicator);
+            let bg = if is_active || is_hovered {
+                theme::p().surface_high
+            } else {
+                theme::p().surface
+            };
             let style = if is_active {
                 Style::default()
                     .fg(theme::p().accent)
+                    .bg(bg)
                     .add_modifier(Modifier::BOLD)
             } else if !tab.pending_approvals.is_empty() {
                 Style::default()
                     .fg(theme::p().error)
+                    .bg(bg)
                     .add_modifier(Modifier::BOLD)
             } else if tab.is_running {
-                Style::default().fg(theme::p().warning)
-            } else if tab.has_unread {
-                Style::default().fg(theme::p().text)
+                Style::default().fg(theme::p().warning).bg(bg)
+            } else if tab.has_unread || is_hovered {
+                Style::default().fg(theme::p().text).bg(bg)
             } else {
-                Style::default().fg(theme::p().muted)
+                Style::default().fg(theme::p().muted).bg(bg)
             };
-            (label, style)
+            (label, style, bg)
         })
         .collect();
 
@@ -50,10 +64,10 @@ pub(super) fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Re
     let total_tab_width = |s: usize, e: usize| -> usize {
         labels[s..e]
             .iter()
-            .map(|(l, _)| l.chars().count() + 3)
+            .map(|(l, _, _)| l.chars().count() + 3)
             .sum::<usize>()
     };
-    let budget = width.saturating_sub(new_btn.len() + 4);
+    let budget = width.saturating_sub(new_btn.len() + 6);
     while total_tab_width(start, end) > budget && end - start > 1 {
         if app.active_tab > start && (end - app.active_tab) <= (app.active_tab - start) {
             start += 1;
@@ -62,17 +76,20 @@ pub(super) fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Re
         }
     }
 
-    let mut spans = Vec::new();
-    let mut col = area.x;
+    let mut spans = vec![Span::styled(" ", Style::default().bg(theme::p().surface))];
+    let mut col = area.x.saturating_add(1);
     if start > 0 {
         let marker = "« ";
-        spans.push(Span::styled(marker, Style::default().fg(theme::p().faint)));
+        spans.push(Span::styled(
+            marker,
+            Style::default().fg(theme::p().faint).bg(theme::p().surface),
+        ));
         col = col.saturating_add(marker.chars().count() as u16);
     }
 
-    for (idx, (label, style)) in labels.iter().enumerate().take(end).skip(start) {
+    for (idx, (label, style, pill_bg)) in labels.iter().enumerate().take(end).skip(start) {
         let label_len = label.chars().count() as u16;
-        let zone_w = label_len.min(area.x + area.width - col);
+        let zone_w = label_len.min((area.x + area.width).saturating_sub(col));
         if zone_w > 0 {
             app.tab_hit_zones.push(TabHitZone {
                 rect: Rect::new(col, area.y, zone_w, 1),
@@ -81,29 +98,36 @@ pub(super) fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Re
         }
         spans.push(Span::styled(label.clone(), *style));
         col = col.saturating_add(label_len);
-        let close_w = 1u16.min(area.x + area.width - col);
+        let close_w = 2u16.min((area.x + area.width).saturating_sub(col));
         if close_w > 0 {
             app.tab_hit_zones.push(TabHitZone {
                 rect: Rect::new(col, area.y, close_w, 1),
                 kind: TabHitKind::CloseTab(idx),
             });
         }
+        let close_hovered = app.hovered_tab == Some(TabHitKind::CloseTab(idx));
+        let close_fg = if close_hovered {
+            theme::p().error
+        } else if idx == app.active_tab {
+            theme::p().muted
+        } else {
+            theme::p().faint
+        };
         spans.push(Span::styled(
-            "×",
-            if idx == app.active_tab {
-                Style::default().fg(theme::p().muted)
-            } else {
-                Style::default().fg(theme::p().faint)
-            },
+            "× ",
+            Style::default().fg(close_fg).bg(*pill_bg),
         ));
         col = col.saturating_add(close_w);
-        spans.push(Span::raw(" "));
+        spans.push(Span::styled(" ", Style::default().bg(theme::p().surface)));
         col = col.saturating_add(1);
     }
 
     if end < labels.len() {
         let marker = "» ";
-        spans.push(Span::styled(marker, Style::default().fg(theme::p().faint)));
+        spans.push(Span::styled(
+            marker,
+            Style::default().fg(theme::p().faint).bg(theme::p().surface),
+        ));
         col = col.saturating_add(marker.chars().count() as u16);
     }
 
@@ -113,10 +137,20 @@ pub(super) fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Re
             rect: Rect::new(col, area.y, new_w, 1),
             kind: TabHitKind::NewTab,
         });
+        let new_hovered = app.hovered_tab == Some(TabHitKind::NewTab);
         spans.push(Span::styled(
             new_btn,
             Style::default()
-                .fg(theme::p().muted)
+                .fg(if new_hovered {
+                    theme::p().interactive
+                } else {
+                    theme::p().muted
+                })
+                .bg(if new_hovered {
+                    theme::p().surface_high
+                } else {
+                    theme::p().surface
+                })
                 .add_modifier(Modifier::BOLD),
         ));
         col = col.saturating_add(new_w);
@@ -124,10 +158,16 @@ pub(super) fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Re
 
     let used = (col.saturating_sub(area.x)) as usize;
     let hint = "/sessions · /new · Ctrl-w close";
-    if width.saturating_sub(used) >= hint.len() + 2 {
-        let pad = width - used - hint.len() - 1;
-        spans.push(Span::raw(" ".repeat(pad)));
-        spans.push(Span::styled(hint, Style::default().fg(theme::p().faint)));
+    if width.saturating_sub(used) >= hint.len() + 3 {
+        let pad = width - used - hint.len() - 2;
+        spans.push(Span::styled(
+            " ".repeat(pad),
+            Style::default().bg(theme::p().surface),
+        ));
+        spans.push(Span::styled(
+            hint,
+            Style::default().fg(theme::p().faint).bg(theme::p().surface),
+        ));
     }
 
     let bar = Paragraph::new(Line::from(spans));

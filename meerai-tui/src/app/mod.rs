@@ -40,6 +40,7 @@ use crate::workspace::{WorkspaceQuery, local_workspace};
 use crate::{OpenedSession, SessionOpener};
 
 const DOUBLE_CTRL_C_WINDOW: Duration = Duration::from_secs(2);
+const NOTICE_TTL: Duration = Duration::from_secs(4);
 pub const MIN_SIDEBAR_WIDTH: u16 = 110;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,6 +153,37 @@ pub struct HoverZone {
 pub struct TabHitZone {
     pub rect: Rect,
     pub kind: TabHitKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalClickAction {
+    Accept,
+    AcceptTurn,
+    AcceptSession,
+    Decline,
+    DeclineReason,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModalHitKind {
+    ListItem(usize),
+    ApiKeyField(bool),
+    ApprovalAction(ApprovalClickAction),
+    SearchModeToggle,
+    Close,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModalHitZone {
+    pub rect: Rect,
+    pub kind: ModalHitKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompletionHitZone {
+    pub rect: Rect,
+    pub index: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -447,12 +479,18 @@ pub struct AppState {
     pub agents: Vec<AgentDefinition>,
     pub skills: Vec<SkillDefinition>,
     pub tab_hit_zones: Vec<TabHitZone>,
+    pub hovered_tab: Option<TabHitKind>,
     pub transcript_inner_area: Rect,
     pub sidebar_changes_inner_area: Rect,
     pub visible_file_change_rows: usize,
+    pub hovered_file_change: Option<usize>,
     pub thinking_hit_zones: Vec<ThinkingHitZone>,
     pub hover_zones: Vec<HoverZone>,
     pub hovered_entry: Option<usize>,
+    pub modal_hit_zones: Vec<ModalHitZone>,
+    pub hovered_modal_hit: Option<ModalHitKind>,
+    pub completion_hit_zones: Vec<CompletionHitZone>,
+    pub hovered_completion: Option<usize>,
     pub update_available: Option<String>,
     pub launch_system: String,
     pub launch_definitions: String,
@@ -476,6 +514,8 @@ pub struct AppState {
     key_status_cache: RefCell<HashMap<String, KeyStatus>>,
     pub should_quit: bool,
     pub status_notice: Option<String>,
+    notice_seen: Option<String>,
+    notice_set_at: Option<Instant>,
     pub session_opener: Option<Arc<dyn SessionOpener>>,
     pub(super) pending_session_actions: Vec<PendingSessionAction>,
     next_tab_id: u64,
@@ -573,12 +613,18 @@ impl AppState {
             agents: Vec::new(),
             skills: Vec::new(),
             tab_hit_zones: Vec::new(),
+            hovered_tab: None,
             transcript_inner_area: Rect::default(),
             sidebar_changes_inner_area: Rect::default(),
             visible_file_change_rows: 0,
+            hovered_file_change: None,
             thinking_hit_zones: Vec::new(),
             hover_zones: Vec::new(),
             hovered_entry: None,
+            modal_hit_zones: Vec::new(),
+            hovered_modal_hit: None,
+            completion_hit_zones: Vec::new(),
+            hovered_completion: None,
             update_available: None,
             launch_system: String::new(),
             launch_definitions: String::new(),
@@ -602,6 +648,8 @@ impl AppState {
             key_status_cache: RefCell::new(HashMap::new()),
             should_quit: false,
             status_notice: None,
+            notice_seen: None,
+            notice_set_at: None,
             session_opener: None,
             pending_session_actions: Vec::new(),
             next_tab_id: 2,
@@ -991,6 +1039,17 @@ impl AppState {
             if self.status_notice.as_deref() == Some("Press Ctrl-c again to exit") {
                 self.status_notice = None;
             }
+        }
+        if self.status_notice != self.notice_seen {
+            self.notice_seen = self.status_notice.clone();
+            self.notice_set_at = self.status_notice.as_ref().map(|_| Instant::now());
+        } else if self
+            .notice_set_at
+            .is_some_and(|t| t.elapsed() >= NOTICE_TTL)
+        {
+            self.status_notice = None;
+            self.notice_seen = None;
+            self.notice_set_at = None;
         }
     }
 

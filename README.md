@@ -533,7 +533,9 @@ unaffected by this block.
 Every request starts from the built-in `BASE_SYSTEM_PROMPT`. The binary then
 appends, in order, the `--system` text (if any), the workspace `AGENTS.md`, and
 `.meerai/instructions.md`. These files are read per run and capped at 32 KiB
-each with a 64 KiB block cap. When an authorized tool touches a subdirectory,
+each with a 64 KiB block cap. The agent also appends an `Active model:` line
+with the current model spec, so it answers model-identity questions without
+reading your config. When an authorized tool touches a subdirectory,
 that directory's `AGENTS.md` is injected once for the turn, capped at 16 KiB,
 with at most eight files per turn. Treat repository instructions as untrusted
 content from the repository.

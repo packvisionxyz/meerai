@@ -1,8 +1,9 @@
 use super::statusline::key_status_style;
 use super::*;
+use crate::app::ApprovalClickAction;
 
-pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
-    let Some(modal) = &app.modal else {
+pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
+    let Some(modal) = app.modal.clone() else {
         return;
     };
     if area.width < 20 || area.height < 8 {
@@ -11,19 +12,23 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
 
     match modal {
         ActiveModal::ProviderSelect { filter, selected } => {
-            let popup = cap_width(centered_rect(area, 66, 68, 42, 10), 64);
-            let inner = dialog_frame(frame, popup, "Connect Provider (/connect)");
+            let popup = cap_width(centered_rect(area, 68, 72, 46, 12), 68);
+            dim_backdrop(frame, area, popup);
+            let inner = dialog_frame(frame, app, popup, "Connect Provider (/connect)", true);
 
             let rows = Layout::vertical([
                 Constraint::Length(1),
+                Constraint::Length(1),
                 Constraint::Min(3),
+                Constraint::Length(1),
                 Constraint::Length(1),
             ])
             .split(inner);
 
+            let filter_area = input_band(frame, rows[0], true);
             let filter_line = Line::from(vec![
                 Span::styled(
-                    "Filter ",
+                    "Filter  ",
                     Style::default()
                         .fg(theme::p().muted)
                         .add_modifier(Modifier::BOLD),
@@ -34,48 +39,72 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                     Span::styled(filter.clone(), Style::default().fg(theme::p().text))
                 },
             ]);
-            let filter_area = input_band(frame, rows[0]);
             frame.render_widget(Paragraph::new(filter_line), filter_area);
+            place_input_cursor(frame, filter_area, 8 + filter.chars().count());
 
-            let providers = app.filtered_providers(filter);
-            let active_provider = &app.tab().active_provider;
+            let providers = app.filtered_providers(&filter);
+            let active_provider = app.tab().active_provider.clone();
+            let selected_idx = if providers.is_empty() {
+                0
+            } else {
+                selected.min(providers.len() - 1)
+            };
+            let list_width = rows[2].width as usize;
             let list_items: Vec<ListItem<'_>> = providers
                 .iter()
-                .map(|(p, status)| {
+                .enumerate()
+                .map(|(idx, (p, status))| {
                     let (badge, color) = key_status_style(status);
-                    let active_mark = if p.id == *active_provider { "*" } else { " " };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            format!("{active_mark} "),
-                            Style::default().fg(theme::p().faint),
-                        ),
+                    let badge_text = format!("[{badge}]");
+                    let is_active = p.id == active_provider;
+                    let is_selected = idx == selected_idx;
+                    let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(idx));
+                    let marker = if is_active { "● " } else { "  " };
+                    let marker_color = if is_active {
+                        theme::p().accent
+                    } else {
+                        theme::p().faint
+                    };
+                    let id_text = format!(" ({})", p.id);
+                    let left_len = 2 + p.display_name.chars().count() + id_text.chars().count() + 1;
+                    let badge_len = badge_text.chars().count();
+                    let gap = list_width.saturating_sub(left_len + badge_len + 1).max(1);
+                    let row = ListItem::new(Line::from(vec![
+                        Span::styled(" ", Style::default()),
+                        Span::styled(marker, Style::default().fg(marker_color)),
                         Span::styled(
                             p.display_name.clone(),
                             Style::default()
                                 .fg(theme::p().text)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(
-                            format!(" ({}) ", p.id),
-                            Style::default().fg(theme::p().faint),
-                        ),
-                        Span::styled(format!("[{badge}]"), Style::default().fg(color)),
-                    ]))
+                        Span::styled(id_text, Style::default().fg(theme::p().faint)),
+                        Span::raw(" ".repeat(gap)),
+                        Span::styled(badge_text, Style::default().fg(color)),
+                    ]));
+                    if is_hovered && !is_selected {
+                        row.style(hover_row_style())
+                    } else {
+                        row
+                    }
                 })
                 .collect();
 
             let mut state = ListState::default();
             if !providers.is_empty() {
-                state.select(Some((*selected).min(providers.len() - 1)));
+                state.select(Some(selected_idx));
             }
             let list = List::new(list_items).highlight_style(selection_style());
-            frame.render_stateful_widget(list, rows[1], &mut state);
+            frame.render_stateful_widget(list, rows[2], &mut state);
+            register_list_hit_zones(app, rows[2], state.offset(), providers.len());
 
-            let footer = Paragraph::new(Line::from(Span::styled(
-                "Enter configure · Up/Down move · Type filter · Esc close",
-                Style::default().fg(theme::p().faint),
-            )));
-            frame.render_widget(footer, rows[2]);
+            let footer = Paragraph::new(key_hints_line(&[
+                ("Enter", "configure"),
+                ("↑↓", "move"),
+                ("Type", "filter"),
+                ("Esc", "close"),
+            ]));
+            frame.render_widget(footer, rows[4]);
         }
         ActiveModal::ApiKeyInput {
             provider_id,
@@ -86,11 +115,53 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
             existing_key_status,
             error,
         } => {
-            let popup = centered_rect_fixed(area, 64, 13);
+            let popup = centered_rect_fixed(area, 66, 15);
+            dim_backdrop(frame, area, popup);
             let title = format!("Connect {provider_name} ({provider_id})");
-            let inner = dialog_frame(frame, popup, &title);
+            let inner = dialog_frame(frame, app, popup, &title, true);
 
-            let (badge, badge_color) = key_status_style(existing_key_status);
+            let rows = Layout::vertical([
+                Constraint::Length(1), // status
+                Constraint::Length(1), // gap
+                Constraint::Length(1), // api key label
+                Constraint::Length(1), // api key input
+                Constraint::Length(1), // gap
+                Constraint::Length(1), // base url label
+                Constraint::Length(1), // base url input
+                Constraint::Min(1),    // gap / note
+                Constraint::Length(1), // status/err
+                Constraint::Length(1), // footer
+            ])
+            .split(inner);
+
+            let (badge, badge_color) = key_status_style(&existing_key_status);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        "Status  ",
+                        Style::default()
+                            .fg(theme::p().muted)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("[{badge}]"), Style::default().fg(badge_color)),
+                ])),
+                rows[0],
+            );
+
+            let key_focus = !editing_base_url;
+            let key_label_style = if key_focus {
+                Style::default()
+                    .fg(theme::p().interactive)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::p().muted)
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled("API key", key_label_style)),
+                rows[2],
+            );
+            let key_band_rect = rows[3];
+            let key_input_area = input_band(frame, key_band_rect, key_focus);
             let masked_key = if api_key.is_empty() {
                 if existing_key_status.is_configured() {
                     "(press Enter to keep existing key, or type new key)".to_string()
@@ -100,124 +171,135 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
             } else {
                 "•".repeat(api_key.chars().count())
             };
+            let key_val_style = if api_key.is_empty() {
+                Style::default().fg(theme::p().faint)
+            } else {
+                Style::default().fg(theme::p().text)
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(masked_key, key_val_style)),
+                key_input_area,
+            );
+            app.modal_hit_zones.push(ModalHitZone {
+                rect: key_band_rect,
+                kind: ModalHitKind::ApiKeyField(false),
+            });
 
+            let url_label_style = if editing_base_url {
+                Style::default()
+                    .fg(theme::p().interactive)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::p().muted)
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled("Base URL", url_label_style)),
+                rows[5],
+            );
+            let url_band_rect = rows[6];
+            let url_input_area = input_band(frame, url_band_rect, editing_base_url);
             let default_url = app
-                .active_provider_default_base_url(provider_id)
+                .active_provider_default_base_url(&provider_id)
                 .unwrap_or_else(|| "provider default".to_string());
             let url_display = if base_url.is_empty() {
                 format!("({default_url})")
             } else {
                 base_url.clone()
             };
-
-            let key_label_style = if !editing_base_url {
-                Style::default()
-                    .fg(theme::p().interactive)
-                    .add_modifier(Modifier::BOLD)
+            let url_val_style = if base_url.is_empty() {
+                Style::default().fg(theme::p().faint)
             } else {
-                Style::default().fg(theme::p().muted)
+                Style::default().fg(theme::p().text)
             };
-            let url_label_style = if *editing_base_url {
-                Style::default()
-                    .fg(theme::p().interactive)
-                    .add_modifier(Modifier::BOLD)
+            frame.render_widget(
+                Paragraph::new(Span::styled(url_display, url_val_style)),
+                url_input_area,
+            );
+            app.modal_hit_zones.push(ModalHitZone {
+                rect: url_band_rect,
+                kind: ModalHitKind::ApiKeyField(true),
+            });
+
+            if key_focus {
+                place_input_cursor(frame, key_input_area, api_key.chars().count());
             } else {
-                Style::default().fg(theme::p().muted)
-            };
+                place_input_cursor(frame, url_input_area, base_url.chars().count());
+            }
 
-            let mut lines = vec![
-                Line::from(vec![
-                    Span::styled(
-                        "Status    ",
-                        Style::default()
-                            .fg(theme::p().muted)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(format!("[{badge}]"), Style::default().fg(badge_color)),
-                ]),
-                Line::default(),
-                Line::from(vec![
-                    Span::styled("API key   ", key_label_style),
-                    Span::styled(masked_key, Style::default().fg(theme::p().text)),
-                ]),
-                Line::from(vec![
-                    Span::styled("Base URL  ", url_label_style),
-                    Span::styled(url_display, Style::default().fg(theme::p().text)),
-                ]),
-                Line::default(),
-            ];
-
-            if let Some(err) = error {
-                lines.push(Line::from(Span::styled(
+            let info_line = if let Some(err) = error {
+                Line::from(Span::styled(
                     format!("Error: {err}"),
                     Style::default().fg(theme::p().error),
-                )));
+                ))
             } else {
-                lines.push(Line::from(Span::styled(
+                Line::from(Span::styled(
                     "Saved in ~/.local/share/meerai/auth.json (0600).",
                     Style::default().fg(theme::p().faint),
-                )));
-            }
-            lines.push(Line::from(Span::styled(
-                "Enter save · Tab switch field · Ctrl-d delete key · Esc back",
-                Style::default().fg(theme::p().faint),
-            )));
-
-            frame.render_widget(Paragraph::new(lines), inner);
+                ))
+            };
+            frame.render_widget(Paragraph::new(info_line), rows[8]);
+            frame.render_widget(
+                Paragraph::new(key_hints_line(&[
+                    ("Enter", "save"),
+                    ("Tab", "switch field"),
+                    ("Ctrl-d", "delete key"),
+                    ("Esc", "back"),
+                ])),
+                rows[9],
+            );
         }
         ActiveModal::ModelInput {
             input,
             selected_recent,
             error,
         } => {
-            let active_provider = &app.tab().active_provider;
-            let active_model = &app.tab().model;
+            let active_provider = app.tab().active_provider.clone();
+            let active_model = app.tab().model.clone();
             let recent = app.recent_models_for_active_provider();
             let height = if recent.is_empty() {
-                9
+                12
             } else {
-                (8 + recent.len().min(8)) as u16
+                (12 + recent.len().min(8)) as u16
             };
-            let popup = centered_rect_fixed(area, 60, height);
+            let popup = centered_rect_fixed(area, 64, height);
+            dim_backdrop(frame, area, popup);
             let title = format!("Set Model [{active_provider}] (/model)");
-            let inner = dialog_frame(frame, popup, &title);
+            let inner = dialog_frame(frame, app, popup, &title, true);
 
             let rows = Layout::vertical([
-                Constraint::Length(2),
-                Constraint::Min(1),
-                Constraint::Length(2),
+                Constraint::Length(1), // input
+                Constraint::Length(1), // gap
+                Constraint::Length(1), // section label
+                Constraint::Min(1),    // list
+                Constraint::Length(1), // gap
+                Constraint::Length(1), // status
+                Constraint::Length(1), // footer
             ])
             .split(inner);
 
             let placeholder = app
-                .current_or_default_model(active_provider)
+                .current_or_default_model(&active_provider)
                 .map(|m| format!("(Enter keeps '{m}', or type model name)"))
                 .unwrap_or_else(|| "(type model name, e.g. gpt-4o)".to_string());
             let input_display = if input.is_empty() {
                 Span::styled(placeholder, Style::default().fg(theme::p().faint))
             } else {
-                Span::styled(
-                    input.as_str().to_string(),
-                    Style::default().fg(theme::p().text),
-                )
+                Span::styled(input.clone(), Style::default().fg(theme::p().text))
             };
-            let input_lines = vec![Line::from(vec![
-                Span::styled(
-                    "Model  ",
-                    Style::default()
-                        .fg(theme::p().interactive)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                input_display,
-            ])];
-            let input_area = input_band(
-                frame,
-                Rect {
-                    height: 1,
-                    ..rows[0]
-                },
+            let input_area = input_band(frame, rows[0], true);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        "Model  ",
+                        Style::default()
+                            .fg(theme::p().interactive)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    input_display,
+                ])),
+                input_area,
             );
-            frame.render_widget(Paragraph::new(input_lines), input_area);
+            place_input_cursor(frame, input_area, 7 + input.chars().count());
 
             if recent.is_empty() {
                 frame.render_widget(
@@ -225,17 +307,35 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                         "No recent models saved for this provider.",
                         Style::default().fg(theme::p().faint),
                     ))),
-                    rows[1],
+                    rows[3],
                 );
             } else {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "RECENT MODELS",
+                        Style::default()
+                            .fg(theme::p().faint)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    rows[2],
+                );
                 let list_items: Vec<ListItem<'_>> = recent
                     .iter()
-                    .map(|m| {
-                        let active_mark = if m == active_model { "*" } else { " " };
-                        ListItem::new(Line::from(vec![
+                    .enumerate()
+                    .map(|(idx, m)| {
+                        let is_active = m == &active_model;
+                        let is_selected = selected_recent == Some(idx);
+                        let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(idx));
+                        let active_mark = if is_active { "● " } else { "  " };
+                        let row = ListItem::new(Line::from(vec![
+                            Span::raw(" "),
                             Span::styled(
-                                format!("{active_mark} "),
-                                Style::default().fg(theme::p().faint),
+                                active_mark,
+                                Style::default().fg(if is_active {
+                                    theme::p().accent
+                                } else {
+                                    theme::p().faint
+                                }),
                             ),
                             Span::styled(
                                 m.clone(),
@@ -243,15 +343,21 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                                     .fg(theme::p().text)
                                     .add_modifier(Modifier::BOLD),
                             ),
-                        ]))
+                        ]));
+                        if is_hovered && !is_selected {
+                            row.style(hover_row_style())
+                        } else {
+                            row
+                        }
                     })
                     .collect();
                 let mut state = ListState::default();
                 if let Some(idx) = selected_recent {
-                    state.select(Some((*idx).min(recent.len() - 1)));
+                    state.select(Some(idx.min(recent.len() - 1)));
                 }
                 let list = List::new(list_items).highlight_style(selection_style());
-                frame.render_stateful_widget(list, rows[1], &mut state);
+                frame.render_stateful_widget(list, rows[3], &mut state);
+                register_list_hit_zones(app, rows[3], state.offset(), recent.len());
             }
 
             let status_line = if let Some(err) = error {
@@ -265,21 +371,24 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                     Style::default().fg(theme::p().faint),
                 ))
             };
-            let footer_lines = vec![
-                status_line,
-                Line::from(Span::styled(
-                    "Enter apply · Up/Down recent · Ctrl-u clear · Esc close",
-                    Style::default().fg(theme::p().faint),
-                )),
-            ];
-            frame.render_widget(Paragraph::new(footer_lines), rows[2]);
+            frame.render_widget(Paragraph::new(status_line), rows[5]);
+            frame.render_widget(
+                Paragraph::new(key_hints_line(&[
+                    ("Enter", "apply"),
+                    ("↑↓", "recent"),
+                    ("Ctrl-u", "clear"),
+                    ("Esc", "close"),
+                ])),
+                rows[6],
+            );
         }
         ActiveModal::DiffView {
             file_index,
             diff,
             scroll,
         } => {
-            let popup = centered_rect(area, 92, 84, 60, 12);
+            let popup = centered_rect(area, 92, 86, 60, 12);
+            dim_backdrop(frame, area, popup);
             let file_pos = if app.file_changes.is_empty() {
                 String::new()
             } else {
@@ -289,9 +398,14 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                 "Diff: {} ({}) +{} -{}{file_pos}",
                 diff.path, diff.status, diff.additions, diff.deletions
             );
-            let inner = dialog_frame(frame, popup, &title);
+            let inner = dialog_frame(frame, app, popup, &title, true);
 
-            let rows = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(inner);
+            let rows = Layout::vertical([
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
             let panes = Layout::horizontal([
                 Constraint::Percentage(50),
                 Constraint::Length(1),
@@ -299,15 +413,15 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
             ])
             .split(rows[0]);
 
-            let left_header = pane_header(frame, panes[0], &format!("Original (a/{})", diff.path));
-            let right_header =
+            let left_body = pane_header(frame, panes[0], &format!("Original (a/{})", diff.path));
+            let right_body =
                 pane_header(frame, panes[2], &format!("Working Tree (b/{})", diff.path));
 
-            let left_inner_w = left_header.width as usize;
-            let right_inner_w = right_header.width as usize;
-            let view_h = left_header.height.max(1) as usize;
+            let left_inner_w = left_body.width as usize;
+            let right_inner_w = right_body.width as usize;
+            let view_h = left_body.height.max(1) as usize;
             let max_scroll = diff.rows.len().saturating_sub(view_h);
-            let effective_scroll = (*scroll).min(max_scroll);
+            let effective_scroll = scroll.min(max_scroll);
 
             let mut left_lines = Vec::with_capacity(view_h);
             let mut right_lines = Vec::with_capacity(view_h);
@@ -326,14 +440,17 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                 ));
             }
 
-            frame.render_widget(Paragraph::new(left_lines), left_header);
-            frame.render_widget(Paragraph::new(right_lines), right_header);
+            frame.render_widget(Paragraph::new(left_lines), left_body);
+            frame.render_widget(Paragraph::new(right_lines), right_body);
             frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "j/k scroll · Ctrl-d/u page · g/G top/bot · Tab/[/] next/prev file · Esc/q close",
-                    Style::default().fg(theme::p().faint),
-                ))),
-                rows[1],
+                Paragraph::new(key_hints_line(&[
+                    ("j/k", "scroll"),
+                    ("Ctrl-d/u", "page"),
+                    ("g/G", "top/bot"),
+                    ("Tab/[/]", "next/prev file"),
+                    ("Esc/q", "close"),
+                ])),
+                rows[2],
             );
         }
         ActiveModal::Search {
@@ -344,34 +461,37 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
             preview,
             ..
         } => {
-            let popup = centered_rect(area, 90, 82, 60, 14);
+            let popup = centered_rect(area, 90, 84, 60, 14);
+            dim_backdrop(frame, area, popup);
             let title = format!(
                 "Search [{}] ({} matches) (/search)",
                 mode.label(),
                 results.len()
             );
-            let inner = dialog_frame(frame, popup, &title);
+            let inner = dialog_frame(frame, app, popup, &title, true);
 
             let layout = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Min(5),
-                Constraint::Length(1),
+                Constraint::Length(1), // query band
+                Constraint::Length(1), // gap
+                Constraint::Min(5),    // panes
+                Constraint::Length(1), // gap
+                Constraint::Length(1), // footer
             ])
             .split(inner);
 
-            let mode_color = match mode {
-                SearchMode::Files => theme::p().muted,
-                SearchMode::Content => theme::p().muted,
-            };
             let placeholder = match mode {
                 SearchMode::Files => "(type to fuzzy-match file paths)",
                 SearchMode::Content => "(type query to search content with ripgrep)",
             };
-            let query_inner = input_band(frame, layout[0]);
+            let query_inner = input_band(frame, layout[0], true);
+            let mode_badge = format!("[{}]", mode.label());
+            let mode_badge_w = mode_badge.chars().count() as u16;
             let input_box = Paragraph::new(Line::from(vec![
                 Span::styled(
-                    format!("[{}] ", mode.label()),
-                    Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                    format!("{mode_badge} "),
+                    Style::default()
+                        .fg(theme::p().interactive)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 if query.is_empty() {
                     Span::styled(placeholder, Style::default().fg(theme::p().faint))
@@ -380,27 +500,36 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                 },
             ]));
             frame.render_widget(input_box, query_inner);
-            if query_inner.width > 0 && query_inner.height > 0 {
-                let prefix_chars = mode.label().chars().count() + 3;
-                let query_chars = query.chars().count();
-                let cursor_x = (query_inner.x + (prefix_chars + query_chars) as u16)
-                    .min(query_inner.x + query_inner.width.saturating_sub(1));
-                frame.set_cursor_position(Position::new(cursor_x, query_inner.y));
-            }
+            app.modal_hit_zones.push(ModalHitZone {
+                rect: Rect::new(query_inner.x, query_inner.y, mode_badge_w, 1),
+                kind: ModalHitKind::SearchModeToggle,
+            });
+            place_input_cursor(
+                frame,
+                query_inner,
+                mode.label().chars().count() + 3 + query.chars().count(),
+            );
 
             let panes = Layout::horizontal([
                 Constraint::Percentage(45),
                 Constraint::Length(1),
                 Constraint::Percentage(55),
             ])
-            .split(layout[1]);
+            .split(layout[2]);
 
             let results_inner = pane_header(frame, panes[0], "Results");
             let results_inner_w = results_inner.width as usize;
+            let selected_idx = if results.is_empty() {
+                0
+            } else {
+                selected.min(results.len() - 1)
+            };
 
             let list_items: Vec<ListItem<'_>> = results
                 .iter()
-                .map(|m| {
+                .enumerate()
+                .map(|(idx, m)| {
+                    let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(idx));
                     let text = match m.line {
                         Some(ln) => {
                             let col = m.column.unwrap_or(1);
@@ -408,16 +537,25 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                         }
                         None => m.path.clone(),
                     };
-                    ListItem::new(Line::from(truncate_single_line(&text, results_inner_w)))
+                    let row = ListItem::new(Line::from(format!(
+                        " {}",
+                        truncate_single_line(&text, results_inner_w.saturating_sub(2))
+                    )));
+                    if is_hovered && idx != selected_idx {
+                        row.style(hover_row_style())
+                    } else {
+                        row
+                    }
                 })
                 .collect();
 
             let mut list_state = ListState::default();
             if !results.is_empty() {
-                list_state.select(Some((*selected).min(results.len() - 1)));
+                list_state.select(Some(selected_idx));
             }
             let list = List::new(list_items).highlight_style(selection_style());
             frame.render_stateful_widget(list, results_inner, &mut list_state);
+            register_list_hit_zones(app, results_inner, list_state.offset(), results.len());
 
             let preview_title = preview
                 .as_ref()
@@ -436,7 +574,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                         .skip(scroll)
                         .take(preview_h)
                         .map(|(ln, text, highlighted)| {
-                            let gutter = format!("{ln:>4} │ ");
+                            let gutter = format!("{ln:>4}  ");
                             let body = truncate_single_line(
                                 text,
                                 preview_w.saturating_sub(gutter.chars().count()),
@@ -476,19 +614,23 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
             frame.render_widget(Paragraph::new(preview_lines), preview_inner);
 
             frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "Tab Files/Content · Up/Down select · PgUp/PgDn scroll preview · Enter insert @file · Esc close",
-                    Style::default().fg(theme::p().faint),
-                ))),
-                layout[2],
+                Paragraph::new(key_hints_line(&[
+                    ("Tab", "Files/Content"),
+                    ("↑↓", "select"),
+                    ("PgUp/PgDn", "scroll preview"),
+                    ("Enter", "insert @file"),
+                    ("Esc", "close"),
+                ])),
+                layout[4],
             );
         }
         ActiveModal::UserMessageActions {
             entry_idx,
             selected,
         } => {
-            let popup = centered_rect_fixed(area, 40, 8);
-            let inner = dialog_frame(frame, popup, "Message");
+            let popup = centered_rect_fixed(area, 44, 10);
+            dim_backdrop(frame, area, popup);
+            let inner = dialog_frame(frame, app, popup, "Message", true);
 
             let rows = Layout::vertical([
                 Constraint::Length(3),
@@ -502,46 +644,56 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                 (UserAction::Copy, "Copy", "c"),
                 (UserAction::Fork, "Fork", "f"),
             ];
+            let width = rows[0].width as usize;
+            let selected_idx = selected.min(2);
             let list_items: Vec<ListItem<'_>> = items
                 .iter()
-                .map(|(_, label, key)| {
-                    ListItem::new(Line::from(vec![
-                        Span::styled(format!(" {label}"), Style::default().fg(theme::p().text)),
-                        Span::raw("  "),
-                        Span::styled(*key, Style::default().fg(theme::p().faint)),
-                    ]))
+                .enumerate()
+                .map(|(idx, (_, label, key))| {
+                    let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(idx));
+                    let left = format!(" {label}");
+                    let gap = width
+                        .saturating_sub(left.chars().count() + key.len() + 1)
+                        .max(2);
+                    let row = ListItem::new(Line::from(vec![
+                        Span::styled(left, Style::default().fg(theme::p().text)),
+                        Span::raw(" ".repeat(gap)),
+                        Span::styled(*key, Style::default().fg(theme::p().muted)),
+                    ]));
+                    if is_hovered && idx != selected_idx {
+                        row.style(hover_row_style())
+                    } else {
+                        row
+                    }
                 })
                 .collect();
             let mut state = ListState::default();
-            state.select(Some((*selected).min(2)));
+            state.select(Some(selected_idx));
             let list = List::new(list_items).highlight_style(selection_style());
             frame.render_stateful_widget(list, rows[0], &mut state);
+            register_list_hit_zones(app, rows[0], state.offset(), items.len());
             let _ = entry_idx;
 
             frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "Enter run · Esc close",
-                    Style::default().fg(theme::p().faint),
-                ))),
+                Paragraph::new(key_hints_line(&[("Enter", "run"), ("Esc", "close")])),
                 rows[2],
             );
         }
         ActiveModal::CommandPalette { filter, selected } => {
-            let popup = centered_rect(area, 50, 62, 46, 12);
-            let popup = Rect {
-                x: popup.x + popup.width.saturating_sub(58) / 2,
-                width: popup.width.min(58),
-                ..popup
-            };
-            let inner = dialog_frame(frame, popup, "Commands (Ctrl-p)");
+            let popup = cap_width(centered_rect(area, 54, 66, 48, 14), 62);
+            dim_backdrop(frame, area, popup);
+            let inner = dialog_frame(frame, app, popup, "Commands (Ctrl-p)", true);
 
             let rows = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Min(3),
-                Constraint::Length(1),
+                Constraint::Length(1), // filter
+                Constraint::Length(1), // gap
+                Constraint::Min(3),    // list
+                Constraint::Length(1), // gap
+                Constraint::Length(1), // footer
             ])
             .split(inner);
 
+            let filter_area = input_band(frame, rows[0], true);
             let filter_line = Line::from(vec![
                 Span::styled(
                     "> ",
@@ -555,16 +707,26 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                     Span::styled(filter.clone(), Style::default().fg(theme::p().text))
                 },
             ]);
-            let filter_area = input_band(frame, rows[0]);
             frame.render_widget(Paragraph::new(filter_line), filter_area);
+            place_input_cursor(frame, filter_area, 2 + filter.chars().count());
 
-            let commands = crate::app::filtered_commands(filter);
-            let width = rows[1].width as usize;
+            let commands = crate::app::filtered_commands(&filter);
+            let width = rows[2].width as usize;
+            let selected_idx = if commands.is_empty() {
+                0
+            } else {
+                selected.min(commands.len() - 1)
+            };
             let mut items: Vec<ListItem<'_>> = Vec::new();
             let mut command_rows: Vec<usize> = Vec::new();
+            let mut visual_to_command: Vec<Option<usize>> = Vec::new();
             let mut section = "";
-            for command in &commands {
+            for (cmd_idx, command) in commands.iter().enumerate() {
                 if command.section != section {
+                    if !section.is_empty() {
+                        items.push(ListItem::new(Line::default()));
+                        visual_to_command.push(None);
+                    }
                     section = command.section;
                     items.push(ListItem::new(Line::from(Span::styled(
                         format!(" {} ", section.to_uppercase()),
@@ -572,8 +734,11 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                             .fg(theme::p().faint)
                             .add_modifier(Modifier::BOLD),
                     ))));
+                    visual_to_command.push(None);
                 }
                 command_rows.push(items.len());
+                visual_to_command.push(Some(cmd_idx));
+                let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(cmd_idx));
                 let label = format!(" {}", command.label);
                 let label_len = label.chars().count();
                 let hint_len = command.hint.chars().count();
@@ -583,74 +748,113 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                 } else {
                     Style::default().fg(theme::p().muted)
                 };
-                items.push(ListItem::new(Line::from(vec![
+                let row = ListItem::new(Line::from(vec![
                     Span::styled(label, Style::default().fg(theme::p().text)),
                     Span::raw(" ".repeat(gap)),
                     Span::styled(command.hint, hint_style),
-                ])));
+                ]));
+                items.push(if is_hovered && cmd_idx != selected_idx {
+                    row.style(hover_row_style())
+                } else {
+                    row
+                });
             }
 
             let mut state = ListState::default();
             if !commands.is_empty() {
-                let idx = (*selected).min(commands.len() - 1);
-                state.select(Some(command_rows[idx]));
+                state.select(Some(command_rows[selected_idx]));
             }
             let list = List::new(items).highlight_style(selection_style());
-            frame.render_stateful_widget(list, rows[1], &mut state);
+            frame.render_stateful_widget(list, rows[2], &mut state);
+
+            let offset = state.offset();
+            for row_offset in 0..rows[2].height as usize {
+                let visual_idx = offset + row_offset;
+                if let Some(Some(cmd_idx)) = visual_to_command.get(visual_idx) {
+                    app.modal_hit_zones.push(ModalHitZone {
+                        rect: Rect::new(rows[2].x, rows[2].y + row_offset as u16, rows[2].width, 1),
+                        kind: ModalHitKind::ListItem(*cmd_idx),
+                    });
+                }
+            }
 
             let footer = if commands.is_empty() {
-                "No matches · Esc close"
+                key_hints_line(&[("No matches", ""), ("Esc", "close")])
             } else {
-                "Enter run · ↑↓ move · Esc close"
+                key_hints_line(&[("Enter", "run"), ("↑↓", "move"), ("Esc", "close")])
             };
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    footer,
-                    Style::default().fg(theme::p().faint),
-                ))),
-                rows[2],
-            );
+            frame.render_widget(Paragraph::new(footer), rows[4]);
         }
         ActiveModal::RewindMenu { selected, .. } => {
-            let popup = cap_width(centered_rect(area, 60, 50, 40, 9), 60);
-            let inner = dialog_frame(frame, popup, "Rewind");
-            let options = ["Rewind code + conversation", "Rewind code only"];
-            let mut lines = vec![Line::from(Span::styled(
-                "Choose what to restore from the last turn:",
-                Style::default().fg(theme::p().muted),
-            ))];
-            for (index, option) in options.iter().enumerate() {
-                let style = if index == *selected {
-                    Style::default()
-                        .fg(theme::p().interactive)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme::p().text)
-                };
-                let prefix = if index == *selected { "> " } else { "  " };
-                lines.push(Line::from(Span::styled(
-                    format!("{prefix}{}. {option}", index + 1),
-                    style,
-                )));
-            }
-            lines.push(Line::from(Span::styled(
-                "Up/Down move · Enter apply · Esc cancel",
-                Style::default().fg(theme::p().faint),
-            )));
-            for (offset, line) in lines.into_iter().enumerate() {
-                if offset as u16 >= inner.height {
-                    break;
-                }
-                frame.render_widget(
-                    Paragraph::new(line),
-                    Rect {
-                        x: inner.x,
-                        y: inner.y + offset as u16,
-                        width: inner.width,
-                        height: 1,
-                    },
-                );
-            }
+            let popup = cap_width(centered_rect(area, 60, 48, 44, 11), 60);
+            dim_backdrop(frame, area, popup);
+            let inner = dialog_frame(frame, app, popup, "Rewind", true);
+
+            let rows = Layout::vertical([
+                Constraint::Length(1), // intro
+                Constraint::Length(1), // gap
+                Constraint::Min(2),    // options
+                Constraint::Length(1), // gap
+                Constraint::Length(1), // footer
+            ])
+            .split(inner);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "Choose what to restore from the last turn:",
+                    Style::default().fg(theme::p().muted),
+                )),
+                rows[0],
+            );
+
+            let options = [
+                (
+                    "1. Rewind code + conversation",
+                    "restore files & shadow turn",
+                ),
+                ("2. Rewind code only", "restore files, keep chat"),
+            ];
+            let selected_idx = selected.min(1);
+            let list_items: Vec<ListItem<'_>> = options
+                .iter()
+                .enumerate()
+                .map(|(idx, (label, desc))| {
+                    let is_selected = idx == selected_idx;
+                    let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(idx));
+                    let prefix = if is_selected { "▸ " } else { "  " };
+                    let row = ListItem::new(Line::from(vec![
+                        Span::styled(
+                            prefix,
+                            Style::default().fg(if is_selected {
+                                theme::p().interactive
+                            } else {
+                                theme::p().faint
+                            }),
+                        ),
+                        Span::styled(*label, Style::default().fg(theme::p().text)),
+                        Span::styled(format!("  — {desc}"), Style::default().fg(theme::p().faint)),
+                    ]));
+                    if is_hovered && !is_selected {
+                        row.style(hover_row_style())
+                    } else {
+                        row
+                    }
+                })
+                .collect();
+            let mut state = ListState::default();
+            state.select(Some(selected_idx));
+            let list = List::new(list_items).highlight_style(selection_style());
+            frame.render_stateful_widget(list, rows[2], &mut state);
+            register_list_hit_zones(app, rows[2], state.offset(), options.len());
+
+            frame.render_widget(
+                Paragraph::new(key_hints_line(&[
+                    ("↑↓", "move"),
+                    ("Enter", "apply"),
+                    ("Esc", "cancel"),
+                ])),
+                rows[4],
+            );
         }
         ActiveModal::Question {
             request,
@@ -658,7 +862,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
             current,
             focus,
         } => {
-            let prompt = &request.questions[*current];
+            let prompt = &request.questions[current];
             let title = if request.questions.len() > 1 {
                 format!(
                     "Question {}/{} — {}",
@@ -669,66 +873,120 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
             } else {
                 format!("Question — {}", prompt.header)
             };
-            let popup = cap_width(centered_rect(area, 70, 70, 44, 10), 72);
-            let inner = dialog_frame(frame, popup, &title);
-            let mut lines = vec![
-                Line::from(Span::styled(
-                    prompt.question.clone(),
-                    Style::default()
-                        .fg(theme::p().text)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-            ];
+            let popup = cap_width(centered_rect(area, 72, 72, 48, 12), 76);
+            dim_backdrop(frame, area, popup);
+            let inner = dialog_frame(frame, app, popup, &title, false);
+
+            let q_width = inner.width.max(1) as usize;
+            let wrapped_q_lines = wrap_count(&prompt.question, q_width).clamp(1, 4) as u16;
+            let rows = Layout::vertical([
+                Constraint::Length(wrapped_q_lines),
+                Constraint::Length(1),
+                Constraint::Min(2),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+
+            frame.render_widget(
+                Paragraph::new(prompt.question.clone())
+                    .style(
+                        Style::default()
+                            .fg(theme::p().text)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .wrap(Wrap { trim: false }),
+                rows[0],
+            );
+
+            let mut y = rows[2].y;
+            let max_y = rows[2].y + rows[2].height;
             for (index, option) in prompt.options.iter().enumerate() {
-                let selected = answers[*current].contains(&index);
-                let marker = if selected { "[x]" } else { "[ ]" };
-                let prefix = if index == *focus {
-                    format!(">{marker} ")
-                } else {
-                    format!(" {marker} ")
-                };
-                let style = if index == *focus {
-                    Style::default()
-                        .fg(theme::p().interactive)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme::p().text)
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, style),
-                    Span::styled(format!("{}. {}", index + 1, option.label), style),
-                ]));
-                if let Some(description) = &option.description {
-                    lines.push(Line::from(Span::styled(
-                        format!("      {description}"),
-                        Style::default().fg(theme::p().muted),
-                    )));
-                }
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                if prompt.multiple {
-                    "Up/Down move · Space toggle · Tab next · Enter submit · Esc cancel"
-                } else {
-                    "Up/Down move · Space select · Tab next · Enter submit · Esc cancel"
-                },
-                Style::default().fg(theme::p().faint),
-            )));
-            for (offset, line) in lines.into_iter().enumerate() {
-                if offset as u16 >= inner.height {
+                if y >= max_y {
                     break;
                 }
+                let is_selected = answers[current].contains(&index);
+                let is_focused = index == focus;
+                let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(index));
+                let marker = if is_selected { "[x]" } else { "[ ]" };
+                let row_bg = if is_focused || is_hovered {
+                    theme::p().surface_high
+                } else {
+                    theme::p().surface
+                };
+                let prefix = if is_focused { "▸ " } else { "  " };
+                let label_style = if is_focused {
+                    Style::default()
+                        .fg(theme::p().interactive)
+                        .bg(row_bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme::p().text).bg(row_bg)
+                };
+                let marker_style = Style::default()
+                    .fg(if is_selected {
+                        theme::p().accent
+                    } else if is_focused {
+                        theme::p().interactive
+                    } else {
+                        theme::p().muted
+                    })
+                    .bg(row_bg)
+                    .add_modifier(Modifier::BOLD);
+
+                let option_rect = Rect::new(rows[2].x, y, rows[2].width, 1);
+                if is_focused || is_hovered {
+                    frame.render_widget(
+                        Block::default().style(Style::default().bg(row_bg)),
+                        option_rect,
+                    );
+                }
                 frame.render_widget(
-                    Paragraph::new(line),
-                    Rect {
-                        x: inner.x,
-                        y: inner.y + offset as u16,
-                        width: inner.width,
-                        height: 1,
-                    },
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(prefix, label_style),
+                        Span::styled(format!("{marker} "), marker_style),
+                        Span::styled(format!("{}. {}", index + 1, option.label), label_style),
+                    ])),
+                    option_rect,
                 );
+                app.modal_hit_zones.push(ModalHitZone {
+                    rect: option_rect,
+                    kind: ModalHitKind::ListItem(index),
+                });
+                y += 1;
+
+                if let Some(description) = &option.description
+                    && y < max_y
+                {
+                    let desc_rect = Rect::new(rows[2].x, y, rows[2].width, 1);
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            format!(
+                                "      {}",
+                                truncate_single_line(
+                                    description,
+                                    (rows[2].width as usize).saturating_sub(6)
+                                )
+                            ),
+                            Style::default().fg(theme::p().muted),
+                        )),
+                        desc_rect,
+                    );
+                    y += 1;
+                }
             }
+
+            let action_label = if prompt.multiple { "toggle" } else { "select" };
+            frame.render_widget(
+                Paragraph::new(key_hints_line(&[
+                    ("↑↓", "move"),
+                    ("Space", action_label),
+                    ("Tab", "next"),
+                    ("Enter", "submit"),
+                    ("Esc", "cancel"),
+                ])),
+                rows[4],
+            );
         }
         ActiveModal::Approval {
             queue,
@@ -738,7 +996,8 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
             let Some(request) = queue.first() else {
                 return;
             };
-            let popup = cap_width(centered_rect(area, 64, 46, 46, 12), 72);
+            let popup = cap_width(centered_rect(area, 68, 54, 52, 14), 76);
+            dim_backdrop(frame, area, popup);
             let title = if queue.len() > 1 {
                 format!("Approval required ({})", queue.len())
             } else {
@@ -746,17 +1005,21 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
             };
             let inner = dialog_frame_styled(
                 frame,
+                app,
                 popup,
                 &title,
                 Style::default()
                     .fg(theme::p().error)
                     .add_modifier(Modifier::BOLD),
+                false,
             );
 
             let rows = Layout::vertical([
-                Constraint::Length(2),
-                Constraint::Min(3),
-                Constraint::Length(3),
+                Constraint::Length(2), // header
+                Constraint::Length(1), // gap
+                Constraint::Min(3),    // preview card
+                Constraint::Length(1), // gap
+                Constraint::Length(2), // footer / reason
             ])
             .split(inner);
 
@@ -772,6 +1035,11 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                 Some(EffectClass::External) => " · effect: external",
                 None => "",
             };
+            let effect_color = match request.effect {
+                Some(EffectClass::Write) => theme::p().warning,
+                Some(EffectClass::Execute) | Some(EffectClass::External) => theme::p().error,
+                Some(EffectClass::Read) | None => theme::p().muted,
+            };
             let header = vec![
                 Line::from(Span::styled(
                     request.preview.title.clone(),
@@ -781,11 +1049,21 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                 )),
                 Line::from(Span::styled(
                     format!("kind: {kind}{effect}"),
-                    Style::default().fg(theme::p().faint),
+                    Style::default().fg(effect_color),
                 )),
             ];
             frame.render_widget(Paragraph::new(header), rows[0]);
 
+            frame.render_widget(
+                Block::default().style(Style::default().bg(theme::p().background)),
+                rows[2],
+            );
+            let detail_inner = Rect {
+                x: rows[2].x.saturating_add(1),
+                y: rows[2].y,
+                width: rows[2].width.saturating_sub(2),
+                height: rows[2].height,
+            };
             let detail = if request.preview.detail.is_empty() {
                 vec![Line::from(Span::styled(
                     "(no details)",
@@ -803,34 +1081,88 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                 Paragraph::new(detail)
                     .style(Style::default().fg(theme::p().text))
                     .wrap(Wrap { trim: false }),
-                rows[1],
+                detail_inner,
             );
 
-            let footer = if *editing_reason {
-                vec![
-                    Line::from(vec![
-                        Span::styled("Reason  ", Style::default().fg(theme::p().warning)),
+            if editing_reason {
+                let reason_area = input_band(
+                    frame,
+                    Rect::new(rows[4].x, rows[4].y, rows[4].width, 1),
+                    true,
+                );
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
                         Span::styled(
-                            reason.as_str().to_string(),
-                            Style::default().fg(theme::p().text),
+                            "Reason  ",
+                            Style::default()
+                                .fg(theme::p().warning)
+                                .add_modifier(Modifier::BOLD),
                         ),
+                        Span::styled(reason.clone(), Style::default().fg(theme::p().text)),
                         Span::styled("█", Style::default().fg(theme::p().warning)),
-                    ]),
-                    Line::from(Span::styled(
+                    ])),
+                    reason_area,
+                );
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
                         "Enter:send decline reason  Esc:back",
                         Style::default().fg(theme::p().faint),
-                    )),
-                ]
+                    ))),
+                    Rect::new(rows[4].x, rows[4].y + 1, rows[4].width, 1),
+                );
             } else {
-                vec![
-                    Line::from(Span::styled(
-                        "y accept · t turn · a session · n deny · r reason · esc cancel",
-                        Style::default().fg(theme::p().faint),
-                    )),
-                    Line::default(),
-                ]
-            };
-            frame.render_widget(Paragraph::new(footer), rows[2]);
+                let actions = [
+                    ("y accept", ApprovalClickAction::Accept, theme::p().success),
+                    (
+                        "t turn",
+                        ApprovalClickAction::AcceptTurn,
+                        theme::p().interactive,
+                    ),
+                    (
+                        "a session",
+                        ApprovalClickAction::AcceptSession,
+                        theme::p().info,
+                    ),
+                    ("n deny", ApprovalClickAction::Decline, theme::p().warning),
+                    (
+                        "r reason",
+                        ApprovalClickAction::DeclineReason,
+                        theme::p().muted,
+                    ),
+                    ("esc cancel", ApprovalClickAction::Cancel, theme::p().error),
+                ];
+                let mut spans = Vec::new();
+                let mut col = rows[4].x;
+                for (idx, (label, action, color)) in actions.iter().enumerate() {
+                    if idx > 0 {
+                        spans.push(Span::styled(" · ", Style::default().fg(theme::p().faint)));
+                        col = col.saturating_add(3);
+                    }
+                    let w = label.chars().count() as u16;
+                    let hovered =
+                        app.hovered_modal_hit == Some(ModalHitKind::ApprovalAction(*action));
+                    let style = if hovered {
+                        Style::default()
+                            .fg(theme::p().text)
+                            .bg(theme::p().surface_high)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(*color).add_modifier(Modifier::BOLD)
+                    };
+                    if col + w <= rows[4].x + rows[4].width {
+                        app.modal_hit_zones.push(ModalHitZone {
+                            rect: Rect::new(col, rows[4].y, w, 1),
+                            kind: ModalHitKind::ApprovalAction(*action),
+                        });
+                    }
+                    spans.push(Span::styled(*label, style));
+                    col = col.saturating_add(w);
+                }
+                frame.render_widget(
+                    Paragraph::new(Line::from(spans)),
+                    Rect::new(rows[4].x, rows[4].y, rows[4].width, 1),
+                );
+            }
         }
         ActiveModal::SessionSelect {
             filter,
@@ -839,19 +1171,23 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
             loading,
             error,
         } => {
-            let popup = cap_width(centered_rect(area, 66, 72, 46, 12), 68);
-            let inner = dialog_frame(frame, popup, "Switch Session (/sessions)");
+            let popup = cap_width(centered_rect(area, 68, 74, 48, 13), 72);
+            dim_backdrop(frame, area, popup);
+            let inner = dialog_frame(frame, app, popup, "Switch Session (/sessions)", true);
 
             let rows = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Min(3),
-                Constraint::Length(1),
+                Constraint::Length(1), // filter
+                Constraint::Length(1), // gap
+                Constraint::Min(3),    // list
+                Constraint::Length(1), // gap
+                Constraint::Length(1), // footer
             ])
             .split(inner);
 
+            let filter_area = input_band(frame, rows[0], true);
             let filter_line = Line::from(vec![
                 Span::styled(
-                    "Filter ",
+                    "Filter  ",
                     Style::default()
                         .fg(theme::p().muted)
                         .add_modifier(Modifier::BOLD),
@@ -865,25 +1201,26 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                     Span::styled(filter.clone(), Style::default().fg(theme::p().text))
                 },
             ]);
-            let filter_area = input_band(frame, rows[0]);
             frame.render_widget(Paragraph::new(filter_line), filter_area);
+            place_input_cursor(frame, filter_area, 8 + filter.chars().count());
 
-            let filtered = app.filtered_sessions(sessions, filter);
-            if *loading && filtered.is_empty() {
+            let filtered = app.filtered_sessions(&sessions, &filter);
+            let selected_idx = selected.min(filtered.len().saturating_sub(1));
+            if loading && filtered.is_empty() {
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
                         "Loading sessions...",
                         Style::default().fg(theme::p().faint),
                     ))),
-                    rows[1],
+                    rows[2],
                 );
-            } else if let Some(err) = error {
+            } else if let Some(err) = &error {
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
                         format!("Failed to list sessions: {err}"),
                         Style::default().fg(theme::p().error),
                     ))),
-                    rows[1],
+                    rows[2],
                 );
             } else if filtered.is_empty() {
                 frame.render_widget(
@@ -891,27 +1228,32 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                         "No matching sessions.",
                         Style::default().fg(theme::p().faint),
                     ))),
-                    rows[1],
+                    rows[2],
                 );
             } else {
                 let now = now_millis();
-                let max_title = (inner.width as usize).saturating_sub(36).max(16);
+                let max_title = (inner.width as usize).saturating_sub(38).max(16);
                 let list_items: Vec<ListItem<'_>> = filtered
                     .iter()
-                    .map(|summary| {
+                    .enumerate()
+                    .map(|(idx, summary)| {
                         let open_idx = app.tab_index_for_session(&summary.id);
+                        let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(idx));
                         let (tab_badge, badge_style) = match open_idx {
-                            Some(idx) if idx == app.active_tab => (
-                                format!("[tab {}*] ", idx + 1),
+                            Some(tab_i) if tab_i == app.active_tab => (
+                                format!("[tab {}*] ", tab_i + 1),
                                 Style::default()
                                     .fg(theme::p().success)
                                     .add_modifier(Modifier::BOLD),
                             ),
-                            Some(idx) => (
-                                format!("[tab {}] ", idx + 1),
+                            Some(tab_i) => (
+                                format!("{:<9}", format!("[tab {}]", tab_i + 1)),
                                 Style::default().fg(theme::p().accent),
                             ),
-                            None => ("       ".to_string(), Style::default().fg(theme::p().faint)),
+                            None => (
+                                "         ".to_string(),
+                                Style::default().fg(theme::p().faint),
+                            ),
                         };
                         let raw_title = summary
                             .title
@@ -931,6 +1273,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                             Style::default().fg(theme::p().faint)
                         };
                         let mut item_spans = vec![
+                            Span::raw(" "),
                             Span::styled(tab_badge, badge_style),
                             Span::styled(title_text, title_style),
                             Span::styled(
@@ -952,41 +1295,84 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &AppState, area: R
                                 Style::default().fg(theme::p().faint),
                             ));
                         }
-                        ListItem::new(Line::from(item_spans))
+                        let row = ListItem::new(Line::from(item_spans));
+                        if is_hovered && idx != selected_idx {
+                            row.style(hover_row_style())
+                        } else {
+                            row
+                        }
                     })
                     .collect();
 
                 let mut state = ListState::default();
-                state.select(Some((*selected).min(filtered.len() - 1)));
+                state.select(Some(selected_idx));
                 let list = List::new(list_items).highlight_style(selection_style());
-                frame.render_stateful_widget(list, rows[1], &mut state);
+                frame.render_stateful_widget(list, rows[2], &mut state);
+                register_list_hit_zones(app, rows[2], state.offset(), filtered.len());
             }
 
-            let selected_id = filtered
-                .get((*selected).min(filtered.len().saturating_sub(1)))
-                .map(|summary| summary.id.clone());
+            let selected_id = filtered.get(selected_idx).map(|summary| summary.id.clone());
             let confirming = app.session_delete_confirm.is_some()
                 && app.session_delete_confirm.as_ref() == selected_id.as_ref();
-            let footer_text = if *loading {
-                "Refreshing... · Enter switch · Up/Down move · Esc close"
+            let footer_line = if loading {
+                key_hints_line(&[
+                    ("Refreshing...", ""),
+                    ("Enter", "switch"),
+                    ("↑↓", "move"),
+                    ("Esc", "close"),
+                ])
             } else if confirming {
-                "Press Ctrl-d again to delete · Esc cancel"
+                Line::from(Span::styled(
+                    "Press Ctrl-d again to delete · Esc cancel",
+                    Style::default()
+                        .fg(theme::p().error)
+                        .add_modifier(Modifier::BOLD),
+                ))
             } else {
-                "Enter switch · Ctrl-d delete · Up/Down move · Type filter · Esc close"
+                key_hints_line(&[
+                    ("Enter", "switch"),
+                    ("Ctrl-d", "delete"),
+                    ("↑↓", "move"),
+                    ("Type", "filter"),
+                    ("Esc", "close"),
+                ])
             };
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    footer_text,
-                    Style::default().fg(if confirming {
-                        theme::p().error
-                    } else {
-                        theme::p().faint
-                    }),
-                ))),
-                rows[2],
-            );
+            frame.render_widget(Paragraph::new(footer_line), rows[4]);
         }
     }
+}
+
+fn place_input_cursor(frame: &mut Frame<'_>, area: Rect, char_offset: usize) {
+    if area.width > 0 && area.height > 0 {
+        let cursor_x = (area.x + char_offset as u16).min(area.x + area.width.saturating_sub(1));
+        frame.set_cursor_position(Position::new(cursor_x, area.y));
+    }
+}
+
+fn register_list_hit_zones(app: &mut AppState, area: Rect, offset: usize, len: usize) {
+    for row in 0..area.height as usize {
+        let idx = offset + row;
+        if idx >= len {
+            break;
+        }
+        app.modal_hit_zones.push(ModalHitZone {
+            rect: Rect::new(area.x, area.y + row as u16, area.width, 1),
+            kind: ModalHitKind::ListItem(idx),
+        });
+    }
+}
+
+fn wrap_count(text: &str, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    text.split('\n')
+        .map(|line| {
+            let chars = line.chars().count();
+            chars.div_ceil(width).max(1)
+        })
+        .sum::<usize>()
+        .max(1)
 }
 
 fn format_relative_age(now_ms: u64, updated_ms: u64) -> String {
@@ -1018,7 +1404,10 @@ fn format_diff_pane_line(
     }
 
     let Some(cell) = cell else {
-        return Line::from(Span::styled("~", Style::default().fg(theme::p().faint)));
+        return Line::from(Span::styled(
+            "     · ",
+            Style::default().fg(theme::p().faint),
+        ));
     };
 
     let prefix = match (kind, is_left) {

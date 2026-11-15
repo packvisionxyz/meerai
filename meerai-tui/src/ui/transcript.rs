@@ -8,6 +8,7 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area:
         width: area.width.saturating_sub(4),
         height: area.height.saturating_sub(2),
     };
+    app.transcript_inner_area = inner;
 
     let raw_lines = build_transcript_lines(app);
     let mut wrapped = if inner.width > 0 {
@@ -23,7 +24,6 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area:
         }
     };
 
-    app.transcript_inner_area = inner;
     app.thinking_hit_zones = std::mem::take(&mut wrapped.hit_zones);
     app.transcript_wrapped_lines = std::mem::take(&mut wrapped.doc_lines);
 
@@ -60,7 +60,8 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area:
     let first_visible = scroll_y as usize;
     let last_visible = first_visible + inner.height as usize;
 
-    let mut paint = |bands: &[(usize, usize)], color: ratatui::style::Color| {
+    let paint = |frame: &mut Frame<'_>, bands: &[(usize, usize)], x_offset: u16, color: Color| {
+        let start_x = inner.x.saturating_add(x_offset).min(inner.x + inner.width);
         for &(start, end) in bands {
             if end <= first_visible || start >= last_visible {
                 continue;
@@ -70,7 +71,7 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area:
             let buf = frame.buffer_mut();
             for row in from..to {
                 let y = inner.y + (row - first_visible) as u16;
-                for col in inner.x..inner.x + inner.width {
+                for col in start_x..inner.x + inner.width {
                     if let Some(cell) = buf.cell_mut((col, y)) {
                         cell.set_bg(color);
                     }
@@ -79,36 +80,118 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area:
         }
     };
 
-    paint(&wrapped.code_bands, theme::p().surface_high);
-    paint(&wrapped.bands, theme::p().surface);
+    paint(frame, &wrapped.code_bands, 2, theme::p().surface_high);
+    paint(frame, &wrapped.bands, 0, theme::p().surface);
     if let Some(range) = hover_range {
-        paint(&[range], theme::p().surface_high);
+        paint(frame, &[range], 0, theme::p().surface_high);
     }
 }
+
+const LOGO_M_ROWS: [&str; 4] = ["██      ██", "████  ████", "██  ██  ██", "██      ██"];
 
 fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
     let key_status = app.active_key_status();
     let (badge, badge_color) = key_status_style(&key_status);
+    let logo_style = Style::default()
+        .fg(theme::p().accent)
+        .add_modifier(Modifier::BOLD);
 
-    vec![tagged_line(
-        Line::from(vec![
-            Span::styled(
-                "meerai",
+    let mut lines = vec![
+        tagged_line(
+            Line::from(vec![
+                Span::styled(LOGO_M_ROWS[0], logo_style),
+                Span::raw("  "),
+                Span::styled(
+                    "meerai",
+                    Style::default()
+                        .fg(theme::p().accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!("{} / {}", app.tab().active_provider, display_model(app)),
+                    Style::default().fg(theme::p().text),
+                ),
+                Span::raw(" "),
+                Span::styled(format!("[{badge}]"), Style::default().fg(badge_color)),
+            ]),
+            None,
+            0,
+        ),
+        tagged_line(
+            Line::from(vec![
+                Span::styled(LOGO_M_ROWS[1], logo_style),
+                Span::styled(
+                    "  Commands: /sessions, /new, /connect, /models, /help, @ (files).",
+                    Style::default().fg(theme::p().muted),
+                ),
+            ]),
+            None,
+            0,
+        ),
+        tagged_line(
+            Line::from(vec![
+                Span::styled(LOGO_M_ROWS[2], logo_style),
+                Span::styled(
+                    "  Shortcuts: Ctrl-j newline, Ctrl-t think, Drag/Shift+Click copy.",
+                    Style::default().fg(theme::p().muted),
+                ),
+            ]),
+            None,
+            0,
+        ),
+        tagged_line(
+            Line::from(vec![
+                Span::styled(LOGO_M_ROWS[3], logo_style),
+                Span::styled(
+                    format!("  Workspace: {}", app.workspace_root.display()),
+                    Style::default().fg(theme::p().faint),
+                ),
+            ]),
+            None,
+            0,
+        ),
+    ];
+
+    if app.tab().transcript.is_empty() {
+        let tip = |key: &str, desc: &str| {
+            banded_line(
+                Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled(
+                        format!("{key:<14}"),
+                        Style::default()
+                            .fg(theme::p().text)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(desc.to_string(), Style::default().fg(theme::p().muted)),
+                ]),
+                None,
+                0,
+            )
+        };
+        lines.push(tagged_line(Line::default(), None, 0));
+        lines.push(banded_line(Line::default(), None, 0));
+        lines.push(banded_line(
+            Line::from(Span::styled(
+                "  Quick start",
                 Style::default()
-                    .fg(theme::p().accent)
+                    .fg(theme::p().muted)
                     .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("{} / {}", app.tab().active_provider, display_model(app)),
-                Style::default().fg(theme::p().muted),
-            ),
-            Span::raw(" "),
-            Span::styled(format!("[{badge}]"), Style::default().fg(badge_color)),
-        ]),
-        None,
-        0,
-    )]
+            )),
+            None,
+            0,
+        ));
+        lines.push(banded_line(Line::default(), None, 0));
+        lines.push(tip("Ctrl-p", "Command palette"));
+        lines.push(tip("Ctrl-f  /", "Search workspace files & content"));
+        lines.push(tip("@", "Mention agents, skills, or files"));
+        lines.push(tip("/connect", "Configure provider or API key"));
+        lines.push(tip("/help", "List all commands & shortcuts"));
+        lines.push(banded_line(Line::default(), None, 0));
+    }
+
+    lines
 }
 
 fn script_from_args(name: &str, args: &str) -> Option<(String, String)> {
@@ -249,12 +332,20 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
         }
         match entry {
             TranscriptEntry::User { text } => {
-                let header = vec![Span::styled(
+                let mut header = vec![Span::styled(
                     "▌ you",
                     Style::default()
                         .fg(theme::p().accent)
                         .add_modifier(Modifier::BOLD),
                 )];
+                if app.hovered_entry == Some(idx) {
+                    header.push(Span::styled(
+                        "  [click for actions]",
+                        Style::default()
+                            .fg(theme::p().faint)
+                            .add_modifier(Modifier::ITALIC),
+                    ));
+                }
                 lines.push(with_hover(
                     banded_line(Line::from(header), Some(idx), 2),
                     idx,
@@ -361,11 +452,24 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     lines.push(tagged_line(Line::from(header_spans), None, 2));
                 }
                 if !text.is_empty() {
+                    let mut in_code_block = false;
                     for line in crate::markdown::render(text) {
-                        let mut spans = vec![Span::styled("  ", Style::default())];
+                        if line.code && !in_code_block {
+                            lines.push(code_line(tagged_line(Line::default(), None, 4)));
+                            in_code_block = true;
+                        } else if !line.code && in_code_block {
+                            lines.push(code_line(tagged_line(Line::default(), None, 4)));
+                            in_code_block = false;
+                        }
+                        let prefix = if line.code { "    " } else { "  " };
+                        let gutter = if line.code { 4 } else { 2 };
+                        let mut spans = vec![Span::styled(prefix, Style::default())];
                         spans.extend(line.spans);
-                        let tagged = tagged_line(Line::from(spans), None, 2);
+                        let tagged = tagged_line(Line::from(spans), None, gutter);
                         lines.push(if line.code { code_line(tagged) } else { tagged });
+                    }
+                    if in_code_block {
+                        lines.push(code_line(tagged_line(Line::default(), None, 4)));
                     }
                 }
             }
@@ -604,19 +708,12 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     Span::styled(" ", Style::default()),
                     Span::styled(format!("[{badge}]"), badge_style),
                 ]);
-                lines.push(with_hover(
-                    if active {
-                        banded_line(line, None, 2)
-                    } else {
-                        tagged_line(line, None, 2)
-                    },
-                    idx,
-                ));
+                lines.push(with_hover(banded_line(line, None, 2), idx));
                 if let Some(report) = &sub.report {
                     let preview = truncate_single_line(report, 120);
                     if !preview.is_empty() {
                         lines.push(with_hover(
-                            tagged_line(
+                            banded_line(
                                 Line::from(vec![
                                     Span::styled("  ↳ ", Style::default().fg(theme::p().faint)),
                                     Span::styled(preview, Style::default().fg(theme::p().faint)),
@@ -630,41 +727,52 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                 }
             }
             TranscriptEntry::System { text } => {
-                for line in text.split('\n') {
+                for (line_idx, line) in text.split('\n').enumerate() {
+                    let prefix = if line_idx == 0 {
+                        Span::styled("  [system] ", Style::default().fg(theme::p().info))
+                    } else {
+                        Span::styled("           ", Style::default())
+                    };
                     lines.push(tagged_line(
-                        Line::from(Span::styled(
-                            format!("[system] {line}"),
-                            Style::default().fg(theme::p().muted),
-                        )),
+                        Line::from(vec![
+                            prefix,
+                            Span::styled(line.to_string(), Style::default().fg(theme::p().muted)),
+                        ]),
                         None,
-                        0,
+                        11,
                     ));
                 }
             }
             TranscriptEntry::Error { text, expanded } => {
                 if *expanded {
                     let line_count = text.lines().count().max(1);
-                    lines.push(tagged_line(
-                        Line::from(Span::styled(
-                            format!("  ▾ [error] ({line_count} lines)  [click to hide]"),
-                            Style::default()
-                                .fg(theme::p().error)
-                                .add_modifier(Modifier::BOLD),
-                        )),
-                        Some(idx),
-                        2,
+                    lines.push(with_hover(
+                        banded_line(
+                            Line::from(Span::styled(
+                                format!("  ▾ [error] ({line_count} lines)  [click to hide]"),
+                                Style::default()
+                                    .fg(theme::p().error)
+                                    .add_modifier(Modifier::BOLD),
+                            )),
+                            Some(idx),
+                            2,
+                        ),
+                        idx,
                     ));
                     for line in text.split('\n') {
-                        lines.push(tagged_line(
-                            Line::from(vec![
-                                Span::styled("  │ ", Style::default().fg(theme::p().faint)),
-                                Span::styled(
-                                    line.to_string(),
-                                    Style::default().fg(theme::p().error),
-                                ),
-                            ]),
-                            Some(idx),
-                            4,
+                        lines.push(with_hover(
+                            banded_line(
+                                Line::from(vec![
+                                    Span::styled("  │ ", Style::default().fg(theme::p().faint)),
+                                    Span::styled(
+                                        line.to_string(),
+                                        Style::default().fg(theme::p().error),
+                                    ),
+                                ]),
+                                Some(idx),
+                                4,
+                            ),
+                            idx,
                         ));
                     }
                 } else {
@@ -673,24 +781,56 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     } else {
                         (app.terminal_width as usize).saturating_sub(4).max(40)
                     };
-                    let max_summary = avail_width.saturating_sub(32).max(12);
+                    let max_summary = avail_width.saturating_sub(14).max(12);
                     let summary = summarize_error_line(text, max_summary);
-                    lines.push(tagged_line(
-                        Line::from(vec![
-                            Span::styled(
-                                format!("  ▸ [error] {summary}"),
-                                Style::default().fg(theme::p().error),
+                    let prefix_len = 12;
+                    let hint_len = 19;
+                    if prefix_len + summary.chars().count() + hint_len <= avail_width {
+                        lines.push(with_hover(
+                            banded_line(
+                                Line::from(vec![
+                                    Span::styled(
+                                        format!("  ▸ [error] {summary}"),
+                                        Style::default().fg(theme::p().error),
+                                    ),
+                                    Span::styled(
+                                        "  [click to expand]",
+                                        Style::default()
+                                            .fg(theme::p().faint)
+                                            .add_modifier(Modifier::ITALIC),
+                                    ),
+                                ]),
+                                Some(idx),
+                                2,
                             ),
-                            Span::styled(
-                                "  [click to expand]",
-                                Style::default()
-                                    .fg(theme::p().faint)
-                                    .add_modifier(Modifier::ITALIC),
+                            idx,
+                        ));
+                    } else {
+                        lines.push(with_hover(
+                            banded_line(
+                                Line::from(Span::styled(
+                                    format!("  ▸ [error] {summary}"),
+                                    Style::default().fg(theme::p().error),
+                                )),
+                                Some(idx),
+                                2,
                             ),
-                        ]),
-                        Some(idx),
-                        2,
-                    ));
+                            idx,
+                        ));
+                        lines.push(with_hover(
+                            banded_line(
+                                Line::from(Span::styled(
+                                    "    [click to expand]",
+                                    Style::default()
+                                        .fg(theme::p().faint)
+                                        .add_modifier(Modifier::ITALIC),
+                                )),
+                                Some(idx),
+                                4,
+                            ),
+                            idx,
+                        ));
+                    }
                 }
             }
         }

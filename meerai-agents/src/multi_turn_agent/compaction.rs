@@ -301,7 +301,7 @@ impl MultiTurnAgent {
             .saturating_mul(u64::from(harness.config.high_watermark_pct))
             / 100;
         let estimated = estimate_context_tokens(&self.request_messages())
-            + estimate_tokens(&self.system_prompt);
+            + estimate_tokens(&self.effective_system_prompt());
         estimated > threshold
     }
 

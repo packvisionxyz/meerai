@@ -6,13 +6,32 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: R
         Block::default().style(Style::default().bg(theme::p().surface)),
         area,
     );
-    if area.height < 3 || area.width < 6 {
+    if area.height < 3 || area.width < 8 {
         return;
     }
+
+    let stripe_color = if app.tab().is_running {
+        theme::p().warning
+    } else {
+        match app.mode {
+            InputMode::Insert => theme::p().accent,
+            InputMode::Normal => theme::p().info,
+        }
+    };
+    for y in area.y..area.y + area.height {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "▌",
+                Style::default().fg(stripe_color).bg(theme::p().surface),
+            )),
+            Rect::new(area.x, y, 1, 1),
+        );
+    }
+
     let inner = Rect {
-        x: area.x.saturating_add(1),
+        x: area.x.saturating_add(2),
         y: area.y.saturating_add(1),
-        width: area.width.saturating_sub(2),
+        width: area.width.saturating_sub(4),
         height: area.height.saturating_sub(2),
     };
     let content = Rect {
@@ -22,13 +41,30 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: R
     };
     app.composer_input_area = content;
 
+    let marker_color = match app.mode {
+        InputMode::Insert => theme::p().interactive,
+        InputMode::Normal => theme::p().muted,
+    };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "❯",
-            Style::default().fg(theme::p().interactive),
+            Style::default()
+                .fg(marker_color)
+                .add_modifier(Modifier::BOLD),
         ))),
         Rect::new(inner.x, inner.y, 2, 1),
     );
+
+    if !app.tab().queued.is_empty() && area.width >= 30 {
+        let badge = format!("{} queued · Ctrl-g steer", app.tab().queued.len());
+        let badge_w = badge.chars().count() as u16;
+        if badge_w + 4 < area.width {
+            frame.render_widget(
+                Paragraph::new(Span::styled(badge, Style::default().fg(theme::p().warning))),
+                Rect::new(area.x + area.width - badge_w - 2, area.y, badge_w, 1),
+            );
+        }
+    }
 
     let (cursor_row, cursor_col) = cursor_row_col(&app.tab().input, app.tab().cursor);
     let visible_rows = content.height.max(1) as usize;
@@ -37,9 +73,13 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: R
 
     let tab = app.tab();
     let mut cursor_display_col = cursor_col;
+    let placeholder = match app.mode {
+        InputMode::Insert => "Ask meerai anything...",
+        InputMode::Normal => "Press i or a to insert...",
+    };
     let lines = if tab.input.is_empty() {
         Paragraph::new(Line::from(Span::styled(
-            "Ask meerai anything...",
+            placeholder,
             Style::default().fg(theme::p().faint),
         )))
     } else {
@@ -248,7 +288,7 @@ fn mention_chip_style(kind: MentionKind) -> Style {
 
 pub(super) fn render_completion_popup(
     frame: &mut Frame<'_>,
-    app: &AppState,
+    app: &mut AppState,
     transcript_area: Rect,
     composer_area: Rect,
 ) {
@@ -263,9 +303,9 @@ pub(super) fn render_completion_popup(
 
     let max_visible = (transcript_area.height.saturating_sub(2) as usize).clamp(1, 8);
     let height = items.len().min(max_visible) as u16 + 2;
-    let width = composer_area.width.saturating_sub(2).min(64);
+    let width = composer_area.width.saturating_sub(4).min(68);
 
-    let x = composer_area.x + 1;
+    let x = composer_area.x + 2;
     let y = composer_area.y.saturating_sub(height);
     let popup_area = Rect::new(x, y, width, height);
 
@@ -290,15 +330,56 @@ pub(super) fn render_completion_popup(
         None => String::new(),
     };
 
-    let list_items: Vec<ListItem<'_>> = items
+    let inner = dialog_frame_compact(frame, popup_area, &title);
+    let col_width = items
         .iter()
         .map(|item| {
-            let mut spans = vec![Span::styled(
-                item.label.clone(),
-                Style::default()
-                    .fg(theme::p().text)
-                    .add_modifier(Modifier::BOLD),
-            )];
+            let badge_w = item
+                .item_kind
+                .badge()
+                .map(|b| b.chars().count() + 1)
+                .unwrap_or(0);
+            item.label.chars().count() + badge_w
+        })
+        .max()
+        .unwrap_or(12)
+        .min((inner.width as usize).saturating_div(2).max(12));
+
+    let selected_idx = app.completion.selected();
+    let hovered_idx = app.hovered_completion;
+
+    let list_items: Vec<ListItem<'_>> = items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let is_selected = idx == selected_idx;
+            let is_hovered = hovered_idx == Some(idx);
+            let badge_len = item
+                .item_kind
+                .badge()
+                .map(|b| b.chars().count() + 1)
+                .unwrap_or(0);
+            let full_label_len = item.label.chars().count() + badge_len;
+            let pad = col_width.saturating_sub(full_label_len) + 2;
+            let max_desc = (inner.width as usize).saturating_sub(full_label_len + pad + 2);
+
+            let lead = if is_selected { "▸ " } else { "  " };
+            let mut spans = vec![
+                Span::styled(
+                    lead,
+                    Style::default().fg(if is_selected {
+                        theme::p().interactive
+                    } else {
+                        theme::p().faint
+                    }),
+                ),
+                Span::styled(
+                    item.label.clone(),
+                    Style::default()
+                        .fg(theme::p().text)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
             if let Some(badge) = item.item_kind.badge() {
                 let color = match item.item_kind {
                     CompletionItemKind::Agent => theme::p().accent,
@@ -310,20 +391,41 @@ pub(super) fn render_completion_popup(
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ));
             }
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                item.description.clone(),
-                Style::default().fg(theme::p().faint),
-            ));
-            ListItem::new(Line::from(spans))
+            if !item.description.is_empty() && max_desc > 0 {
+                spans.push(Span::raw(" ".repeat(pad)));
+                spans.push(Span::styled(
+                    truncate_single_line(&item.description, max_desc),
+                    Style::default().fg(if is_selected || is_hovered {
+                        theme::p().muted
+                    } else {
+                        theme::p().faint
+                    }),
+                ));
+            }
+            let row = ListItem::new(Line::from(spans));
+            if is_hovered && !is_selected {
+                row.style(hover_row_style())
+            } else {
+                row
+            }
         })
         .collect();
 
     let mut list_state = ListState::default();
-    list_state.select(Some(app.completion.selected()));
+    list_state.select(Some(selected_idx));
 
-    let inner = dialog_frame(frame, popup_area, &title);
     let list = List::new(list_items).highlight_style(selection_style());
-
     frame.render_stateful_widget(list, inner, &mut list_state);
+
+    let offset = list_state.offset();
+    for row in 0..inner.height as usize {
+        let idx = offset + row;
+        if idx >= items.len() {
+            break;
+        }
+        app.completion_hit_zones.push(CompletionHitZone {
+            rect: Rect::new(inner.x, inner.y + row as u16, inner.width, 1),
+            index: idx,
+        });
+    }
 }

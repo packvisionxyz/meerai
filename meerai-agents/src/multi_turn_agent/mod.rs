@@ -532,6 +532,10 @@ impl MultiTurnAgent {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.model.clone();
     }
 
+    pub(super) fn effective_system_prompt(&self) -> String {
+        crate::prompt::append_model_identity(self.system_prompt.clone(), &self.model)
+    }
+
     pub fn set_permission_mode(&mut self, mode: ApprovalMode) {
         if let Some(harness) = &mut self.harness {
             harness.policy.set_mode(mode);
@@ -731,8 +735,9 @@ impl MultiTurnAgent {
             return;
         }
 
+        let prompt = self.effective_system_prompt();
         let changed = match &self.logged_system_prompt {
-            Some(previous) => previous != &self.system_prompt,
+            Some(previous) => previous != &prompt,
             None => true,
         };
         if !changed {
@@ -742,9 +747,9 @@ impl MultiTurnAgent {
         if self.logged_system_prompt.is_some() {
             self.system_prompt_generation += 1;
         }
-        self.logged_system_prompt = Some(self.system_prompt.clone());
+        self.logged_system_prompt = Some(prompt.clone());
 
-        if self.system_prompt.is_empty() {
+        if prompt.is_empty() {
             return;
         }
 
@@ -753,7 +758,7 @@ impl MultiTurnAgent {
             SessionEvent::SystemMessage {
                 sections: vec![PromptSection {
                     label: "instructions".to_string(),
-                    content: self.system_prompt.clone(),
+                    content: prompt,
                 }],
                 generation: self.system_prompt_generation,
             },

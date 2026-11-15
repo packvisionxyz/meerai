@@ -958,7 +958,13 @@ async fn harness_dual_writes_session_events() {
             assert_eq!(*generation, 0);
             assert_eq!(sections.len(), 1);
             assert_eq!(sections[0].label, "instructions");
-            assert_eq!(sections[0].content, "Be precise.");
+            assert_eq!(
+                sections[0].content,
+                crate::prompt::append_model_identity(
+                    "Be precise.".to_string(),
+                    "gemini::gemini-3.8-flash"
+                )
+            );
         }
         other => panic!("expected SystemMessage, got {other:?}"),
     }
@@ -996,6 +1002,57 @@ async fn harness_dual_writes_session_events() {
     }
 
     assert_eq!(agent.history().len(), 3);
+}
+
+#[tokio::test]
+async fn model_switch_updates_identity_in_request_and_log() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(text_end("first"))],
+        vec![ChatStreamEvent::End(text_end("second"))],
+    ]));
+    let session = memory_session();
+    let mut agent = MultiTurnAgent::with_streamer(
+        streamer.clone(),
+        "openai::gpt-4o",
+        vec![],
+        "Be precise.",
+        MultiTurnAgentConfig::default(),
+    );
+    agent.set_harness(harness(&session, yolo(), HarnessConfig::default()));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("one", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    agent.set_model("gemini::gemini-3.8-flash");
+    agent
+        .prompt_streaming("two", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let requests = streamer.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let first = requests[0].system.clone().unwrap();
+    let second = requests[1].system.clone().unwrap();
+    assert!(first.contains("Active model: openai::gpt-4o."));
+    assert!(second.contains("Active model: gemini::gemini-3.8-flash."));
+    assert!(!second.contains("openai::gpt-4o"));
+
+    let system_messages: Vec<(String, u64)> = session_events(&session)
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::SystemMessage {
+                sections,
+                generation,
+            } => Some((sections[0].content.clone(), *generation)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(system_messages.len(), 2);
+    assert_eq!(system_messages[0].1, 0);
+    assert_eq!(system_messages[1].1, 1);
+    assert!(system_messages[1].0.contains("gemini::gemini-3.8-flash"));
 }
 
 #[tokio::test]
@@ -1038,7 +1095,13 @@ async fn harness_builds_requests_from_projection() {
     let reqs = streamer.requests.lock().unwrap();
     assert_eq!(reqs.len(), 2);
     assert_eq!(reqs[1].messages.len(), 3);
-    assert_eq!(reqs[1].system.as_deref(), Some("Be precise."));
+    assert_eq!(
+        reqs[1].system,
+        Some(crate::prompt::append_model_identity(
+            "Be precise.".to_string(),
+            "gpt-4o-mini"
+        ))
+    );
     let rendered = format!("{:?}", reqs[1].messages);
     assert!(!rendered.contains("secret thoughts"));
     assert!(!rendered.contains("more thoughts"));
@@ -4432,7 +4495,13 @@ async fn subagent_custom_definition_enforces_read_only_plan_policy_and_model() {
     );
 
     let reqs = child_streamer.requests.lock().unwrap();
-    assert_eq!(reqs[0].system.as_deref(), Some("Review carefully."));
+    assert_eq!(
+        reqs[0].system,
+        Some(crate::prompt::append_model_identity(
+            "Review carefully.".to_string(),
+            "openai::gpt-4o-mini"
+        ))
+    );
     let tool_names: Vec<&str> = reqs[0]
         .tools
         .as_ref()

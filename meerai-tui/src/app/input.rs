@@ -120,13 +120,17 @@ impl AppState {
             self.last_mouse_pos = Some(pos);
         }
 
-        if self.modal.is_some()
-            && !matches!(
-                mouse.kind,
-                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-            )
-        {
-            return false;
+        if self.modal.is_some() {
+            return match mouse.kind {
+                MouseEventKind::Moved => self.handle_modal_mouse_move(mouse.column, mouse.row),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.handle_modal_click(mouse.column, mouse.row)
+                }
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    self.handle_modal_scroll(mouse.kind)
+                }
+                _ => false,
+            };
         }
 
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
@@ -145,16 +149,28 @@ impl AppState {
                 self.extend_composer_drag(anchor, mouse.column, mouse.row);
                 return true;
             }
-            let hovered = self.hovered_entry_at(pos);
-            if hovered != self.hovered_entry {
-                self.hovered_entry = hovered;
-                return true;
-            }
-            return false;
+            let hovered_entry = self.hovered_entry_at(pos);
+            let hovered_tab = self.tab_hit_at(mouse.column, mouse.row);
+            let hovered_file = self.hovered_file_change_at(mouse.column, mouse.row);
+            let hovered_completion = self.completion_hit_at(mouse.column, mouse.row);
+            let changed = hovered_entry != self.hovered_entry
+                || hovered_tab != self.hovered_tab
+                || hovered_file != self.hovered_file_change
+                || hovered_completion != self.hovered_completion;
+            self.hovered_entry = hovered_entry;
+            self.hovered_tab = hovered_tab;
+            self.hovered_file_change = hovered_file;
+            self.hovered_completion = hovered_completion;
+            return changed;
         }
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                if self.modal.is_none() && self.click_completion_at(mouse.column, mouse.row) {
+                    self.selection = None;
+                    self.doc_selection = None;
+                    return true;
+                }
                 if self.modal.is_none() && self.click_tab_at(mouse.column, mouse.row) {
                     self.selection = None;
                     self.doc_selection = None;
@@ -289,23 +305,6 @@ impl AppState {
             _ => {}
         }
 
-        if let Some(ActiveModal::DiffView { diff, scroll, .. }) = &mut self.modal {
-            let max_scroll = diff.rows.len().saturating_sub(1);
-            return match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    *scroll = scroll.saturating_sub(3);
-                    true
-                }
-                MouseEventKind::ScrollDown => {
-                    *scroll = (*scroll + 3).min(max_scroll);
-                    true
-                }
-                _ => false,
-            };
-        }
-        if self.modal.is_some() {
-            return false;
-        }
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.scroll_up(3);
@@ -319,6 +318,42 @@ impl AppState {
             }
             _ => false,
         }
+    }
+
+    fn handle_modal_scroll(&mut self, kind: MouseEventKind) -> bool {
+        if let Some(ActiveModal::DiffView { diff, scroll, .. }) = &mut self.modal {
+            let max_scroll = diff.rows.len().saturating_sub(1);
+            return match kind {
+                MouseEventKind::ScrollUp => {
+                    *scroll = scroll.saturating_sub(3);
+                    true
+                }
+                MouseEventKind::ScrollDown => {
+                    *scroll = (*scroll + 3).min(max_scroll);
+                    true
+                }
+                _ => false,
+            };
+        }
+        if let Some(ActiveModal::Search {
+            preview: Some(prev),
+            ..
+        }) = &mut self.modal
+        {
+            let max_scroll = prev.lines.len().saturating_sub(6);
+            return match kind {
+                MouseEventKind::ScrollUp => {
+                    prev.scroll = prev.scroll.saturating_sub(3);
+                    true
+                }
+                MouseEventKind::ScrollDown => {
+                    prev.scroll = (prev.scroll + 3).min(max_scroll);
+                    true
+                }
+                _ => false,
+            };
+        }
+        false
     }
 
     fn refresh_active_doc_selection_head(&mut self) {
@@ -533,9 +568,9 @@ impl AppState {
         ));
     }
 
-    pub fn click_file_change_at(&mut self, column: u16, row: u16) -> bool {
-        if !self.is_sidebar_visible() {
-            return false;
+    pub fn hovered_file_change_at(&self, column: u16, row: u16) -> Option<usize> {
+        if !self.is_sidebar_visible() || self.modal.is_some() {
+            return None;
         }
         let area = self.sidebar_changes_inner_area;
         if area.width == 0
@@ -545,19 +580,25 @@ impl AppState {
             || row < area.y
             || row >= area.y + area.height
         {
-            return false;
+            return None;
         }
         let row_idx = (row - area.y) as usize;
         if row_idx >= self.visible_file_change_rows || row_idx >= self.file_changes.len() {
-            return false;
+            return None;
         }
+        Some(row_idx)
+    }
+
+    pub fn click_file_change_at(&mut self, column: u16, row: u16) -> bool {
+        let Some(row_idx) = self.hovered_file_change_at(column, row) else {
+            return false;
+        };
         self.open_diff_modal(row_idx);
         true
     }
 
-    pub fn click_tab_at(&mut self, column: u16, row: u16) -> bool {
-        let Some(kind) = self
-            .tab_hit_zones
+    pub fn tab_hit_at(&self, column: u16, row: u16) -> Option<TabHitKind> {
+        self.tab_hit_zones
             .iter()
             .find(|zone| {
                 let r = zone.rect;
@@ -569,7 +610,37 @@ impl AppState {
                     && row < r.y + r.height
             })
             .map(|zone| zone.kind)
-        else {
+    }
+
+    pub fn completion_hit_at(&self, column: u16, row: u16) -> Option<usize> {
+        if !self.completion.is_active() || self.modal.is_some() || self.mode != InputMode::Insert {
+            return None;
+        }
+        self.completion_hit_zones
+            .iter()
+            .find(|zone| {
+                let r = zone.rect;
+                r.width > 0
+                    && r.height > 0
+                    && column >= r.x
+                    && column < r.x + r.width
+                    && row >= r.y
+                    && row < r.y + r.height
+            })
+            .map(|zone| zone.index)
+    }
+
+    pub fn click_completion_at(&mut self, column: u16, row: u16) -> bool {
+        let Some(index) = self.completion_hit_at(column, row) else {
+            return false;
+        };
+        self.completion.set_selected(index);
+        self.accept_completion();
+        true
+    }
+
+    pub fn click_tab_at(&mut self, column: u16, row: u16) -> bool {
+        let Some(kind) = self.tab_hit_at(column, row) else {
             return false;
         };
 

@@ -356,7 +356,8 @@ Detail in [`infra.md`](infra.md). Summary:
   controlled by a project file.
 - Prompt composition: `BASE_SYSTEM_PROMPT` + optional `--system` + root `AGENTS.md` +
   `.meerai/instructions.md` (32 KiB/file, 64 KiB block); scoped `AGENTS.md` injected once per turn
-  when a tool touches its directory (16 KiB, max 8 files).
+  when a tool touches its directory (16 KiB, max 8 files). The agent appends an `Active model:`
+  identity line at request time (refreshed by `set_model`) and logs it with the system prompt.
 - Agent/skill definitions (M12): read-only discovery at the project root from `.agents/agents` and
   `.agents/skills` first, then `.claude/agents` and `.claude/skills`; `.agents` wins duplicate ids;
   no `.meerai` definition directories and no copies. Startup `--agent` takes one id (repeating is an

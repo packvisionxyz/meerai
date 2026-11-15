@@ -897,36 +897,11 @@ impl AppState {
                     self.modal = Some(ActiveModal::RewindMenu { turn_id, selected });
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    selected = (selected + 1).min(2);
+                    selected = (selected + 1).min(1);
                     self.modal = Some(ActiveModal::RewindMenu { turn_id, selected });
                 }
                 KeyCode::Enter => {
-                    let scope = match selected {
-                        0 => RewindScope::Both,
-                        _ => RewindScope::Code,
-                    };
-                    {
-                        let index = self
-                            .tab()
-                            .user_turns
-                            .iter()
-                            .find_map(|(index, turn)| (turn == &turn_id).then_some(*index));
-                        if let Some(index) = index {
-                            let tab = self.tab_mut();
-                            tab.transcript.truncate(index);
-                            tab.user_turns.retain(|idx, _| *idx < index);
-                            tab.is_running = false;
-                            tab.turn_id = None;
-                            tab.queued.clear();
-                            tab.auto_follow = true;
-                        }
-                    }
-                    let _ = self
-                        .tab()
-                        .cmd_tx
-                        .send(AgentCommand::Rewind { turn_id, scope });
-                    self.modal = None;
-                    self.status_notice = Some("Rewinding...".to_string());
+                    self.apply_rewind_choice(turn_id, selected);
                     return true;
                 }
                 _ => {
@@ -1160,6 +1135,415 @@ impl AppState {
         }
 
         true
+    }
+
+    pub(super) fn modal_hit_at(&self, col: u16, row: u16) -> Option<ModalHitKind> {
+        self.modal_hit_zones
+            .iter()
+            .rev()
+            .find(|zone| {
+                let r = zone.rect;
+                r.width > 0
+                    && r.height > 0
+                    && col >= r.x
+                    && col < r.x + r.width
+                    && row >= r.y
+                    && row < r.y + r.height
+            })
+            .map(|zone| zone.kind)
+    }
+
+    pub(super) fn handle_modal_mouse_move(&mut self, col: u16, row: u16) -> bool {
+        let hit = self.modal_hit_at(col, row);
+        if hit == self.hovered_modal_hit {
+            return false;
+        }
+        self.hovered_modal_hit = hit;
+        true
+    }
+
+    pub(super) fn handle_modal_click(&mut self, col: u16, row: u16) -> bool {
+        let Some(hit) = self.modal_hit_at(col, row) else {
+            return false;
+        };
+        let Some(modal) = self.modal.take() else {
+            return false;
+        };
+        match (modal, hit) {
+            (ActiveModal::ProviderSelect { filter, .. }, ModalHitKind::Close) => {
+                let _ = filter;
+                self.modal = None;
+            }
+            (ActiveModal::ProviderSelect { filter, .. }, ModalHitKind::ListItem(idx)) => {
+                self.activate_provider_at(&filter, idx);
+            }
+            (
+                ActiveModal::ApiKeyInput {
+                    provider_id,
+                    provider_name,
+                    api_key,
+                    base_url,
+                    existing_key_status,
+                    error,
+                    ..
+                },
+                ModalHitKind::ApiKeyField(target_base_url),
+            ) => {
+                self.modal = Some(ActiveModal::ApiKeyInput {
+                    provider_id,
+                    provider_name,
+                    api_key,
+                    base_url,
+                    editing_base_url: target_base_url,
+                    existing_key_status,
+                    error,
+                });
+            }
+            (ActiveModal::ApiKeyInput { provider_id, .. }, ModalHitKind::Close) => {
+                self.reopen_provider_select_for(&provider_id);
+            }
+            (ActiveModal::ModelInput { .. }, ModalHitKind::Close) => {
+                self.modal = None;
+            }
+            (
+                ActiveModal::ModelInput {
+                    input,
+                    selected_recent,
+                    ..
+                },
+                ModalHitKind::ListItem(idx),
+            ) => {
+                let recent = self.recent_models_for_active_provider();
+                if let Some(model) = recent.get(idx) {
+                    let (target_provider, target_model) = self.resolve_model_target(model);
+                    self.select_provider_and_model(&target_provider, &target_model);
+                    self.modal = None;
+                } else {
+                    self.modal = Some(ActiveModal::ModelInput {
+                        input,
+                        selected_recent,
+                        error: None,
+                    });
+                }
+            }
+            (ActiveModal::DiffView { .. }, ModalHitKind::Close) => {
+                self.modal = None;
+            }
+            (ActiveModal::Search { .. }, ModalHitKind::Close) => {
+                self.modal = None;
+            }
+            (
+                ActiveModal::Search {
+                    query,
+                    mut mode,
+                    workspace_files,
+                    mut results,
+                    mut selected,
+                    mut preview,
+                },
+                ModalHitKind::SearchModeToggle,
+            ) => {
+                mode = mode.toggle();
+                Self::refresh_search(
+                    self.workspace.as_ref(),
+                    &self.workspace_root,
+                    mode,
+                    &workspace_files,
+                    &query,
+                    &mut results,
+                    &mut selected,
+                    &mut preview,
+                );
+                self.modal = Some(ActiveModal::Search {
+                    query,
+                    mode,
+                    workspace_files,
+                    results,
+                    selected,
+                    preview,
+                });
+            }
+            (
+                ActiveModal::Search {
+                    query,
+                    mode,
+                    workspace_files,
+                    results,
+                    selected,
+                    preview,
+                },
+                ModalHitKind::ListItem(idx),
+            ) => {
+                if selected == idx {
+                    if let Some(item) = results.get(idx) {
+                        let snippet = match item.line {
+                            Some(line) => format!("@{}#L{line} ", item.path),
+                            None => format!("@{} ", item.path),
+                        };
+                        self.insert_str(&snippet);
+                        self.mode = InputMode::Insert;
+                        self.completion.reset();
+                        self.modal = None;
+                    }
+                } else {
+                    let next_selected = idx.min(results.len().saturating_sub(1));
+                    let preview = results
+                        .get(idx)
+                        .map(|item| build_search_preview(&self.workspace_root, item, 20))
+                        .or(preview);
+                    self.modal = Some(ActiveModal::Search {
+                        query,
+                        mode,
+                        workspace_files,
+                        results,
+                        selected: next_selected,
+                        preview,
+                    });
+                }
+            }
+            (ActiveModal::CommandPalette { .. }, ModalHitKind::Close) => {
+                self.modal = None;
+            }
+            (ActiveModal::CommandPalette { filter, .. }, ModalHitKind::ListItem(idx)) => {
+                let commands = filtered_commands(&filter);
+                if let Some(command) = commands.get(idx) {
+                    let action = command.action;
+                    self.modal = None;
+                    self.run_palette_action(action);
+                } else {
+                    self.modal = Some(ActiveModal::CommandPalette {
+                        filter,
+                        selected: 0,
+                    });
+                }
+            }
+            (ActiveModal::SessionSelect { .. }, ModalHitKind::Close) => {
+                self.session_delete_confirm = None;
+                self.modal = None;
+            }
+            (
+                ActiveModal::SessionSelect {
+                    filter,
+                    sessions,
+                    loading,
+                    error,
+                    ..
+                },
+                ModalHitKind::ListItem(idx),
+            ) => {
+                let filtered_ids: Vec<(meerai_session::SessionId, Option<usize>)> =
+                    filter_session_summaries(&sessions, &filter)
+                        .into_iter()
+                        .map(|summary| {
+                            let open_tab = self.tab_index_for_session(&summary.id);
+                            (summary.id.clone(), open_tab)
+                        })
+                        .collect();
+                if let Some((session_id, open_tab)) = filtered_ids.get(idx).cloned() {
+                    self.session_delete_confirm = None;
+                    self.modal = None;
+                    self.activate_session_choice(session_id, open_tab);
+                } else {
+                    self.modal = Some(ActiveModal::SessionSelect {
+                        filter,
+                        selected: idx,
+                        sessions,
+                        loading,
+                        error,
+                    });
+                }
+            }
+            (ActiveModal::UserMessageActions { .. }, ModalHitKind::Close) => {
+                self.modal = None;
+            }
+            (ActiveModal::UserMessageActions { entry_idx, .. }, ModalHitKind::ListItem(idx)) => {
+                let actions = [UserAction::Rewind, UserAction::Copy, UserAction::Fork];
+                if let Some(&action) = actions.get(idx) {
+                    self.modal = None;
+                    self.run_user_action(entry_idx, action);
+                }
+            }
+            (ActiveModal::RewindMenu { .. }, ModalHitKind::Close) => {
+                self.modal = None;
+            }
+            (ActiveModal::RewindMenu { turn_id, .. }, ModalHitKind::ListItem(idx)) => {
+                self.apply_rewind_choice(turn_id, idx);
+            }
+            (
+                ActiveModal::Question {
+                    request,
+                    mut answers,
+                    current,
+                    ..
+                },
+                ModalHitKind::ListItem(idx),
+            ) => {
+                let prompt = &request.questions[current];
+                if idx < prompt.options.len() {
+                    if prompt.multiple {
+                        if let Some(pos) = answers[current].iter().position(|i| *i == idx) {
+                            answers[current].remove(pos);
+                        } else {
+                            answers[current].push(idx);
+                            answers[current].sort_unstable();
+                        }
+                    } else {
+                        answers[current] = vec![idx];
+                    }
+                    self.modal = Some(ActiveModal::Question {
+                        request,
+                        answers,
+                        current,
+                        focus: idx,
+                    });
+                } else {
+                    self.modal = Some(ActiveModal::Question {
+                        request,
+                        answers,
+                        current,
+                        focus: 0,
+                    });
+                }
+            }
+            (
+                ActiveModal::Approval {
+                    queue,
+                    mut reason,
+                    mut editing_reason,
+                },
+                ModalHitKind::ApprovalAction(action),
+            ) => {
+                let request_id = queue.first().map(|req| req.request_id.clone());
+                let decision = match action {
+                    ApprovalClickAction::Accept => Some((ApprovalDecision::Accept, None)),
+                    ApprovalClickAction::AcceptTurn => {
+                        Some((ApprovalDecision::Accept, Some(GrantScope::Turn)))
+                    }
+                    ApprovalClickAction::AcceptSession => {
+                        Some((ApprovalDecision::AcceptForSession, None))
+                    }
+                    ApprovalClickAction::Decline => Some((ApprovalDecision::Decline, None)),
+                    ApprovalClickAction::DeclineReason => {
+                        reason.clear();
+                        editing_reason = true;
+                        None
+                    }
+                    ApprovalClickAction::Cancel => Some((ApprovalDecision::Cancel, None)),
+                };
+                if let Some((decision, scope)) = decision
+                    && let Some(request_id) = request_id
+                {
+                    let _ = self.tab().cmd_tx.send(AgentCommand::Approve {
+                        request_id,
+                        decision,
+                        scope,
+                    });
+                }
+                self.modal = Some(ActiveModal::Approval {
+                    queue,
+                    reason,
+                    editing_reason,
+                });
+            }
+            (other, _) => {
+                self.modal = Some(other);
+                return false;
+            }
+        }
+        true
+    }
+
+    fn reopen_provider_select_for(&mut self, provider_id: &str) {
+        let selected = {
+            let rt = self.runtime.read().unwrap();
+            rt.catalog
+                .providers()
+                .iter()
+                .position(|p| p.id == provider_id)
+                .unwrap_or(0)
+        };
+        self.modal = Some(ActiveModal::ProviderSelect {
+            filter: String::new(),
+            selected,
+        });
+    }
+
+    fn activate_provider_at(&mut self, filter: &str, selected: usize) {
+        let providers = self.filtered_providers(filter);
+        if let Some((provider, status)) = providers.get(selected) {
+            if !provider.requires_api_key {
+                self.activate_provider_only(&provider.id);
+                self.open_model_input();
+            } else {
+                let saved_url = {
+                    let rt = self.runtime.read().unwrap();
+                    rt.base_urls.get(&provider.id).cloned().unwrap_or_default()
+                };
+                self.modal = Some(ActiveModal::ApiKeyInput {
+                    provider_id: provider.id.clone(),
+                    provider_name: provider.display_name.clone(),
+                    api_key: String::new(),
+                    base_url: saved_url,
+                    editing_base_url: false,
+                    existing_key_status: status.clone(),
+                    error: None,
+                });
+            }
+        } else {
+            self.modal = Some(ActiveModal::ProviderSelect {
+                filter: filter.to_string(),
+                selected,
+            });
+        }
+    }
+
+    fn activate_session_choice(
+        &mut self,
+        session_id: meerai_session::SessionId,
+        open_tab: Option<usize>,
+    ) {
+        if let Some(tab_idx) = open_tab {
+            self.switch_to_tab(tab_idx);
+            self.status_notice = Some(format!("Switched to tab {}", tab_idx + 1));
+        } else if self.session_opener.is_some() {
+            self.status_notice = Some(format!("Opening session {session_id}..."));
+            self.pending_session_actions
+                .push(PendingSessionAction::OpenSessionId(session_id));
+        } else {
+            self.tab_mut().transcript.push(TranscriptEntry::Error {
+                text: "Session switching is not available in this context.".to_string(),
+                expanded: false,
+            });
+        }
+    }
+
+    fn apply_rewind_choice(&mut self, turn_id: TurnId, selected: usize) {
+        let scope = match selected {
+            0 => RewindScope::Both,
+            _ => RewindScope::Code,
+        };
+        {
+            let index = self
+                .tab()
+                .user_turns
+                .iter()
+                .find_map(|(index, turn)| (turn == &turn_id).then_some(*index));
+            if let Some(index) = index {
+                let tab = self.tab_mut();
+                tab.transcript.truncate(index);
+                tab.user_turns.retain(|idx, _| *idx < index);
+                tab.is_running = false;
+                tab.turn_id = None;
+                tab.queued.clear();
+                tab.auto_follow = true;
+            }
+        }
+        let _ = self
+            .tab()
+            .cmd_tx
+            .send(AgentCommand::Rewind { turn_id, scope });
+        self.modal = None;
+        self.status_notice = Some("Rewinding...".to_string());
     }
 
     pub(super) fn open_command_palette(&mut self) {

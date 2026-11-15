@@ -22,12 +22,17 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
         InputMode::Normal => (" NOR ", theme::p().info),
     };
 
-    let mut spans = vec![Span::styled(
-        badge_text,
-        Style::default()
-            .fg(badge_color)
-            .add_modifier(Modifier::BOLD),
-    )];
+    let mut spans = vec![
+        Span::styled(" ", Style::default().bg(theme::p().surface)),
+        Span::styled(
+            badge_text,
+            Style::default()
+                .fg(badge_color)
+                .bg(theme::p().surface_high)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ", Style::default().bg(theme::p().surface)),
+    ];
 
     let mode_color = match tab.approval_mode {
         ApprovalMode::Plan => theme::p().accent,
@@ -38,7 +43,10 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
     };
     spans.push(Span::styled(
         format!(" {} ", approval_mode_badge(tab.approval_mode)),
-        Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(mode_color)
+            .bg(theme::p().surface_high)
+            .add_modifier(Modifier::BOLD),
     ));
 
     let key_status = app.active_key_status();
@@ -109,9 +117,10 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
     }
 
     if let Some(notice) = &app.status_notice {
+        let color = notice_color(notice_severity(notice));
         spans.push(Span::styled(
             format!(" · {notice}"),
-            Style::default().fg(theme::p().error),
+            Style::default().fg(color),
         ));
     } else {
         let hint = if tab.is_running {

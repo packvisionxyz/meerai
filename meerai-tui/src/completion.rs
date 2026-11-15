@@ -264,6 +264,12 @@ impl CompletionEngine {
         }
     }
 
+    pub fn set_selected(&mut self, index: usize) {
+        if !self.items.is_empty() {
+            self.selected = index.min(self.items.len() - 1);
+        }
+    }
+
     pub fn update(&mut self, input: &str, cursor: usize) {
         let cursor = floor_char_boundary(input, cursor);
         let Some(trigger) = detect_trigger(input, cursor) else {
