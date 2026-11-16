@@ -1,0 +1,23 @@
+[package]
+name = "meerai-syntax"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tree-sitter = { workspace = true }
+tree-sitter-bash = { workspace = true }
+tree-sitter-css = { workspace = true }
+tree-sitter-go = { workspace = true }
+tree-sitter-html = { workspace = true }
+tree-sitter-javascript = { workspace = true }
+tree-sitter-json = { workspace = true }
+tree-sitter-python = { workspace = true }
+tree-sitter-rust = { workspace = true }
+tree-sitter-typescript = { workspace = true }

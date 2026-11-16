@@ -228,6 +228,7 @@ pub(crate) async fn resolve_read_path_with_policy(
     allow_sensitive_files: bool,
 ) -> Result<PathBuf, PathIssue> {
     let workspace = canonicalize_or_keep(workspace_root).await;
+    let workspace_display = workspace.display().to_string();
     let candidate = join(&workspace, raw);
     let (resolved, exists) = locate(&candidate).await?;
 
@@ -250,7 +251,9 @@ pub(crate) async fn resolve_read_path_with_policy(
     if exists {
         Ok(resolved)
     } else {
-        Err(PathIssue::Missing(format!("path does not exist: {raw}")))
+        Err(PathIssue::Missing(format!(
+            "path does not exist: {raw}\n(workspace root: {workspace_display})"
+        )))
     }
 }
 

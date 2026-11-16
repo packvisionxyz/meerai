@@ -91,10 +91,35 @@ fn nested_value(value: &Value) -> Option<Value> {
     }
 }
 
+fn repair_invalid_json_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.peek() {
+            Some('"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u') => {
+                out.push('\\');
+                out.push(chars.next().expect("peeked escape"));
+            }
+            Some(_) | None => out.push_str("\\\\"),
+        }
+    }
+    out
+}
+
 pub fn parse_tool_arguments(text: &str) -> Option<Value> {
     let mut candidate = text.trim().to_string();
-    for _ in 0..6 {
+    for _ in 0..32 {
         if let Ok(value) = serde_json::from_str::<Value>(&candidate) {
+            return Some(value);
+        }
+        let repaired = repair_invalid_json_escapes(&candidate);
+        if repaired != candidate
+            && let Ok(value) = serde_json::from_str::<Value>(&repaired)
+        {
             return Some(value);
         }
         if !candidate.contains("\\\"") {
@@ -110,7 +135,7 @@ pub fn parse_tool_arguments(text: &str) -> Option<Value> {
 /// `{\"command\": ...}`. Models emit all of these.
 pub fn normalize_tool_arguments(value: &Value) -> Value {
     let mut current = value.clone();
-    for _ in 0..8 {
+    for _ in 0..64 {
         let next = match &current {
             Value::String(text) => {
                 parse_tool_arguments(text).and_then(|inner| nested_value(&inner))
@@ -229,12 +254,41 @@ mod tests {
     }
 
     #[test]
+    fn unwraps_more_than_eight_wrapper_layers() {
+        use serde_json::json;
+        let inner = json!({"command": "wc -l src/*.rs | sort -n"});
+        let mut wrapped = inner.to_string();
+        for _ in 0..16 {
+            wrapped = json!({ "arguments": wrapped }).to_string();
+        }
+        assert_eq!(
+            super::normalize_tool_arguments(&serde_json::Value::String(wrapped)),
+            inner
+        );
+    }
+
+    #[test]
     fn parses_arguments_from_raw_escaped_text() {
         assert_eq!(
             super::parse_tool_arguments(r#"{\"command\":\"ls\"}"#),
             Some(serde_json::json!({"command": "ls"}))
         );
         assert_eq!(super::parse_tool_arguments("not json"), None);
+    }
+
+    #[test]
+    fn repairs_invalid_backslash_escapes_in_arguments() {
+        let plain = r#"{"command":"grep -n 'a\|b' src/app.rs"}"#;
+        assert_eq!(
+            super::parse_tool_arguments(plain),
+            Some(serde_json::json!({"command": "grep -n 'a\\|b' src/app.rs"}))
+        );
+
+        let quoted = r#""{\"command\":\"grep -n 'a\|b' src/app.rs\"}""#;
+        assert_eq!(
+            super::normalize_tool_arguments(&serde_json::Value::String(quoted.to_string())),
+            serde_json::json!({"command": "grep -n 'a\\|b' src/app.rs"})
+        );
     }
 
     #[test]

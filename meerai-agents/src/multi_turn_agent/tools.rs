@@ -1643,16 +1643,26 @@ async fn run_tool_from(
         }
 
         let invocation = tool.invoke_structured(name, args);
-        let result = match effective_timeout {
-            Some(ms) => match tokio::time::timeout(Duration::from_millis(ms), invocation).await {
-                Ok(result) => result,
-                Err(_) => {
-                    return Ok(ToolRun::from_output(ToolOutput::Fail(format!(
-                        "tool timed out after {ms}ms"
-                    ))));
-                }
-            },
-            None => invocation.await,
+        tokio::pin!(invocation);
+        let limit = effective_timeout.map(Duration::from_millis);
+        let invoked = async {
+            match limit {
+                Some(limit) => tokio::time::timeout(limit, &mut invocation).await,
+                None => Ok::<_, tokio::time::error::Elapsed>((&mut invocation).await),
+            }
+        };
+        let result = tokio::select! {
+            _ = cancel.cancelled() => return Err(anyhow!("Tool execution cancelled")),
+            result = invoked => result,
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(_) => {
+                let ms = effective_timeout.unwrap_or(0);
+                return Ok(ToolRun::from_output(ToolOutput::Fail(format!(
+                    "tool timed out after {ms}ms"
+                ))));
+            }
         };
 
         match result {
@@ -1900,4 +1910,54 @@ mod auto_approve_tests {
 
 fn normalized_tool_args(value: &serde_json::Value) -> String {
     meerai_core::lenient::normalize_tool_arguments(value).to_string()
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use std::time::Duration;
+
+    use meerai_core::{ToolDefinition, ToolError, ToolOutput, Toolset, async_trait};
+    use tokio_util::sync::CancellationToken;
+
+    use super::run_tool_from;
+
+    struct SlowTool;
+
+    #[async_trait]
+    impl Toolset for SlowTool {
+        fn name(&self) -> String {
+            "slow".to_string()
+        }
+
+        fn definition(&self) -> Vec<ToolDefinition> {
+            Vec::new()
+        }
+
+        fn contain(&self, fn_name: &str) -> bool {
+            fn_name == "slow-run"
+        }
+
+        async fn invoke(&self, _fn_name: &str, _args: &str) -> Result<ToolOutput, ToolError> {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(ToolOutput::Text("done".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_stops_an_in_flight_tool() {
+        let tools: Vec<Box<dyn Toolset>> = vec![Box::new(SlowTool)];
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let task = tokio::spawn(async move {
+            run_tool_from(&tools, Some(60_000), 1, "slow-run", "{}", &cancel).await
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        token.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("tool did not stop after cancel")
+            .expect("task panicked");
+        let error = result.expect_err("cancelled tool should fail");
+        assert!(error.to_string().contains("cancelled"), "{error:#}");
+    }
 }

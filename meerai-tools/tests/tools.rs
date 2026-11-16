@@ -200,7 +200,9 @@ async fn read_file_windows_lines_with_offset_and_limit() {
     assert!(output.contains("showing lines 1-2000 of 2100"));
 
     let run = call(&tools, "read_file", json!({ "path": "missing.txt" })).await;
-    assert!(failure_text(&run).contains("does not exist"));
+    let failure = failure_text(&run);
+    assert!(failure.contains("does not exist"));
+    assert!(failure.contains("(workspace root: "));
 
     let run = call(&tools, "read_file", json!({ "path": "notes.txt/child" })).await;
     assert_eq!(run.observation.status, ObservationStatus::Error);

@@ -3,6 +3,7 @@ use comrak::{Arena, Options, parse_document};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 
+use crate::syntax;
 use crate::theme;
 
 pub struct MarkdownLine {
@@ -54,12 +55,11 @@ fn render_block<'a>(node: &'a AstNode<'a>, out: &mut Vec<MarkdownLine>, indent: 
             }
         }
         NodeValue::CodeBlock(block) => {
+            let language = syntax::language_for_fence(&block.info);
             let literal = block.literal;
-            for line in literal.trim_end_matches('\n').split('\n') {
-                out.push(MarkdownLine {
-                    spans: vec![Span::styled(line.to_string(), code_style())],
-                    code: true,
-                });
+            let body = literal.trim_end_matches('\n');
+            for spans in syntax::highlight(language, body, code_block_style()) {
+                out.push(MarkdownLine { spans, code: true });
             }
             if literal.is_empty() {
                 out.push(MarkdownLine {
@@ -112,18 +112,53 @@ fn render_block<'a>(node: &'a AstNode<'a>, out: &mut Vec<MarkdownLine>, indent: 
             }
         }
         NodeValue::Table(..) => {
-            for row in node.children() {
+            let rows: Vec<Vec<Vec<Span<'static>>>> = node
+                .children()
+                .map(|row| {
+                    row.children()
+                        .map(|cell| {
+                            inline_lines(cell, theme::text())
+                                .into_iter()
+                                .flatten()
+                                .collect()
+                        })
+                        .collect()
+                })
+                .collect();
+            let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+            let widths: Vec<usize> = (0..columns)
+                .map(|col| {
+                    rows.iter()
+                        .filter_map(|row| row.get(col))
+                        .map(|spans| spans.iter().map(|span| span.content.chars().count()).sum())
+                        .max()
+                        .unwrap_or(0)
+                })
+                .collect();
+            let total_width = widths.iter().sum::<usize>() + 3 * columns.saturating_sub(1);
+            for (row_idx, row) in rows.iter().enumerate() {
                 let mut spans = Vec::new();
-                for cell in row.children() {
-                    if !spans.is_empty() {
+                for (col, cell) in row.iter().enumerate() {
+                    if col > 0 {
                         spans.push(Span::styled(" │ ", Style::default().fg(theme::p().faint)));
                     }
-                    let text = plain_text(cell);
-                    if !text.is_empty() {
-                        spans.push(Span::styled(text, theme::text()));
+                    spans.extend(cell.iter().cloned());
+                    if col + 1 < columns {
+                        let used: usize =
+                            cell.iter().map(|span| span.content.chars().count()).sum();
+                        spans.push(Span::raw(" ".repeat(widths[col].saturating_sub(used))));
                     }
                 }
                 push_line(out, indent, spans, false);
+                if row_idx == 0 {
+                    out.push(MarkdownLine {
+                        spans: vec![Span::styled(
+                            "─".repeat(total_width.clamp(1, 80)),
+                            Style::default().fg(theme::p().faint),
+                        )],
+                        code: false,
+                    });
+                }
             }
         }
         NodeValue::DescriptionList | NodeValue::DescriptionItem(..) => {
@@ -227,7 +262,7 @@ fn walk_inline<'a>(node: &'a AstNode<'a>, style: Style, lines: &mut Vec<Vec<Span
         match value {
             NodeValue::Text(text) => push_span(lines, Span::styled(text, style)),
             NodeValue::Code(code) => {
-                push_span(lines, Span::styled(code.literal, code_style()));
+                push_span(lines, Span::styled(code.literal, inline_code_style()));
             }
             NodeValue::SoftBreak => push_span(lines, Span::styled(" ", style)),
             NodeValue::LineBreak => lines.push(Vec::new()),
@@ -266,32 +301,15 @@ fn push_span(lines: &mut Vec<Vec<Span<'static>>>, span: Span<'static>) {
     line.push(span);
 }
 
-fn plain_text<'a>(node: &'a AstNode<'a>) -> String {
-    let mut text = String::new();
-    for child in node.descendants() {
-        match &child.data.borrow().value {
-            NodeValue::Text(value) => {
-                if !text.is_empty() {
-                    text.push(' ');
-                }
-                text.push_str(value);
-            }
-            NodeValue::Code(comrak::nodes::NodeCode { literal, .. }) => {
-                if !text.is_empty() {
-                    text.push(' ');
-                }
-                text.push_str(literal);
-            }
-            NodeValue::SoftBreak | NodeValue::LineBreak => text.push(' '),
-            _ => {}
-        }
-    }
-    text
-}
-
-fn code_style() -> Style {
+fn code_block_style() -> Style {
     Style::default()
         .fg(theme::p().text)
+        .bg(theme::p().surface_high)
+}
+
+fn inline_code_style() -> Style {
+    Style::default()
+        .fg(theme::p().accent)
         .bg(theme::p().surface_high)
 }
 
@@ -304,8 +322,18 @@ mod tests {
         let lines = render("Run it:\n\n```sh\ncargo test --workspace\n```\n");
         let code: Vec<&MarkdownLine> = lines.iter().filter(|line| line.code).collect();
         assert_eq!(code.len(), 1);
-        assert_eq!(code[0].spans[0].content, "cargo test --workspace");
-        assert_eq!(code[0].spans[0].style.bg, Some(theme::p().surface_high));
+        let text: String = code[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(text, "cargo test --workspace");
+        assert!(
+            code[0]
+                .spans
+                .iter()
+                .all(|span| span.style.bg == Some(theme::p().surface_high))
+        );
     }
 
     #[test]
@@ -367,5 +395,34 @@ mod tests {
             .map(|span| span.content.to_string())
             .collect();
         assert_eq!(text, "a `broken command");
+    }
+
+    #[test]
+    fn highlights_fenced_code_and_keeps_table_cell_styles() {
+        let lines = render(
+            "```rust\nlet value = 1;\n```\n\n| file | note |\n| --- | --- |\n| `src/main.rs` | **new** |\n",
+        );
+
+        let code = lines.iter().find(|line| line.code).expect("code block");
+        assert!(code.spans.iter().any(|span| span.content == "let"));
+        assert!(
+            code.spans
+                .iter()
+                .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
+        );
+
+        let path = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content == "src/main.rs")
+            .expect("table path");
+        assert_eq!(path.style.bg, Some(theme::p().surface_high));
+        assert_eq!(path.style.fg, Some(theme::p().accent));
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.spans.iter().any(|span| span.content.contains('─')))
+        );
     }
 }

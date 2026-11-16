@@ -4,7 +4,7 @@ Pack Vision's terminal agent harness — written in Rust, designed for
 autonomous and interactive software engineering in the terminal with a
 selection-first, modal TUI and a scriptable headless CLI.
 
-**Status:** early-stage, distribution-hardened. The workspace has eleven library
+**Status:** early-stage, distribution-hardened. The workspace has twelve library
 crates plus the `meerai` binary (built by `meerai-cli`). Milestones **M1–M13**
 (session log, harness, checkpoints, hooks, subagent runtime, `meerai-cli` +
 session fork, retrieval v2/v3, security & supply chain, agents/skills discovery,
@@ -148,7 +148,8 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   `LspToolset` (`lsp-go_to_definition`, `lsp-find_references`,
   `lsp-get_diagnostics` over stdio JSON-RPC), opt-in post-edit diagnostics
   (`context.post_edit_diagnostics`), and `SearchAsCodeToolset`
-  (`sac-run_script` running `python3 -I` or `node -e` with env scrubbing and
+  (`sac-run_script` running inline `python3 -I -c` / `node -e` scripts or
+  existing script files through `path`, with env scrubbing and
   `EffectClass::Execute` policy gating). At startup meerai probes `python3`,
   then `node`; it registers the script tool only for the detected runtime and
   tells the model to prefer one analysis script over long chains of small
@@ -215,7 +216,8 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 | `meerai-policy` | `PolicyEngine`: ordered permission rules, approval modes, turn/session grants |
 | `meerai-tools` | `code` (`CodeTools`, seven `code-*` tools with path guards, unified diffs, observations), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`), `search_as_code` (`SearchAsCodeToolset`) |
 | `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent` v2, `prompt::{BASE_SYSTEM_PROMPT, compose_system_prompt}`, `spawn_worker`, `subagent` (`SubagentToolset` + child sessions), and best-effort tool-output redaction |
-| `meerai-tui` | Modal terminal UI library (`ratatui` + `crossterm`) with transcript replay, subagent items, and approval overlay |
+| `meerai-syntax` | Tree-sitter highlighting for Rust, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML, CSS, and JSON, with a lexical fallback for other languages; returns per-line tokens with no UI dependency |
+| `meerai-tui` | Modal terminal UI library (`ratatui` + `crossterm`) with transcript replay, subagent items, syntax-highlighted code fences and edit diffs, and approval overlay |
 | `meerai-cli` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions`/`hooks` subcommands, TUI launcher |
 | `meerai-acp` | ACP client bridge: `agy acp` preset, handshake, typed events, `AcpWorker`, permission replies, cancel, `session/load`; used by the CLI and TUI |
 
@@ -589,9 +591,11 @@ unaffected by this block.
 ### Prompt and repository instructions
 
 Every request starts from the built-in `BASE_SYSTEM_PROMPT`. The binary then
-appends, in order, the `--system` text (if any), the workspace `AGENTS.md`, and
-`.meerai/instructions.md`. These files are read per run and capped at 32 KiB
-each with a 64 KiB block cap. The agent also appends an `Active model:` line
+appends a `Workspace root:` line, the `--system` text (if any), the workspace
+`AGENTS.md`, and `.meerai/instructions.md`. The root line states that file tool
+paths are relative to it and that a shell `cd` does not move it. These files are
+read per run and capped at 32 KiB each with a 64 KiB block cap. The agent also
+appends an `Active model:` line
 with the current model spec, so it answers model-identity questions without
 reading your config. When an authorized tool touches a subdirectory,
 that directory's `AGENTS.md` is injected once for the turn, capped at 16 KiB,

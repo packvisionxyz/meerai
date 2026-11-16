@@ -269,8 +269,10 @@ locally by `LocalWorkspace` and injectable through `TuiLaunchConfig`.
 - **Completion:** a custom scorer in `completion.rs` (no `nucleo`). It covers
   slash commands, `@file` paths, and model ids.
 - **Text buffer:** plain `String` plus cursor helpers (no `ropey`).
-- **Markdown/highlighting:** plain text plus manual styling (no
-  `pulldown-cmark`, `syntect`, or `tree-sitter`).
+- **Markdown/highlighting:** `comrak` for Markdown; `meerai-syntax` for
+  tree-sitter highlighting (Rust, Python, JavaScript, TypeScript/TSX, Go, Bash,
+  HTML, CSS, JSON) with a lexical fallback, so no `syntect` or
+  `pulldown-cmark`; grammar dependencies stay out of the TUI crate.
 - **Clipboard:** OSC 52 plus native helpers (no `arboard`).
 - **Search/diff:** `grep-searcher`/`grep-regex`/`ignore` for workspace search;
   `similar` diffs arrive in `FileChange` items and render in the diff modal.

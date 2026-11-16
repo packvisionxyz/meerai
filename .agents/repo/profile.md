@@ -10,7 +10,7 @@
 
 - **Product:** `meerai` (Pack Vision) — a pure, provider-agnostic terminal agent harness
   written in Rust, featuring a selection-first modal TUI and a scriptable headless CLI mode.
-- **Shape:** Rust Cargo workspace (`edition = "2024"`, toolchain pinned to `1.100.0`). Eleven
+- **Shape:** Rust Cargo workspace (`edition = "2024"`, toolchain pinned to `1.100.0`). Twelve
   library crates plus the `meerai` binary, built by `meerai-cli`. Milestones M1–M13 of
   `docs/harness-spec.md` have landed; the repo is distribution-hardened (Apache-2.0
   license, CI, tag-driven releases, Pages site) and includes project-root config discovery, TUI
@@ -52,7 +52,8 @@
 | `meerai-client/` | Client-facing provider surface: `ProviderCatalog` + `providers.yml`, `ModelInfo`, `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract, `MemorySecretStore`, auth listing |
 | `meerai-providers/` | `genai` client factory + native secret stores (`auth.json`, OS keychain); re-exports the client surface |
 | `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig` (+ `TokenPricing`), `AgentEvent` v2, `intercept` (`Interceptor`/`StepPlan`/`ToolPlan`/`ToolContext`/`ToolOutcome`, async `before_tool`), hook engine (`hooks`: `HookEngine`/`HookContext`/`HookReport`, `HookFired` logging), `question-ask` (`QuestionAsked`/`AnswerQuestion`, not an approval), `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins + read-only custom child runs, `child_session_id` on `SubagentRun`), delegated `acp-run` (`acp_subagent`: `AcpRunToolset`/`AcpSpawner`), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
-| `meerai-tui/` | Modal TUI library (`ratatui` + `crossterm`) split into `ui/` panels and `app/` modules, transcript replay, tabs, collapsible per-turn activity digests (`+`/`-`, hover affordances), inline syntax-highlighted edit diffs (`syntax.rs`), expandable subagent child conversations, menu shortcuts, `/agent`/`/skill`, the `@` Mentions popup, and `workspace::WorkspaceQuery` (local walker + grep; no `meerai-tools` or `meerai-providers` dependency) |
+| `meerai-tui/` | Modal TUI library (`ratatui` + `crossterm`) split into `ui/` panels and `app/` modules, transcript replay, tabs, collapsible per-turn activity digests (`+`/`-`, hover affordances), inline syntax-highlighted edit diffs (`meerai-syntax`), expandable subagent child conversations, menu shortcuts, `/agent`/`/skill`, the `@` Mentions popup, and `workspace::WorkspaceQuery` (local walker + grep; no `meerai-tools` or `meerai-providers` dependency) |
+| `meerai-syntax/` | Tree-sitter highlighting for Rust, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML, CSS, and JSON plus a lexical fallback; `highlight_block` returns per-line `Token`s; depends only on grammar crates |
 | `meerai-cli/` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions` (`list`, `rm`, `prune`, `fork`) subcommands, and TUI launcher |
 | `.agents/agents/`, `.agents/skills/` | Default agent (`*.md`) and skill (`*/SKILL.md`) definitions, read at runtime |
 | `.claude/agents/`, `.claude/skills/` | Lower-priority agent and skill definitions, same format |
@@ -251,6 +252,7 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 | `meerai-tools` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-tools` |
 | `meerai-agents` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-agents` |
 | `meerai-tui` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-tui` |
+| `meerai-syntax` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-syntax` |
 | `meerai-acp` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-acp`; live `cargo test -p meerai-acp --test live_agy -- --ignored` and `--test live_worker -- --ignored` |
 | Repo-wide | `cargo fmt --all -- --check && cargo clippy --workspace --all-targets && cargo test --workspace` (or `make verify`) |
 | Docs only | Re-run the repo-wide check when code claims changed; otherwise verify links and the stale-claim grep |
@@ -382,7 +384,8 @@ Detail in [`infra.md`](infra.md). Summary:
   unless `--keep N`; `--continue` resumes by last activity. Automatic retention is opt-in through
   user `sessions.auto_prune_days`/`sessions.keep`, spares the active session, and is never
   controlled by a project file.
-- Prompt composition: `BASE_SYSTEM_PROMPT` + optional `--system` + root `AGENTS.md` +
+- Prompt composition: `BASE_SYSTEM_PROMPT` + a `Workspace root:` line (file tool paths are relative
+  to it; a shell `cd` does not move it) + optional `--system` + root `AGENTS.md` +
   `.meerai/instructions.md` (32 KiB/file, 64 KiB block); scoped `AGENTS.md` injected once per turn
   when a tool touches its directory (16 KiB, max 8 files). The agent appends an `Active model:`
   identity line at request time (refreshed by `set_model`) and logs it with the system prompt.

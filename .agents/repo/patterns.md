@@ -183,7 +183,8 @@ Rules for all shapes:
   from the last cumulative `UsageUpdated`. Counters are session cumulative and resume seeds them
   from the log. The TUI statusline adds `session ↑… ↓… Σ…` from the same cumulative usage.
   `est_cost_usd` is always `None`.
-- Prompt composition: `BASE_SYSTEM_PROMPT` + optional `--system` + root `AGENTS.md` +
+- Prompt composition: `BASE_SYSTEM_PROMPT` + a `Workspace root:` line (file tool paths are relative
+  to it; a shell `cd` does not move it) + optional `--system` + root `AGENTS.md` +
   `.meerai/instructions.md` (32 KiB/file, 64 KiB block). Scoped `AGENTS.md` files are injected once
   per turn as `RuntimeContext` when a tool touches their directory (16 KiB, max 8 files).
 

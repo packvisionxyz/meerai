@@ -541,8 +541,10 @@ Adopted pattern: dsh `compaction` bracket + source-spec Technique D.
 What the current binary does:
 
 - `compose_system_prompt` builds **one** system string from
-  `BASE_SYSTEM_PROMPT` + optional `--system` text + the root `AGENTS.md` +
-  `.meerai/instructions.md` (32 KiB per file, 64 KiB block cap). It is sent with
+  `BASE_SYSTEM_PROMPT` + a `Workspace root:` line + optional `--system` text +
+  the root `AGENTS.md` + `.meerai/instructions.md` (32 KiB per file, 64 KiB
+  block cap). The root line states that file tool paths are relative to it and
+  that a shell `cd` does not move it. It is sent with
   `ChatRequest::with_system` and logged as a `SystemMessage` with a `generation`
   counter when it changes.
 - Tool schemas are attached to the request separately with stable ordering, and
@@ -1224,9 +1226,11 @@ contention is normal, not a hang.
   startup warning to Phase-1 guards on unsupported/nested hosts (and Windows).
   Release signing steps in `release.yml` remain inactive until repository signing
   secrets are supplied; see [threat-model.md](threat-model.md).
-- **Prompt composition.** `BASE_SYSTEM_PROMPT` + `--system` + root `AGENTS.md` +
-  `.meerai/instructions.md` (32 KiB/file, 64 KiB block) in the system prompt;
-  scoped `AGENTS.md` injected once per turn as runtime context (16 KiB, max 8).
+- **Prompt composition.** `BASE_SYSTEM_PROMPT` + a `Workspace root:` line (file
+  tool paths are relative to it; a shell `cd` does not move it) + `--system` +
+  root `AGENTS.md` + `.meerai/instructions.md` (32 KiB/file, 64 KiB block) in the
+  system prompt; scoped `AGENTS.md` injected once per turn as runtime context
+  (16 KiB, max 8).
 - **Project permissions are tighten-only; config cannot redirect.**
   `<project-root>/.meerai/settings.yml` is discovered from the CWD (see
   *Project root discovery* below) and merged

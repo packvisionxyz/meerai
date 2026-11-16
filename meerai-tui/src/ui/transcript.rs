@@ -233,13 +233,16 @@ fn script_from_args(name: &str, args: &str) -> Option<(String, String)> {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(args).ok()?;
-    let script = value.get("script")?.as_str()?.to_string();
     let language = value
         .get("language")
         .and_then(|v| v.as_str())
         .unwrap_or("script")
         .to_string();
-    Some((language, script))
+    if let Some(script) = value.get("script").and_then(|v| v.as_str()) {
+        return Some((language, script.to_string()));
+    }
+    let path = value.get("path").and_then(|v| v.as_str())?;
+    Some((language, format!("(file) {path}")))
 }
 
 fn tool_status_badge(status: &ToolCallStatus) -> (&'static str, Color) {
@@ -992,20 +995,32 @@ fn edit_diff(tc: &ToolCallEntry) -> Option<Vec<crate::diff::UnifiedLine>> {
 fn render_edit_diff(
     lines: &mut Vec<TaggedTranscriptLine>,
     diff: &[crate::diff::UnifiedLine],
-    language: Option<&str>,
+    language: Option<crate::syntax::Language>,
     idx: usize,
 ) {
     use crate::diff::UnifiedLineKind;
     const MAX_DIFF_LINES: usize = 200;
-    let mut rendered = 0usize;
-    for line in diff {
-        if line.kind == UnifiedLineKind::FileHeader {
-            continue;
-        }
-        if rendered >= MAX_DIFF_LINES {
-            lines.push(nested_line(idx, "…".to_string(), true));
-            break;
-        }
+    let body: Vec<&crate::diff::UnifiedLine> = diff
+        .iter()
+        .filter(|line| line.kind != UnifiedLineKind::FileHeader)
+        .collect();
+    let visible = body.len().min(MAX_DIFF_LINES);
+    let source = body
+        .iter()
+        .take(visible)
+        .map(|line| {
+            if line.kind == UnifiedLineKind::HunkHeader {
+                ""
+            } else {
+                line.text.as_str()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tokens = crate::syntax::token_lines(language, &source);
+
+    for (position, line) in body.iter().take(visible).enumerate() {
+        let line_tokens = tokens.get(position).map(Vec::as_slice).unwrap_or(&[]);
         let tagged = match line.kind {
             UnifiedLineKind::HunkHeader => with_hover(
                 banded_line(
@@ -1019,18 +1034,21 @@ fn render_edit_diff(
                 idx,
             ),
             UnifiedLineKind::Context => {
-                code_diff_line(idx, " ", theme::p().diff_context, language, &line.text)
+                code_diff_line(idx, " ", theme::p().diff_context, line_tokens, &line.text)
             }
             UnifiedLineKind::Added => {
-                code_diff_line(idx, "+", theme::p().diff_added, language, &line.text)
+                code_diff_line(idx, "+", theme::p().diff_added, line_tokens, &line.text)
             }
             UnifiedLineKind::Removed => {
-                code_diff_line(idx, "-", theme::p().diff_removed, language, &line.text)
+                code_diff_line(idx, "-", theme::p().diff_removed, line_tokens, &line.text)
             }
             UnifiedLineKind::FileHeader => continue,
         };
-        rendered += 1;
         lines.push(tagged);
+    }
+
+    if body.len() > visible {
+        lines.push(nested_line(idx, "…".to_string(), true));
     }
 }
 
@@ -1038,7 +1056,7 @@ fn code_diff_line(
     idx: usize,
     sign: &str,
     color: Color,
-    language: Option<&str>,
+    tokens: &[crate::syntax::Token],
     text: &str,
 ) -> TaggedTranscriptLine {
     let base = Style::default().fg(color);
@@ -1047,7 +1065,11 @@ fn code_diff_line(
         Span::styled(format!("{sign} "), Style::default().fg(color)),
         Span::styled("  ", Style::default()),
     ];
-    spans.extend(crate::syntax::highlight(language, text, base));
+    if tokens.is_empty() {
+        spans.push(Span::styled(text.to_string(), base));
+    } else {
+        spans.extend(crate::syntax::line_spans(tokens, base));
+    }
     with_hover(banded_line(Line::from(spans), Some(idx), 4), idx)
 }
 

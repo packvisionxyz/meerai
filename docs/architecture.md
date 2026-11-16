@@ -12,7 +12,7 @@ and a scriptable headless CLI mode. The protocol and context design live in
 
 ## Current workspace
 
-Ten library crates plus the `meerai` binary (built by `meerai-cli`):
+Twelve library crates plus the `meerai` binary (built by `meerai-cli`):
 
 | Crate | Current role |
 | --- | --- |
@@ -25,7 +25,8 @@ Ten library crates plus the `meerai` binary (built by `meerai-cli`):
 | `meerai-policy` | `PolicyEngine`: ordered rules, `ApprovalMode` presets, turn/session grants, YAML parsing |
 | `meerai-tools` | `code` (`CodeTools` with seven `code-*` tools, path guards, unified diffs, observations, `workspace_search`), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`), `search_as_code` (`SearchAsCodeToolset`) |
 | `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent` v2, `intercept` (`Interceptor`/`StepPlan`/`ToolOutcome`), `question-ask` (`QuestionAsked`/`AnswerQuestion`), `prompt`, `spawn_worker`, `subagent` runtime, tool-output redaction |
-| `meerai-tui` | Modal terminal UI (`ratatui` + `crossterm`, split `ui/` panels and `app/` modules) with transcript replay, tabs, subagent cards, question and rewind overlays, and the `WorkspaceQuery` seam |
+| `meerai-syntax` | Tree-sitter highlighting for nine languages plus a lexical fallback; `highlight_block` returns per-line tokens and has no UI dependency |
+| `meerai-tui` | Modal terminal UI (`ratatui` + `crossterm`, split `ui/` panels and `app/` modules) with transcript replay, tabs, subagent cards, question and rewind overlays, syntax-highlighted fences and diffs, and the `WorkspaceQuery` seam |
 | `meerai-cli` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions` (`list`/`rm`/`prune`/`fork`) subcommands, TUI launcher |
 
 Dependency direction today:
@@ -34,8 +35,9 @@ Dependency direction today:
 core ──▶ session ──▶ agents ──▶ cli
   ├──▶ policy ──▶ agents/common/tui
   ├──▶ tools ──▶ cli
-  └──▶ common ──▶ client ──▶ tui ──▶ cli
-                      └──▶ providers ──▶ cli
+  ├──▶ common ──▶ client ──▶ tui ──▶ cli
+  │                    └──▶ providers ──▶ cli
+  └──▶ syntax ──▶ tui
 macros ──▶ (consumers)
 ```
 
@@ -188,10 +190,11 @@ compaction summaries. The default is the session model. Its usage counts toward
   Unix.
 - `.env` is **opt-in**: `MEERAI_LOAD_DOTENV=1|true|yes` or `--env-file <PATH>`.
   There is no implicit `dotenvy` load.
-- Prompt composition: `BASE_SYSTEM_PROMPT` + optional `--system` + workspace
-  `AGENTS.md` + `.meerai/instructions.md` (32 KiB/file, 64 KiB block). Scoped
-  `AGENTS.md` files are injected once per turn when an authorized tool touches
-  their directory (16 KiB, max 8 files).
+- Prompt composition: `BASE_SYSTEM_PROMPT` + a `Workspace root:` line (file
+  tool paths are relative to it; a shell `cd` does not move it) + optional
+  `--system` + workspace `AGENTS.md` + `.meerai/instructions.md` (32 KiB/file,
+  64 KiB block). Scoped `AGENTS.md` files are injected once per turn when an
+  authorized tool touches their directory (16 KiB, max 8 files).
 
 ## Current agents and skills (`meerai-common::definitions`)
 

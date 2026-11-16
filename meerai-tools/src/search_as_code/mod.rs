@@ -87,12 +87,22 @@ struct RunScriptArgs {
     )]
     #[serde(alias = "lang")]
     language: ScriptLanguage,
-    #[schemars(description = "Script source code to execute in the workspace root.")]
-    #[serde(alias = "code")]
-    script: String,
+    #[schemars(description = "Inline script source. Provide exactly one of `script` or `path`.")]
+    #[serde(alias = "code", default)]
+    script: Option<String>,
+    #[schemars(
+        description = "Path to an existing script file, relative to the workspace root or absolute. Provide exactly one of `script` or `path`."
+    )]
+    #[serde(alias = "file", alias = "script_path", default)]
+    path: Option<String>,
     #[schemars(description = "Timeout in milliseconds (default 15000, max 60000).")]
     #[serde(default, deserialize_with = "meerai_core::lenient::option_u64_value")]
     timeout_ms: Option<u64>,
+}
+
+enum ScriptSource {
+    Inline(String),
+    File(PathBuf),
 }
 
 #[derive(Clone, Debug)]
@@ -176,12 +186,46 @@ impl SearchAsCodeToolset {
             ));
         }
 
-        let (program, argv): (&str, Vec<String>) = match args.language {
-            ScriptLanguage::Python => (
+        let source = match (args.script, args.path) {
+            (Some(script), None) if !script.trim().is_empty() => ScriptSource::Inline(script),
+            (None, Some(path)) if !path.trim().is_empty() => {
+                let raw = PathBuf::from(path.trim());
+                let candidate = if raw.is_absolute() {
+                    raw
+                } else {
+                    cwd.join(raw)
+                };
+                match tokio::fs::metadata(&candidate).await {
+                    Ok(meta) if meta.is_file() => ScriptSource::File(candidate),
+                    _ => {
+                        return failure_run(format!(
+                            "script file not found: {}",
+                            candidate.display()
+                        ));
+                    }
+                }
+            }
+            (Some(_), Some(_)) => {
+                return failure_run("provide exactly one of `script` or `path`".to_string());
+            }
+            _ => return failure_run("provide `script` or `path`".to_string()),
+        };
+
+        let (program, argv): (&str, Vec<String>) = match (args.language, &source) {
+            (ScriptLanguage::Python, ScriptSource::Inline(script)) => (
                 "python3",
-                vec!["-I".to_string(), "-c".to_string(), args.script.clone()],
+                vec!["-I".to_string(), "-c".to_string(), script.clone()],
             ),
-            ScriptLanguage::Javascript => ("node", vec!["-e".to_string(), args.script.clone()]),
+            (ScriptLanguage::Python, ScriptSource::File(path)) => (
+                "python3",
+                vec!["-I".to_string(), path.to_string_lossy().into_owned()],
+            ),
+            (ScriptLanguage::Javascript, ScriptSource::Inline(script)) => {
+                ("node", vec!["-e".to_string(), script.clone()])
+            }
+            (ScriptLanguage::Javascript, ScriptSource::File(path)) => {
+                ("node", vec![path.to_string_lossy().into_owned()])
+            }
         };
 
         let command = WorldCommand {
@@ -280,13 +324,13 @@ impl Toolset for SearchAsCodeToolset {
     fn definition(&self) -> Vec<ToolDefinition> {
         let description = match self.runtime {
             Some(ScriptRuntime::Python) => {
-                "Run a short Python analysis script (python3 -I) in the workspace root with sensitive environment variables scrubbed. Prefer one script over many small lookups when a task needs multi-step scanning or aggregation."
+                "Run a short Python analysis script (python3 -I) inline or from a file in the workspace root with sensitive environment variables scrubbed. Use `script` for inline code or `path` for an existing file. Prefer one script over many small lookups when a task needs multi-step scanning or aggregation."
             }
             Some(ScriptRuntime::Javascript) => {
-                "Run a short JavaScript analysis script (node -e) in the workspace root with sensitive environment variables scrubbed. Prefer one script over many small lookups when a task needs multi-step scanning or aggregation."
+                "Run a short JavaScript analysis script (node) inline or from a file in the workspace root with sensitive environment variables scrubbed. Use `script` for inline code or `path` for an existing file. Prefer one script over many small lookups when a task needs multi-step scanning or aggregation."
             }
             None => {
-                "Run a short Python or JavaScript analysis script in the workspace root with sensitive environment variables scrubbed."
+                "Run a short Python or JavaScript analysis script inline or from a file in the workspace root with sensitive environment variables scrubbed."
             }
         };
         vec![definition_for::<RunScriptArgs>(
@@ -306,7 +350,7 @@ impl Toolset for SearchAsCodeToolset {
     fn permission_spec(&self, fn_name: &str) -> Option<ToolPermissionSpec> {
         (fn_name == RUN_SCRIPT_TOOL).then_some(ToolPermissionSpec {
             action: PermissionAction::Shell,
-            resource_arg: None,
+            resource_arg: Some("path"),
         })
     }
 
@@ -388,6 +432,60 @@ mod tests {
         assert_eq!(run.observation.status, ObservationStatus::Success);
         assert_eq!(run.observation.exit_code, Some(0));
         assert_eq!(run.observation.stdout.trim(), "hello sac");
+    }
+
+    #[tokio::test]
+    async fn executes_python_script_file_in_workspace() {
+        if !command_available("python3") {
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("sample.txt"), "hello file").unwrap();
+        fs::write(
+            dir.path().join("scan.py"),
+            "print(open('sample.txt').read())",
+        )
+        .unwrap();
+
+        let toolset = SearchAsCodeToolset::new(dir.path());
+        let run = toolset
+            .invoke_structured(
+                RUN_SCRIPT_TOOL,
+                r#"{"language": "python", "path": "scan.py"}"#,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(run.observation.status, ObservationStatus::Success);
+        assert_eq!(run.observation.exit_code, Some(0));
+        assert_eq!(run.observation.stdout.trim(), "hello file");
+    }
+
+    #[tokio::test]
+    async fn requires_exactly_one_script_source() {
+        let dir = TempDir::new().unwrap();
+        let toolset = SearchAsCodeToolset::new(dir.path());
+        for args in [
+            r#"{"language": "python"}"#,
+            r#"{"language": "python", "script": "print(1)", "path": "scan.py"}"#,
+            r#"{"language": "python", "path": "missing.py"}"#,
+        ] {
+            let run = toolset
+                .invoke_structured(RUN_SCRIPT_TOOL, args)
+                .await
+                .unwrap();
+            assert_eq!(run.observation.status, ObservationStatus::Error);
+            let text = match &run.output {
+                ToolOutput::Fail(text) | ToolOutput::Text(text) => text.clone(),
+                ToolOutput::Stop(reason) => format!("{reason:?}"),
+            };
+            assert!(
+                text.contains("exactly one")
+                    || text.contains("provide `script`")
+                    || text.contains("not found"),
+                "{text}"
+            );
+        }
     }
 
     #[tokio::test]

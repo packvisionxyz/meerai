@@ -21,6 +21,7 @@ meerai-core = { path = "../meerai-core/" }
 meerai-policy = { path = "../meerai-policy/" }
 meerai-client = { path = "../meerai-client/" }
 meerai-session = { path = "../meerai-session/" }
+meerai-syntax = { path = "../meerai-syntax/" }
 
 anyhow = { workspace = true }
 crossterm = { workspace = true }

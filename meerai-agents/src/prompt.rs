@@ -29,9 +29,20 @@ Communication:
 const INSTRUCTION_FILES: [&str; 2] = ["AGENTS.md", ".meerai/instructions.md"];
 const MAX_FILE_BYTES: usize = 32 * 1024;
 const MAX_BLOCK_BYTES: usize = 64 * 1024;
+const WORKSPACE_ANCHOR_RULE: &str =
+    "File tool paths are relative to this root. A shell cd does not move it.";
+
+fn workspace_anchor(workspace_root: &Path) -> String {
+    format!(
+        "Workspace root: {}\n{WORKSPACE_ANCHOR_RULE}",
+        workspace_root.display()
+    )
+}
 
 pub async fn compose_system_prompt(user_system: &str, workspace_root: &Path) -> String {
     let mut prompt = String::from(BASE_SYSTEM_PROMPT);
+    prompt.push_str("\n\n");
+    prompt.push_str(&workspace_anchor(workspace_root));
 
     let user_system = user_system.trim();
     if !user_system.is_empty() {
@@ -73,7 +84,7 @@ pub fn append_script_guidance(mut prompt: String, runtime: Option<&str>) -> Stri
     );
     prompt.push_str(runtime);
     prompt.push_str(
-        " script and run it with sac-run_script instead of chaining many code-grep, code-glob, or code-list_dir calls. Keep the script read-only, print a compact result, and cite the files it read.",
+        " script and run it with sac-run_script instead of chaining many code-grep, code-glob, or code-list_dir calls. Pass inline code as `script` or an existing file as `path`. Derive every path from the workspace root or a script argument; never hardcode an absolute repository path. Keep the script read-only, print a compact result, and cite the files it read.",
     );
     prompt
 }
@@ -121,8 +132,12 @@ async fn read_capped(path: &Path, limit: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn base_with_root(root: &Path) -> String {
+        format!("{BASE_SYSTEM_PROMPT}\n\n{}", workspace_anchor(root))
+    }
 
     fn workspace(tag: &str) -> PathBuf {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -178,7 +193,9 @@ mod tests {
     async fn composes_base_prompt_without_files() {
         let root = workspace("empty");
         let prompt = compose_system_prompt("", &root).await;
-        assert_eq!(prompt, BASE_SYSTEM_PROMPT);
+        assert_eq!(prompt, base_with_root(&root));
+        assert!(prompt.contains(&format!("Workspace root: {}", root.display())));
+        assert!(prompt.contains("A shell cd does not move it."));
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -188,7 +205,10 @@ mod tests {
         let prompt = compose_system_prompt("  Be terse.  ", &root).await;
         assert_eq!(
             prompt,
-            format!("{BASE_SYSTEM_PROMPT}\n\n## Additional instructions\n\nBe terse.")
+            format!(
+                "{}\n\n## Additional instructions\n\nBe terse.",
+                base_with_root(&root)
+            )
         );
         std::fs::remove_dir_all(&root).ok();
     }
@@ -203,7 +223,8 @@ mod tests {
         assert_eq!(
             prompt,
             format!(
-                "{BASE_SYSTEM_PROMPT}\n\n## Repository instructions (AGENTS.md)\n\nRun cargo test."
+                "{}\n\n## Repository instructions (AGENTS.md)\n\nRun cargo test.",
+                base_with_root(&root)
             )
         );
         std::fs::remove_dir_all(&root).ok();
@@ -223,8 +244,9 @@ mod tests {
             .unwrap();
         let prompt = compose_system_prompt("", &root).await;
         let expected = format!(
-            "{BASE_SYSTEM_PROMPT}\n\n## Repository instructions (AGENTS.md)\n\nroot rules\
-             \n\n## Repository instructions (.meerai/instructions.md)\n\nextra rules"
+            "{}\n\n## Repository instructions (AGENTS.md)\n\nroot rules\
+             \n\n## Repository instructions (.meerai/instructions.md)\n\nextra rules",
+            base_with_root(&root)
         );
         assert_eq!(prompt, expected);
         std::fs::remove_dir_all(&root).ok();
@@ -251,7 +273,7 @@ mod tests {
     async fn missing_file_is_ignored() {
         let root = workspace("missing");
         let prompt = compose_system_prompt("", &root).await;
-        assert_eq!(prompt, BASE_SYSTEM_PROMPT);
+        assert_eq!(prompt, base_with_root(&root));
         assert!(!prompt.contains("Repository instructions"));
         std::fs::remove_dir_all(&root).ok();
     }
