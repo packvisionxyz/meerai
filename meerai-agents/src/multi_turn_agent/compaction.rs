@@ -79,16 +79,18 @@ impl MultiTurnAgent {
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
         cancel: &CancellationToken,
         clock: Option<TurnClock>,
-    ) -> Option<TurnError> {
-        let (events, verbatim_window_turns) = self.harness.as_ref().map(|harness| {
+    ) -> Result<bool, TurnError> {
+        let Some((events, verbatim_window_turns)) = self.harness.as_ref().map(|harness| {
             (
                 harness.session.events(),
                 harness.config.verbatim_window_turns,
             )
-        })?;
+        }) else {
+            return Ok(false);
+        };
 
         if has_open_compaction(&events) {
-            return None;
+            return Ok(false);
         }
 
         let compaction_id = CompactionId::new();
@@ -138,7 +140,7 @@ impl MultiTurnAgent {
                 event_tx,
             )
             .await;
-            return None;
+            return Ok(false);
         }
 
         let Some(range) = plan_compaction_boundary(&events, verbatim_window_turns) else {
@@ -162,20 +164,47 @@ impl MultiTurnAgent {
                 event_tx,
             )
             .await;
-            return None;
+            return Ok(false);
         };
 
         let end_index = events
             .iter()
             .position(|logged| logged.seq == range.end_inclusive)
             .map_or(events.len(), |index| index + 1);
-        let transcript = render_transcript(
-            &derive_messages(&events[..end_index], &self.projection_policy()),
-            SUMMARY_MESSAGE_TOKEN_LIMIT,
-        );
+        let projection_policy = self.projection_policy();
+        let distinct_model = self
+            .harness
+            .as_ref()
+            .is_some_and(|harness| harness.config.summarizer_model.is_some());
+        let request = if distinct_model {
+            let mut transcript_policy = projection_policy.clone();
+            transcript_policy.clear_old_tool_results = false;
+            let transcript = render_transcript(
+                &derive_messages(&events[..end_index], &transcript_policy),
+                SUMMARY_MESSAGE_TOKEN_LIMIT,
+            );
+            ChatRequest::new(vec![ChatMessage::user(transcript)])
+                .with_system(SUMMARY_INSTRUCTION.to_string())
+        } else {
+            let mut messages = self.request_messages();
+            messages.push(ChatMessage::user(SUMMARY_INSTRUCTION.to_string()));
+            let tools: Vec<Tool> = self
+                .tools
+                .iter()
+                .flat_map(|tool| tool.definition())
+                .map(|definition| definition.to_genai())
+                .collect();
+            let mut request = ChatRequest::new(messages);
+            let system = self.effective_system_prompt();
+            if !system.is_empty() {
+                request = request.with_system(system);
+            }
+            if !tools.is_empty() {
+                request = request.with_tools(tools);
+            }
+            request
+        };
         let before = estimate_context_tokens(&self.request_messages());
-        let request = ChatRequest::new(vec![ChatMessage::user(transcript)])
-            .with_system(SUMMARY_INSTRUCTION.to_string());
 
         let mut budget_error: Option<TurnError> = None;
         let summary = match clock.and_then(|clock| clock.remaining().map(|left| (clock, left))) {
@@ -247,7 +276,7 @@ impl MultiTurnAgent {
                     event_tx,
                 )
                 .await;
-                None
+                Ok(true)
             }
             Err(error) => {
                 let message = format!("{error:#}");
@@ -282,7 +311,10 @@ impl MultiTurnAgent {
                     )
                     .await;
                 }
-                budget_error
+                match budget_error {
+                    Some(error) => Err(error),
+                    None => Ok(false),
+                }
             }
         }
     }
@@ -292,11 +324,18 @@ impl MultiTurnAgent {
         request: ChatRequest,
         cancel: &CancellationToken,
     ) -> Result<(String, Option<Usage>)> {
-        let options = ChatOptions::default()
+        let mut options = ChatOptions::default()
             .with_capture_content(true)
             .with_capture_usage(true)
             .with_stream_header_timeout(STREAM_HEADER_TIMEOUT)
             .with_stream_read_timeout(STREAM_READ_TIMEOUT);
+        if self
+            .harness
+            .as_ref()
+            .is_none_or(|harness| harness.config.prompt_caching)
+        {
+            options = options.with_cache_control(CacheControl::Ephemeral);
+        }
         let model = self
             .harness
             .as_ref()
@@ -373,7 +412,8 @@ impl MultiTurnAgent {
             .saturating_mul(u64::from(harness.config.high_watermark_pct))
             / 100;
         let estimated = estimate_context_tokens(&self.request_messages())
-            + estimate_tokens(&self.effective_system_prompt());
+            + estimate_tokens(&self.effective_system_prompt())
+            + self.tool_schema_tokens;
         estimated > threshold
     }
 

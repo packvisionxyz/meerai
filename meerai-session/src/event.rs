@@ -91,6 +91,8 @@ pub struct Usage {
     pub total_tokens: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<i32>,
 }
 
 impl Usage {
@@ -107,16 +109,22 @@ impl Usage {
         self.completion_tokens = sum(self.completion_tokens, other.completion_tokens);
         self.total_tokens = sum(self.total_tokens, other.total_tokens);
         self.cached_tokens = sum(self.cached_tokens, other.cached_tokens);
+        self.cache_creation_tokens = sum(self.cache_creation_tokens, other.cache_creation_tokens);
     }
 }
 
 impl From<genai::chat::Usage> for Usage {
     fn from(usage: genai::chat::Usage) -> Self {
+        let (cached_tokens, cache_creation_tokens) = usage
+            .prompt_tokens_details
+            .map(|details| (details.cached_tokens, details.cache_creation_tokens))
+            .unwrap_or_default();
         Self {
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
-            cached_tokens: None,
+            cached_tokens,
+            cache_creation_tokens,
         }
     }
 }

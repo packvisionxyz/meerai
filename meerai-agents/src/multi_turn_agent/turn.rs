@@ -7,16 +7,40 @@ fn is_context_overflow(message: &str) -> bool {
         .any(|marker| lowered.contains(marker))
 }
 
-fn is_transient_error(message: &str) -> bool {
-    let lowered = message.to_lowercase();
-    !NON_TRANSIENT_ERROR_MARKERS
-        .iter()
-        .any(|marker| lowered.contains(marker))
+pub(super) fn provider_error_status(error: &anyhow::Error) -> Option<u16> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<genai::Error>())
+        .and_then(|error| error.status())
+        .map(|status| status.as_u16())
+}
+
+pub(super) fn status_is_transient(status: u16) -> bool {
+    matches!(status, 408 | 409 | 425 | 429) || (500..=599).contains(&status)
+}
+
+fn is_transient_provider_error(error: &anyhow::Error, message: &str) -> bool {
+    match provider_error_status(error) {
+        Some(status) => status_is_transient(status),
+        None => !NON_TRANSIENT_ERROR_MARKERS
+            .iter()
+            .any(|marker| message.to_lowercase().contains(marker)),
+    }
 }
 
 pub(super) fn provider_backoff_after(failures: usize) -> Duration {
     let factor = 1u64 << failures.saturating_sub(1).min(8);
     Duration::from_millis(PROVIDER_BACKOFF_MS.saturating_mul(factor))
+}
+
+pub(super) fn provider_backoff_with_jitter(failures: usize) -> Duration {
+    let base = provider_backoff_after(failures);
+    let cap = (base.as_millis() as u64 / 2).max(1);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_nanos())
+        .unwrap_or(0);
+    base + Duration::from_millis(u64::from(nanos) % cap)
 }
 
 impl MultiTurnAgent {
@@ -123,6 +147,17 @@ impl MultiTurnAgent {
                     },
                 )
                 .await;
+                self.run_hook_with_error(
+                    HookEvent::TurnFailed,
+                    Some(&turn_id),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(&message),
+                    event_tx,
+                )
+                .await;
                 self.log_event(
                     event_tx,
                     SessionEvent::TurnEnded {
@@ -137,6 +172,17 @@ impl MultiTurnAgent {
             }
         };
         if let Some(harness) = &self.harness {
+            if let Err(error) = harness.session.heal_dangling_tool_calls().await {
+                self.log_event(
+                    event_tx,
+                    SessionEvent::Error {
+                        code: ErrorCode::Internal,
+                        message: format!("failed to repair dangling tool calls: {error:#}"),
+                        retryable: false,
+                    },
+                )
+                .await;
+            }
             harness.policy.clear_scoped_grants(GrantScope::Turn);
         }
         (turn_id, outcome)
@@ -158,8 +204,18 @@ impl MultiTurnAgent {
             .flat_map(|tool| tool.definition())
             .map(|def| def.to_genai())
             .collect();
+        self.tool_schema_tokens = self
+            .tools
+            .iter()
+            .flat_map(|tool| tool.definition())
+            .map(|definition| {
+                estimate_tokens(&definition.name)
+                    + estimate_tokens(&definition.description)
+                    + estimate_tokens(&definition.parameters.to_string())
+            })
+            .sum();
 
-        let options = ChatOptions::default()
+        let mut options = ChatOptions::default()
             .with_capture_content(true)
             .with_capture_tool_calls(true)
             .with_capture_usage(true)
@@ -170,6 +226,13 @@ impl MultiTurnAgent {
                 ("x-opencode-session", self.session_id.as_str()),
                 ("user-agent", MEERAI_USER_AGENT),
             ]));
+        if self
+            .harness
+            .as_ref()
+            .is_none_or(|harness| harness.config.prompt_caching)
+        {
+            options = options.with_cache_control(CacheControl::Ephemeral);
+        }
 
         let harnessed = self.harness.is_some();
         let max_steps = self
@@ -187,7 +250,19 @@ impl MultiTurnAgent {
             started: turn_started,
             max_secs: max_turn_secs,
         };
-        let mut pressured = false;
+        let mut pressure_compactions = 0usize;
+        let mut pressure_step: Option<usize> = None;
+        let progress_tracking = self
+            .harness
+            .as_ref()
+            .is_some_and(|harness| harness.policy.mode() != ApprovalMode::Plan)
+            && self.tools.iter().any(|tool| {
+                tool.definition()
+                    .iter()
+                    .any(|definition| tool.effect_of(&definition.name) == EffectClass::Write)
+            });
+        let mut no_progress_steps = 0usize;
+        let mut no_progress_diagnosed = false;
         let mut stop_hook_used = false;
         let mut last_tool_signature: Option<String> = None;
         let mut repeated_tool_batches = 0usize;
@@ -208,12 +283,8 @@ impl MultiTurnAgent {
             }
             if self.pending_compact {
                 self.pending_compact = false;
-                if let Some(error) = self
-                    .run_compaction(CompactionTrigger::Manual, event_tx, &cancel, Some(clock))
-                    .await
-                {
-                    return Err(error);
-                }
+                self.run_compaction(CompactionTrigger::Manual, event_tx, &cancel, Some(clock))
+                    .await?;
             }
             self.apply_pending_steers(event_tx).await;
 
@@ -254,13 +325,18 @@ impl MultiTurnAgent {
                     }
                 }
 
-                if !pressured && self.over_high_watermark() {
-                    pressured = true;
-                    if let Some(error) = self
+                if self.over_high_watermark()
+                    && pressure_compactions < MAX_PRESSURE_COMPACTIONS_PER_TURN
+                    && pressure_step != Some(step_index)
+                {
+                    pressure_step = Some(step_index);
+                    match self
                         .run_compaction(CompactionTrigger::Pressure, event_tx, &cancel, Some(clock))
                         .await
                     {
-                        return Err(error);
+                        Ok(true) => pressure_compactions += 1,
+                        Ok(false) => {}
+                        Err(error) => return Err(error),
                     }
                 }
 
@@ -417,6 +493,9 @@ impl MultiTurnAgent {
                 last_tool_signature = None;
                 repeated_tool_batches = 0;
             } else {
+                let edit_batch = tool_calls.iter().all(|call| {
+                    matches!(call.fn_name.as_str(), "code-edit_file" | "code-write_file")
+                });
                 let mut parts: Vec<String> = tool_calls
                     .iter()
                     .map(|call| format!("{}:{}", call.fn_name, call.fn_arguments))
@@ -430,6 +509,16 @@ impl MultiTurnAgent {
                     last_tool_signature = Some(signature);
                 }
                 if repeated_tool_batches == 2 {
+                    if edit_batch {
+                        self.log_event(
+                            event_tx,
+                            SessionEvent::CircuitBreaker {
+                                kind: BreakerKind::RepeatedIdenticalEdit,
+                                action: BreakerAction::DiagnosticInjected,
+                            },
+                        )
+                        .await;
+                    }
                     self.log_event(
                         event_tx,
                         SessionEvent::UserMessage {
@@ -443,6 +532,16 @@ impl MultiTurnAgent {
                     .await;
                 }
                 if repeated_tool_batches >= 4 {
+                    if edit_batch {
+                        self.log_event(
+                            event_tx,
+                            SessionEvent::CircuitBreaker {
+                                kind: BreakerKind::RepeatedIdenticalEdit,
+                                action: BreakerAction::TurnFailed,
+                            },
+                        )
+                        .await;
+                    }
                     return Err(TurnError::loop_detected(anyhow!(
                         "loop detected: repeated identical tool calls"
                     )));
@@ -510,6 +609,51 @@ impl MultiTurnAgent {
 
             if let Some(reason) = stop_reason {
                 return Ok(completed(event_tx, turn_id, reason));
+            }
+
+            if !tool_calls.is_empty() && progress_tracking {
+                let delegated = tool_calls
+                    .iter()
+                    .any(|call| matches!(call.fn_name.as_str(), "subagent-run" | "acp-run"));
+                if self.file_changes_this_step > 0 || delegated {
+                    no_progress_steps = 0;
+                    no_progress_diagnosed = false;
+                } else {
+                    no_progress_steps += 1;
+                    if no_progress_steps == NO_PROGRESS_DIAGNOSTIC_STEPS && !no_progress_diagnosed {
+                        no_progress_diagnosed = true;
+                        self.log_event(
+                            event_tx,
+                            SessionEvent::CircuitBreaker {
+                                kind: BreakerKind::NoProgress,
+                                action: BreakerAction::DiagnosticInjected,
+                            },
+                        )
+                        .await;
+                        self.log_event(
+                            event_tx,
+                            SessionEvent::UserMessage {
+                                source: InputSource::RuntimeContext,
+                                content: vec![ContentBlock::Text(NO_PROGRESS_NOTICE.to_string())],
+                            },
+                        )
+                        .await;
+                    }
+                    if no_progress_steps >= NO_PROGRESS_FAIL_STEPS {
+                        self.log_event(
+                            event_tx,
+                            SessionEvent::CircuitBreaker {
+                                kind: BreakerKind::NoProgress,
+                                action: BreakerAction::TurnFailed,
+                            },
+                        )
+                        .await;
+                        return Err(TurnError::loop_detected(anyhow!(
+                            "no progress: {} steps without a file change",
+                            no_progress_steps
+                        )));
+                    }
+                }
             }
 
             if tool_calls.is_empty() {
@@ -707,7 +851,7 @@ impl MultiTurnAgent {
 
                     if recoverable && !overflow_retried {
                         overflow_retried = true;
-                        if let Some(error) = self
+                        if let Err(error) = self
                             .run_compaction(
                                 CompactionTrigger::ContextOverflow,
                                 event_tx,
@@ -721,10 +865,10 @@ impl MultiTurnAgent {
                         continue;
                     }
 
-                    let transient = !recoverable && is_transient_error(&message);
+                    let transient = !recoverable && is_transient_provider_error(&error, &message);
                     if transient && transient_failures + 1 < MAX_PROVIDER_ATTEMPTS {
                         transient_failures += 1;
-                        let delay = provider_backoff_after(transient_failures);
+                        let delay = provider_backoff_with_jitter(transient_failures);
                         tokio::select! {
                             _ = cancel.cancelled() => return Err(StepFailure::Cancelled),
                             _ = tokio::time::sleep(delay) => {}

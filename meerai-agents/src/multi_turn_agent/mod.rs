@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use futures::{Stream, StreamExt};
 use genai::chat::{
-    ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatStreamEvent, StreamEnd, Tool, ToolCall,
-    ToolResponse,
+    CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatStreamEvent, StreamEnd,
+    Tool, ToolCall, ToolResponse,
 };
 use genai::{Client, Headers};
 use meerai_common::hooks::HookEvent;
@@ -52,7 +52,8 @@ const STEP_LIMIT_NOTICE: &str =
 
 const SUMMARY_INSTRUCTION: &str = "Summarize the transcript below as a compact state block. Use \
     exactly these headings, each followed by terse bullets: Goal, Completed progress, Modified \
-    files, Key decisions, Open blockers. Do not add other headings and do not invent facts.";
+    files, Key decisions, Open blockers. Do not add other headings, do not invent facts, and do \
+    not call tools.";
 
 const SUMMARY_MESSAGE_TOKEN_LIMIT: u64 = 2_000;
 
@@ -66,6 +67,11 @@ const NOT_EXECUTED_STOPPED: &str = "not executed: turn stopped";
 
 const MAX_PROVIDER_ATTEMPTS: usize = 3;
 const PROVIDER_BACKOFF_MS: u64 = 250;
+const MAX_PRESSURE_COMPACTIONS_PER_TURN: usize = 2;
+const MAX_RECOVERY_ATTEMPTS: usize = 1;
+const NO_PROGRESS_DIAGNOSTIC_STEPS: usize = 8;
+const NO_PROGRESS_FAIL_STEPS: usize = 12;
+const NO_PROGRESS_NOTICE: &str = "No file change in the last 8 steps. Make a concrete edit, run a check, or end the turn with what you have.";
 
 const STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(120);
@@ -378,6 +384,8 @@ pub struct MultiTurnAgent {
     pub(super) harness: Option<AgentHarness>,
     pub(super) system_prompt_generation: u64,
     pub(super) logged_system_prompt: Option<String>,
+    pub(super) tool_schema_tokens: u64,
+    pub(super) file_changes_this_step: usize,
     pub(super) pending_steers: VecDeque<String>,
     pub(super) pending_compact: bool,
     pub(in crate::multi_turn_agent) failure_tracker: FailureTracker,
@@ -459,6 +467,8 @@ impl MultiTurnAgent {
             harness: None,
             system_prompt_generation: 0,
             logged_system_prompt: None,
+            tool_schema_tokens: 0,
+            file_changes_this_step: 0,
             pending_steers: VecDeque::new(),
             pending_compact: false,
             failure_tracker: FailureTracker::default(),
@@ -592,6 +602,31 @@ impl MultiTurnAgent {
         prompt: Option<&str>,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) -> HookReport {
+        self.run_hook_with_error(
+            event,
+            turn_id,
+            tool_name,
+            tool_input,
+            tool_output,
+            prompt,
+            None,
+            event_tx,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn run_hook_with_error(
+        &self,
+        event: HookEvent,
+        turn_id: Option<&TurnId>,
+        tool_name: Option<&str>,
+        tool_input: Option<&str>,
+        tool_output: Option<&str>,
+        prompt: Option<&str>,
+        error: Option<&str>,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) -> HookReport {
         if self.hooks.is_empty() {
             return HookReport::default();
         }
@@ -605,6 +640,7 @@ impl MultiTurnAgent {
             tool_input,
             tool_output,
             prompt,
+            error,
             cwd: harness.policy.workspace_root(),
         };
         let report = self.hooks.run(event, &ctx).await;
@@ -842,12 +878,14 @@ impl MultiTurnAgent {
                 strip_ephemera: true,
                 prune_reasoning: harness.config.reasoning_pruning,
                 verbatim_window_turns: harness.config.verbatim_window_turns,
+                clear_old_tool_results: true,
                 include_system_messages: false,
             },
             None => ProjectionPolicy {
                 strip_ephemera: true,
                 prune_reasoning: true,
                 verbatim_window_turns: 4,
+                clear_old_tool_results: true,
                 include_system_messages: true,
             },
         }

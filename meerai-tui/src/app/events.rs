@@ -456,11 +456,14 @@ impl SessionTab {
                 self.metrics.session_prompt_tokens = session_prompt;
                 self.metrics.session_completion_tokens = session_completion;
                 self.metrics.session_total_tokens = session_total;
+                self.metrics.session_cached_tokens =
+                    cumulative.cached_tokens.unwrap_or(0).max(0) as u64;
                 self.metrics.update_speed(usage.completion_tokens);
                 self.usage = UsageStats {
                     prompt_tokens: usage.prompt_tokens,
                     completion_tokens: usage.completion_tokens,
                     total_tokens: usage.total_tokens,
+                    cached_tokens: usage.cached_tokens,
                 };
             }
             AgentEvent::TurnCompleted { reason, .. } => {

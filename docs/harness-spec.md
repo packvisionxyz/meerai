@@ -448,6 +448,7 @@ Per-model context budget comes from `ProviderCatalog`. The engine targets:
 | `spill_max_inline_tokens` | 12 500 | per-tool-result retention budget (§7.2) |
 | `verbatim_window_k` | 4 turns | recent turns never compacted |
 | `reasoning_pruning` | on | strip pre-1-step reasoning from projections (§7.3) |
+| `prompt_caching` | on | request-level `CacheControl::Ephemeral`; cached tokens are reported in `Usage` (§7.1) |
 
 Resolution: the CLI asks `ProviderCatalog::model_info(provider, model)` for the
 active model. A model `context_window` replaces the configured default only when
@@ -474,6 +475,12 @@ Adopted pattern: dsh `spill-policy` (refines source-spec Technique A).
 
 - `read_file`/`grep` work on blob paths transparently: the binary adds the
   session directory to `CodeTools` readable roots.
+- **Age-based clearing.** `derive_messages` replaces a tool result outside
+  `verbatim_window_turns` (default 4) with a short stub, unless `clear_old_tool_results`
+  is false. The call stays paired, the newest window stays verbatim, and a spilled
+  result names its blob path. The log keeps every result. The same-model
+  summarizer keeps the parent clearing policy so its prefix matches; a distinct
+  summarizer model disables clearing so its input stays complete.
 - The **log copy keeps only the retained content**: `ToolResult` stores the
   truncated `ToolObservation`, and `SpillApplied` stores the byte count plus the
   blob path. The full value exists only in the blob file; the current log has no
@@ -505,7 +512,11 @@ Adopted pattern: dsh `compaction` bracket + source-spec Technique D.
   once). Manual: `:compact` / `/compact` (`AgentCommand::Compact`).
 - **Edge safety**: compaction boundaries snap to tool-pairing-balanced
   positions — never cut between an assistant tool call and its result
-  (dsh `toolPairingBalancedBefore/After`).
+  (dsh `toolPairingBalancedBefore/After`). When fewer turns exist than the
+  verbatim window, the planner falls back to the last balanced `StepEnded`
+  outside the newest window, so a long turn can compact. Pressure compaction
+  applies at most twice per turn and once per step. `run_compaction` returns
+  `Result<bool, TurnError>`; `Ok(false)` is skipped.
 - **Procedure** (all logged, crash-safe via bracket lock):
   1. append `CompactionStarted` (lock; an unmatched start after recovery = busy signal),
   2. summarize turns `1..N-K` with a small model call into a **structured state block**
@@ -519,6 +530,11 @@ Adopted pattern: dsh `compaction` bracket + source-spec Technique D.
   `provider:model` spec) overrides the model used for the summary call. The
   default is the session model. Summary usage is added to cumulative usage and
   counts toward `context.max_session_tokens`.
+- **Cache-safe summary:** when no separate summarizer model is configured, the
+  summary request reuses the parent system prompt, tools, and history and
+  appends `SUMMARY_INSTRUCTION` as the last user message, so the provider's
+  cached prefix stays warm. A distinct summarizer model keeps the standalone
+  transcript request.
 - **Optional pre-pass**: prune old tool results to spill stubs before
   summarizing (cheap tokens back without an LLM call).
 - **Clean reset** for long refactors: `Fork` a fresh session seeded with the
@@ -559,7 +575,8 @@ What the current binary does:
 
 The loop does not reorder or reformat the composed system string between steps.
 Moving the remaining sections into a stabilized multi-section prefix is future
-work.
+work. Compaction's summary request reuses the parent system, tools, and history
+when no distinct summarizer model is set, so the cached prefix stays warm.
 
 ### 7.6 Output contracts
 
@@ -724,7 +741,7 @@ Deterministic, user-supplied extensions that run *in code*, not in the model.
 
 - **Event set (v1):** `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
   `PermissionRequest`, `PostToolUse`, `PostToolUseFailure`, `Stop`,
-  `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop`, `SessionEnd`.
+  `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop`, `SessionEnd`, and `TurnFailed`.
   (Later: `FileChanged`, `PreModelSwitch`, `PostToolBatch`.)
 - **Definition:** `.meerai/hooks.json` (project) + `~/.config/meerai/hooks.json`
   (user); entries `{ event, matcher (tool glob), if (arg pattern), command, timeout_ms }`.
@@ -751,6 +768,8 @@ Deterministic, user-supplied extensions that run *in code*, not in the model.
   prompts once on a terminal and defaults to no. Hooks
   may tighten policy but cannot loosen `plan`, an explicit `deny`/`ask` rule, or
   the outside-workspace approval. `SessionStart`/`SessionEnd` are log-only.
+  `TurnFailed` fires after a failed turn with the error in the `error` payload
+  field; its decision is logged but does not change the failed turn.
   Hooks run outside `ExecutionWorld`. Every firing also emits
   `AgentEvent::HookCompleted`; the TUI appends a System line and headless NDJSON
   carries it. Load-time `timeout_ms` outside 1..60000 warns and resets to the
@@ -761,7 +780,10 @@ Deterministic, user-supplied extensions that run *in code*, not in the model.
 `Stop` fires when the loop is about to end a turn naturally. A project hook can
 run `cargo clippy`/tests and block once with a reason — a deterministic
 "verify before done" gate (Claude Code pattern; the source spec's dual-agent
-verification is the LLM-driven variant, §13).
+verification is the LLM-driven variant, §13). `meerai hooks verify` installs a
+user Stop hook with a per-project failure baseline: the first failing run
+records known failures, later runs block only on new names, and a pass clears
+the baseline.
 
 ### 9.4 Budgets & circuit breakers (source spec §2.2)
 
@@ -775,11 +797,11 @@ Enforced by the budget gate in §5, all configurable per session:
   kill. `est_cost_usd` is computed from `UsageUpdated` when the provider catalog
   carries input/output pricing for the active model; otherwise it stays `None`.
   USD spend caps remain deferred.
-- **circuit breakers**: 3 identical failing tool calls, repeated identical
-  edits, or N consecutive steps without surface progress → log
-  `CircuitBreaker`, inject a structured diagnostic user message, and either
-  continue once or end the turn with `Failed { loop_detected }`
-  (dsh `repeat-tool-reminder` guard + source spec).
+- **circuit breakers**: 3 identical failing tool calls, identical edit batches, or 8 tool steps
+  without a file change → log `CircuitBreaker`, inject a structured diagnostic user message, and
+  either continue once or end the turn with `Failed { loop_detected }` (dsh `repeat-tool-reminder`
+  guard + source spec). `NoProgress` fails at 12 steps and is disabled in `plan` mode and when no
+  write tool is registered.
 
 ### 9.5 Inline guardrails (source spec §2.4)
 
@@ -961,13 +983,20 @@ Review the current changes. List findings by severity with file:line references.
   `{ status, exit_code, stdout, stderr, hint }`; raw stack traces never reach
   the model unstructured.
 - Transient provider failures retry **3 attempts total** with 250 ms then 500 ms
-  backoff (`MAX_PROVIDER_ATTEMPTS`, `provider_backoff_after`). Errors whose
-  message contains a non-transient marker (`api key`, `unauthorized`, `401`,
-  `403`, `invalid model`, `not found`, `permission denied`) fail immediately.
+  backoff plus up to 50% jitter (`MAX_PROVIDER_ATTEMPTS`,
+  `provider_backoff_with_jitter`). The class comes from the HTTP status when
+  genai exposes one: 408/409/425/429 and 5xx are transient; other 4xx are
+  permanent. Without a status, a message blocklist applies (`api key`,
+  `unauthorized`, `401`, `403`, `invalid model`, `not found`,
+  `permission denied`).
   Tool invocation retries use a fixed 250 ms sleep and `max_retries` (default 3).
   There is no `invoke_tool_with_retry` function in the current tree.
 - Provider context-overflow errors route to the compaction recovery path
   (§7.4) and retry once instead of failing the turn.
+- The worker queues one recovery turn after a retryable provider error or a
+  `LoopDetected` failure. The prompt names the failure and asks for a different
+  approach. Budget, config, tool, and non-retryable provider failures do not
+  recover. This is v1; deeper recovery actions remain backlog.
 - Recurring model mistake classes (e.g., repeated invalid edits) compile into
   harness-side pre-checks over time — the §1 P3 discipline, tracked as
   "harness growth" backlog items from trace review (§13).
@@ -1044,10 +1073,10 @@ Extends the roadmap in [architecture.md](architecture.md); each milestone keeps
 | M2 | **Item protocol** | `AgentEvent` (§4) behind the existing channel; TUI `handle_agent_event` folds items; headless NDJSON | `meerai-agents`, `meerai-tui` | landed (R0–R3) |
 | M3 | **Coding tools + effect classes** | `meerai-tools` v1 (architecture.md §coding toolsets) with `EffectClass`, path guards, unified-diff `FileChange` items | new crate, `meerai-core` | landed (R1–R3) |
 | M4 | **Policy engine + approvals** | `meerai-policy`: ordered rules, approval request/response loop, TUI approval overlay wired to `ApprovalRequested`, session grants | new crate, TUI | landed (R1–R3) |
-| M5 | **Context engine v1** | spill policy, ephemera/reasoning pruning, prefix ordering, watermark compaction with bracket lock + `:compact` | `meerai-session`, `meerai-agents` | landed (R1–R3); prefix ordering partial: root `AGENTS.md` + `.meerai/instructions.md` + scoped per-turn injection are implemented; full static-first multi-section prefix remains future work |
+| M5 | **Context engine v1** | spill policy, ephemera/reasoning pruning, age-based tool-result clearing, prefix ordering, watermark compaction with bracket lock + `:compact` | `meerai-session`, `meerai-agents` | landed (R1–R3); tool-result clearing, in-turn step-boundary compaction, schema-aware watermark, and cache-safe summaries added; prefix ordering partial: root `AGENTS.md` + `.meerai/instructions.md` + scoped per-turn injection are implemented; full static-first multi-section prefix remains future work |
 | D1 | **Distribution hardening** | Apache-2.0 license, workspace metadata, CI gate, tag-driven 5-target release, Pages installers | repo root, `.github/`, `site/` | landed |
 | M6 | **Checkpoints + rewind** | per-turn snapshots, `/rewind` menu, restore-code/conversation flows | `meerai-session`, `meerai-agents`, TUI | landed v1: capture before write tools, `RewindScope::{Both,Code,Conversation}`, `/rewind` menu, staged restore with rollback. Shell-only edits, gitignored files, and summarize-from-here remain backlog |
-| M7 | **Hooks** | 12-event v1 set, JSON stdin/exit-2 contract, explicit project-trust gate, concurrent execution with timeouts, `HookFired` logging, tighten-only policy integration | `meerai-common`, `meerai-policy`, `meerai-agents`, `meerai-cli` | landed v1: TTY trust prompt plus `hooks trust|untrust|status`; `SessionStart`/`SessionEnd` are log-only; `/reload` reloads hooks; hooks run outside `ExecutionWorld` |
+| M7 | **Hooks** | 13-event v1 set, JSON stdin/exit-2 contract, explicit project-trust gate, concurrent execution with timeouts, `HookFired` logging, tighten-only policy integration | `meerai-common`, `meerai-policy`, `meerai-agents`, `meerai-cli` | landed v1: TTY trust prompt plus `hooks trust|untrust|status`; `SessionStart`/`SessionEnd` are log-only; `TurnFailed` is observational; `/reload` reloads hooks; hooks run outside `ExecutionWorld` |
 | M8 | **Subagent runtime** | child sessions (`parent_session_id`), depth-1 isolation, built-ins (`build`/`plan`/`explore`/`general`), `subagent-run` tool, forwarded child approvals, usage rollup, `SubagentRun` items, read-only `Plan` execution for M12 custom definitions | `meerai-agents`, `meerai-session`, `meerai-tui` | landed (M8): child sessions and `SubagentToolset` landed; M12 frontmatter `tools`/`permissions` remain prompt-only |
 | M9 | **CLI + resume/fork** | `meerai-cli` crate: `--prompt`, `--json`, `--continue`, `--resume <id>`, `--fork <id>`, `sessions fork <id> [--turn <turn-id>]`, `auth`/`sessions`, config/env wiring | `meerai-cli`, `meerai-session` | landed (M9): `meerai-cli`, `sessions fork`, and `--fork` landed (`-p` stays `--provider`); `export` and TUI `/fork` are not built |
 | M10 | **Retrieval v2/v3** | `RepoMapToolset` (`retrieval-repo_map` via tree-sitter + PageRank), `LspToolset` (`lsp-go_to_definition`, `lsp-find_references`, `lsp-get_diagnostics`), `SearchAsCodeToolset` (`sac-run_script`) | `meerai-tools`, `meerai-cli` | landed (M10): repo map, LSP stdio tools, and search-as-code landed; opt-in post-edit diagnostics (`context.post_edit_diagnostics`) landed |
@@ -1119,7 +1148,9 @@ contention is normal, not a hang.
 - [x] Context knobs with §7.1 defaults (watermark 75 %, spill 12 500 tokens, verbatim window 4 turns, reasoning pruning on) in `HarnessConfig`; `ProjectionPolicy` carries the trimming flags.
 - [x] Spill in post-execute: head/tail retention, blob write, recovery notice; `read_file` exempt; storage failure fails open (tests).
 - [x] Ephemera stripping + reasoning pruning active in `derive_messages` (snapshot tests); only the current turn's `RuntimeContext` survives.
-- [x] Compaction: pressure trigger (pre-step watermark) + manual `Compact` command; bracket events logged; boundary snaps tool-pair-balanced; structured state-block summary; shadowed range replayable deterministically (tests).
+- [x] Age-based tool-result clearing: results outside `verbatim_window_turns` become stubs with the spill pointer; the newest window stays verbatim; the same-model summarizer keeps the parent clearing policy and a distinct summarizer model disables it.
+- [x] Schema-aware watermark: the turn's tool-schema estimate is summed into the pressure check.
+- [x] Compaction: pressure trigger (pre-step watermark) + manual `Compact` command; bracket events logged; boundary snaps tool-pair-balanced; structured state-block summary; shadowed range replayable deterministically (tests). A long turn falls back to balanced `StepEnded` boundaries; pressure applies at most twice per turn and once per step; the summary request reuses the parent prefix when no distinct summarizer model is set.
 - [x] `ContextOverflow` → compact → retry once in the request-error path.
 - [x] Budget gate: max steps per turn (default 32; final step strips tools and asks for a summary), per-tool wall-clock caps, per-turn wall clock (`max_turn_secs`, also bounding streams, summarization, and tool batches), session token cap → approval-style pause.
 - [x] Circuit breakers: 3 identical failing tool calls → `CircuitBreaker` event + model-visible diagnostic; a 4th fails the turn with `LoopDetected`.

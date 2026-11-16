@@ -838,12 +838,14 @@ fn renders_transcript_completion_and_statusline() {
             completion_tokens: Some(25),
             total_tokens: Some(125),
             cached_tokens: None,
+            cache_creation_tokens: None,
         },
         cumulative: Usage {
             prompt_tokens: Some(100),
             completion_tokens: Some(25),
             total_tokens: Some(125),
-            cached_tokens: None,
+            cached_tokens: Some(40),
+            cache_creation_tokens: None,
         },
         est_cost_usd: None,
     });
@@ -870,7 +872,7 @@ fn renders_transcript_completion_and_statusline() {
     assert!(rendered.contains("gemini / gemini-3.8-flash"));
     assert!(rendered.contains("[saved]"));
     assert!(rendered.contains("↑100 ↓25 Σ125"));
-    assert!(rendered.contains("session ↑100 ↓25 Σ125"));
+    assert!(rendered.contains("session ↑100 ↓25 Σ125 ↻40"));
     assert!(rendered.contains("42.5 tok/s"));
     assert!(rendered.contains("1.4s"));
     assert!(rendered.contains("meerai"));

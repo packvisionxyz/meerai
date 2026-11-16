@@ -26,19 +26,34 @@ pub fn plan_compaction_boundary(
         .filter(|(_, logged)| matches!(logged.event, SessionEvent::TurnStarted { .. }))
         .map(|(index, _)| index)
         .collect();
-    let window_start = if verbatim_window_turns == 0 {
-        events.len()
+    let step_fallback = turn_starts.len() <= verbatim_window_turns;
+    let window_start = if !step_fallback {
+        if verbatim_window_turns == 0 {
+            events.len()
+        } else {
+            turn_starts[turn_starts.len() - verbatim_window_turns]
+        }
     } else {
-        if turn_starts.len() <= verbatim_window_turns {
+        let step_ends: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, logged)| matches!(logged.event, SessionEvent::StepEnded { .. }))
+            .map(|(index, _)| index)
+            .collect();
+        let keep_steps = verbatim_window_turns.max(1);
+        if step_ends.len() <= keep_steps {
             return None;
         }
-        turn_starts[turn_starts.len() - verbatim_window_turns]
+        step_ends[step_ends.len() - keep_steps]
     };
     let candidates: Vec<usize> = events
         .iter()
         .enumerate()
         .take(window_start)
-        .filter(|(_, logged)| matches!(logged.event, SessionEvent::TurnEnded { .. }))
+        .filter(|(_, logged)| {
+            matches!(logged.event, SessionEvent::TurnEnded { .. })
+                || (step_fallback && matches!(logged.event, SessionEvent::StepEnded { .. }))
+        })
         .map(|(index, _)| index)
         .collect();
 
@@ -217,6 +232,41 @@ mod tests {
 
         let full = plan_compaction_boundary(&events, 0).unwrap();
         assert_eq!(full.end_inclusive, Seq(6));
+    }
+
+    #[test]
+    fn falls_back_to_step_boundaries_inside_a_long_turn() {
+        let turn = TurnId::from("turn");
+        let mut events = vec![
+            logged(
+                1,
+                SessionEvent::TurnStarted {
+                    turn_id: turn.clone(),
+                    trigger: crate::event::TurnTrigger::UserPrompt,
+                },
+            ),
+            user(2, "goal"),
+        ];
+        let mut seq = 3;
+        for index in 0..6 {
+            events.push(assistant_with_call(seq, &format!("call-{index}")));
+            seq += 1;
+            events.push(tool_result(seq, &format!("call-{index}")));
+            seq += 1;
+            events.push(logged(
+                seq,
+                SessionEvent::StepEnded {
+                    step_id: crate::ids::StepId::new(),
+                    finish: crate::event::StepFinish::Completed,
+                },
+            ));
+            seq += 1;
+        }
+
+        let range = plan_compaction_boundary(&events, 2).unwrap();
+        assert_eq!(range.start, Seq(1));
+        assert_eq!(range.end_inclusive, Seq(14));
+        assert!(plan_compaction_boundary(&events, 6).is_none());
     }
 
     #[test]

@@ -87,8 +87,12 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   `ItemStarted`, `ItemDelta`, `ItemCompleted`, `ApprovalRequested`,
   `ApprovalResolved`, `UsageUpdated`, `TurnCompleted`, `Error`); session
   dual-write, `derive_messages`-driven requests, approval suspend/resume, spill,
-  compaction, token and wall-clock budgets, circuit breakers, cancellation,
-  steering, provider retries, consecutive read-only tool batches, first-prompt
+  compaction, provider prompt caching with cache-token reporting, age-based
+  tool-result clearing, in-turn step-boundary compaction, token and
+  wall-clock budgets, circuit breakers, cancellation,
+  steering, status-classified provider retries with jitter, one bounded
+  recovery turn after a retryable provider or loop failure, consecutive
+  read-only tool batches, first-prompt
   session titles, summarizer-model selection, an ordered step interceptor seam
   (`before_step`, async `before_tool`, `after_tool`, `turn_stopping`) for
   checkpoints, and best-effort tool-output redaction before spill, logging,
@@ -109,7 +113,7 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   (globset, last match wins), `ApprovalMode` presets (`plan`, `ask`, `auto`),
   turn and session grants, and YAML rule parsing.
 - **Hooks (`meerai-common::hooks`, `meerai-agents::hooks`):** user and project
-  shell hooks for twelve lifecycle events. User hooks load from the config dir
+  shell hooks for thirteen lifecycle events. User hooks load from the config dir
   (`~/.config/meerai/hooks.json`); project hooks load from `.meerai/hooks.json`
   only after explicit trust. Hooks run concurrently with a timeout, receive JSON
   on stdin, use exit `0`/`2` plus JSON decisions, log `HookFired`, emit live
@@ -244,6 +248,7 @@ meerai --env-file .env.local                    # load variables from a file
 meerai auth list|login|logout                   # inspect, save, remove API keys
 meerai sessions list|rm|prune|fork              # list, delete, prune, or fork sessions
 meerai hooks trust|untrust|status               # manage project hook trust
+meerai hooks verify [--command CMD]             # install a Stop verify hook with a baseline
 meerai sessions fork <ID> --turn <TURN_ID>      # fork from a specific closed turn
 meerai sessions prune --days 30 --keep 5        # delete old sessions, keep 5 newest
 meerai --version                                # print version (-V)
@@ -262,8 +267,19 @@ Headless runs without `--json` print one cumulative summary line to stderr after
 the turn:
 
 ```text
-tokens: prompt=1234 completion=567 total=1801
+tokens: prompt=1234 completion=567 total=1801 cached=800
 ```
+
+`cached=<n>` appears only when the provider reports prompt-cache reads. Prompt caching is on by
+default; set `context.prompt_caching: false` to send no cache control. Cache-write counts are kept in
+the session `Usage` but are not printed.
+
+Old tool results also leave the working context. `context.verbatim_window_turns` (default 4) keeps
+the newest N turns verbatim; an older result becomes a short stub that keeps the call paired and
+points at the spill blob when one exists. The session log keeps every result. When a long turn
+crosses the high watermark, compaction can run at a tool-pairing-balanced step boundary, at most
+twice per turn. The summarizer reuses the parent system prompt, tools, and history when
+`context.summarizer_model` is unset, so its prefix stays cache-warm.
 
 Missing counters are omitted. `--json` reports the same data as `UsageUpdated`
 events. The TUI statusline shows the current turn (`↑… ↓… Σ…`) and running
@@ -312,7 +328,8 @@ as prompt text.
   frontmatter, the id comes from the file or directory name and the body is the
   prompt.
 - A skill uses only the text of its `SKILL.md`. Supporting files in the skill
-  directory are not read.
+  directory are not read. Agent and skill instructions are capped at 16 KiB per
+  definition and 32 KiB total; excess text is truncated with a warning.
 - Definitions are repository-controlled prompt text. They cannot run tools,
   grant permissions, or imply a sandbox. Treat them as untrusted content.
 
@@ -446,7 +463,14 @@ returns nothing.
   `approval_mode`, `permissions`, `context`, `sessions`, and `theme`.
 - `providers.yml` — provider overrides and an optional `models:` list with
   `context_window`, `input_cost_per_mtok`, and `output_cost_per_mtok`.
-- `hooks.json` — user hooks.
+- `hooks.json` — user hooks. `meerai hooks verify [--command CMD] [--reset-baseline]`
+  installs a Stop hook with a per-project failure baseline. The first failing
+  run records the known failures and does not block; later runs block only on
+  new failure names, and a passing run clears the baseline. Cargo test names and
+  pytest `FAILED` lines are recognized; other commands fall back to a
+  command-level baseline. `--reset-baseline` clears it. It auto-detects
+  `cargo test` or `npm test`; pass `--command` for anything else. The hook is a
+  user hook, so it needs no project trust.
 
 ### Auth and app data (`~/.local/share/meerai`)
 
@@ -508,7 +532,7 @@ context:
   rule or a non-list shape drops the whole project block with a warning.
 - **`context`** — overrides field by field (`context_window_tokens`,
   `high_watermark_pct`, `spill_max_inline_tokens`, `verbatim_window_turns`,
-  `reasoning_pruning`, `max_steps_per_turn`, `tool_timeout_ms`,
+  `reasoning_pruning`, `prompt_caching`, `max_steps_per_turn`, `tool_timeout_ms`,
   `max_session_tokens`, `max_turn_secs`, `summarizer_model`). The budget caps
   `max_session_tokens` and `max_turn_secs` are clamped against user values: a
   project value cannot raise a user cap, and a project cannot use `0` to disable
@@ -730,6 +754,7 @@ OS sandboxing on Windows hosts.
 - [docs/architecture.md](docs/architecture.md) — current implementation notes, target harness architecture, protocol/loop design, and migration plan
 - [docs/tui-design.md](docs/tui-design.md) — modal TUI design, keybindings, pickers, diff review, and async Rust rendering architecture
 - [docs/acp.md](docs/acp.md) — Agent Client Protocol: the landed `agy` client (M13), the planned `meerai acp` editor surface (M14), and the trust boundary
+- [docs/token-efficiency-and-self-healing.md](docs/token-efficiency-and-self-healing.md) — initiative for prompt caching, tool-result pruning, live call repair, and verified recovery
 - [AGENTS.md](AGENTS.md) — repository guide for AI coding agents (commands, macro conventions, known traps)
 
 ## License

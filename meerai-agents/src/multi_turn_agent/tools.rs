@@ -287,6 +287,7 @@ impl MultiTurnAgent {
         mut inbox: Option<&mut mpsc::UnboundedReceiver<AgentCommand>>,
         clock: TurnClock,
     ) -> Result<Option<String>, TurnError> {
+        self.file_changes_this_step = 0;
         let mut plans: Vec<CallPlan> = Vec::with_capacity(tool_calls.len());
 
         for tc in tool_calls {
@@ -734,6 +735,9 @@ impl MultiTurnAgent {
             if let Some(run) = run
                 && !run.file_changes.is_empty()
             {
+                self.file_changes_this_step = self
+                    .file_changes_this_step
+                    .saturating_add(run.file_changes.len());
                 let status = if matches!(run.output, ToolOutput::Text(_)) {
                     ItemStatus::Succeeded
                 } else {

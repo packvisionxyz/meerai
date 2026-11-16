@@ -79,6 +79,7 @@ async fn fire_hooks(
         tool_input: Some(args),
         tool_output: output,
         prompt: Some(task),
+        error: None,
         cwd: workspace_root,
     };
     let report = hooks.run(event, &context).await;

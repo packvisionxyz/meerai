@@ -253,11 +253,17 @@ fn format_session_usage(app: &AppState) -> Option<String> {
     if total == 0 {
         return None;
     }
+    let cached = if metrics.session_cached_tokens > 0 {
+        format!(" ↻{}", format_compact_tokens(metrics.session_cached_tokens))
+    } else {
+        String::new()
+    };
     Some(format!(
-        "session ↑{} ↓{} Σ{}",
+        "session ↑{} ↓{} Σ{}{}",
         format_compact_tokens(metrics.session_prompt_tokens),
         format_compact_tokens(metrics.session_completion_tokens),
-        format_compact_tokens(total)
+        format_compact_tokens(total),
+        cached
     ))
 }
 

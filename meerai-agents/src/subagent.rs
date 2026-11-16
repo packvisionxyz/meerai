@@ -374,22 +374,11 @@ impl SubagentToolset {
     }
 
     fn tool_description(&self) -> String {
-        let mut parts: Vec<String> = BUILTIN_AGENTS
-            .iter()
-            .map(|agent| format!("{} ({})", agent.id, agent.description))
-            .collect();
-        for agent in &self.custom_agents {
-            let desc = agent
-                .description
-                .as_deref()
-                .map(str::trim)
-                .filter(|d| !d.is_empty())
-                .unwrap_or("read-only custom agent");
-            parts.push(format!("{} ({})", agent.id, desc));
-        }
+        let mut ids: Vec<&str> = BUILTIN_AGENTS.iter().map(|agent| agent.id).collect();
+        ids.extend(self.custom_agents.iter().map(|agent| agent.id.as_str()));
         format!(
             "Run an isolated subagent for a focused task. Available agents: {}.",
-            parts.join("; ")
+            ids.join(", ")
         )
     }
 }
@@ -525,6 +514,7 @@ impl Toolset for SubagentToolset {
                 tool_input: Some(args),
                 tool_output: None,
                 prompt: Some(&parsed.task),
+                error: None,
                 cwd: &bridge.workspace_root,
             };
             let report = hooks.run(HookEvent::SubagentStart, &context).await;
@@ -704,6 +694,7 @@ impl Toolset for SubagentToolset {
                 tool_input: Some(args),
                 tool_output: Some(&report),
                 prompt: Some(&parsed.task),
+                error: None,
                 cwd: &bridge.workspace_root,
             };
             let stop_report = hooks.run(HookEvent::SubagentStop, &context).await;

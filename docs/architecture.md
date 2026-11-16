@@ -101,12 +101,17 @@ or the TUI crate. genai still pulls reqwest in both builds.
   provider catalog has `input_cost_per_mtok` and `output_cost_per_mtok` for the
   model; the bundled catalog ships context windows only, so it stays `None`
   unless a user override adds pricing.
-- **Retries.** Provider calls: 3 attempts total, 250/500 ms, transient-only.
-  Tool calls: `max_retries` (default 3) with a fixed 250 ms sleep. Context
-  overflow triggers one compaction retry.
+- **Retries.** Provider calls: 3 attempts total, 250/500 ms with up to 50%
+  jitter, status-classified transient-only (408/409/425/429 and 5xx; other 4xx
+  are permanent; a message blocklist is the fallback). Tool calls: `max_retries`
+  (default 3) with a fixed 250 ms sleep. Context overflow triggers one
+  compaction retry. The worker queues one recovery turn after a retryable
+  provider or `LoopDetected` failure.
 - **Budgets.** Max steps per turn (default 32), per-tool timeout (default
   120 s), per-turn wall clock (`max_turn_secs`, default 1800, `0` disables),
-  optional session token cap, and repeated-failure circuit breakers.
+  optional session token cap, and circuit breakers for repeated failures,
+  identical edit batches, and no-progress streaks (8-step diagnostic, 12-step
+  failure; disabled in `plan` mode and without a write tool).
 - **Async safety.** Cancellation uses a per-turn `CancellationToken`; retries
   and timeouts use `tokio::time`. No library `println!`; the TUI and headless
   printer only consume events.
@@ -144,6 +149,7 @@ context:
   spill_max_inline_tokens: 12500
   verbatim_window_turns: 4
   reasoning_pruning: true
+  prompt_caching: true
   max_steps_per_turn: 32
   tool_timeout_ms: 120000
   max_turn_secs: 1800
@@ -181,6 +187,13 @@ unchanged. A project file cannot control retention.
 `context.summarizer_model` is an optional full `provider:model` spec for
 compaction summaries. The default is the session model. Its usage counts toward
 `context.max_session_tokens`.
+
+`context.verbatim_window_turns` also drives projection clearing:
+`derive_messages` stubs tool results outside the newest N turns, keeps the call
+pair, and names the spill blob. The same-model summarizer keeps the parent
+clearing policy so the cached prefix matches; a distinct `summarizer_model`
+disables clearing for a complete transcript. Pressure compaction can also run
+inside a long turn at a balanced step boundary.
 
 - `providers.yml` in the config directory holds user provider overrides
   (`base_url`, `model`, `api_key`, `options.apiKey`, `recent_models`).

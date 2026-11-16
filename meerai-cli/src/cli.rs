@@ -15,7 +15,7 @@ pub(crate) fn help_text() -> String {
     meerai acp doctor\n  \
     meerai auth <list|login|logout>\n  \
     meerai sessions <list|rm|prune|fork>\n  \
-    meerai hooks <trust|untrust|status>\n\
+    meerai hooks <trust|untrust|status|verify>\n\
     \n\
     Commands:\n  \
     acp doctor                      Connect to the agy ACP adapter, print capabilities, exit\n  \
@@ -31,7 +31,8 @@ pub(crate) fn help_text() -> String {
     Fork a session at a closed turn (default: latest closed turn)\n  \
     hooks status                    Show hook settings and project trust state\n  \
     hooks trust                     Trust project hooks for this repository\n  \
-    hooks untrust                   Revoke project hook trust for this repository\n\
+    hooks untrust                   Revoke project hook trust for this repository\n  \
+    hooks verify [--command CMD] [--reset-baseline]  Install a Stop hook with a failure baseline\n\
     \n\
     TUI commands:\n  \
     /agent <id>                     Apply an agent by id (or mention @agent/<id>)\n  \
@@ -87,6 +88,10 @@ pub(crate) enum HooksCommand {
     Trust,
     Untrust,
     Status,
+    Verify {
+        command: Option<String>,
+        reset_baseline: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -394,8 +399,31 @@ where
                     }
                     subcommand = Some(CliSubcommand::Hooks(HooksCommand::Untrust));
                 }
+                Some("verify") => {
+                    let mut command = None;
+                    let mut reset_baseline = false;
+                    while let Some(arg) = iter.next() {
+                        match arg.as_str() {
+                            "--command" => {
+                                let value = iter.next().ok_or_else(|| {
+                                    anyhow::anyhow!("missing value for --command")
+                                })?;
+                                command = Some(value);
+                            }
+                            "--reset-baseline" => reset_baseline = true,
+                            "-h" | "--help" => show_help = true,
+                            _ => bail!("unexpected argument for hooks verify: {arg}"),
+                        }
+                    }
+                    subcommand = Some(CliSubcommand::Hooks(HooksCommand::Verify {
+                        command,
+                        reset_baseline,
+                    }));
+                }
                 Some(other) => {
-                    bail!("unknown hooks subcommand: {other}. Expected: trust, untrust, status");
+                    bail!(
+                        "unknown hooks subcommand: {other}. Expected: trust, untrust, status, verify"
+                    );
                 }
             },
             "-p" | "--provider" => {

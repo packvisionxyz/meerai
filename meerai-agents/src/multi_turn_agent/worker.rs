@@ -55,6 +55,7 @@ pub fn spawn_worker(
             match cmd {
                 AgentCommand::SubmitPrompt(prompt) | AgentCommand::Steer(prompt) => {
                     queued.push_back(prompt);
+                    let mut recovery_attempts = 0usize;
 
                     while let Some(prompt) = queued.pop_front() {
                         let harnessed = agent.harness.is_some();
@@ -62,6 +63,7 @@ pub fn spawn_worker(
                         let mut pending_quit = false;
                         let mut pending_reset = false;
                         let mut pending_model: Option<String> = None;
+                        let mut recovery: Option<String> = None;
                         let (inbox_tx, mut inbox_rx) = mpsc::unbounded_channel();
 
                         {
@@ -76,16 +78,32 @@ pub fn spawn_worker(
                                 tokio::select! {
                                     res = &mut turn_fut => {
                                         let (turn_id, outcome) = res;
-                                        if let Err(err) = outcome {
-                                            let message = err.message();
-                                            let _ = event_tx.send(AgentEvent::Error {
-                                                code: err.code,
-                                                message: message.clone(),
-                                            });
-                                            let _ = event_tx.send(AgentEvent::TurnCompleted {
-                                                turn_id,
-                                                reason: TurnEndReason::Failed { error: message },
-                                            });
+                                        match outcome {
+                                            Ok(_) => recovery_attempts = 0,
+                                            Err(err) => {
+                                                let message = err.message();
+                                                let _ = event_tx.send(AgentEvent::Error {
+                                                    code: err.code,
+                                                    message: message.clone(),
+                                                });
+                                                let _ = event_tx.send(AgentEvent::TurnCompleted {
+                                                    turn_id,
+                                                    reason: TurnEndReason::Failed { error: message.clone() },
+                                                });
+                                                let recoverable = match err.code {
+                                                    ErrorCode::Provider => err.retryable,
+                                                    ErrorCode::LoopDetected => true,
+                                                    _ => false,
+                                                };
+                                                if recoverable
+                                                    && recovery_attempts < MAX_RECOVERY_ATTEMPTS
+                                                    && !pending_quit
+                                                    && !pending_reset
+                                                {
+                                                    recovery_attempts += 1;
+                                                    recovery = Some(recovery_prompt(&message));
+                                                }
+                                            }
                                         }
                                         break;
                                     }
@@ -137,6 +155,12 @@ pub fn spawn_worker(
                             agent.end_session(&event_tx).await;
                             agent.reset();
                             agent.start_session(&event_tx).await;
+                        }
+                        if !pending_quit
+                            && !pending_reset
+                            && let Some(recovery) = recovery.take()
+                        {
+                            queued.push_front(recovery);
                         }
                         if pending_quit {
                             break 'worker;
@@ -210,4 +234,12 @@ pub fn spawn_worker(
     });
 
     (cmd_tx, event_rx)
+}
+
+fn recovery_prompt(message: &str) -> String {
+    format!(
+        "The previous turn failed: {message}\n\n\
+         Do not repeat the failed action. Diagnose the cause, change the approach, and make one \
+         concrete change or check. If the failure is not recoverable, stop and report it."
+    )
 }

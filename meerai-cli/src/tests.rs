@@ -260,6 +260,23 @@ fn composes_skill_then_agent_instructions() {
 }
 
 #[test]
+fn caps_large_definition_instructions() {
+    let mut huge = test_skill("huge");
+    huge.body = "x".repeat(20_000);
+    let composed = compose_definition_prompt("BASE".to_string(), &[&huge], None);
+    assert!(composed.len() < 17 * 1024);
+    assert!(composed.contains("definition truncated"));
+
+    let mut first = test_skill("first");
+    first.body = "a".repeat(16_400);
+    let mut second = test_skill("second");
+    second.body = "b".repeat(16_400);
+    let composed = compose_definition_prompt("BASE".to_string(), &[&first, &second], None);
+    assert!(composed.len() < 33 * 1024);
+    assert!(composed.contains("definition block truncated"));
+}
+
+#[test]
 fn prune_message_names_count_and_window() {
     assert_eq!(
         format_prune_message(3, 30),
@@ -487,6 +504,7 @@ fn harness_config_uses_defaults_and_context_overrides() {
         spill_max_inline_tokens: Some(8_000),
         verbatim_window_turns: Some(6),
         reasoning_pruning: Some(false),
+        prompt_caching: Some(false),
         max_steps_per_turn: Some(48),
         tool_timeout_ms: Some(60_000),
         max_session_tokens: Some(2_000_000),
@@ -500,6 +518,7 @@ fn harness_config_uses_defaults_and_context_overrides() {
     assert_eq!(config.spill_max_inline_tokens, 8_000);
     assert_eq!(config.verbatim_window_turns, 6);
     assert!(!config.reasoning_pruning);
+    assert!(!config.prompt_caching);
     assert_eq!(config.max_steps_per_turn, 48);
     assert_eq!(config.tool_timeout_ms, 60_000);
     assert_eq!(config.max_session_tokens, Some(2_000_000));
@@ -994,11 +1013,12 @@ fn formats_token_summary_and_omits_missing_fields() {
         prompt_tokens: Some(10),
         completion_tokens: Some(5),
         total_tokens: Some(15),
-        cached_tokens: None,
+        cached_tokens: Some(6),
+        cache_creation_tokens: None,
     };
     assert_eq!(
         format_token_summary(&full).as_deref(),
-        Some("tokens: prompt=10 completion=5 total=15")
+        Some("tokens: prompt=10 completion=5 total=15 cached=6")
     );
 
     let partial = meerai_agents::Usage {
@@ -1006,6 +1026,7 @@ fn formats_token_summary_and_omits_missing_fields() {
         completion_tokens: Some(4),
         total_tokens: None,
         cached_tokens: None,
+        cache_creation_tokens: None,
     };
     assert_eq!(
         format_token_summary(&partial).as_deref(),
@@ -1580,14 +1601,42 @@ fn parses_hooks_subcommands() {
         parse_args(hooks(&["untrust"])).unwrap().subcommand,
         Some(CliSubcommand::Hooks(HooksCommand::Untrust))
     );
+    assert_eq!(
+        parse_args(hooks(&["verify"])).unwrap().subcommand,
+        Some(CliSubcommand::Hooks(HooksCommand::Verify {
+            command: None,
+            reset_baseline: false
+        }))
+    );
+    assert_eq!(
+        parse_args(hooks(&["verify", "--command", "cargo test"]))
+            .unwrap()
+            .subcommand,
+        Some(CliSubcommand::Hooks(HooksCommand::Verify {
+            command: Some("cargo test".to_string()),
+            reset_baseline: false
+        }))
+    );
+    assert_eq!(
+        parse_args(hooks(&["verify", "--reset-baseline"]))
+            .unwrap()
+            .subcommand,
+        Some(CliSubcommand::Hooks(HooksCommand::Verify {
+            command: None,
+            reset_baseline: true
+        }))
+    );
     assert!(parse_args(hooks(&["-h"])).unwrap().show_help);
     assert!(parse_args(hooks(&["--help"])).unwrap().show_help);
     assert!(parse_args(hooks(&["trust", "--help"])).unwrap().show_help);
     assert!(parse_args(hooks(&["untrust", "-h"])).unwrap().show_help);
+    assert!(parse_args(hooks(&["verify", "--help"])).unwrap().show_help);
     assert!(parse_args(hooks(&["status", "extra"])).is_err());
     assert!(parse_args(hooks(&["trust", "extra"])).is_err());
+    assert!(parse_args(hooks(&["verify", "--command"])).is_err());
+    assert!(parse_args(hooks(&["verify", "extra"])).is_err());
     assert!(parse_args(hooks(&["bogus"])).is_err());
-    assert!(help_text().contains("hooks <trust|untrust|status>"));
+    assert!(help_text().contains("hooks <trust|untrust|status|verify>"));
 }
 
 #[test]

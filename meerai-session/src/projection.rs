@@ -1,14 +1,19 @@
+use std::path::PathBuf;
+
 use genai::chat::{ChatMessage, ToolCall as GenaiToolCall, ToolResponse};
+use meerai_core::ToolObservation;
 use serde::{Deserialize, Serialize};
 
 use crate::compaction::{COMPACTED_MARKER, summary_message};
 use crate::event::{ContentBlock, InputSource, LoggedEvent, SeqRange, SessionEvent};
+use crate::ids::CallId;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectionPolicy {
     pub strip_ephemera: bool,
     pub prune_reasoning: bool,
     pub verbatim_window_turns: usize,
+    pub clear_old_tool_results: bool,
     pub include_system_messages: bool,
 }
 
@@ -18,6 +23,7 @@ impl Default for ProjectionPolicy {
             strip_ephemera: true,
             prune_reasoning: true,
             verbatim_window_turns: 4,
+            clear_old_tool_results: true,
             include_system_messages: true,
         }
     }
@@ -31,6 +37,13 @@ pub fn derive_messages(events: &[LoggedEvent], policy: &ProjectionPolicy) -> Vec
         .rev()
         .find(|logged| matches!(logged.event, SessionEvent::TurnStarted { .. }))
         .map(|logged| logged.seq);
+    let turn_count = events
+        .iter()
+        .filter(|logged| !shadowed.iter().any(|range| range.contains(logged.seq)))
+        .filter(|logged| matches!(logged.event, SessionEvent::TurnStarted { .. }))
+        .count();
+    let spills = spill_paths(events, &shadowed);
+    let mut turn_index: Option<usize> = None;
     let mut next_summary = 0;
     let mut messages = Vec::new();
     let mut latest_calls: Vec<GenaiToolCall> = Vec::new();
@@ -49,6 +62,9 @@ pub fn derive_messages(events: &[LoggedEvent], policy: &ProjectionPolicy) -> Vec
         }
 
         match &logged.event {
+            SessionEvent::TurnStarted { .. } => {
+                turn_index = Some(turn_index.map_or(0, |index| index + 1));
+            }
             SessionEvent::SystemMessage { sections, .. } => {
                 if !policy.include_system_messages {
                     continue;
@@ -101,8 +117,10 @@ pub fn derive_messages(events: &[LoggedEvent], policy: &ProjectionPolicy) -> Vec
                 else {
                     continue;
                 };
+                let content =
+                    tool_result_content(policy, turn_index, turn_count, &spills, call_id, output);
                 let response =
-                    ToolResponse::from_tool_call(call, output.render()).with_fn_name(&call.fn_name);
+                    ToolResponse::from_tool_call(call, content).with_fn_name(&call.fn_name);
                 messages.push(ChatMessage::from(response));
             }
             _ => {}
@@ -162,6 +180,55 @@ fn to_genai_tool_call(
             .unwrap_or_else(|_| serde_json::Value::String(call.args.clone())),
         thought_signatures: signature.cloned(),
     }
+}
+
+fn spill_paths(events: &[LoggedEvent], shadowed: &[SeqRange]) -> Vec<(CallId, PathBuf, u64)> {
+    events
+        .iter()
+        .filter(|logged| !shadowed.iter().any(|range| range.contains(logged.seq)))
+        .filter_map(|logged| match &logged.event {
+            SessionEvent::SpillApplied {
+                call_id,
+                bytes_omitted,
+                blob_path,
+            } => Some((call_id.clone(), blob_path.clone(), *bytes_omitted)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn tool_result_content(
+    policy: &ProjectionPolicy,
+    turn_index: Option<usize>,
+    turn_count: usize,
+    spills: &[(CallId, PathBuf, u64)],
+    call_id: &CallId,
+    output: &ToolObservation,
+) -> String {
+    let clears = policy.clear_old_tool_results
+        && turn_index.is_some_and(|index| {
+            turn_count.saturating_sub(index) > policy.verbatim_window_turns.max(1)
+        });
+    if !clears {
+        return output.render();
+    }
+    let spill = spills.iter().find(|(id, _, _)| id == call_id);
+    let status = format!("{:?}", output.status).to_lowercase();
+    let mut text = match spill {
+        Some((_, path, omitted)) => format!(
+            "[tool result cleared from an earlier turn: {status}, {omitted} bytes omitted; full output at {}; re-run the tool if needed]",
+            path.display()
+        ),
+        None => format!(
+            "[tool result cleared from an earlier turn: {status}, {} bytes omitted; re-run the tool if needed]",
+            output.stdout.len().saturating_add(output.stderr.len())
+        ),
+    };
+    if let Some(hint) = output.hint.as_deref().filter(|hint| !hint.is_empty()) {
+        text.push_str("\nhint: ");
+        text.push_str(hint);
+    }
+    text
 }
 
 pub fn join_text_blocks(blocks: &[ContentBlock]) -> String {
@@ -466,6 +533,116 @@ mod tests {
 
         let messages = derive_messages(&events, &ProjectionPolicy::default());
         assert!(messages.is_empty());
+    }
+
+    fn multi_turn_results(turns: usize) -> Vec<LoggedEvent> {
+        let mut events = Vec::new();
+        let mut seq = 1;
+        for index in 0..turns {
+            let turn = TurnId::from(format!("turn-{index}").as_str());
+            events.push(turn_started(seq, &turn));
+            seq += 1;
+            events.push(logged(seq, user(&format!("request {index}"))));
+            seq += 1;
+            events.push(logged(
+                seq,
+                assistant(
+                    Vec::new(),
+                    vec![tool_call(&format!("call-{index}"), "code-read_file", "{}")],
+                ),
+            ));
+            seq += 1;
+            events.push(logged(
+                seq,
+                tool_result(
+                    &format!("call-{index}"),
+                    ToolObservation::success(format!("output-{index}")),
+                ),
+            ));
+            seq += 1;
+            events.push(turn_ended(seq, &turn));
+            seq += 1;
+        }
+        events
+    }
+
+    fn tool_response_contents(messages: &[ChatMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .flat_map(|message| {
+                message
+                    .content
+                    .tool_responses()
+                    .into_iter()
+                    .map(|response| response.content.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn clears_tool_results_outside_the_verbatim_window() {
+        let events = multi_turn_results(6);
+        let messages = derive_messages(&events, &ProjectionPolicy::default());
+        let responses = tool_response_contents(&messages);
+
+        assert_eq!(responses.len(), 6);
+        assert!(responses[0].contains("cleared from an earlier turn"));
+        assert!(responses[1].contains("cleared from an earlier turn"));
+        assert_eq!(responses[2], "output-2");
+        assert_eq!(responses[5], "output-5");
+        assert_eq!(
+            messages
+                .iter()
+                .flat_map(|message| message.content.tool_calls())
+                .count(),
+            6,
+            "tool calls must stay paired after their result is cleared"
+        );
+    }
+
+    #[test]
+    fn tool_result_clearing_can_be_disabled() {
+        let events = multi_turn_results(6);
+        let policy = ProjectionPolicy {
+            clear_old_tool_results: false,
+            ..ProjectionPolicy::default()
+        };
+        let responses = tool_response_contents(&derive_messages(&events, &policy));
+        assert_eq!(responses[0], "output-0");
+        assert_eq!(responses[5], "output-5");
+    }
+
+    #[test]
+    fn cleared_tool_result_points_at_the_spill_blob() {
+        let mut events = multi_turn_results(5);
+        events.push(logged(
+            events.len() as u64 + 1,
+            SessionEvent::SpillApplied {
+                call_id: CallId::from("call-0"),
+                bytes_omitted: 900,
+                blob_path: PathBuf::from("/tmp/blob-0.txt"),
+            },
+        ));
+
+        let messages = derive_messages(&events, &ProjectionPolicy::default());
+        let responses = tool_response_contents(&messages);
+        assert!(responses[0].contains("900 bytes omitted"));
+        assert!(responses[0].contains("/tmp/blob-0.txt"));
+        assert_eq!(responses[1], "output-1");
+    }
+
+    #[test]
+    fn zero_window_keeps_only_the_newest_turn() {
+        let events = multi_turn_results(4);
+        let policy = ProjectionPolicy {
+            verbatim_window_turns: 0,
+            ..ProjectionPolicy::default()
+        };
+        let responses = tool_response_contents(&derive_messages(&events, &policy));
+        assert!(responses[0].contains("cleared"));
+        assert!(responses[2].contains("cleared"));
+        assert_eq!(responses[3], "output-3");
     }
 
     #[test]

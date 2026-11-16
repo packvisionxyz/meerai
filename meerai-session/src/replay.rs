@@ -516,6 +516,7 @@ mod tests {
                         completion_tokens: Some(5),
                         total_tokens: Some(15),
                         cached_tokens: None,
+                        cache_creation_tokens: None,
                     },
                 },
             },
@@ -528,6 +529,7 @@ mod tests {
                         completion_tokens: Some(7),
                         total_tokens: Some(27),
                         cached_tokens: None,
+                        cache_creation_tokens: None,
                     },
                 },
             },
@@ -540,6 +542,7 @@ mod tests {
                 completion_tokens: Some(7),
                 total_tokens: Some(27),
                 cached_tokens: None,
+                cache_creation_tokens: None,
             })
         );
         assert_eq!(session_usage_from_events(&[]), None);

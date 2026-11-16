@@ -30,6 +30,8 @@ pub enum HookEvent {
     SubagentStop,
     #[serde(rename = "SessionEnd")]
     SessionEnd,
+    #[serde(rename = "TurnFailed")]
+    TurnFailed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +42,8 @@ pub struct HookEntry {
     #[serde(default, rename = "if", skip_serializing_if = "Option::is_none")]
     pub if_pattern: Option<String>,
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_file: Option<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,6 +65,7 @@ impl HookEvent {
             HookEvent::SubagentStart => "SubagentStart",
             HookEvent::SubagentStop => "SubagentStop",
             HookEvent::SessionEnd => "SessionEnd",
+            HookEvent::TurnFailed => "TurnFailed",
         }
     }
 }
@@ -158,8 +163,8 @@ fn read_entries(path: &Path, warnings: &mut Vec<String>) -> Vec<HookEntry> {
     if raw.trim().is_empty() {
         return Vec::new();
     }
-    let entries = match serde_yaml::from_str::<HookDocument>(&raw) {
-        Ok(HookDocument::List(entries)) | Ok(HookDocument::Wrapped { hooks: entries }) => entries,
+    let entries = match parse_entries(&raw) {
+        Ok(entries) => entries,
         Err(error) => {
             warnings.push(format!("ignoring hooks at {}: {error}", path.display()));
             return Vec::new();
@@ -193,6 +198,43 @@ fn read_entries(path: &Path, warnings: &mut Vec<String>) -> Vec<HookEntry> {
         kept.push(entry);
     }
     kept
+}
+
+fn parse_entries(raw: &str) -> Result<Vec<HookEntry>, serde_yaml::Error> {
+    match serde_yaml::from_str::<HookDocument>(raw)? {
+        HookDocument::List(entries) | HookDocument::Wrapped { hooks: entries } => Ok(entries),
+    }
+}
+
+pub fn user_hooks_path(config_dir: &Path) -> std::path::PathBuf {
+    config_dir.join("hooks.json")
+}
+
+pub fn append_user_hook(config_dir: &Path, entry: HookEntry) -> std::io::Result<bool> {
+    let path = user_hooks_path(config_dir);
+    let mut entries = if path.exists() {
+        let raw = fs::read_to_string(&path)?;
+        if raw.trim().is_empty() {
+            Vec::new()
+        } else {
+            parse_entries(&raw).map_err(|error| {
+                std::io::Error::other(format!("cannot update {}: {error}", path.display()))
+            })?
+        }
+    } else {
+        Vec::new()
+    };
+    if entries
+        .iter()
+        .any(|existing| existing.event == entry.event && existing.command == entry.command)
+    {
+        return Ok(false);
+    }
+    entries.push(entry);
+    let raw = serde_yaml::to_string(&entries).map_err(std::io::Error::other)?;
+    fs::create_dir_all(config_dir)?;
+    fs::write(&path, raw)?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -296,6 +338,79 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].event, HookEvent::PostToolUse);
         assert_eq!(entries[0].command, "fmt.sh");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_user_hook_merges_and_dedups() {
+        let dir = temp_dir("append");
+        fs::create_dir_all(&dir).unwrap();
+        let first = HookEntry {
+            event: HookEvent::Stop,
+            matcher: None,
+            if_pattern: None,
+            command: "one.sh".to_string(),
+            baseline_file: None,
+            timeout_ms: None,
+            fail_closed: None,
+        };
+        assert!(append_user_hook(&dir, first.clone()).unwrap());
+        assert!(!append_user_hook(&dir, first).unwrap());
+
+        let mut warnings = Vec::new();
+        let entries = load_hooks(&user_hooks_path(&dir), None, &mut warnings);
+        assert_eq!(entries.len(), 1);
+        assert!(warnings.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_user_hook_preserves_existing_entries() {
+        let dir = temp_dir("append_existing");
+        write_hooks(
+            &dir,
+            "hooks.json",
+            r#"[ { "event": "SessionStart", "command": "start.sh" } ]"#,
+        );
+        let hook = HookEntry {
+            event: HookEvent::Stop,
+            matcher: None,
+            if_pattern: None,
+            command: "stop.sh".to_string(),
+            baseline_file: None,
+            timeout_ms: None,
+            fail_closed: None,
+        };
+        assert!(append_user_hook(&dir, hook).unwrap());
+
+        let mut warnings = Vec::new();
+        let entries = load_hooks(&user_hooks_path(&dir), None, &mut warnings);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].command, "start.sh");
+        assert_eq!(entries[1].command, "stop.sh");
+        assert!(warnings.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_baseline_file() {
+        let dir = temp_dir("baseline_file");
+        let path = write_hooks(
+            &dir,
+            "hooks.json",
+            r#"[ { "event": "Stop", "command": "cargo test", "baseline_file": "/tmp/baseline.txt" } ]"#,
+        );
+        let mut warnings = Vec::new();
+        let entries = load_hooks(&path, None, &mut warnings);
+        assert!(warnings.is_empty());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].baseline_file.as_deref(),
+            Some(std::path::Path::new("/tmp/baseline.txt"))
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

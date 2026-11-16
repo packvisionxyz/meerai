@@ -208,6 +208,32 @@ fn big_output(lines: usize) -> String {
         .collect()
 }
 
+struct LargeSchemaToolset;
+
+#[async_trait]
+impl Toolset for LargeSchemaToolset {
+    fn name(&self) -> String {
+        "large".to_string()
+    }
+
+    fn definition(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            r#type: "function".to_string(),
+            name: "large-run".to_string(),
+            description: "x".repeat(100_000),
+            parameters: serde_json::json!({ "type": "object" }),
+        }]
+    }
+
+    fn contain(&self, _fn_name: &str) -> bool {
+        false
+    }
+
+    async fn invoke(&self, _fn_name: &str, _args: &str) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::Text("never".to_string()))
+    }
+}
+
 fn tool_end_counting(calls: Vec<ToolCall>, total_tokens: i32) -> StreamEnd {
     StreamEnd {
         captured_content: Some(MessageContent::from_tool_calls(calls)),
@@ -859,6 +885,53 @@ async fn reports_budget_errors_as_failed_turns() {
 }
 
 #[tokio::test]
+async fn worker_recovers_once_after_a_provider_failure() {
+    let streamer = Arc::new(FakeStreamer::with_script(vec![
+        ScriptedStream::Error("temporary provider failure".to_string()),
+        ScriptedStream::Error("temporary provider failure".to_string()),
+        ScriptedStream::Error("temporary provider failure".to_string()),
+        ScriptedStream::Events(vec![ChatStreamEvent::End(text_end("recovered"))]),
+    ]));
+    let session = memory_session();
+    let agent = harness_agent(
+        streamer,
+        Vec::new(),
+        "system",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+    let (cmd_tx, mut rx) = spawn_worker(agent);
+    cmd_tx
+        .send(AgentCommand::SubmitPrompt("go".to_string()))
+        .unwrap();
+
+    let mut completions = Vec::new();
+    while let Some(event) = rx.recv().await {
+        if let AgentEvent::TurnCompleted { reason, .. } = event {
+            completions.push(reason);
+            if completions.len() == 2 {
+                break;
+            }
+        }
+    }
+    assert!(matches!(completions[0], TurnEndReason::Failed { .. }));
+    assert!(matches!(completions[1], TurnEndReason::Completed));
+
+    let recovered = session_events(&session).iter().any(|event| {
+        match event {
+        SessionEvent::UserMessage { content, .. } => content.iter().any(|block| {
+            matches!(block, ContentBlock::Text(text) if text.contains("previous turn failed"))
+        }),
+        _ => false,
+    }
+    });
+    assert!(recovered, "recovery prompt must be logged");
+
+    let _ = cmd_tx.send(AgentCommand::Quit);
+}
+
+#[tokio::test]
 async fn queues_steering_as_next_prompt() {
     let streamer = Arc::new(FakeStreamer::new(vec![
         vec![
@@ -916,7 +989,7 @@ async fn harness_dual_writes_session_events() {
     )]]));
     let session = memory_session();
     let mut agent = MultiTurnAgent::with_streamer(
-        streamer,
+        streamer.clone(),
         "gemini::gemini-3.8-flash",
         vec![Box::new(EchoToolset)],
         "Be precise.",
@@ -930,6 +1003,13 @@ async fn harness_dual_writes_session_events() {
         .await
         .unwrap();
     assert_eq!(out, "done now");
+
+    let cached = streamer.options.lock().unwrap();
+    assert_eq!(
+        cached[0].cache_control,
+        Some(genai::chat::CacheControl::Ephemeral)
+    );
+    drop(cached);
 
     let events = session_events(&session);
     let kinds: Vec<&str> = events.iter().map(event_kind).collect();
@@ -2155,6 +2235,7 @@ async fn pressure_compaction_brackets_and_shrinks_history() {
         strip_ephemera: true,
         prune_reasoning: true,
         verbatim_window_turns: 1,
+        clear_old_tool_results: false,
         include_system_messages: false,
     };
     let derived = session.derive_messages(&policy);
@@ -2171,9 +2252,10 @@ async fn pressure_compaction_brackets_and_shrinks_history() {
     assert_eq!(reqs[2].messages.len(), 2);
     assert!(
         reqs[1]
-            .system
-            .as_deref()
-            .is_some_and(|system| system.contains("Goal"))
+            .messages
+            .last()
+            .and_then(|message| message.content.first_text())
+            .is_some_and(|text| text.contains("Goal"))
     );
 }
 
@@ -2691,6 +2773,7 @@ async fn repeated_failures_trigger_breaker_and_end_turn() {
         step("c2"),
         step("c3"),
         step("c4"),
+        vec![ChatStreamEvent::End(text_end("recovered"))],
     ]));
 
     let session = memory_session();
@@ -2709,25 +2792,29 @@ async fn repeated_failures_trigger_breaker_and_end_turn() {
         .unwrap();
 
     let mut code = None;
-    let mut failure = None;
+    let mut completions = Vec::new();
     while let Some(event) = rx.recv().await {
         match event {
             AgentEvent::Error {
                 code: error_code, ..
             } => code = Some(error_code),
-            AgentEvent::TurnCompleted {
-                reason: TurnEndReason::Failed { error },
-                ..
-            } => {
-                failure = Some(error);
-                break;
+            AgentEvent::TurnCompleted { reason, .. } => {
+                completions.push(reason);
+                if completions.len() == 2 {
+                    break;
+                }
             }
-            AgentEvent::TurnCompleted { .. } => break,
             _ => {}
         }
     }
     assert_eq!(code, Some(ErrorCode::LoopDetected));
-    assert_eq!(failure.as_deref(), Some(LOOP_DETECTED));
+    assert_eq!(
+        completions[0],
+        TurnEndReason::Failed {
+            error: LOOP_DETECTED.to_string()
+        }
+    );
+    assert_eq!(completions[1], TurnEndReason::Completed);
 
     let events = session_events(&session);
     let breakers: Vec<&SessionEvent> = events
@@ -2769,7 +2856,7 @@ async fn repeated_failures_trigger_breaker_and_end_turn() {
     )));
 
     let reqs = streamer.requests.lock().unwrap();
-    assert_eq!(reqs.len(), 4);
+    assert_eq!(reqs.len(), 5);
     let next_request = format!("{:?}", reqs[3].messages);
     assert!(
         next_request.contains("failed identically 3 times"),
@@ -2983,6 +3070,16 @@ fn turn_deadline_comparison_uses_elapsed_seconds() {
     assert_eq!(provider_backoff_after(1), Duration::from_millis(250));
     assert_eq!(provider_backoff_after(2), Duration::from_millis(500));
     assert_eq!(provider_backoff_after(3), Duration::from_millis(1_000));
+    for _ in 0..16 {
+        let delay = provider_backoff_with_jitter(1);
+        assert!(delay >= Duration::from_millis(250));
+        assert!(delay < Duration::from_millis(375));
+    }
+    assert!(status_is_transient(429));
+    assert!(status_is_transient(503));
+    assert!(!status_is_transient(400));
+    assert!(!status_is_transient(401));
+    assert_eq!(provider_error_status(&anyhow::Error::msg("plain")), None);
 }
 
 #[test]
@@ -4333,6 +4430,14 @@ fn subagent_presets_and_effect_of_call_classification() {
     let spec = toolset.permission_spec("subagent-run").unwrap();
     assert_eq!(spec.action, PermissionAction::Subagent);
     assert_eq!(spec.resource_arg, Some("agent"));
+
+    let description = toolset.definition().into_iter().next().unwrap().description;
+    assert!(description.contains("explore"));
+    assert!(description.contains("reviewer"));
+    assert!(
+        !description.contains("Reviews diffs"),
+        "custom descriptions must stay out of the tool schema"
+    );
 }
 
 #[tokio::test]
@@ -5781,6 +5886,168 @@ async fn repeated_identical_tool_batches_end_with_loop_detected() {
 }
 
 #[tokio::test]
+async fn repeated_identical_edits_log_the_edit_breaker() {
+    let batch = || {
+        vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+            call_id: "c1".to_string(),
+            fn_name: "code-edit_file".to_string(),
+            fn_arguments: serde_json::json!({
+                "path": "src/lib.rs",
+                "old_text": "a",
+                "new_text": "b"
+            }),
+            thought_signatures: None,
+        }]))]
+    };
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        batch(),
+        batch(),
+        batch(),
+        batch(),
+        batch(),
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        vec![Box::new(StaticToolset::new(
+            "code",
+            "code-edit_file",
+            "edited",
+            EffectClass::Write,
+        ))],
+        "system",
+        &session,
+        auto_mode(),
+        HarnessConfig {
+            max_steps_per_turn: 10,
+            ..HarnessConfig::default()
+        },
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let _ = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await;
+
+    let breakers: Vec<(BreakerKind, BreakerAction)> = session_events(&session)
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::CircuitBreaker { kind, action } => Some((*kind, *action)),
+            _ => None,
+        })
+        .collect();
+    assert!(breakers.contains(&(
+        BreakerKind::RepeatedIdenticalEdit,
+        BreakerAction::DiagnosticInjected
+    )));
+    assert!(breakers.contains(&(
+        BreakerKind::RepeatedIdenticalEdit,
+        BreakerAction::TurnFailed
+    )));
+}
+
+#[tokio::test]
+async fn no_progress_breaker_emits_diagnostic_and_fails() {
+    let batches: Vec<Vec<ChatStreamEvent>> = (0..12)
+        .map(|index| {
+            vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+                call_id: format!("call-{index}"),
+                fn_name: "code-read_file".to_string(),
+                fn_arguments: serde_json::json!({ "path": format!("src/{index}.rs") }),
+                thought_signatures: None,
+            }]))]
+        })
+        .collect();
+    let streamer = Arc::new(FakeStreamer::new(batches));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        vec![
+            Box::new(StaticToolset::new(
+                "code",
+                "code-read_file",
+                "content",
+                EffectClass::Read,
+            )),
+            Box::new(StaticToolset::new(
+                "code",
+                "code-edit_file",
+                "edited",
+                EffectClass::Write,
+            )),
+        ],
+        "system",
+        &session,
+        auto_mode(),
+        HarnessConfig {
+            max_steps_per_turn: 20,
+            ..HarnessConfig::default()
+        },
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .expect_err("no progress must fail");
+    assert!(format!("{error:#}").contains("no progress"));
+
+    let breakers: Vec<(BreakerKind, BreakerAction)> = session_events(&session)
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::CircuitBreaker { kind, action } => Some((*kind, *action)),
+            _ => None,
+        })
+        .collect();
+    assert!(breakers.contains(&(BreakerKind::NoProgress, BreakerAction::DiagnosticInjected)));
+    assert!(breakers.contains(&(BreakerKind::NoProgress, BreakerAction::TurnFailed)));
+}
+
+#[tokio::test]
+async fn read_only_turns_do_not_trip_no_progress() {
+    let mut batches: Vec<Vec<ChatStreamEvent>> = (0..8)
+        .map(|index| {
+            vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+                call_id: format!("call-{index}"),
+                fn_name: "code-read_file".to_string(),
+                fn_arguments: serde_json::json!({ "path": format!("src/{index}.rs") }),
+                thought_signatures: None,
+            }]))]
+        })
+        .collect();
+    batches.push(vec![ChatStreamEvent::End(text_end("done"))]);
+    let streamer = Arc::new(FakeStreamer::new(batches));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        vec![Box::new(StaticToolset::new(
+            "code",
+            "code-read_file",
+            "content",
+            EffectClass::Read,
+        ))],
+        "system",
+        &session,
+        auto_mode(),
+        HarnessConfig {
+            max_steps_per_turn: 12,
+            ..HarnessConfig::default()
+        },
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "done");
+    assert!(!session_events(&session).iter().any(|event| matches!(
+        event,
+        SessionEvent::CircuitBreaker {
+            kind: BreakerKind::NoProgress,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
 async fn tool_call_chunks_execute_when_capture_is_empty() {
     let streamer = Arc::new(FakeStreamer::new(vec![
         vec![
@@ -6508,9 +6775,53 @@ fn hook_entry(event: HookEvent, command: &str) -> meerai_common::hooks::HookEntr
         matcher: None,
         if_pattern: None,
         command: command.to_string(),
+        baseline_file: None,
         timeout_ms: None,
         fail_closed: None,
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn turn_failed_hook_receives_the_error() {
+    let streamer = Arc::new(FakeStreamer::with_script(vec![
+        ScriptedStream::Error("boom".to_string()),
+        ScriptedStream::Error("boom".to_string()),
+        ScriptedStream::Error("boom".to_string()),
+    ]));
+    let session = memory_session();
+    let dir = std::env::temp_dir().join(format!("meerai_turn_failed_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let payload_path = dir.join("payload.json");
+    let mut agent = harness_agent(
+        streamer,
+        Vec::new(),
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+    agent.set_hooks(Arc::new(crate::hooks::HookEngine::new(vec![hook_entry(
+        HookEvent::TurnFailed,
+        &format!("cat > {}", payload_path.display()),
+    )])));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .expect_err("turn must fail");
+    assert!(format!("{error:#}").contains("boom"));
+
+    let payload = std::fs::read_to_string(&payload_path).unwrap();
+    assert!(payload.contains("\"event\":\"TurnFailed\""));
+    assert!(payload.contains("boom"));
+    assert!(session_events(&session).iter().any(|event| matches!(
+        event,
+        SessionEvent::HookFired { event, .. } if event == "TurnFailed"
+    )));
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[cfg(unix)]
@@ -6683,6 +6994,251 @@ async fn session_start_and_end_fire_once_through_the_worker() {
 }
 
 #[tokio::test]
+async fn tool_schema_tokens_count_toward_the_watermark() {
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("done"),
+    )]]));
+    let session = memory_session();
+    let mut agent = MultiTurnAgent::with_streamer(
+        streamer,
+        "test-model",
+        vec![Box::new(LargeSchemaToolset)],
+        "",
+        MultiTurnAgentConfig::default(),
+    );
+    let config = HarnessConfig {
+        context_window_tokens: 2_000,
+        high_watermark_pct: 100,
+        ..HarnessConfig::default()
+    };
+    agent.set_harness(harness(&session, auto_mode(), config));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(
+        agent.tool_schema_tokens > 20_000,
+        "large schema must be counted, got {}",
+        agent.tool_schema_tokens
+    );
+    assert!(agent.over_high_watermark());
+}
+
+#[tokio::test]
+async fn pressure_compaction_can_run_inside_a_long_turn() {
+    let streamer = Arc::new(LongTurnStreamer {
+        tool_steps: AtomicUsize::new(0),
+        summaries: AtomicUsize::new(0),
+        steps: 6,
+    });
+    let session = memory_session();
+    let config = HarnessConfig {
+        context_window_tokens: 100,
+        high_watermark_pct: 10,
+        verbatim_window_turns: 2,
+        ..HarnessConfig::default()
+    };
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![Box::new(EchoToolset)],
+        "system",
+        &session,
+        auto_mode(),
+        config,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "done");
+    assert!(streamer.summaries.load(Ordering::SeqCst) >= 1);
+    let applied = session_events(&session).iter().any(|event| {
+        matches!(
+            event,
+            SessionEvent::CompactionEnded {
+                result: CompactionResult::Applied { .. },
+                ..
+            }
+        )
+    });
+    assert!(applied, "in-turn pressure compaction must apply");
+}
+
+struct LongTurnStreamer {
+    tool_steps: AtomicUsize,
+    summaries: AtomicUsize,
+    steps: usize,
+}
+
+#[async_trait]
+impl ChatStreamer for LongTurnStreamer {
+    async fn stream_chat(
+        &self,
+        _model: &str,
+        request: ChatRequest,
+        _options: &ChatOptions,
+    ) -> Result<BoxedChatStream> {
+        let wants_summary = request
+            .system
+            .as_deref()
+            .is_some_and(|system| system.contains("Summarize the transcript"))
+            || request
+                .messages
+                .last()
+                .and_then(|message| message.content.first_text())
+                .is_some_and(|text| text.contains("Summarize the transcript"));
+        if wants_summary {
+            self.summaries.fetch_add(1, Ordering::SeqCst);
+            let events: Vec<Result<ChatStreamEvent>> = vec![
+                Ok(ChatStreamEvent::Chunk(StreamChunk {
+                    content: "Goal: finish".to_string(),
+                })),
+                Ok(ChatStreamEvent::End(text_end("Goal: finish"))),
+            ];
+            return Ok(Box::pin(stream::iter(events)));
+        }
+        let step = self.tool_steps.fetch_add(1, Ordering::SeqCst);
+        let events: Vec<Result<ChatStreamEvent>> = if step < self.steps {
+            vec![Ok(ChatStreamEvent::End(tool_end(vec![tool_call(
+                &format!("call-{step}"),
+                &format!("go-{step}"),
+            )])))]
+        } else {
+            vec![Ok(ChatStreamEvent::End(text_end("done")))]
+        };
+        Ok(Box::pin(stream::iter(events)))
+    }
+}
+
+struct SummaryProbeStreamer {
+    requests: Mutex<Vec<ChatRequest>>,
+    turn_requests: AtomicUsize,
+}
+
+#[async_trait]
+impl ChatStreamer for SummaryProbeStreamer {
+    async fn stream_chat(
+        &self,
+        _model: &str,
+        request: ChatRequest,
+        _options: &ChatOptions,
+    ) -> Result<BoxedChatStream> {
+        let wants_summary = request
+            .messages
+            .last()
+            .and_then(|message| message.content.first_text())
+            .is_some_and(|text| text.contains("Summarize the transcript"));
+        self.requests.lock().unwrap().push(request);
+        if wants_summary {
+            let events: Vec<Result<ChatStreamEvent>> =
+                vec![Ok(ChatStreamEvent::End(text_end("Goal: probe")))];
+            return Ok(Box::pin(stream::iter(events)));
+        }
+        let index = self.turn_requests.fetch_add(1, Ordering::SeqCst);
+        let events: Vec<Result<ChatStreamEvent>> = if index.is_multiple_of(2) {
+            vec![Ok(ChatStreamEvent::End(tool_end(vec![tool_call(
+                &format!("call-{index}"),
+                &format!("go-{index}"),
+            )])))]
+        } else {
+            vec![Ok(ChatStreamEvent::End(text_end(&format!(
+                "reply-{index}"
+            ))))]
+        };
+        Ok(Box::pin(stream::iter(events)))
+    }
+}
+
+#[tokio::test]
+async fn compaction_reuses_the_parent_prefix_for_cache_hits() {
+    let streamer = Arc::new(SummaryProbeStreamer {
+        requests: Mutex::new(Vec::new()),
+        turn_requests: AtomicUsize::new(0),
+    });
+    let session = memory_session();
+    let config = HarnessConfig {
+        verbatim_window_turns: 1,
+        ..HarnessConfig::default()
+    };
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![Box::new(EchoToolset)],
+        "system",
+        &session,
+        auto_mode(),
+        config,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("one", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    agent
+        .prompt_streaming("two", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let (compact_tx, _compact_rx) = mpsc::unbounded_channel();
+    let applied = agent
+        .run_compaction(
+            CompactionTrigger::Manual,
+            &compact_tx,
+            &CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(applied, "manual compaction must apply");
+
+    let requests = streamer.requests.lock().unwrap();
+    let summary = requests
+        .iter()
+        .find(|request| {
+            request
+                .messages
+                .last()
+                .and_then(|message| message.content.first_text())
+                .is_some_and(|text| text.contains("Summarize the transcript"))
+        })
+        .expect("summary request");
+    let parent = requests
+        .iter()
+        .rfind(|request| {
+            !request
+                .messages
+                .last()
+                .and_then(|message| message.content.first_text())
+                .is_some_and(|text| text.contains("Summarize the transcript"))
+        })
+        .expect("parent request");
+    assert_eq!(summary.system, parent.system);
+    assert!(
+        summary
+            .tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty()),
+        "summary request must carry the parent tool definitions"
+    );
+    assert_eq!(
+        serde_json::to_value(&summary.tools).unwrap(),
+        serde_json::to_value(&parent.tools).unwrap(),
+        "summary tools must match the parent byte for byte"
+    );
+    let prefix = parent.messages.len();
+    assert_eq!(
+        serde_json::to_value(&summary.messages[..prefix]).unwrap(),
+        serde_json::to_value(&parent.messages).unwrap(),
+        "summary history must reuse the parent prefix"
+    );
+}
+
+#[tokio::test]
 async fn post_edit_diagnostics_returns_lsp_text() {
     let tools: Vec<Box<dyn Toolset>> = vec![Box::new(StaticToolset::new(
         "lsp",
@@ -6704,5 +7260,154 @@ async fn post_edit_diagnostics_without_lsp_tool_returns_none() {
         super::tools::collect_post_edit_diagnostics(&tools, "src/main.rs")
             .await
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn prompt_caching_disabled_sends_no_cache_control() {
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("done"),
+    )]]));
+    let session = memory_session();
+    let mut agent = MultiTurnAgent::with_streamer(
+        streamer.clone(),
+        "gemini::gemini-3.8-flash",
+        Vec::new(),
+        "",
+        MultiTurnAgentConfig::default(),
+    );
+    let config = HarnessConfig {
+        prompt_caching: false,
+        ..HarnessConfig::default()
+    };
+    agent.set_harness(harness(&session, auto_mode(), config));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let cached = streamer.options.lock().unwrap();
+    assert_eq!(cached[0].cache_control, None);
+}
+
+#[test]
+fn usage_copies_cache_token_details() {
+    let usage = Usage {
+        prompt_tokens: Some(100),
+        completion_tokens: Some(5),
+        total_tokens: Some(105),
+        prompt_tokens_details: Some(genai::chat::PromptTokensDetails {
+            cache_creation_tokens: Some(40),
+            cached_tokens: Some(60),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let converted = meerai_session::Usage::from(usage);
+    assert_eq!(converted.cached_tokens, Some(60));
+    assert_eq!(converted.cache_creation_tokens, Some(40));
+}
+
+struct PlanningCancelToolset {
+    cancel: CancellationToken,
+}
+
+#[async_trait]
+impl Toolset for PlanningCancelToolset {
+    fn name(&self) -> String {
+        "echo".to_string()
+    }
+
+    fn definition(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            r#type: "function".to_string(),
+            name: "echo-say".to_string(),
+            description: "Cancels the turn while planning".to_string(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        }]
+    }
+
+    fn contain(&self, fn_name: &str) -> bool {
+        fn_name == "echo-say"
+    }
+
+    fn effect_of(&self, _fn_name: &str) -> EffectClass {
+        EffectClass::Read
+    }
+
+    fn effect_of_call(&self, _fn_name: &str, _args: &str) -> EffectClass {
+        self.cancel.cancel();
+        EffectClass::Read
+    }
+
+    async fn invoke(&self, _fn_name: &str, _args: &str) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::Text("should not run".to_string()))
+    }
+}
+
+#[tokio::test]
+async fn turn_end_heals_calls_left_unexecuted_by_a_cancel() {
+    let cancel = CancellationToken::new();
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        tool_end(vec![tool_call("call-1", "one"), tool_call("call-2", "two")]),
+    )]]));
+    let session = memory_session();
+    let mut agent = MultiTurnAgent::with_streamer(
+        streamer,
+        "gemini::gemini-3.8-flash",
+        vec![Box::new(PlanningCancelToolset {
+            cancel: cancel.clone(),
+        })],
+        "",
+        MultiTurnAgentConfig::default(),
+    );
+    agent.set_harness(harness(&session, auto_mode(), HarnessConfig::default()));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent.prompt_streaming("go", &tx, cancel).await.unwrap();
+
+    let events = session_events(&session);
+    let turn_ended = events
+        .iter()
+        .position(|event| matches!(event, SessionEvent::TurnEnded { .. }))
+        .expect("turn must end");
+    let before_end = &events[..turn_ended];
+    assert_eq!(
+        before_end
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::ToolResult { .. }))
+            .count(),
+        0,
+        "cancel during planning must leave results unlogged"
+    );
+    let repaired: Vec<CallId> = events[turn_ended..]
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::ToolResult { call_id, output } => {
+                assert!(
+                    output.stderr.contains("interrupted before completion"),
+                    "unexpected repair: {}",
+                    output.stderr
+                );
+                Some(call_id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        repaired,
+        vec![CallId::from_raw("call-1"), CallId::from_raw("call-2")]
+    );
+
+    session.heal_dangling_tool_calls().await.unwrap();
+    assert_eq!(
+        session_events(&session)
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::ToolResult { .. }))
+            .count(),
+        2,
+        "repair must be idempotent"
     );
 }

@@ -299,6 +299,7 @@ pub struct UsageStats {
     pub prompt_tokens: Option<i32>,
     pub completion_tokens: Option<i32>,
     pub total_tokens: Option<i32>,
+    pub cached_tokens: Option<i32>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -307,6 +308,7 @@ pub struct TurnMetrics {
     pub session_prompt_tokens: u64,
     pub session_completion_tokens: u64,
     pub session_total_tokens: u64,
+    pub session_cached_tokens: u64,
     pub turn_started_at: Option<Instant>,
     pub first_token_at: Option<Instant>,
     pub last_ttft_ms: Option<u64>,
@@ -456,6 +458,7 @@ impl SessionTab {
                 .total_tokens
                 .map(|total| total.max(0) as u64)
                 .unwrap_or(prompt + completion);
+            self.metrics.session_cached_tokens = usage.cached_tokens.unwrap_or(0).max(0) as u64;
         }
     }
 

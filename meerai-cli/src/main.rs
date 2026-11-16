@@ -113,23 +113,55 @@ fn select_definition<'a, T>(
     bail!("unknown {flag} id '{id}'; available {kind}: {list}")
 }
 
+const MAX_DEFINITION_BYTES: usize = 16 * 1024;
+const MAX_DEFINITION_BLOCK_BYTES: usize = 32 * 1024;
+
+fn capped_definition(body: &str) -> (String, bool) {
+    if body.len() <= MAX_DEFINITION_BYTES {
+        return (body.to_string(), false);
+    }
+    let end = meerai_core::text::floor_char_boundary(body, MAX_DEFINITION_BYTES);
+    (
+        format!("{}\n... [definition truncated]", &body[..end]),
+        true,
+    )
+}
+
 fn compose_definition_prompt(
     mut system: String,
     skills: &[&SkillDefinition],
     agent: Option<&AgentDefinition>,
 ) -> String {
+    let mut block = String::new();
+    let mut truncated = false;
     for skill in skills {
-        system.push_str(&format!(
+        let (body, cut) = capped_definition(&skill.body);
+        truncated |= cut;
+        block.push_str(&format!(
             "\n\n## Skill instructions ({})\n\n{}",
-            skill.id, skill.body
+            skill.id, body
         ));
     }
     if let Some(agent) = agent {
-        system.push_str(&format!(
+        let (body, cut) = capped_definition(&agent.prompt);
+        truncated |= cut;
+        block.push_str(&format!(
             "\n\n## Agent instructions ({})\n\n{}",
-            agent.id, agent.prompt
+            agent.id, body
         ));
     }
+    if block.len() > MAX_DEFINITION_BLOCK_BYTES {
+        let end = meerai_core::text::floor_char_boundary(&block, MAX_DEFINITION_BLOCK_BYTES);
+        block.truncate(end);
+        block.push_str("\n... [definition block truncated]");
+        truncated = true;
+    }
+    if truncated {
+        eprintln!(
+            "warning: agent and skill instructions exceed the definition cap (16 KiB per definition, 32 KiB total) and were truncated"
+        );
+    }
+    system.push_str(&block);
     system
 }
 

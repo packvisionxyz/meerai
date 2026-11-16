@@ -100,6 +100,7 @@ pub struct HookContext<'a> {
     pub tool_input: Option<&'a str>,
     pub tool_output: Option<&'a str>,
     pub prompt: Option<&'a str>,
+    pub error: Option<&'a str>,
     pub cwd: &'a Path,
 }
 
@@ -149,6 +150,7 @@ struct HookPayload<'a> {
     tool_input: Option<&'a str>,
     tool_output: Option<&'a str>,
     prompt: Option<&'a str>,
+    error: Option<&'a str>,
     cwd: &'a str,
 }
 
@@ -239,7 +241,7 @@ async fn fire(entry: &HookEntry, ctx: &HookContext<'_>) -> HookFiring {
 
     let (decision, reason, exit_code) = match outcome {
         Ok(Ok(output)) => {
-            let (decision, reason) = interpret(entry.event, &output);
+            let (decision, reason) = interpret(entry, &output);
             (decision, reason, output.exit_code)
         }
         Ok(Err(reason)) => (failure_decision(entry), Some(reason), None),
@@ -333,6 +335,7 @@ fn payload_bytes(event: HookEvent, ctx: &HookContext<'_>) -> Result<Vec<u8>, Str
         tool_input: ctx.tool_input,
         tool_output: ctx.tool_output,
         prompt: ctx.prompt,
+        error: ctx.error,
         cwd: cwd.as_ref(),
     };
     serde_json::to_vec(&payload).map_err(|error| format!("hook payload failed: {error}"))
@@ -360,9 +363,12 @@ fn shell_command(command: &str, cwd: &Path) -> Command {
     child
 }
 
-fn interpret(event: HookEvent, output: &HookOutput) -> (HookDecision, Option<String>) {
+fn interpret(entry: &HookEntry, output: &HookOutput) -> (HookDecision, Option<String>) {
+    if entry.baseline_file.is_some() {
+        return baseline_decision(entry, output);
+    }
     match output.exit_code {
-        Some(0) => parse_stdout(event, &output.stdout),
+        Some(0) => parse_stdout(entry.event, &output.stdout),
         Some(2) => (HookDecision::Block, Some(block_reason(&output.stderr))),
         Some(code) => (HookDecision::Pass, Some(format!("exit code {code}"))),
         None => (
@@ -370,6 +376,98 @@ fn interpret(event: HookEvent, output: &HookOutput) -> (HookDecision, Option<Str
             Some("hook terminated without an exit code".to_string()),
         ),
     }
+}
+
+fn baseline_decision(entry: &HookEntry, output: &HookOutput) -> (HookDecision, Option<String>) {
+    let Some(path) = entry.baseline_file.as_deref() else {
+        return (HookDecision::Pass, None);
+    };
+    if output.exit_code == Some(0) {
+        let _ = std::fs::remove_file(path);
+        return (HookDecision::Pass, None);
+    }
+    let current = extract_failures(output);
+    let Some(baseline) = read_baseline(path) else {
+        write_baseline(path, &current);
+        return (
+            HookDecision::Pass,
+            Some("verify baseline recorded; run again to compare".to_string()),
+        );
+    };
+    let new: Vec<&str> = current
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !baseline.iter().any(|known| known == name))
+        .collect();
+    if new.is_empty() {
+        write_baseline(path, &current);
+        return (HookDecision::Pass, None);
+    }
+    (
+        HookDecision::Block,
+        Some(format!("new verify failures: {}", new.join(", "))),
+    )
+}
+
+fn extract_failures(output: &HookOutput) -> Vec<String> {
+    let text = format!("{}\n{}", output.stdout, output.stderr);
+    let mut failures = Vec::new();
+    let mut in_failures = false;
+    for line in text.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.trim() == "failures:" {
+            in_failures = true;
+            continue;
+        }
+        if in_failures {
+            if trimmed.trim().is_empty() {
+                in_failures = false;
+                continue;
+            }
+            let candidate = trimmed.trim();
+            if trimmed.starts_with("    ")
+                && !candidate.starts_with("----")
+                && candidate
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '-' | '.' | '/'))
+            {
+                failures.push(candidate.to_string());
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("FAILED ") {
+            let name = rest.split(" - ").next().unwrap_or(rest).trim();
+            failures.push(name.to_string());
+        }
+    }
+    failures.sort();
+    failures.dedup();
+    if failures.is_empty() {
+        failures.push("command failed".to_string());
+    }
+    failures
+}
+
+fn read_baseline(path: &std::path::Path) -> Option<Vec<String>> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    Some(
+        raw.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+fn write_baseline(path: &std::path::Path, failures: &[String]) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut content = failures.join("\n");
+    if !content.is_empty() {
+        content.push('\n');
+    }
+    let _ = std::fs::write(path, content);
 }
 
 fn parse_stdout(event: HookEvent, stdout: &str) -> (HookDecision, Option<String>) {
@@ -456,6 +554,7 @@ mod tests {
             matcher: None,
             if_pattern: None,
             command: command.to_string(),
+            baseline_file: None,
             timeout_ms: None,
             fail_closed: None,
         }
@@ -469,6 +568,7 @@ mod tests {
             tool_input: None,
             tool_output: None,
             prompt: None,
+            error: None,
             cwd,
         }
     }
@@ -780,6 +880,7 @@ mod tests {
             tool_input: Some(r#"{"path":"a.rs"}"#),
             tool_output: Some("ok"),
             prompt: Some("fix it"),
+            error: None,
             cwd: &dir,
         };
         let report = HookEngine::new(vec![entry(HookEvent::PostToolUse, "cat > payload.json")])
@@ -845,5 +946,83 @@ mod tests {
         assert_eq!(report.firings[1].decision, HookDecision::Block);
         assert_eq!(report.reason(), Some("nope"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn output(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HookOutput {
+        HookOutput {
+            exit_code,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        }
+    }
+
+    fn baseline_entry(path: &std::path::Path) -> HookEntry {
+        HookEntry {
+            event: HookEvent::Stop,
+            matcher: None,
+            if_pattern: None,
+            command: "cargo test".to_string(),
+            baseline_file: Some(path.to_path_buf()),
+            timeout_ms: None,
+            fail_closed: None,
+        }
+    }
+
+    #[test]
+    fn baseline_hook_blocks_only_new_failures() {
+        let dir = temp_dir("baseline_verify");
+        fs::create_dir_all(&dir).unwrap();
+        let baseline = dir.join("baseline.txt");
+        let entry = baseline_entry(&baseline);
+
+        let first = interpret(&entry, &output(Some(101), "failures:\n    tests::a\n", ""));
+        assert_eq!(first.0, HookDecision::Pass);
+        assert!(first.1.unwrap().contains("baseline recorded"));
+
+        let same = interpret(&entry, &output(Some(101), "failures:\n    tests::a\n", ""));
+        assert_eq!(same.0, HookDecision::Pass);
+
+        let new = interpret(&entry, &output(Some(101), "failures:\n    tests::b\n", ""));
+        assert_eq!(new.0, HookDecision::Block);
+        assert!(new.1.unwrap().contains("tests::b"));
+
+        let pass = interpret(&entry, &output(Some(0), "ok", ""));
+        assert_eq!(pass.0, HookDecision::Pass);
+        assert!(!baseline.exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn baseline_hook_understands_pytest_failed_lines() {
+        let dir = temp_dir("baseline_pytest");
+        fs::create_dir_all(&dir).unwrap();
+        let baseline = dir.join("baseline.txt");
+        let entry = baseline_entry(&baseline);
+
+        interpret(
+            &entry,
+            &output(Some(1), "FAILED tests/test_a.py::test_a\n", ""),
+        );
+        let new = interpret(
+            &entry,
+            &output(Some(1), "FAILED tests/test_b.py::test_b\n", ""),
+        );
+        assert_eq!(new.0, HookDecision::Block);
+        assert!(new.1.unwrap().contains("tests/test_b.py::test_b"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cargo_failure_extraction_ignores_panic_text() {
+        let out = output(
+            Some(101),
+            "failures:\n---- tests::a stdout ----\n\
+             thread 'tests::a' panicked\n    assertion `left == right` failed\n\
+             failures:\n    tests::a\n",
+            "",
+        );
+        assert_eq!(extract_failures(&out), vec!["tests::a".to_string()]);
     }
 }

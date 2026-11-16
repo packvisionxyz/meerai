@@ -219,7 +219,32 @@ Notes:
     detection, cancel during planning) is healed after its `TurnEnded`, so a fork does not copy that
     repair. `Session::load_events` is the read-only path (TUI child refresh) and must never heal; do
     not call `Session::open` from a read path. Do not heal at projection time; the log must show the
-    repair.
+    repair. `run_turn` also calls the same idempotent `Session::heal_dangling_tool_calls` after
+    `TurnEnded`, so the live process never sends an unpaired call.
+25. **Provider cache behavior:** `context.prompt_caching` (default true) sets a request-level
+    `CacheControl::Ephemeral` on every model step; `Usage` copies provider cached and cache-write
+    token counts, and the headless summary and TUI show cache reads. Pricing stays token-only; do not
+    invent a cache discount.
+26. **Projection clearing and compaction:** `ProjectionPolicy::clear_old_tool_results` (default true)
+    stubs tool results outside `verbatim_window_turns`; the newest window stays verbatim, a spilled
+    stub names its blob; the same-model summarizer keeps the parent clearing policy and a distinct
+    summarizer model disables clearing. `run_compaction` returns
+    `Result<bool, TurnError>`; pressure compaction applies at most twice per turn and once per step,
+    and the planner falls back to balanced `StepEnded` boundaries. With no `summarizer_model`, the
+    summary request reuses the parent system, tools, and history. Do not clear at log-write time or
+    delete a result.
+27. **No-progress breaker:** `NoProgress` logs `CircuitBreaker` at 8 tool steps without a file
+    change and fails the turn at 12. It is disabled in `plan` mode and when no write tool is
+    registered; a `subagent-run`/`acp-run` delegation resets the counter. Do not count read-only
+    exploration as failure.
+28. **Recovery turn:** the worker queues one recovery turn after a retryable provider or
+    `LoopDetected` failure. The prompt is user-visible and names the failure. It runs before the
+    next queued prompt, at most once per failure streak; budget, config, tool, and non-retryable
+    provider failures do not recover. Do not recover in a read-only or headless one-shot path
+    without an explicit design; the worker path is the v1 surface.
+29. **Provider retry classification:** use the HTTP status from `genai::Error::status()` when
+    present (408/409/425/429 and 5xx transient; other 4xx permanent) and the message blocklist only
+    as a fallback. Backoff is 250/500 ms plus up to 50% jitter. Do not retry a permanent status.
 
 ## 5. Patterns
 
@@ -384,7 +409,10 @@ Detail in [`infra.md`](infra.md). Summary:
 - Hooks: user hooks load from `<config-dir>/hooks.json`; project hooks from
   `<project-root>/.meerai/hooks.json` only with `MEERAI_TRUST_PROJECT_HOOKS=1|true|yes`, user
   `hooks.trust_project: true`, or a canonical path in user `hooks.trusted_projects`.
-  `meerai hooks trust|untrust|status` manages the list; the TUI path prompts once on a terminal. Hooks run concurrently with a 10 s default timeout (60 s max), fail
+  `meerai hooks trust|untrust|status` manages the list; `meerai hooks verify [--command CMD]
+  [--reset-baseline]` appends one user `Stop` hook with a per-project failure baseline (first run
+  records known failures, later runs block only new names, a pass clears it); the TUI path prompts
+  once on a terminal. Hooks run concurrently with a 10 s default timeout (60 s max), fail
   open unless `fail_closed`, log `HookFired`, and may tighten policy but cannot loosen `plan`, an
   explicit `deny`/`ask` rule, or the outside-workspace approval. They run outside `ExecutionWorld`.
 - Build surfaces: `meerai-tui` defaults `update` (reqwest); `meerai-cli` defaults `tui`.

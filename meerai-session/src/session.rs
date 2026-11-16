@@ -606,7 +606,7 @@ impl Session {
         Ok(())
     }
 
-    async fn heal_dangling_tool_calls(&self) -> Result<()> {
+    pub async fn heal_dangling_tool_calls(&self) -> Result<()> {
         let events = self.events();
         let shadowed = shadowed_ranges(&events);
         let mut pending: Vec<CallId> = Vec::new();
@@ -1325,6 +1325,25 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn heal_dangling_tool_calls_is_public_and_idempotent() {
+        let session = Session::memory(SessionId::new(), PathBuf::from("/tmp/workspace"));
+        let turn = TurnId::new();
+        session.append(started(&turn)).await.unwrap();
+        session.append(user("pending work")).await.unwrap();
+        session.append(assistant_with_call("call-1")).await.unwrap();
+
+        session.heal_dangling_tool_calls().await.unwrap();
+        session.heal_dangling_tool_calls().await.unwrap();
+
+        let results = session
+            .events()
+            .iter()
+            .filter(|logged| matches!(logged.event, SessionEvent::ToolResult { .. }))
+            .count();
+        assert_eq!(results, 1, "live repair must not duplicate results");
     }
 
     #[tokio::test]

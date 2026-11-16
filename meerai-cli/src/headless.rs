@@ -59,6 +59,9 @@ pub(crate) fn format_token_summary(usage: &meerai_agents::Usage) -> Option<Strin
     if let Some(total) = usage.total_tokens {
         parts.push(format!("total={total}"));
     }
+    if let Some(cached) = usage.cached_tokens {
+        parts.push(format!("cached={cached}"));
+    }
     (!parts.is_empty()).then(|| format!("tokens: {}", parts.join(" ")))
 }
 

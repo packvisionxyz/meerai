@@ -112,12 +112,14 @@ fn agent_event_streaming_updates_transcript_and_status() {
             completion_tokens: Some(30),
             total_tokens: Some(150),
             cached_tokens: None,
+            cache_creation_tokens: None,
         },
         cumulative: Usage {
             prompt_tokens: Some(120),
             completion_tokens: Some(30),
             total_tokens: Some(150),
             cached_tokens: None,
+            cache_creation_tokens: None,
         },
         est_cost_usd: None,
     });
@@ -614,6 +616,7 @@ fn session_usage_from_events_returns_last_cumulative_usage() {
                     completion_tokens: Some(5),
                     total_tokens: Some(15),
                     cached_tokens: None,
+                    cache_creation_tokens: None,
                 },
             },
         },
@@ -626,6 +629,7 @@ fn session_usage_from_events_returns_last_cumulative_usage() {
                     completion_tokens: Some(7),
                     total_tokens: Some(27),
                     cached_tokens: None,
+                    cache_creation_tokens: None,
                 },
             },
         },
@@ -638,6 +642,7 @@ fn session_usage_from_events_returns_last_cumulative_usage() {
             completion_tokens: Some(7),
             total_tokens: Some(27),
             cached_tokens: None,
+            cache_creation_tokens: None,
         })
     );
     assert_eq!(session_usage_from_events(&[]), None);

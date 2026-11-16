@@ -15,6 +15,7 @@ pub struct HarnessConfig {
     pub spill_max_inline_tokens: u64,
     pub verbatim_window_turns: usize,
     pub reasoning_pruning: bool,
+    pub prompt_caching: bool,
     pub max_steps_per_turn: usize,
     pub tool_timeout_ms: u64,
     pub max_session_tokens: Option<u64>,
@@ -31,6 +32,7 @@ impl Default for HarnessConfig {
             spill_max_inline_tokens: 12_500,
             verbatim_window_turns: 4,
             reasoning_pruning: true,
+            prompt_caching: true,
             max_steps_per_turn: 32,
             tool_timeout_ms: 120_000,
             max_session_tokens: None,
@@ -61,6 +63,9 @@ impl HarnessConfig {
         }
         if let Some(value) = context.reasoning_pruning {
             cfg.reasoning_pruning = value;
+        }
+        if let Some(value) = context.prompt_caching {
+            cfg.prompt_caching = value;
         }
         if let Some(value) = context.max_steps_per_turn {
             cfg.max_steps_per_turn = value;

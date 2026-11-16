@@ -104,6 +104,8 @@ pub struct ContextSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_pruning: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_caching: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps_per_turn: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_timeout_ms: Option<u64>,
@@ -503,6 +505,7 @@ fn merge_context(
                 .or(user.spill_max_inline_tokens),
             verbatim_window_turns: project.verbatim_window_turns.or(user.verbatim_window_turns),
             reasoning_pruning: project.reasoning_pruning.or(user.reasoning_pruning),
+            prompt_caching: project.prompt_caching.or(user.prompt_caching),
             max_steps_per_turn: project.max_steps_per_turn.or(user.max_steps_per_turn),
             tool_timeout_ms: project.tool_timeout_ms.or(user.tool_timeout_ms),
             max_session_tokens: merge_max_session_tokens(
@@ -681,6 +684,7 @@ providers:
                 spill_max_inline_tokens: Some(8_000),
                 verbatim_window_turns: Some(6),
                 reasoning_pruning: Some(false),
+                prompt_caching: Some(true),
                 max_steps_per_turn: Some(48),
                 tool_timeout_ms: Some(60_000),
                 max_session_tokens: Some(1_500_000),
