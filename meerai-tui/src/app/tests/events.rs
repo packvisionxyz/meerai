@@ -289,6 +289,47 @@ fn compaction_items_render_system_entries() {
 }
 
 #[test]
+fn hook_completed_events_render_system_entries() {
+    let (mut app, _rx, _secrets) = test_app();
+
+    app.handle_agent_event(AgentEvent::HookCompleted {
+        event: "PreToolUse".to_string(),
+        decision: "deny".to_string(),
+        reason: Some("no shell".to_string()),
+    });
+    assert_eq!(
+        app.tab().transcript.last(),
+        Some(&TranscriptEntry::System {
+            text: "hook PreToolUse: deny — no shell".to_string(),
+        })
+    );
+
+    app.handle_agent_event(AgentEvent::HookCompleted {
+        event: "SessionStart".to_string(),
+        decision: "pass".to_string(),
+        reason: None,
+    });
+    assert_eq!(
+        app.tab().transcript.last(),
+        Some(&TranscriptEntry::System {
+            text: "hook SessionStart: pass".to_string(),
+        })
+    );
+
+    app.handle_agent_event(AgentEvent::HookCompleted {
+        event: "Stop".to_string(),
+        decision: "block".to_string(),
+        reason: Some("é".repeat(250)),
+    });
+    assert_eq!(
+        app.tab().transcript.last(),
+        Some(&TranscriptEntry::System {
+            text: format!("hook Stop: block — {}", "é".repeat(200)),
+        })
+    );
+}
+
+#[test]
 fn transcript_from_events_replays_known_entries_and_skips_runtime_events() {
     use meerai_core::ToolObservation;
     use meerai_session::{

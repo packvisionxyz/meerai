@@ -270,14 +270,17 @@ pub(crate) async fn run_headless(
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     let turn = tokio::spawn(async move {
-        agent
+        agent.start_session(&event_tx).await;
+        let result = agent
             .prompt_streaming_with_commands(
                 &prompt,
                 &event_tx,
                 CancellationToken::new(),
                 &mut cmd_rx,
             )
-            .await
+            .await;
+        agent.end_session(&event_tx).await;
+        result
     });
 
     let stdout = io::stdout();

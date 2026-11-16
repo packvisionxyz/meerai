@@ -6274,3 +6274,209 @@ async fn repeated_cancelled_questions_disable_the_tool() {
             || output.stderr.contains("question-ask is disabled")
     }));
 }
+
+#[cfg(unix)]
+fn hook_entry(event: HookEvent, command: &str) -> meerai_common::hooks::HookEntry {
+    meerai_common::hooks::HookEntry {
+        event,
+        matcher: None,
+        if_pattern: None,
+        command: command.to_string(),
+        timeout_ms: None,
+        fail_closed: None,
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn pre_tool_use_deny_refuses_the_tool_and_logs_hook_fired() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![tool_call("c1", "ok")]))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        vec![Box::new(EchoToolset)],
+        "",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+    agent.set_hooks(Arc::new(crate::hooks::HookEngine::new(vec![hook_entry(
+        HookEvent::PreToolUse,
+        r#"printf '{"hookSpecificOutput":{"permissionDecision":"deny","reason":"no echo"}}'"#,
+    )])));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "done");
+
+    let events = session_events(&session);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::HookFired { event, decision, .. }
+            if event == "PreToolUse" && decision == "deny"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::ToolResult { output, .. } if output.status == ObservationStatus::Refused
+    )));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn user_prompt_submit_block_fails_the_turn_without_logging_user_message() {
+    let streamer = Arc::new(FakeStreamer::new(Vec::new()));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        Vec::new(),
+        "",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+    agent.set_hooks(Arc::new(crate::hooks::HookEngine::new(vec![hook_entry(
+        HookEvent::UserPromptSubmit,
+        "printf 'blocked prompt' >&2; exit 2",
+    )])));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("blocked prompt"));
+
+    let events = session_events(&session);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::Error { code: ErrorCode::Config, message, .. }
+            if message == "blocked prompt"
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        SessionEvent::UserMessage {
+            source: InputSource::User,
+            ..
+        }
+    )));
+    assert!(session.meta().title.is_none());
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::TurnEnded { reason: TurnEndReason::Failed { error }, .. }
+            if error == "blocked prompt"
+    )));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hook_firings_emit_hook_completed_events() {
+    let streamer = Arc::new(FakeStreamer::new(Vec::new()));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        Vec::new(),
+        "",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+    agent.set_hooks(Arc::new(crate::hooks::HookEngine::new(vec![hook_entry(
+        HookEvent::SessionStart,
+        "exit 0",
+    )])));
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    agent.start_session(&tx).await;
+    drop(tx);
+
+    let mut completions = Vec::new();
+    while let Some(event) = rx.recv().await {
+        if let AgentEvent::HookCompleted {
+            event,
+            decision,
+            reason,
+        } = event
+        {
+            completions.push((event, decision, reason));
+        }
+    }
+
+    assert_eq!(
+        completions,
+        vec![("SessionStart".to_string(), "pass".to_string(), None)]
+    );
+    assert!(session_events(&session).iter().any(|event| matches!(
+        event,
+        SessionEvent::HookFired { event, decision, .. }
+            if event == "SessionStart" && decision == "pass"
+    )));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn session_start_and_end_fire_once_through_the_worker() {
+    let streamer = Arc::new(FakeStreamer::new(Vec::new()));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        Vec::new(),
+        "",
+        &session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+    agent.set_hooks(Arc::new(crate::hooks::HookEngine::new(vec![
+        hook_entry(HookEvent::SessionStart, "exit 0"),
+        hook_entry(HookEvent::SessionEnd, "exit 0"),
+    ])));
+
+    let (cmd_tx, mut rx) = spawn_worker(agent);
+    cmd_tx.send(AgentCommand::Quit).unwrap();
+    while rx.recv().await.is_some() {}
+
+    let events = session_events(&session);
+    let count = |name: &str| {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    SessionEvent::HookFired { event, .. } if event == name
+                )
+            })
+            .count()
+    };
+    assert_eq!(count("SessionStart"), 1);
+    assert_eq!(count("SessionEnd"), 1);
+}
+
+#[tokio::test]
+async fn post_edit_diagnostics_returns_lsp_text() {
+    let tools: Vec<Box<dyn Toolset>> = vec![Box::new(StaticToolset::new(
+        "lsp",
+        "lsp-get_diagnostics",
+        "warning: unused variable",
+        EffectClass::Read,
+    ))];
+
+    let text = super::tools::collect_post_edit_diagnostics(&tools, "src/main.rs")
+        .await
+        .unwrap();
+    assert_eq!(text, "warning: unused variable");
+}
+
+#[tokio::test]
+async fn post_edit_diagnostics_without_lsp_tool_returns_none() {
+    let tools: Vec<Box<dyn Toolset>> = Vec::new();
+    assert!(
+        super::tools::collect_post_edit_diagnostics(&tools, "src/main.rs")
+            .await
+            .is_none()
+    );
+}

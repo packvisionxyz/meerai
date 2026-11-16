@@ -115,6 +115,8 @@ pub struct ContextSettings {
     pub max_turn_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summarizer_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_edit_diagnostics: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +125,16 @@ pub struct SessionSettings {
     pub auto_prune_days: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HooksSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_project: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_projects: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +225,8 @@ pub struct AppSettings {
     pub context: Option<ContextSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sessions: Option<SessionSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<HooksSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<ThemeSettings>,
 }
@@ -407,6 +421,12 @@ pub fn merge_project_settings(
                 .to_string(),
         );
     }
+    if project.hooks.is_some() {
+        warnings.push(
+            "ignoring project hooks settings: project hooks are read from .meerai/hooks.json after explicit trust"
+                .to_string(),
+        );
+    }
 
     if let Some(permissions) = project.permissions.as_ref()
         && let Some((asks, denies)) = split_project_permissions(permissions, &mut warnings)
@@ -532,6 +552,7 @@ fn merge_context(
             ),
             max_turn_secs: merge_max_turn_secs(user.max_turn_secs, project.max_turn_secs),
             summarizer_model: project.summarizer_model.or(user.summarizer_model),
+            post_edit_diagnostics: project.post_edit_diagnostics.or(user.post_edit_diagnostics),
         }),
     }
 }
@@ -706,6 +727,7 @@ providers:
                 max_session_tokens: Some(1_500_000),
                 max_turn_secs: Some(900),
                 summarizer_model: Some("openrouter:small-model".to_string()),
+                post_edit_diagnostics: Some(true),
             }),
             ..AppSettings::default()
         };
@@ -957,6 +979,55 @@ providers:
             settings_from_yaml("sessions:\n  auto_prune_days: 1\n"),
         );
         assert_eq!(merged.sessions, None);
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn hooks_settings_roundtrip_and_stay_absent_when_unset() {
+        let dir = temp_dir("hooks_settings");
+        let settings = AppSettings {
+            hooks: Some(HooksSettings {
+                enabled: Some(true),
+                trust_project: Some(false),
+                ..HooksSettings::default()
+            }),
+            ..AppSettings::default()
+        };
+        save_settings_to(&dir, &settings).unwrap();
+        assert_eq!(load_settings_from(&dir).unwrap(), settings);
+        let raw = fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap();
+        assert!(raw.contains("enabled: true"));
+        assert!(raw.contains("trust_project: false"));
+
+        let partial: AppSettings = serde_yaml::from_str("hooks:\n  trust_project: true\n").unwrap();
+        let hooks = partial.hooks.as_ref().unwrap();
+        assert_eq!(hooks.enabled, None);
+        assert_eq!(hooks.trust_project, Some(true));
+
+        let plain: AppSettings = serde_yaml::from_str("active_provider: openrouter\n").unwrap();
+        assert_eq!(plain.hooks, None);
+        assert!(!serde_yaml::to_string(&plain).unwrap().contains("hooks"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_ignores_project_hooks_settings() {
+        let user = settings_from_yaml("hooks:\n  enabled: true\n  trust_project: true\n");
+        let project = settings_from_yaml("hooks:\n  enabled: false\n  trust_project: false\n");
+
+        let (merged, warnings) = merge_project_settings(user, project);
+        let hooks = merged.hooks.unwrap_or_default();
+        assert_eq!(hooks.enabled, Some(true));
+        assert_eq!(hooks.trust_project, Some(true));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("ignoring project hooks settings"));
+
+        let (merged, warnings) = merge_project_settings(
+            AppSettings::default(),
+            settings_from_yaml("hooks:\n  enabled: true\n"),
+        );
+        assert_eq!(merged.hooks, None);
         assert_eq!(warnings.len(), 1);
     }
 

@@ -95,6 +95,144 @@ enum Authorization {
     Cancelled,
 }
 
+const LSP_DIAGNOSTICS_TOOL: &str = "lsp-get_diagnostics";
+const LSP_DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(5);
+const LSP_DIAGNOSTICS_MAX_BYTES: usize = 4096;
+
+pub(super) async fn collect_post_edit_diagnostics(
+    tools: &[Box<dyn Toolset>],
+    path: &str,
+) -> Option<String> {
+    let tool = tools
+        .iter()
+        .find(|tool| tool.contain(LSP_DIAGNOSTICS_TOOL))?;
+    let args = serde_json::json!({ "path": path }).to_string();
+    let run = tokio::time::timeout(
+        LSP_DIAGNOSTICS_TIMEOUT,
+        tool.invoke_structured(LSP_DIAGNOSTICS_TOOL, &args),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let ToolOutput::Text(text) = run.output else {
+        return None;
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let end = floor_char_boundary(text, LSP_DIAGNOSTICS_MAX_BYTES);
+    Some(crate::screen::screen_untrusted_text(
+        "lsp_diagnostics",
+        &text[..end],
+    ))
+}
+
+const POST_EDIT_DIAGNOSTIC_TOOLS: [&str; 2] = ["code-edit_file", "code-write_file"];
+
+fn should_collect_post_edit_diagnostics(
+    enabled: bool,
+    status: ItemStatus,
+    tool_name: &str,
+    path: Option<&str>,
+    policy_allowed: bool,
+) -> bool {
+    enabled
+        && status == ItemStatus::Succeeded
+        && POST_EDIT_DIAGNOSTIC_TOOLS.contains(&tool_name)
+        && path.is_some()
+        && policy_allowed
+}
+
+#[cfg(test)]
+mod post_edit_diagnostics_tests {
+    use super::should_collect_post_edit_diagnostics;
+    use crate::events::ItemStatus;
+
+    #[test]
+    fn collects_after_a_policy_allowed_edit() {
+        assert!(should_collect_post_edit_diagnostics(
+            true,
+            ItemStatus::Succeeded,
+            "code-edit_file",
+            Some("src/lib.rs"),
+            true
+        ));
+        assert!(should_collect_post_edit_diagnostics(
+            true,
+            ItemStatus::Succeeded,
+            "code-write_file",
+            Some("src/lib.rs"),
+            true
+        ));
+    }
+
+    #[test]
+    fn skips_when_the_setting_is_disabled() {
+        assert!(!should_collect_post_edit_diagnostics(
+            false,
+            ItemStatus::Succeeded,
+            "code-edit_file",
+            Some("src/lib.rs"),
+            true
+        ));
+    }
+
+    #[test]
+    fn skips_when_the_tool_did_not_succeed() {
+        for status in [
+            ItemStatus::Proposed,
+            ItemStatus::Pending,
+            ItemStatus::InProgress,
+            ItemStatus::Failed,
+            ItemStatus::Stopped,
+            ItemStatus::Denied,
+            ItemStatus::Cancelled,
+        ] {
+            assert!(!should_collect_post_edit_diagnostics(
+                true,
+                status,
+                "code-edit_file",
+                Some("src/lib.rs"),
+                true
+            ));
+        }
+    }
+
+    #[test]
+    fn skips_tools_that_do_not_write_files() {
+        assert!(!should_collect_post_edit_diagnostics(
+            true,
+            ItemStatus::Succeeded,
+            "code-read_file",
+            Some("src/lib.rs"),
+            true
+        ));
+    }
+
+    #[test]
+    fn skips_when_the_call_has_no_path() {
+        assert!(!should_collect_post_edit_diagnostics(
+            true,
+            ItemStatus::Succeeded,
+            "code-edit_file",
+            None,
+            true
+        ));
+    }
+
+    #[test]
+    fn skips_when_policy_denies_the_read() {
+        assert!(!should_collect_post_edit_diagnostics(
+            true,
+            ItemStatus::Succeeded,
+            "code-edit_file",
+            Some("src/lib.rs"),
+            false
+        ));
+    }
+}
+
 pub(super) struct ApprovalOutcome {
     pub(super) decision: ApprovalDecision,
     pub(super) scope: Option<GrantScope>,
@@ -189,6 +327,7 @@ impl MultiTurnAgent {
                 let check = permission_check(&tc.fn_name, &args_str, effect, spec);
                 self.authorize(
                     &check,
+                    &args_str,
                     &item_id,
                     turn_id,
                     event_tx,
@@ -234,51 +373,30 @@ impl MultiTurnAgent {
             }
         }
 
-        if let Some(store) = self
-            .harness
-            .as_ref()
-            .and_then(|harness| harness.session.snapshot_store())
-        {
-            let workspace = self
-                .harness
-                .as_ref()
-                .map(|harness| harness.policy.workspace_root().to_path_buf());
-            if let Some(workspace) = workspace {
-                for plan in plans.iter_mut() {
-                    if !plan.authorized() || plan.effect != EffectClass::Write {
-                        continue;
-                    }
-                    let Some(path) = tool_write_path(&plan.args) else {
-                        continue;
-                    };
-                    match store
-                        .capture(turn_id, &workspace, std::path::Path::new(&path))
-                        .await
-                    {
-                        Ok(Some(full)) => {
-                            self.log_event(
-                                event_tx,
-                                SessionEvent::CheckpointCreated {
-                                    checkpoint_id: meerai_session::CheckpointId::new(),
-                                    turn_id: turn_id.clone(),
-                                    paths: vec![full],
-                                },
-                            )
-                            .await;
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            self.log_event(
-                                event_tx,
-                                SessionEvent::Error {
-                                    code: ErrorCode::Internal,
-                                    message: format!("checkpoint failed: {error:#}"),
-                                    retryable: false,
-                                },
-                            )
-                            .await;
-                        }
-                    }
+        let (workspace, snapshots) = match self.harness.as_ref() {
+            Some(harness) => (
+                Some(harness.policy.workspace_root().to_path_buf()),
+                harness.session.snapshot_store(),
+            ),
+            None => (None, None),
+        };
+
+        if let Some(workspace) = workspace.as_deref() {
+            for plan in plans.iter().filter(|plan| plan.authorized()) {
+                let tool_plan = ToolPlan {
+                    turn_id,
+                    step_index,
+                    tool_name: &plan.tool_call.fn_name,
+                    call_id: &plan.tool_call.call_id,
+                    args: &plan.args,
+                    effect: plan.effect,
+                };
+                let context = ToolContext {
+                    workspace,
+                    snapshots: snapshots.as_ref(),
+                };
+                for event in self.run_before_tool(&tool_plan, &context).await {
+                    self.log_event(event_tx, event).await;
                 }
             }
         }
@@ -291,6 +409,7 @@ impl MultiTurnAgent {
         let max_retries = self.config.max_retries;
         let mut ctx = DecisionCtx {
             harness: &mut self.harness,
+            hooks: &mut self.hooks,
             pending_steers: &mut self.pending_steers,
             pending_compact: &mut self.pending_compact,
             chat_history: &mut self.chat_history,
@@ -531,6 +650,38 @@ impl MultiTurnAgent {
                 .await;
             }
 
+            let hook_event = if matches!(status, ItemStatus::Succeeded | ItemStatus::Stopped) {
+                HookEvent::PostToolUse
+            } else {
+                HookEvent::PostToolUseFailure
+            };
+            let report = self
+                .run_hook(
+                    hook_event,
+                    Some(turn_id),
+                    Some(&tool_call.fn_name),
+                    Some(&args_str),
+                    Some(&item_output),
+                    None,
+                    event_tx,
+                )
+                .await;
+            if matches!(
+                report.decision,
+                crate::hooks::HookDecision::Deny | crate::hooks::HookDecision::Block
+            ) {
+                self.log_event(
+                    event_tx,
+                    SessionEvent::UserMessage {
+                        source: InputSource::RuntimeContext,
+                        content: vec![ContentBlock::Text(
+                            report.reason().unwrap_or("blocked by hook").to_string(),
+                        )],
+                    },
+                )
+                .await;
+            }
+
             self.log_event(
                 event_tx,
                 SessionEvent::ToolResult {
@@ -539,6 +690,31 @@ impl MultiTurnAgent {
                 },
             )
             .await;
+
+            if self.post_edit_diagnostics
+                && matches!(status, ItemStatus::Succeeded)
+                && POST_EDIT_DIAGNOSTIC_TOOLS.contains(&tool_call.fn_name.as_str())
+                && let Some(path) = crate::tool_args::tool_write_path(&args_str)
+                && should_collect_post_edit_diagnostics(
+                    self.post_edit_diagnostics,
+                    status,
+                    &tool_call.fn_name,
+                    Some(&path),
+                    self.diagnostics_allowed(&path),
+                )
+                && let Some(text) = collect_post_edit_diagnostics(&self.tools, &path).await
+            {
+                self.log_event(
+                    event_tx,
+                    SessionEvent::UserMessage {
+                        source: InputSource::RuntimeContext,
+                        content: vec![ContentBlock::Text(format!(
+                            "diagnostics for {path}:\n{text}"
+                        ))],
+                    },
+                )
+                .await;
+            }
 
             let response = ToolResponse::from_tool_call(&tool_call, model_text.clone())
                 .with_fn_name(&tool_call.fn_name);
@@ -645,6 +821,25 @@ impl MultiTurnAgent {
         Ok(stop_reason)
     }
 
+    fn diagnostics_allowed(&self, path: &str) -> bool {
+        let Some(harness) = self.harness.as_ref() else {
+            return false;
+        };
+        let action = self
+            .tools
+            .iter()
+            .find(|tool| tool.contain(LSP_DIAGNOSTICS_TOOL))
+            .and_then(|tool| tool.permission_spec(LSP_DIAGNOSTICS_TOOL))
+            .map_or(PermissionAction::Read, |spec| spec.action);
+        let check = PermissionCheck {
+            action,
+            resource: path.to_string(),
+            effect: EffectClass::Read,
+            tool_name: LSP_DIAGNOSTICS_TOOL.to_string(),
+        };
+        matches!(harness.policy.decide(&check), Decision::Allow)
+    }
+
     async fn ask_questions(
         &mut self,
         tool_call: &ToolCall,
@@ -716,9 +911,11 @@ impl MultiTurnAgent {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn authorize(
         &mut self,
         check: &PermissionCheck,
+        args: &str,
         item_id: &ItemId,
         turn_id: &TurnId,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
@@ -742,26 +939,53 @@ impl MultiTurnAgent {
             });
         let outside = outside.as_deref();
 
-        let Some(harness) = self.harness.as_ref() else {
-            return Authorization::Allowed;
+        let (mode, matched, mut decision) = {
+            let Some(harness) = self.harness.as_ref() else {
+                return Authorization::Allowed;
+            };
+            let mode = harness.policy.mode();
+            let matched = harness.policy.matched_effect(check);
+            (mode, matched, harness.policy.decide(check))
         };
 
-        let mut decision = harness.policy.decide(check);
-        if auto_approve_safe_shell(
-            check,
-            &decision,
-            harness.policy.matched_effect(check),
-            harness.policy.mode(),
-        ) {
+        if auto_approve_safe_shell(check, &decision, matched, mode) {
             decision = Decision::Allow;
         }
         if let Some(path) = outside
             && !matches!(decision, Decision::Deny { .. })
-            && harness.policy.mode() != meerai_policy::ApprovalMode::Yolo
+            && mode != meerai_policy::ApprovalMode::Yolo
             && !self.outside_granted(path)
         {
             decision = Decision::Ask;
         }
+
+        let report = self
+            .run_hook(
+                HookEvent::PreToolUse,
+                Some(turn_id),
+                Some(&check.tool_name),
+                Some(args),
+                None,
+                None,
+                event_tx,
+            )
+            .await;
+        decision = apply_hook_decision(decision, matched, mode, outside.is_some(), &report);
+        if matches!(decision, Decision::Ask) {
+            let report = self
+                .run_hook(
+                    HookEvent::PermissionRequest,
+                    Some(turn_id),
+                    Some(&check.tool_name),
+                    Some(args),
+                    None,
+                    None,
+                    event_tx,
+                )
+                .await;
+            decision = apply_hook_decision(decision, matched, mode, outside.is_some(), &report);
+        }
+
         match decision {
             Decision::Allow => Authorization::Allowed,
             Decision::Deny { reason } => Authorization::Refused(reason),
@@ -891,6 +1115,7 @@ impl MultiTurnAgent {
     fn decision_ctx(&mut self) -> DecisionCtx<'_> {
         DecisionCtx {
             harness: &mut self.harness,
+            hooks: &mut self.hooks,
             pending_steers: &mut self.pending_steers,
             pending_compact: &mut self.pending_compact,
             chat_history: &mut self.chat_history,
@@ -966,6 +1191,7 @@ impl MultiTurnAgent {
 
 struct DecisionCtx<'a> {
     harness: &'a mut Option<AgentHarness>,
+    hooks: &'a mut Arc<HookEngine>,
     pending_steers: &'a mut VecDeque<String>,
     pending_compact: &'a mut bool,
     chat_history: &'a mut Vec<ChatMessage>,
@@ -1033,7 +1259,8 @@ impl DecisionCtx<'_> {
                 | AgentCommand::Compact
                 | AgentCommand::ApplyAgent { .. }
                 | AgentCommand::ApplySkill { .. }
-                | AgentCommand::Reload { .. } => {
+                | AgentCommand::Reload { .. }
+                | AgentCommand::SetHooks(_) => {
                     self.handle_live_command(command, event_tx).await;
                 }
                 AgentCommand::AnswerQuestion { .. }
@@ -1087,7 +1314,8 @@ impl DecisionCtx<'_> {
                 | AgentCommand::Compact
                 | AgentCommand::ApplyAgent { .. }
                 | AgentCommand::ApplySkill { .. }
-                | AgentCommand::Reload { .. } => {
+                | AgentCommand::Reload { .. }
+                | AgentCommand::SetHooks(_) => {
                     self.handle_live_command(command, event_tx).await;
                 }
             }
@@ -1129,6 +1357,9 @@ impl DecisionCtx<'_> {
                 .await;
             }
             AgentCommand::Reload { .. } => {}
+            AgentCommand::SetHooks(entries) => {
+                *self.hooks = Arc::new(HookEngine::new(entries));
+            }
             AgentCommand::Approve { .. }
             | AgentCommand::AnswerQuestion { .. }
             | AgentCommand::Rewind { .. }
@@ -1447,16 +1678,6 @@ async fn run_tool_from(
     unreachable!("loop always returns on final attempt")
 }
 
-fn tool_write_path(args: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(args).ok()?;
-    ["path", "file", "file_path"]
-        .iter()
-        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(str::to_string)
-}
-
 fn outside_workspace(workspace: &std::path::Path, resource: &str) -> Option<std::path::PathBuf> {
     use std::path::{Component, Path, PathBuf};
 
@@ -1526,6 +1747,104 @@ fn auto_approve_safe_shell(
         && mode != meerai_policy::ApprovalMode::Plan
         && check.action == meerai_core::PermissionAction::Shell
         && crate::shell_safety::command_is_safe(&check.resource)
+}
+
+fn apply_hook_decision(
+    decision: Decision,
+    matched: Option<meerai_policy::Effect>,
+    mode: ApprovalMode,
+    outside_forced: bool,
+    report: &HookReport,
+) -> Decision {
+    if matches!(decision, Decision::Deny { .. }) {
+        return decision;
+    }
+    if mode == ApprovalMode::Plan {
+        return match report.decision {
+            crate::hooks::HookDecision::Deny | crate::hooks::HookDecision::Block => {
+                Decision::Deny {
+                    reason: report.reason().unwrap_or("blocked by hook").to_string(),
+                }
+            }
+            _ => decision,
+        };
+    }
+    match report.decision {
+        crate::hooks::HookDecision::Deny | crate::hooks::HookDecision::Block => Decision::Deny {
+            reason: report.reason().unwrap_or("blocked by hook").to_string(),
+        },
+        crate::hooks::HookDecision::Ask => match decision {
+            Decision::Allow => Decision::Ask,
+            other => other,
+        },
+        crate::hooks::HookDecision::Allow => match decision {
+            Decision::Ask if matched.is_none() && !outside_forced => Decision::Allow,
+            other => other,
+        },
+        crate::hooks::HookDecision::Pass => decision,
+    }
+}
+
+#[cfg(test)]
+mod hook_decision_tests {
+    use super::apply_hook_decision;
+    use crate::hooks::{HookDecision, HookReport};
+    use meerai_policy::{ApprovalMode, Decision, Effect};
+
+    fn report(decision: HookDecision) -> HookReport {
+        HookReport {
+            decision,
+            firings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn hook_allow_does_not_override_outside_workspace() {
+        let decision = apply_hook_decision(
+            Decision::Ask,
+            None,
+            ApprovalMode::Ask,
+            true,
+            &report(HookDecision::Allow),
+        );
+        assert_eq!(decision, Decision::Ask);
+    }
+
+    #[test]
+    fn plan_mode_hook_denies_a_read() {
+        let decision = apply_hook_decision(
+            Decision::Allow,
+            None,
+            ApprovalMode::Plan,
+            false,
+            &report(HookDecision::Deny),
+        );
+        assert!(matches!(decision, Decision::Deny { .. }));
+    }
+
+    #[test]
+    fn hook_allow_overrides_only_tier_default_ask() {
+        let decision = apply_hook_decision(
+            Decision::Ask,
+            None,
+            ApprovalMode::Ask,
+            false,
+            &report(HookDecision::Allow),
+        );
+        assert_eq!(decision, Decision::Allow);
+    }
+
+    #[test]
+    fn explicit_ask_rule_is_not_loosened() {
+        let decision = apply_hook_decision(
+            Decision::Ask,
+            Some(Effect::Ask),
+            ApprovalMode::Ask,
+            false,
+            &report(HookDecision::Allow),
+        );
+        assert_eq!(decision, Decision::Ask);
+    }
 }
 
 #[cfg(test)]

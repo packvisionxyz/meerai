@@ -1,5 +1,6 @@
 use meerai_agents::AgentCommand;
 use meerai_common::definitions::load_definitions;
+use meerai_common::hooks::load_hooks_for_run;
 use meerai_common::settings::{
     find_project_root, load_project_settings, load_settings_from, merge_project_settings,
 };
@@ -52,6 +53,22 @@ impl AppState {
                 context: merged.context.clone(),
                 system_prompt: system_prompt.clone(),
             });
+        }
+
+        let (hook_entries, hook_warnings) = load_hooks_for_run(
+            self.config_dir.as_deref(),
+            &project_root,
+            self.settings.hooks.as_ref(),
+        );
+        warnings.extend(
+            hook_warnings
+                .into_iter()
+                .map(|warning| format!("hook config: {warning}")),
+        );
+        for tab in &mut self.tabs {
+            let _ = tab
+                .cmd_tx
+                .send(AgentCommand::SetHooks(hook_entries.clone()));
         }
 
         let mut text = String::from(

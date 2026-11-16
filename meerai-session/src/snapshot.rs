@@ -3,6 +3,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,8 @@ use crate::ids::TurnId;
 const MANIFEST_FILE: &str = "manifest.json";
 const MAX_SNAPSHOT_BYTES: u64 = 2 * 1024 * 1024;
 const KEEP_TURNS: usize = 100;
+
+static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 pub struct SnapshotStore {
@@ -23,6 +26,12 @@ pub struct RestoreReport {
     pub restored: Vec<PathBuf>,
     pub deleted: Vec<PathBuf>,
     pub skipped: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+enum AppliedOp {
+    Restored { target: PathBuf, blob: PathBuf },
+    Deleted,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -133,37 +142,121 @@ impl SnapshotStore {
         let turn_dir = self.root.join(turn_id.as_str());
         let manifest = read_manifest(&turn_dir.join(MANIFEST_FILE))?;
         let mut report = RestoreReport::default();
-        for (relative, entry) in manifest.entries {
-            let target = safe_join(workspace, &relative)?;
-            if !entry.existed {
-                match fs::remove_file(&target) {
-                    Ok(()) => report.deleted.push(target),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(error)
-                            .with_context(|| format!("failed to remove {}", target.display()));
-                    }
-                }
-                continue;
+        let mut applied = Vec::new();
+        for (relative, entry) in &manifest.entries {
+            if let Err(error) = apply_entry(
+                &turn_dir,
+                workspace,
+                relative,
+                entry,
+                &mut applied,
+                &mut report,
+            ) {
+                return Err(roll_back(error, &applied));
             }
-            let blob = turn_dir.join(&entry.blob);
-            let bytes = match fs::read(&blob) {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    report.skipped.push(target);
-                    continue;
-                }
-            };
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
-            }
-            fs::write(&target, bytes)
-                .with_context(|| format!("failed to restore {}", target.display()))?;
-            report.restored.push(target);
         }
         Ok(report)
     }
+}
+
+fn apply_entry(
+    turn_dir: &Path,
+    workspace: &Path,
+    relative: &str,
+    entry: &SnapshotEntry,
+    applied: &mut Vec<AppliedOp>,
+    report: &mut RestoreReport,
+) -> Result<()> {
+    let target = safe_join(workspace, relative)?;
+    if !entry.existed {
+        match fs::remove_file(&target) {
+            Ok(()) => {
+                report.deleted.push(target);
+                applied.push(AppliedOp::Deleted);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to remove {}", target.display()));
+            }
+        }
+        return Ok(());
+    }
+
+    let blob = turn_dir.join(&entry.blob);
+    let bytes = match fs::read(&blob) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            report.skipped.push(target);
+            return Ok(());
+        }
+    };
+    stage_into_place(&target, &bytes)?;
+    applied.push(AppliedOp::Restored {
+        target: target.clone(),
+        blob,
+    });
+    report.restored.push(target);
+    Ok(())
+}
+
+fn stage_into_place(target: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let temp = staging_path(target);
+    let staged = fs::write(&temp, bytes)
+        .with_context(|| format!("failed to stage {}", temp.display()))
+        .and_then(|()| keep_permissions(target, &temp))
+        .and_then(|()| {
+            fs::rename(&temp, target)
+                .with_context(|| format!("failed to restore {}", target.display()))
+        });
+    if staged.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    staged
+}
+
+fn staging_path(target: &Path) -> PathBuf {
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let seq = STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+    target.with_file_name(format!(
+        ".{name}.meerai-restore-{}-{seq}.tmp",
+        std::process::id()
+    ))
+}
+
+fn keep_permissions(from: &Path, to: &Path) -> Result<()> {
+    match fs::metadata(from) {
+        Ok(metadata) => fs::set_permissions(to, metadata.permissions())
+            .with_context(|| format!("failed to set permissions on {}", to.display())),
+        Err(_) => Ok(()),
+    }
+}
+
+fn roll_back(error: anyhow::Error, applied: &[AppliedOp]) -> anyhow::Error {
+    let failures = rollback(applied);
+    if failures.is_empty() {
+        return error;
+    }
+    anyhow::anyhow!("{error:#}; rollback failed: {}", failures.join("; "))
+}
+
+fn rollback(applied: &[AppliedOp]) -> Vec<String> {
+    let mut failures = Vec::new();
+    for op in applied.iter().rev() {
+        if let AppliedOp::Restored { target, blob } = op
+            && let Err(error) = fs::read(blob).and_then(|bytes| fs::write(target, bytes))
+        {
+            failures.push(format!("{}: {error}", target.display()));
+        }
+    }
+    failures
 }
 
 fn read_manifest(path: &Path) -> Result<SnapshotManifest> {
@@ -289,6 +382,64 @@ mod tests {
         assert!(!workspace.join("b.txt").exists());
         assert_eq!(report.restored.len(), 1);
         assert_eq!(report.deleted.len(), 1);
+
+        fs::remove_dir_all(&workspace).ok();
+    }
+
+    #[tokio::test]
+    async fn rolls_back_earlier_restores_when_a_later_file_fails() {
+        let workspace = temp_dir("rollback");
+        let store = SnapshotStore::new(workspace.join("snapshots"));
+        let turn = TurnId::new();
+        fs::write(workspace.join("a.txt"), "original-a").unwrap();
+        fs::write(workspace.join("b.txt"), "original-b").unwrap();
+        store
+            .capture(&turn, &workspace, Path::new("a.txt"))
+            .await
+            .unwrap();
+        store
+            .capture(&turn, &workspace, Path::new("b.txt"))
+            .await
+            .unwrap();
+
+        fs::write(workspace.join("a.txt"), "changed-a").unwrap();
+        fs::remove_file(workspace.join("b.txt")).unwrap();
+        fs::create_dir(workspace.join("b.txt")).unwrap();
+
+        let error = store.restore(&turn, &workspace).await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("b.txt"), "{message}");
+        assert_eq!(
+            fs::read_to_string(workspace.join("a.txt")).unwrap(),
+            "original-a"
+        );
+        assert!(workspace.join("b.txt").is_dir());
+        let leftovers: Vec<String> = fs::read_dir(&workspace)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("meerai-restore"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+
+        fs::remove_dir_all(&workspace).ok();
+    }
+
+    #[tokio::test]
+    async fn restores_a_tracked_deletion() {
+        let workspace = temp_dir("delete");
+        let store = SnapshotStore::new(workspace.join("snapshots"));
+        let turn = TurnId::new();
+        store
+            .capture(&turn, &workspace, Path::new("removed.txt"))
+            .await
+            .unwrap();
+        fs::write(workspace.join("removed.txt"), "created").unwrap();
+
+        let report = store.restore(&turn, &workspace).await.unwrap();
+        assert!(!workspace.join("removed.txt").exists());
+        assert_eq!(report.deleted, vec![workspace.join("removed.txt")]);
+        assert!(report.restored.is_empty());
 
         fs::remove_dir_all(&workspace).ok();
     }

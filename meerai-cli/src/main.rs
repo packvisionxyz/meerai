@@ -6,6 +6,7 @@
 mod auth_cmd;
 mod cli;
 mod headless;
+mod hooks_cmd;
 mod sessions_cmd;
 #[cfg(test)]
 mod tests;
@@ -18,7 +19,7 @@ use anyhow::{Result, bail};
 #[cfg(feature = "tui")]
 use meerai_agents::spawn_worker;
 use meerai_agents::{
-    AgentHarness, HarnessConfig, MultiTurnAgent, QuestionToolset, SubagentToolFactory,
+    AgentHarness, HarnessConfig, HookEngine, MultiTurnAgent, QuestionToolset, SubagentToolFactory,
     SubagentToolset, TokenPricing,
 };
 use meerai_client::providers::{
@@ -26,9 +27,10 @@ use meerai_client::providers::{
 };
 use meerai_client::secrets::auth_file_path;
 use meerai_common::definitions::{AgentDefinition, SkillDefinition, load_definitions};
+use meerai_common::hooks::{add_trusted_project, load_hooks_for_run, project_is_trusted};
 use meerai_common::settings::{
-    AppSettings, default_config_dir, default_data_dir, find_project_root, load_project_settings,
-    load_settings_from, merge_project_settings,
+    AppSettings, HooksSettings, default_config_dir, default_data_dir, find_project_root,
+    load_project_settings, load_settings_from, merge_project_settings, save_settings_to,
 };
 use meerai_core::{Toolset, async_trait};
 use meerai_policy::{ApprovalMode, PolicyEngine, parse_approval_mode, rules_from_yaml};
@@ -49,6 +51,7 @@ use meerai_tui::{OpenedSession, SessionOpener, TuiLaunchConfig, transcript_from_
 use auth_cmd::run_auth;
 use cli::{CliSubcommand, HELP_TEXT, parse_args};
 use headless::run_headless;
+use hooks_cmd::run_hooks;
 use sessions_cmd::{
     auto_prune_sessions, continue_session_id, fork_session, prune_empty_sessions, run_sessions,
 };
@@ -132,6 +135,59 @@ fn dotenv_flag_enabled(value: Option<&str>) -> bool {
         Some(flag) => matches!(flag.as_str(), "1" | "true" | "yes"),
         None => false,
     }
+}
+
+fn env_flag(key: &str) -> bool {
+    dotenv_flag_enabled(std::env::var(key).ok().as_deref())
+}
+
+fn prompt_project_hook_trust(
+    hooks_path: &Path,
+    project_root: &Path,
+    config_dir: Option<&Path>,
+    user_settings: &mut AppSettings,
+) -> bool {
+    eprintln!("Project hooks found at {}", hooks_path.display());
+    eprintln!("Hooks run arbitrary commands as you. Trust this project? [y/N]");
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    let answer = answer.trim().to_ascii_lowercase();
+    if answer != "y" && answer != "yes" {
+        return false;
+    }
+    let Some(dir) = config_dir else {
+        let hooks = user_settings
+            .hooks
+            .get_or_insert_with(HooksSettings::default);
+        add_trusted_project(&mut hooks.trusted_projects, project_root);
+        return true;
+    };
+
+    let mut disk_settings = match load_settings_from(dir) {
+        Ok(settings) => settings,
+        Err(err) => {
+            eprintln!("Warning: failed to save project hook trust: {err:#}");
+            return false;
+        }
+    };
+    let trusted = {
+        let hooks = disk_settings
+            .hooks
+            .get_or_insert_with(HooksSettings::default);
+        add_trusted_project(&mut hooks.trusted_projects, project_root);
+        hooks.trusted_projects.clone()
+    };
+    if let Err(err) = save_settings_to(dir, &disk_settings) {
+        eprintln!("Warning: failed to save project hook trust: {err:#}");
+        return false;
+    }
+    let hooks = user_settings
+        .hooks
+        .get_or_insert_with(HooksSettings::default);
+    hooks.trusted_projects = trusted;
+    true
 }
 
 fn load_dotenv(explicit: Option<&Path>) -> Result<()> {
@@ -264,6 +320,14 @@ async fn main() -> Result<()> {
         .as_deref()
         .and_then(|dir| load_settings_from(dir).ok())
         .unwrap_or_default();
+    if let Some(CliSubcommand::Hooks(command)) = cli.subcommand {
+        return run_hooks(
+            command,
+            config_dir.as_deref(),
+            &project_root,
+            &mut user_settings,
+        );
+    }
     let mut settings = user_settings.clone();
     match load_project_settings(&project_root) {
         Ok(Some(project)) => {
@@ -475,6 +539,57 @@ async fn main() -> Result<()> {
         .unwrap_or_default()
         .to_string();
 
+    let hooks_enabled = settings
+        .hooks
+        .as_ref()
+        .and_then(|hooks| hooks.enabled)
+        .unwrap_or(true);
+    let mut trust_project = env_flag("MEERAI_TRUST_PROJECT_HOOKS")
+        || settings
+            .hooks
+            .as_ref()
+            .and_then(|hooks| hooks.trust_project)
+            .unwrap_or(false)
+        || settings
+            .hooks
+            .as_ref()
+            .is_some_and(|hooks| project_is_trusted(&hooks.trusted_projects, &project_root));
+    let project_hooks_path = project_root.join(".meerai").join("hooks.json");
+    if hooks_enabled
+        && !trust_project
+        && project_hooks_path.exists()
+        && cli.prompt.is_none()
+        && io::stdin().is_terminal()
+        && prompt_project_hook_trust(
+            &project_hooks_path,
+            &project_root,
+            config_dir.as_deref(),
+            &mut user_settings,
+        )
+    {
+        trust_project = true;
+        let hooks = settings.hooks.get_or_insert_with(HooksSettings::default);
+        add_trusted_project(&mut hooks.trusted_projects, &project_root);
+    }
+    if hooks_enabled && project_hooks_path.exists() && !trust_project {
+        eprintln!(
+            "Warning: ignoring project hooks: run `meerai hooks trust`, set MEERAI_TRUST_PROJECT_HOOKS=1, or set hooks.trust_project: true"
+        );
+    }
+    let hooks = if hooks_enabled {
+        let (entries, hook_warnings) = load_hooks_for_run(
+            config_dir.as_deref(),
+            &project_root,
+            settings.hooks.as_ref(),
+        );
+        for warning in &hook_warnings {
+            eprintln!("Warning: {warning}");
+        }
+        Arc::new(HookEngine::new(entries))
+    } else {
+        Arc::new(HookEngine::default())
+    };
+
     let host = Arc::new(CliSessionHost {
         workspace_root: workspace_root.clone(),
         session_config,
@@ -484,6 +599,7 @@ async fn main() -> Result<()> {
         approval_mode,
         execution_world,
         sensitive_env_vars,
+        hooks,
         custom_agents: definitions.agents.clone(),
         base_system,
         script_runtime,
@@ -556,6 +672,7 @@ struct CliSessionHost {
     approval_mode: ApprovalMode,
     execution_world: Arc<dyn ExecutionWorld>,
     sensitive_env_vars: Vec<String>,
+    hooks: Arc<HookEngine>,
     custom_agents: Vec<AgentDefinition>,
     base_system: String,
     script_runtime: Option<ScriptRuntime>,
@@ -642,7 +759,16 @@ impl CliSessionHost {
         };
 
         let mut agent = MultiTurnAgent::new(self.client.clone(), model_spec, initial_tools, system);
+        agent.set_hooks(self.hooks.clone());
+        agent.set_post_edit_diagnostics(
+            self.settings
+                .context
+                .as_ref()
+                .and_then(|context| context.post_edit_diagnostics)
+                .unwrap_or(false),
+        );
         let subagent_tool = SubagentToolset::from_agent(&agent, subagent_factory)
+            .with_hooks(self.hooks.clone())
             .with_custom_agents(self.custom_agents.clone());
         agent.add_tool(subagent_tool);
         agent.set_harness(AgentHarness {

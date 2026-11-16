@@ -101,6 +101,46 @@ impl MultiTurnAgent {
         )
         .await;
 
+        let pre_compact = self
+            .run_hook(
+                HookEvent::PreCompact,
+                None,
+                None,
+                None,
+                None,
+                None,
+                event_tx,
+            )
+            .await;
+        if matches!(
+            pre_compact.decision,
+            crate::hooks::HookDecision::Deny | crate::hooks::HookDecision::Block
+        ) {
+            let reason = pre_compact
+                .reason()
+                .unwrap_or("blocked by hook")
+                .to_string();
+            self.log_event(
+                event_tx,
+                SessionEvent::CompactionEnded {
+                    compaction_id,
+                    result: CompactionResult::Skipped { reason },
+                },
+            )
+            .await;
+            self.run_hook(
+                HookEvent::PostCompact,
+                None,
+                None,
+                None,
+                None,
+                None,
+                event_tx,
+            )
+            .await;
+            return None;
+        }
+
         let Some(range) = plan_compaction_boundary(&events, verbatim_window_turns) else {
             self.log_event(
                 event_tx,
@@ -110,6 +150,16 @@ impl MultiTurnAgent {
                         reason: COMPACTION_EMPTY_SKIP.to_string(),
                     },
                 },
+            )
+            .await;
+            self.run_hook(
+                HookEvent::PostCompact,
+                None,
+                None,
+                None,
+                None,
+                None,
+                event_tx,
             )
             .await;
             return None;
@@ -187,6 +237,16 @@ impl MultiTurnAgent {
                     },
                 )
                 .await;
+                self.run_hook(
+                    HookEvent::PostCompact,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    event_tx,
+                )
+                .await;
                 None
             }
             Err(error) => {
@@ -199,6 +259,16 @@ impl MultiTurnAgent {
                             error: message.clone(),
                         },
                     },
+                )
+                .await;
+                self.run_hook(
+                    HookEvent::PostCompact,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    event_tx,
                 )
                 .await;
                 if budget_error.is_none() {

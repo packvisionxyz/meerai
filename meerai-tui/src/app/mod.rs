@@ -201,15 +201,7 @@ pub struct CompletionHitZone {
     pub index: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ToolCallStatus {
-    Proposed,
-    Running,
-    Succeeded,
-    Failed,
-    Stopped,
-    Cancelled,
-}
+pub use meerai_session::replay::ToolCallStatus;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolCallEntry {

@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use meerai_common::definitions::{AgentDefinition, validate_agent_model};
+use meerai_common::hooks::HookEvent;
 use meerai_core::{
     EffectClass, GrantScope, PermissionAction, ToolDefinition, ToolError, ToolOutput,
     ToolPermissionSpec, ToolRun, Toolset,
@@ -18,6 +19,7 @@ use crate::events::{
     TurnEndReason,
 };
 use crate::harness::{AgentHarness, HarnessConfig};
+use crate::hooks::{HookContext, HookDecision, HookEngine};
 use crate::multi_turn_agent::{ChatStreamer, MultiTurnAgent, MultiTurnAgentConfig};
 
 const TOOLSET_NAME: &str = "subagent";
@@ -288,6 +290,7 @@ pub struct SubagentToolset {
     model: Arc<RwLock<String>>,
     tool_factory: SubagentToolFactory,
     custom_agents: Vec<AgentDefinition>,
+    hooks: Option<Arc<HookEngine>>,
 }
 
 impl SubagentToolset {
@@ -301,6 +304,7 @@ impl SubagentToolset {
             model,
             tool_factory,
             custom_agents: Vec::new(),
+            hooks: None,
         }
     }
 
@@ -313,6 +317,11 @@ impl SubagentToolset {
             .into_iter()
             .filter(|agent| find_builtin_agent(&agent.id).is_none())
             .collect();
+        self
+    }
+
+    pub fn with_hooks(mut self, hooks: Arc<HookEngine>) -> Self {
+        self.hooks = Some(hooks);
         self
     }
 
@@ -504,6 +513,32 @@ impl Toolset for SubagentToolset {
         let child_model = resolved.model(&parent_model);
 
         let bridge = SUBAGENT_BRIDGE.try_with(Clone::clone).ok();
+
+        if let Some(hooks) = &self.hooks
+            && let Some(bridge) = &bridge
+            && let Some(parent_session) = &bridge.parent_session
+        {
+            let context = HookContext {
+                session_id: parent_session.id().as_str(),
+                turn_id: None,
+                tool_name: Some(TOOL_RUN),
+                tool_input: Some(args),
+                tool_output: None,
+                prompt: Some(&parsed.task),
+                cwd: &bridge.workspace_root,
+            };
+            let report = hooks.run(HookEvent::SubagentStart, &context).await;
+            for firing in &report.firings {
+                let _ = parent_session
+                    .append(firing.clone().into_session_event())
+                    .await;
+            }
+            if matches!(report.decision, HookDecision::Deny | HookDecision::Block) {
+                let reason = report.reason().unwrap_or("blocked by hook").to_string();
+                return Ok(ToolRun::from_output(ToolOutput::Fail(reason)));
+            }
+        }
+
         let item_id = ItemId::new();
 
         let max_steps = bridge.as_ref().map_or(preset_max_steps, |bridge| {
@@ -521,6 +556,9 @@ impl Toolset for SubagentToolset {
             system_prompt,
             child_config,
         );
+        if let Some(hooks) = &self.hooks {
+            child_agent.set_hooks(hooks.clone());
+        }
 
         let mut child_session_id: Option<String> = None;
         let mut child_initial_cap: Option<u64> = None;
@@ -654,6 +692,27 @@ impl Toolset for SubagentToolset {
                 (ItemStatus::Failed, msg.clone(), ToolOutput::Fail(msg))
             }
         };
+
+        if let Some(hooks) = &self.hooks
+            && let Some(bridge) = &bridge
+            && let Some(parent_session) = &bridge.parent_session
+        {
+            let context = HookContext {
+                session_id: parent_session.id().as_str(),
+                turn_id: None,
+                tool_name: Some(TOOL_RUN),
+                tool_input: Some(args),
+                tool_output: Some(&report),
+                prompt: Some(&parsed.task),
+                cwd: &bridge.workspace_root,
+            };
+            let stop_report = hooks.run(HookEvent::SubagentStop, &context).await;
+            for firing in &stop_report.firings {
+                let _ = parent_session
+                    .append(firing.clone().into_session_event())
+                    .await;
+            }
+        }
 
         if let Some(bridge) = &bridge {
             let _ = bridge.event_tx.send(AgentEvent::ItemCompleted {

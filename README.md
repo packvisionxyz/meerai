@@ -4,14 +4,15 @@ Pack Vision's terminal coding-agent harness — written in Rust, designed for
 autonomous and interactive software engineering in the terminal with a
 selection-first, modal TUI and a scriptable headless CLI.
 
-**Status:** early-stage, distribution-hardened. The workspace has ten library
-crates plus the `meerai` binary (built by `meerai-cli`). Milestones M1–M5 and
-**M8–M12** (subagent runtime, `meerai-cli` + session fork, retrieval v2/v3,
-security & supply chain M11, and agents/skills discovery) of the
-[harness specification](docs/harness-spec.md) have landed. CI (`cargo-deny` +
+**Status:** early-stage, distribution-hardened. The workspace has eleven library
+crates plus the `meerai` binary (built by `meerai-cli`). Milestones **M1–M12**
+(session log, harness, checkpoints, hooks, subagent runtime, `meerai-cli` +
+session fork, retrieval v2/v3, security & supply chain, and agents/skills
+discovery) of the [harness specification](docs/harness-spec.md) have landed. CI (`cargo-deny` +
 test gate), tag-driven release builds, installers, [the threat
 model](docs/threat-model.md), and an Apache-2.0 license are in place.
-Checkpoints (M6), hooks (M7), and `meerai export` do not exist yet (see
+Checkpoints (M6) v1 and hooks (M7) v1 have landed with an explicit project-trust
+gate. `meerai export` does not exist yet (see
 [Security roadmap](#security-roadmap)).
 
 ## Install
@@ -89,9 +90,9 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   compaction, token and wall-clock budgets, circuit breakers, cancellation,
   steering, provider retries, consecutive read-only tool batches, first-prompt
   session titles, summarizer-model selection, an ordered step interceptor seam
-  (`before_step`, `after_tool`, `turn_stopping`) for checkpoints and hooks, and
-  best-effort tool-output redaction before spill, logging, display, and model
-  delivery.
+  (`before_step`, async `before_tool`, `after_tool`, `turn_stopping`) for
+  checkpoints, and best-effort tool-output redaction before spill, logging,
+  display, and model delivery.
 - **Prompt composition (`meerai-agents::prompt`):** `BASE_SYSTEM_PROMPT` plus
   `compose_system_prompt`, which appends `--system` text, the workspace
   `AGENTS.md`, and `.meerai/instructions.md` under byte caps. Scoped `AGENTS.md`
@@ -107,6 +108,13 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 - **Policy engine (`meerai-policy`):** ordered `action/resource/effect` rules
   (globset, last match wins), `ApprovalMode` presets (`plan`, `ask`, `auto-edit`,
   `yolo`), turn and session grants, and YAML rule parsing.
+- **Hooks (`meerai-common::hooks`, `meerai-agents::hooks`):** user and project
+  shell hooks for twelve lifecycle events. User hooks load from
+  `~/.config/meerai/hooks.json`; project hooks load from
+  `.meerai/hooks.json` only after explicit trust. Hooks run concurrently with a
+  timeout, receive JSON on stdin, use exit `0`/`2` plus JSON decisions, log
+  `HookFired`, emit live `HookCompleted` events with TUI system lines, and can
+  tighten policy but not loosen it.
 - **Subagent runtime (`meerai-agents::subagent`):** `SubagentToolset`
   (`subagent-run`) launches isolated depth-1 child sessions (`parent_session_id`),
   supporting built-in profiles (`explore`, `plan`, `build`, `general`) with
@@ -130,7 +138,8 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   results, per-tool `EffectClass`, and provider-secret environment scrubbing; plus
   `RepoMapToolset` (`retrieval-repo_map` via tree-sitter + PageRank),
   `LspToolset` (`lsp-go_to_definition`, `lsp-find_references`,
-  `lsp-get_diagnostics` over stdio JSON-RPC), and `SearchAsCodeToolset`
+  `lsp-get_diagnostics` over stdio JSON-RPC), opt-in post-edit diagnostics
+  (`context.post_edit_diagnostics`), and `SearchAsCodeToolset`
   (`sac-run_script` running `python3 -I` or `node -e` with env scrubbing and
   `EffectClass::Execute` policy gating). At startup meerai probes `python3`,
   then `node`; it registers the script tool only for the detected runtime and
@@ -163,10 +172,10 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 
 ### Not implemented yet
 
-- OS sandbox (macOS Seatbelt / Linux bubblewrap) — `code-shell` and
-  `sac-run_script` run with your privileges after approval.
-- Hooks (M7, including automatic post-edit LSP diagnostics), `meerai export`,
-  and TUI `/fork`.
+- OS sandbox coverage on Windows hosts (Phase-1 host guards) and on hosts
+  without Seatbelt or bubblewrap. `ExecutionWorld` sandboxes when available and
+  warns on the fallback path.
+- `meerai export` and TUI `/fork`.
 - Tool or permission mapping from agent definitions, MCP servers, and skill
   supporting files. M12 reads only `SKILL.md` and custom subagent runs stay
   read-only.
@@ -176,9 +185,10 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   model. The bundled catalog ships context windows only, so cost stays `None`
   unless a user `providers.yml` adds pricing.
 - Progressive tool disclosure.
-- ACP integration (M13 client, M14 agent). Design in [docs/acp.md](docs/acp.md).
-  An ACP backend runs an external agent with its own tools; meerai policy does
-  not apply to it.
+- ACP CLI/TUI integration (M13-P2/P3, M14). The `meerai-acp` P1 client bridge
+  spawns `agy acp` and exposes typed events, but there is no `--acp`, `/acp`,
+  `acp doctor`, or provider setting. An ACP backend runs an external agent with
+  its own tools; meerai policy does not apply to it.
 - Repository signing secrets (`APPLE_CERTIFICATE` / `WINDOWS_CERTIFICATE`) for
   non-empty signed/notarized GitHub Release binaries (conditional steps exist in
   `release.yml`).
@@ -199,7 +209,8 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 | `meerai-tools` | `code` (`CodeTools`, seven `code-*` tools with path guards, unified diffs, observations), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`), `search_as_code` (`SearchAsCodeToolset`) |
 | `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent` v2, `prompt::{BASE_SYSTEM_PROMPT, compose_system_prompt}`, `spawn_worker`, `subagent` (`SubagentToolset` + child sessions), and best-effort tool-output redaction |
 | `meerai-tui` | Modal terminal UI library (`ratatui` + `crossterm`) with transcript replay, subagent items, and approval overlay |
-| `meerai-cli` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth` and `sessions` (`list|rm|prune|fork`) subcommands, TUI launcher |
+| `meerai-cli` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions`/`hooks` subcommands, TUI launcher |
+| `meerai-acp` | M13-P1 ACP client bridge: `agy acp` preset, handshake, typed events, permission replies, cancel. No CLI/TUI integration |
 
 ## Usage
 
@@ -219,6 +230,7 @@ meerai --skill orchestrate                      # apply a skill (repeatable)
 meerai --env-file .env.local                    # load variables from a file
 meerai auth list|login|logout                   # inspect, save, remove API keys
 meerai sessions list|rm|prune|fork              # list, delete, prune, or fork sessions
+meerai hooks trust|untrust|status               # manage project hook trust
 meerai sessions fork <ID> --turn <TURN_ID>      # fork from a specific closed turn
 meerai sessions prune --days 30 --keep 5        # delete old sessions, keep 5 newest
 meerai --version                                # print version (-V)
@@ -390,8 +402,9 @@ starts and replays the stored transcript. Replay covers user and steering
 messages, assistant text and reasoning, tool calls and results, and compaction
 markers. An unmatched tool call shows as cancelled. System and runtime events
 are skipped. Session metadata records the workspace `cwd`, git branch and SHA,
-title, model, and created/updated timestamps. On Unix, session directories are
-`0700` and files are `0600`.
+title, model, approval mode, lineage, optional harness and remote session id,
+and created/updated timestamps. On Unix, session directories are `0700` and
+files are `0600`.
 The agent sets the session title from the first user prompt: first non-empty
 line, at most 80 characters. A session that already has a
 user message is not retitled by the agent.
@@ -408,6 +421,11 @@ user message is not retitled by the agent.
   process CWD. See [Project config](#project-config).
 - `<project-root>/.agents/` (default) and `<project-root>/.claude/`: optional
   markdown agent and skill definitions. See [Agents and skills](#agents-and-skills).
+- `~/.config/meerai/hooks.json` and `<project-root>/.meerai/hooks.json`:
+  optional hook definitions. Project hooks need
+  `MEERAI_TRUST_PROJECT_HOOKS=1|true|yes`, `hooks.trust_project: true`, or the
+  canonical project root in `hooks.trusted_projects` (managed by
+  `meerai hooks trust|untrust|status`). `hooks.enabled: false` disables hooks.
 - `$XDG_DATA_HOME/meerai` (default `~/.local/share/meerai`): `auth.json` written
   by `meerai auth login` (mode `0600`); legacy `auth.yml` is still read.
 - Sessions: `<dirs::data_dir()>/meerai/sessions/<session-id>/` (on macOS
@@ -584,6 +602,8 @@ for example `OPENROUTER_API_KEY` (also `OPEN_ROUTER_API_KEY`) and
 - `MEERAI_SESSION_DIR` — session root override.
 - `MEERAI_LOAD_DOTENV=1|true|yes` — load `./.env` with `dotenvy`. Nothing loads
   implicitly.
+- `MEERAI_TRUST_PROJECT_HOOKS=1|true|yes` — load project `.meerai/hooks.json`.
+  Without it, project hooks are ignored.
 - `--env-file <PATH>` — load variables from an explicit file. A missing file is
   an error.
 
@@ -620,6 +640,13 @@ for example `OPENROUTER_API_KEY` (also `OPEN_ROUTER_API_KEY`) and
   repository-controlled content that reaches the model as instructions. They
   cannot run tools, map permissions, or change the sandbox. Review them like
   code.
+- **Hooks run arbitrary host commands.** `hooks.json` entries execute with your
+  privileges outside `ExecutionWorld`. Project hooks stay disabled until you run
+  `meerai hooks trust`, accept the one-time TUI prompt, set
+  `MEERAI_TRUST_PROJECT_HOOKS=1|true|yes`, or set `hooks.trust_project: true`.
+  Hooks fail open by default; set `fail_closed` on a `PreToolUse` hook to deny on
+  failure. Hooks can tighten policy, not loosen `plan`, an explicit
+  `deny`/`ask` rule, or the outside-workspace approval.
 - **Treat model and tool output as untrusted.** `BASE_SYSTEM_PROMPT` instructs
   this and heuristic injection screening (`screen_run`) wraps flagged content,
   but screening is pattern-based and not a guarantee.
@@ -639,7 +666,8 @@ prompt-injection screening (`screen_run`), session file permissions, configurabl
 retention, session/turn token budgets, `ExecutionWorld` OS sandbox (macOS
 Seatbelt and Linux bubblewrap with Phase-1 fallback warning), OS keychain
 storage (`KeychainSecretStore`) with `auth.json` fallback, `cargo-deny` CI
-audit (`deny.toml`), conditional signing steps in `release.yml`, and the
+audit (`deny.toml`), conditional signing steps in `release.yml`, M7 hooks with
+an explicit project-trust gate and tighten-only policy integration, and the
 written threat model. Pending operational configuration: GitHub repository
 signing certificates/secrets for macOS notarization and Windows signing, plus
 OS sandboxing on Windows hosts.
@@ -650,7 +678,7 @@ OS sandboxing on Windows hosts.
 - [docs/threat-model.md](docs/threat-model.md) — M11 security threat model, trust boundaries, controls, and residual risks
 - [docs/architecture.md](docs/architecture.md) — current implementation notes, target harness architecture, protocol/loop design, and migration plan
 - [docs/tui-design.md](docs/tui-design.md) — modal TUI design, keybindings, pickers, diff review, and async Rust rendering architecture
-- [docs/acp.md](docs/acp.md) — planned Agent Client Protocol integration: external harnesses (M13) and `meerai acp` for editors (M14), with the trust boundary
+- [docs/acp.md](docs/acp.md) — Agent Client Protocol: the M13-P1 `agy` bridge and the planned CLI/TUI (M13) and `meerai acp` editor surface (M14), with the trust boundary
 - [AGENTS.md](AGENTS.md) — repository guide for AI coding agents (commands, macro conventions, known traps)
 
 ## License

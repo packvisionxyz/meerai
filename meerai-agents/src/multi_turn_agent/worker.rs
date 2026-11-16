@@ -21,6 +21,9 @@ impl MultiTurnAgent {
                 | AgentCommand::Reload { .. } => {
                     self.handle_live_command(command, event_tx).await;
                 }
+                AgentCommand::SetHooks(entries) => {
+                    self.set_hooks(Arc::new(HookEngine::new(entries)));
+                }
                 AgentCommand::Approve { .. }
                 | AgentCommand::AnswerQuestion { .. }
                 | AgentCommand::Rewind { .. }
@@ -45,6 +48,8 @@ pub fn spawn_worker(
 
     tokio::spawn(async move {
         let mut queued: VecDeque<String> = VecDeque::new();
+
+        agent.start_session(&event_tx).await;
 
         'worker: while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
@@ -113,6 +118,7 @@ pub fn spawn_worker(
                                                 | AgentCommand::ApplyAgent { .. }
                                                 | AgentCommand::ApplySkill { .. }
                                                 | AgentCommand::Reload { .. }
+                                                | AgentCommand::SetHooks(_)
                                                 | AgentCommand::Rewind { .. }),
                                             ) => {
                                                 let _ = inbox_tx.send(command);
@@ -127,7 +133,9 @@ pub fn spawn_worker(
                             agent.set_model(model);
                         }
                         if pending_reset {
+                            agent.end_session(&event_tx).await;
                             agent.reset();
+                            agent.start_session(&event_tx).await;
                         }
                         if pending_quit {
                             break 'worker;
@@ -166,6 +174,9 @@ pub fn spawn_worker(
                     context,
                     system_prompt,
                 } => agent.reload_config(rules, context, system_prompt),
+                AgentCommand::SetHooks(entries) => {
+                    agent.set_hooks(Arc::new(HookEngine::new(entries)));
+                }
                 AgentCommand::Rewind { turn_id, scope } => {
                     let outcome = agent.rewind(&turn_id, scope).await;
                     let (restored, error) = match outcome {
@@ -179,13 +190,19 @@ pub fn spawn_worker(
                         error,
                     });
                 }
-                AgentCommand::Reset => agent.reset(),
+                AgentCommand::Reset => {
+                    agent.end_session(&event_tx).await;
+                    agent.reset();
+                    agent.start_session(&event_tx).await;
+                }
                 AgentCommand::Cancel => {}
                 AgentCommand::Approve { .. } => {}
                 AgentCommand::AnswerQuestion { .. } => {}
                 AgentCommand::Quit => break,
             }
         }
+
+        agent.end_session(&event_tx).await;
     });
 
     (cmd_tx, event_rx)

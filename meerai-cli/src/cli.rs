@@ -7,7 +7,8 @@ pub(crate) const HELP_TEXT: &str = "Usage:\n  \
     meerai --prompt <TEXT> [--json] [--continue | --resume <ID> | --fork <ID>] [--mode <MODE>]\n          \
     [--agent <ID>] [--skill <ID>]...\n  \
     meerai auth <list|login|logout>\n  \
-    meerai sessions <list|rm|prune|fork>\n\
+    meerai sessions <list|rm|prune|fork>\n  \
+    meerai hooks <trust|untrust|status>\n\
     \n\
     Commands:\n  \
     auth list                       Show credentials across auth.json, config, and env\n  \
@@ -19,7 +20,10 @@ pub(crate) const HELP_TEXT: &str = "Usage:\n  \
     sessions prune [--days N] [--keep N]\n                                              \
     Delete sessions older than N days (default 30), keeping the newest N (default 0)\n  \
     sessions fork <ID> [--turn <TURN_ID>]\n                                              \
-    Fork a session at a closed turn (default: latest closed turn)\n\
+    Fork a session at a closed turn (default: latest closed turn)\n  \
+    hooks status                    Show hook settings and project trust state\n  \
+    hooks trust                     Trust project hooks for this repository\n  \
+    hooks untrust                   Revoke project hook trust for this repository\n\
     \n\
     TUI commands:\n  \
     /agent <id>                     Apply an agent by id (or mention @agent/<id>)\n  \
@@ -68,8 +72,16 @@ pub(crate) enum SessionsCommand {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HooksCommand {
+    Trust,
+    Untrust,
+    Status,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CliSubcommand {
     Auth(AuthCommand),
+    Hooks(HooksCommand),
     Sessions(SessionsCommand),
 }
 
@@ -313,6 +325,41 @@ where
                 }
                 Some(other) => {
                     bail!("unknown sessions subcommand: {other}. Expected: list, rm, prune, fork");
+                }
+            },
+            "hooks" if subcommand.is_none() => match iter.next().as_deref() {
+                None | Some("status") => {
+                    if let Some(extra) = iter.next() {
+                        match extra.as_str() {
+                            "-h" | "--help" => show_help = true,
+                            _ => bail!("unexpected argument for hooks status: {extra}"),
+                        }
+                    }
+                    subcommand = Some(CliSubcommand::Hooks(HooksCommand::Status));
+                }
+                Some("-h" | "--help") => {
+                    show_help = true;
+                }
+                Some("trust") => {
+                    if let Some(extra) = iter.next() {
+                        match extra.as_str() {
+                            "-h" | "--help" => show_help = true,
+                            _ => bail!("unexpected argument for hooks trust: {extra}"),
+                        }
+                    }
+                    subcommand = Some(CliSubcommand::Hooks(HooksCommand::Trust));
+                }
+                Some("untrust") => {
+                    if let Some(extra) = iter.next() {
+                        match extra.as_str() {
+                            "-h" | "--help" => show_help = true,
+                            _ => bail!("unexpected argument for hooks untrust: {extra}"),
+                        }
+                    }
+                    subcommand = Some(CliSubcommand::Hooks(HooksCommand::Untrust));
+                }
+                Some(other) => {
+                    bail!("unknown hooks subcommand: {other}. Expected: trust, untrust, status");
                 }
             },
             "-p" | "--provider" => {

@@ -490,6 +490,7 @@ fn harness_config_uses_defaults_and_context_overrides() {
         max_session_tokens: Some(2_000_000),
         max_turn_secs: Some(600),
         summarizer_model: Some("openrouter:small-model".to_string()),
+        post_edit_diagnostics: None,
     };
     let config = HarnessConfig::from_context_settings(Some(&context));
     assert_eq!(config.context_window_tokens, 200_000);
@@ -548,6 +549,23 @@ fn agent_events_serialize_to_single_line_ndjson_and_roundtrip() {
         assert!(!line.contains('\n'));
         assert_eq!(serde_json::from_str::<AgentEvent>(&line).unwrap(), event);
     }
+}
+
+#[test]
+fn hook_completed_serializes_to_ndjson_and_keeps_headless_running() {
+    let event = AgentEvent::HookCompleted {
+        event: "PreToolUse".to_string(),
+        decision: "deny".to_string(),
+        reason: Some("blocked".to_string()),
+    };
+
+    let line = serde_json::to_string(&event).unwrap();
+    assert!(!line.contains('\n'));
+    assert!(line.contains("\"type\":\"hookCompleted\""));
+    assert!(line.contains("\"event\":\"PreToolUse\""));
+    assert!(line.contains("\"decision\":\"deny\""));
+    assert!(line.contains("\"reason\":\"blocked\""));
+    assert_eq!(headless_outcome(&event), HeadlessOutcome::Continue);
 }
 
 #[test]
@@ -887,17 +905,19 @@ fn write_fake_session(root: &Path, id: &str, updated_at_ms: u64) {
     std::fs::create_dir_all(&dir).unwrap();
     let meta = meerai_session::SessionMeta {
         id: SessionId::from_raw(id),
-        title: None,
         cwd: root.to_path_buf(),
-        git_branch: None,
-        git_sha: None,
-        model: None,
         created_at_ms: updated_at_ms,
         updated_at_ms,
+        title: None,
+        model: None,
+        approval_mode: None,
+        git_branch: None,
+        git_sha: None,
         forked_from: None,
         inherited_event_count: None,
         parent_session_id: None,
-        approval_mode: None,
+        harness: None,
+        remote_session_id: None,
     };
     std::fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
 }
@@ -1453,6 +1473,7 @@ async fn cli_session_host_lists_creates_and_opens_sessions() {
         approval_mode: ApprovalMode::Ask,
         execution_world: Arc::new(meerai_tools::HostWorld::new()),
         sensitive_env_vars: Vec::new(),
+        hooks: Arc::new(HookEngine::default()),
         custom_agents: Vec::new(),
         base_system: "Test system prompt".to_string(),
         default_provider: expected_provider.clone(),
@@ -1534,6 +1555,89 @@ async fn empty_session_cleanup_removes_unused_sessions_only() {
     assert!(!remaining.contains(&unused_id.to_string()));
 
     std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn parses_hooks_subcommands() {
+    let hooks = |args: &[&str]| -> Vec<String> {
+        std::iter::once("hooks".to_string())
+            .chain(args.iter().map(|arg| arg.to_string()))
+            .collect()
+    };
+
+    assert_eq!(
+        parse_args(hooks(&[])).unwrap().subcommand,
+        Some(CliSubcommand::Hooks(HooksCommand::Status))
+    );
+    assert_eq!(
+        parse_args(hooks(&["status"])).unwrap().subcommand,
+        Some(CliSubcommand::Hooks(HooksCommand::Status))
+    );
+    assert_eq!(
+        parse_args(hooks(&["trust"])).unwrap().subcommand,
+        Some(CliSubcommand::Hooks(HooksCommand::Trust))
+    );
+    assert_eq!(
+        parse_args(hooks(&["untrust"])).unwrap().subcommand,
+        Some(CliSubcommand::Hooks(HooksCommand::Untrust))
+    );
+    assert!(parse_args(hooks(&["-h"])).unwrap().show_help);
+    assert!(parse_args(hooks(&["--help"])).unwrap().show_help);
+    assert!(parse_args(hooks(&["trust", "--help"])).unwrap().show_help);
+    assert!(parse_args(hooks(&["untrust", "-h"])).unwrap().show_help);
+    assert!(parse_args(hooks(&["status", "extra"])).is_err());
+    assert!(parse_args(hooks(&["trust", "extra"])).is_err());
+    assert!(parse_args(hooks(&["bogus"])).is_err());
+    assert!(HELP_TEXT.contains("hooks <trust|untrust|status>"));
+}
+
+#[test]
+fn hooks_trust_command_persists_and_removes_project() {
+    let config_dir = std::env::temp_dir().join(format!("meerai-hooks-cfg-{}", SessionId::new()));
+    let project_root =
+        std::env::temp_dir().join(format!("meerai-hooks-project-{}", SessionId::new()));
+    std::fs::create_dir_all(&project_root).unwrap();
+    let mut settings = AppSettings::default();
+
+    crate::hooks_cmd::run_hooks(
+        HooksCommand::Trust,
+        Some(&config_dir),
+        &project_root,
+        &mut settings,
+    )
+    .unwrap();
+    let saved = meerai_common::settings::load_settings_from(&config_dir).unwrap();
+    assert!(
+        meerai_common::hooks::project_is_trusted(
+            &saved.hooks.as_ref().unwrap().trusted_projects,
+            &project_root,
+        ),
+        "trust must persist to settings.yml"
+    );
+
+    crate::hooks_cmd::run_hooks(
+        HooksCommand::Untrust,
+        Some(&config_dir),
+        &project_root,
+        &mut settings,
+    )
+    .unwrap();
+    let saved = meerai_common::settings::load_settings_from(&config_dir).unwrap();
+    assert!(
+        !meerai_common::hooks::project_is_trusted(
+            &saved.hooks.unwrap().trusted_projects,
+            &project_root,
+        ),
+        "untrust must remove the project from settings.yml"
+    );
+
+    let error =
+        crate::hooks_cmd::run_hooks(HooksCommand::Trust, None, &project_root, &mut settings)
+            .unwrap_err();
+    assert!(error.to_string().contains("no config directory"));
+
+    std::fs::remove_dir_all(&config_dir).ok();
+    std::fs::remove_dir_all(&project_root).ok();
 }
 
 #[test]

@@ -76,19 +76,29 @@ impl SessionConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: SessionId,
-    pub title: Option<String>,
     pub cwd: PathBuf,
-    pub git_branch: Option<String>,
-    pub git_sha: Option<String>,
-    pub model: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<SessionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited_event_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<SessionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approval_mode: Option<String>,
+    pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_session_id: Option<String>,
 }
 
 impl SessionMeta {
@@ -96,17 +106,19 @@ impl SessionMeta {
         let now = now_millis();
         Self {
             id,
-            title: None,
             cwd,
-            git_branch: None,
-            git_sha: None,
-            model: None,
             created_at_ms: now,
             updated_at_ms: now,
+            title: None,
+            model: None,
+            approval_mode: None,
+            git_branch: None,
+            git_sha: None,
             forked_from: None,
             inherited_event_count: None,
             parent_session_id: None,
-            approval_mode: None,
+            harness: None,
+            remote_session_id: None,
         }
     }
 }
@@ -438,6 +450,28 @@ impl Session {
         let approval_mode = approval_mode.into();
         self.update_meta(|meta| meta.approval_mode = Some(approval_mode))
             .await
+    }
+
+    pub async fn set_remote_session(
+        &self,
+        harness: impl Into<String>,
+        remote_session_id: impl Into<String>,
+    ) -> Result<()> {
+        let harness = harness.into();
+        let remote_session_id = remote_session_id.into();
+        self.update_meta(|meta| {
+            meta.harness = Some(harness);
+            meta.remote_session_id = Some(remote_session_id);
+        })
+        .await
+    }
+
+    pub async fn clear_remote_session(&self) -> Result<()> {
+        self.update_meta(|meta| {
+            meta.harness = None;
+            meta.remote_session_id = None;
+        })
+        .await
     }
 
     pub async fn flush(&self) -> Result<()> {
@@ -1045,6 +1079,54 @@ mod tests {
             .unwrap();
         let persisted: SessionMeta = serde_json::from_str(&raw).unwrap();
         assert_eq!(persisted.title.as_deref(), Some("Renamed"));
+
+        fs::remove_dir_all(&root).await.unwrap();
+    }
+
+    #[test]
+    fn session_meta_deserializes_without_optional_fields() {
+        let meta: SessionMeta = serde_json::from_str(
+            r#"{"id":"ses-minimal","cwd":"/tmp/workspace","created_at_ms":1,"updated_at_ms":2}"#,
+        )
+        .unwrap();
+
+        assert_eq!(meta.id.as_str(), "ses-minimal");
+        assert_eq!(meta.title, None);
+        assert_eq!(meta.harness, None);
+        assert_eq!(meta.remote_session_id, None);
+    }
+
+    #[tokio::test]
+    async fn remote_session_fields_round_trip() {
+        let root = temp_root("remote-meta");
+        let config = config(&root);
+        let id = SessionId::new();
+        let session = Session::open_or_create(&config, id.clone(), PathBuf::from("/tmp/workspace"))
+            .await
+            .unwrap();
+
+        session
+            .set_remote_session("acp:agy", "remote-session-1")
+            .await
+            .unwrap();
+
+        let meta = session.meta();
+        assert_eq!(meta.harness.as_deref(), Some("acp:agy"));
+        assert_eq!(meta.remote_session_id.as_deref(), Some("remote-session-1"));
+
+        let raw = fs::read_to_string(root.join(id.as_str()).join(META_FILE))
+            .await
+            .unwrap();
+        let persisted: SessionMeta = serde_json::from_str(&raw).unwrap();
+        assert_eq!(persisted.harness.as_deref(), Some("acp:agy"));
+        assert_eq!(
+            persisted.remote_session_id.as_deref(),
+            Some("remote-session-1")
+        );
+
+        session.clear_remote_session().await.unwrap();
+        assert_eq!(session.meta().harness, None);
+        assert_eq!(session.meta().remote_session_id, None);
 
         fs::remove_dir_all(&root).await.unwrap();
     }

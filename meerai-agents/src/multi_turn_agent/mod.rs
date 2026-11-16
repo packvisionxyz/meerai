@@ -14,6 +14,7 @@ use genai::chat::{
     ToolResponse,
 };
 use genai::{Client, Headers};
+use meerai_common::hooks::HookEvent;
 use meerai_common::settings::ContextSettings;
 use meerai_core::env::{MEERAI_USER_AGENT, generate_opencode_session_id, resolve_lexical_subpath};
 use meerai_core::text::floor_char_boundary;
@@ -40,7 +41,10 @@ use crate::events::{
     SessionItem, TurnEndReason, TurnId, TurnTrigger,
 };
 use crate::harness::AgentHarness;
-use crate::intercept::{SharedInterceptor, StepAction, StepPlan, ToolOutcome, TurnStopAction};
+use crate::hooks::{HookContext, HookEngine, HookReport};
+use crate::intercept::{
+    SharedInterceptor, StepAction, StepPlan, ToolContext, ToolOutcome, ToolPlan, TurnStopAction,
+};
 use crate::redact::{redact_run, redact_text};
 
 const STEP_LIMIT_NOTICE: &str =
@@ -317,6 +321,14 @@ impl TurnError {
         }
     }
 
+    pub(super) fn config(source: anyhow::Error) -> Self {
+        Self {
+            code: ErrorCode::Config,
+            source,
+            retryable: false,
+        }
+    }
+
     pub(super) fn message(&self) -> String {
         format!("{:#}", self.source)
     }
@@ -370,6 +382,9 @@ pub struct MultiTurnAgent {
     pub(super) outside_grants: HashSet<PathBuf>,
     pub(super) interceptors: Vec<SharedInterceptor>,
     pub(super) question_cancels: usize,
+    pub(super) hooks: Arc<HookEngine>,
+    pub(super) post_edit_diagnostics: bool,
+    pub(super) session_started: bool,
 }
 
 impl std::fmt::Debug for MultiTurnAgent {
@@ -446,8 +461,11 @@ impl MultiTurnAgent {
             failure_tracker: FailureTracker::default(),
             injected_instruction_dirs: HashSet::new(),
             outside_grants: HashSet::new(),
-            interceptors: Vec::new(),
+            interceptors: vec![Arc::new(crate::checkpoint::CheckpointInterceptor)],
             question_cancels: 0,
+            hooks: Arc::new(HookEngine::default()),
+            post_edit_diagnostics: false,
+            session_started: false,
         }
     }
 
@@ -475,6 +493,52 @@ impl MultiTurnAgent {
         &self.interceptors
     }
 
+    pub fn set_hooks(&mut self, hooks: Arc<HookEngine>) {
+        self.hooks = hooks;
+    }
+
+    pub fn set_post_edit_diagnostics(&mut self, enabled: bool) {
+        self.post_edit_diagnostics = enabled;
+    }
+
+    pub fn hooks(&self) -> &HookEngine {
+        &self.hooks
+    }
+
+    pub async fn start_session(&mut self, event_tx: &mpsc::UnboundedSender<AgentEvent>) {
+        if self.session_started {
+            return;
+        }
+        self.session_started = true;
+        self.run_hook(
+            HookEvent::SessionStart,
+            None,
+            None,
+            None,
+            None,
+            None,
+            event_tx,
+        )
+        .await;
+    }
+
+    pub async fn end_session(&mut self, event_tx: &mpsc::UnboundedSender<AgentEvent>) {
+        if !self.session_started {
+            return;
+        }
+        self.session_started = false;
+        self.run_hook(
+            HookEvent::SessionEnd,
+            None,
+            None,
+            None,
+            None,
+            None,
+            event_tx,
+        )
+        .await;
+    }
+
     pub(super) fn run_before_step(&self, plan: &mut StepPlan) -> StepAction {
         for interceptor in &self.interceptors {
             if let StepAction::Stop { reason } = interceptor.before_step(plan) {
@@ -491,6 +555,18 @@ impl MultiTurnAgent {
             .collect()
     }
 
+    pub(super) async fn run_before_tool(
+        &self,
+        plan: &ToolPlan<'_>,
+        ctx: &ToolContext<'_>,
+    ) -> Vec<SessionEvent> {
+        let mut events = Vec::new();
+        for interceptor in &self.interceptors {
+            events.extend(interceptor.before_tool(plan, ctx).await);
+        }
+        events
+    }
+
     pub(super) fn run_turn_stopping(&self, turn_id: &TurnId, step_index: usize) -> Option<String> {
         for interceptor in &self.interceptors {
             if let TurnStopAction::Continue { reason } =
@@ -500,6 +576,45 @@ impl MultiTurnAgent {
             }
         }
         None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn run_hook(
+        &self,
+        event: HookEvent,
+        turn_id: Option<&TurnId>,
+        tool_name: Option<&str>,
+        tool_input: Option<&str>,
+        tool_output: Option<&str>,
+        prompt: Option<&str>,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) -> HookReport {
+        if self.hooks.is_empty() {
+            return HookReport::default();
+        }
+        let Some(harness) = &self.harness else {
+            return HookReport::default();
+        };
+        let ctx = HookContext {
+            session_id: harness.session.id().as_str(),
+            turn_id,
+            tool_name,
+            tool_input,
+            tool_output,
+            prompt,
+            cwd: harness.policy.workspace_root(),
+        };
+        let report = self.hooks.run(event, &ctx).await;
+        for firing in &report.firings {
+            self.log_event(event_tx, firing.clone().into_session_event())
+                .await;
+            let _ = event_tx.send(AgentEvent::HookCompleted {
+                event: firing.event.as_str().to_string(),
+                decision: firing.decision.as_str().to_string(),
+                reason: firing.reason.clone(),
+            });
+        }
+        report
     }
 
     pub(super) fn estimated_cost(&self, usage: Usage) -> Option<f64> {
@@ -615,6 +730,12 @@ impl MultiTurnAgent {
             harness.policy = policy;
             harness.config = HarnessConfig::from_context_settings(context.as_ref());
         }
+        if let Some(enabled) = context
+            .as_ref()
+            .and_then(|context| context.post_edit_diagnostics)
+        {
+            self.post_edit_diagnostics = enabled;
+        }
         self.system_prompt = system_prompt;
         self.system_prompt_generation = self.system_prompt_generation.wrapping_add(1);
         self.logged_system_prompt = None;
@@ -674,6 +795,7 @@ impl MultiTurnAgent {
         self.injected_instruction_dirs.clear();
         self.outside_grants.clear();
         self.question_cancels = 0;
+        self.session_started = false;
     }
 
     pub async fn prompt(&mut self, prompt: &str) -> Result<String> {

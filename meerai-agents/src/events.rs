@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use meerai_common::hooks::HookEntry;
 use meerai_common::settings::ContextSettings;
 use meerai_core::{EffectClass, FileDiff};
 use meerai_policy::{ApprovalMode, PermissionRule};
@@ -188,6 +189,12 @@ pub enum AgentEvent {
         code: ErrorCode,
         message: String,
     },
+    HookCompleted {
+        event: String,
+        decision: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -228,6 +235,7 @@ pub enum AgentCommand {
         context: Option<ContextSettings>,
         system_prompt: String,
     },
+    SetHooks(Vec<HookEntry>),
     Cancel,
     Reset,
     Quit,

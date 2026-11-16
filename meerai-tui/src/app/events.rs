@@ -3,10 +3,10 @@ use std::time::Instant;
 use meerai_agents::{
     AgentEvent, ErrorCode, ItemDelta, ItemId, ItemStatus, SessionItem, TurnEndReason,
 };
-use meerai_core::ObservationStatus;
-use meerai_session::{
-    ContentBlock, InputSource, LoggedEvent, SeqRange, SessionEvent, join_text_blocks,
-};
+use meerai_session::replay::{ReplayEntry, ReplaySubagent, ReplayToolCall, replay_from_events};
+use meerai_session::{LoggedEvent, SessionEvent};
+
+pub use meerai_session::replay::session_usage_from_events;
 
 use super::*;
 
@@ -432,6 +432,18 @@ impl SessionTab {
             AgentEvent::QuestionAsked { .. }
             | AgentEvent::QuestionResolved { .. }
             | AgentEvent::RewindCompleted { .. } => {}
+            AgentEvent::HookCompleted {
+                event,
+                decision,
+                reason,
+            } => {
+                let mut text = format!("hook {event}: {decision}");
+                if let Some(reason) = reason {
+                    text.push_str(" — ");
+                    text.extend(reason.chars().take(200));
+                }
+                self.transcript.push(TranscriptEntry::System { text });
+            }
             AgentEvent::UsageUpdated {
                 usage, cumulative, ..
             } => {
@@ -572,7 +584,7 @@ impl SessionTab {
                     ToolCallStatus::Proposed | ToolCallStatus::Running
                 )
             {
-                entry.status = fallback.clone();
+                entry.status = fallback;
             }
         }
     }
@@ -606,133 +618,56 @@ fn map_completed_item_status(status: ItemStatus) -> ToolCallStatus {
 }
 
 pub fn transcript_from_events(events: &[LoggedEvent]) -> Vec<TranscriptEntry> {
-    let shadowed: Vec<SeqRange> = events
-        .iter()
-        .filter_map(|logged| match &logged.event {
-            SessionEvent::RewindApplied {
-                replaced: Some(replaced),
-                ..
-            } => Some(*replaced),
-            _ => None,
-        })
-        .collect();
-    let mut transcript = Vec::new();
-    for logged in events {
-        if shadowed.iter().any(|range| range.contains(logged.seq)) {
-            continue;
-        }
-        match &logged.event {
-            SessionEvent::UserMessage {
-                source: InputSource::User | InputSource::Steering,
-                content,
-            } => {
-                let text = join_text_blocks(content);
-                if !text.is_empty() {
-                    transcript.push(TranscriptEntry::User { text });
-                }
-            }
-            SessionEvent::AssistantMessage { content, .. } => {
-                let text = join_text_blocks(content);
-                let reasoning = content
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Reasoning(text) => Some(text.as_str()),
-                        ContentBlock::Text(_) => None,
-                    })
-                    .filter(|text| !text.is_empty())
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                if !text.is_empty() || !reasoning.is_empty() {
-                    transcript.push(TranscriptEntry::Assistant {
-                        text,
-                        reasoning,
-                        streaming: false,
-                        reasoning_expanded: false,
-                    });
-                }
-            }
-            SessionEvent::ToolCall {
-                call_id,
-                name,
-                args,
-            } => {
-                transcript.push(TranscriptEntry::ToolCall(ToolCallEntry {
-                    call_id: call_id.to_string(),
-                    name: name.clone(),
-                    args: args.clone(),
-                    status: ToolCallStatus::Running,
-                    output: None,
-                    expanded: false,
-                }));
-            }
-            SessionEvent::ToolResult { call_id, output } => {
-                let call_id = call_id.to_string();
-                let status = observation_status(output.status);
-                let rendered = output.render();
-                let existing = transcript.iter_mut().rev().find_map(|entry| match entry {
-                    TranscriptEntry::ToolCall(entry) if entry.call_id == call_id => Some(entry),
-                    _ => None,
-                });
-                if let Some(entry) = existing {
-                    entry.status = status;
-                    if !rendered.is_empty() {
-                        entry.output = Some(rendered);
-                    }
-                }
-            }
-            SessionEvent::CompactionSummary { .. } => {
-                transcript.push(TranscriptEntry::System {
-                    text: "Compacted history".to_string(),
-                });
-            }
-            _ => {}
-        }
-    }
-    for entry in &mut transcript {
-        if let TranscriptEntry::ToolCall(entry) = entry
-            && entry.status == ToolCallStatus::Running
-        {
-            entry.status = ToolCallStatus::Cancelled;
-            entry.output = None;
-        }
-    }
-    for entry in &mut transcript {
-        if let TranscriptEntry::ToolCall(tc) = entry
-            && tc.name == "subagent-run"
-            && let Some(child_id) = tc.output.as_deref().and_then(parse_child_session_hint)
-        {
-            let agent = serde_json::from_str::<serde_json::Value>(&tc.args)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("agent")
-                        .and_then(|agent| agent.as_str())
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| "subagent".to_string());
-            *entry = TranscriptEntry::Subagent(SubagentEntry {
-                id: tc.call_id.clone(),
-                agent,
-                status: tc.status.clone(),
-                report: tc.output.clone(),
-                child_session_id: Some(child_id),
-                expanded: false,
-                nested: None,
-                nested_refreshed_at: None,
-                nested_loading: false,
-            });
-        }
-    }
-    transcript
+    replay_from_events(events)
+        .into_iter()
+        .map(TranscriptEntry::from)
+        .collect()
 }
 
-fn parse_child_session_hint(output: &str) -> Option<String> {
-    output.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("Hint: child_session_id: ")
-            .map(|id| id.trim().to_string())
-            .filter(|id| !id.is_empty())
-    })
+impl From<ReplayToolCall> for ToolCallEntry {
+    fn from(call: ReplayToolCall) -> Self {
+        Self {
+            call_id: call.call_id,
+            name: call.name,
+            args: call.args,
+            status: call.status,
+            output: call.output,
+            expanded: false,
+        }
+    }
+}
+
+impl From<ReplaySubagent> for SubagentEntry {
+    fn from(subagent: ReplaySubagent) -> Self {
+        Self {
+            id: subagent.id,
+            agent: subagent.agent,
+            status: subagent.status,
+            report: subagent.report,
+            child_session_id: subagent.child_session_id,
+            expanded: false,
+            nested: None,
+            nested_refreshed_at: None,
+            nested_loading: false,
+        }
+    }
+}
+
+impl From<ReplayEntry> for TranscriptEntry {
+    fn from(entry: ReplayEntry) -> Self {
+        match entry {
+            ReplayEntry::User { text } => TranscriptEntry::User { text },
+            ReplayEntry::Assistant { text, reasoning } => TranscriptEntry::Assistant {
+                text,
+                reasoning,
+                streaming: false,
+                reasoning_expanded: false,
+            },
+            ReplayEntry::ToolCall(call) => TranscriptEntry::ToolCall(call.into()),
+            ReplayEntry::Subagent(subagent) => TranscriptEntry::Subagent(subagent.into()),
+            ReplayEntry::System { text } => TranscriptEntry::System { text },
+        }
+    }
 }
 
 impl AppState {
@@ -818,21 +753,6 @@ impl AppState {
         if let Ok(events) = result {
             entry.nested = Some(transcript_from_events(&events));
         }
-    }
-}
-
-pub fn session_usage_from_events(events: &[LoggedEvent]) -> Option<meerai_agents::Usage> {
-    events.iter().rev().find_map(|logged| match &logged.event {
-        SessionEvent::UsageUpdated { cumulative, .. } => Some(*cumulative),
-        _ => None,
-    })
-}
-
-fn observation_status(status: ObservationStatus) -> ToolCallStatus {
-    match status {
-        ObservationStatus::Success => ToolCallStatus::Succeeded,
-        ObservationStatus::Error | ObservationStatus::Refused => ToolCallStatus::Failed,
-        ObservationStatus::Stopped => ToolCallStatus::Stopped,
     }
 }
 

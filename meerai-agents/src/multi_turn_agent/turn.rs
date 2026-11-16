@@ -42,6 +42,46 @@ impl MultiTurnAgent {
             },
         )
         .await;
+        let prompt_report = self
+            .run_hook(
+                HookEvent::UserPromptSubmit,
+                Some(&turn_id),
+                None,
+                Some(prompt),
+                None,
+                Some(prompt),
+                event_tx,
+            )
+            .await;
+        if matches!(
+            prompt_report.decision,
+            crate::hooks::HookDecision::Deny | crate::hooks::HookDecision::Block
+        ) {
+            let reason = prompt_report
+                .reason()
+                .unwrap_or("blocked by hook")
+                .to_string();
+            self.log_event(
+                event_tx,
+                SessionEvent::Error {
+                    code: ErrorCode::Config,
+                    message: reason.clone(),
+                    retryable: false,
+                },
+            )
+            .await;
+            self.log_event(
+                event_tx,
+                SessionEvent::TurnEnded {
+                    turn_id: turn_id.clone(),
+                    reason: TurnEndReason::Failed {
+                        error: reason.clone(),
+                    },
+                },
+            )
+            .await;
+            return (turn_id, Err(TurnError::config(anyhow!(reason))));
+        }
         self.log_event(
             event_tx,
             SessionEvent::UserMessage {
@@ -467,18 +507,36 @@ impl MultiTurnAgent {
                 if self.apply_pending_steers(event_tx).await {
                     continue;
                 }
-                if !stop_hook_used && let Some(reason) = self.run_turn_stopping(turn_id, step_index)
-                {
-                    stop_hook_used = true;
-                    self.log_event(
-                        event_tx,
-                        SessionEvent::UserMessage {
-                            source: InputSource::RuntimeContext,
-                            content: vec![ContentBlock::Text(reason)],
-                        },
-                    )
-                    .await;
-                    continue;
+                if !stop_hook_used {
+                    let report = self
+                        .run_hook(
+                            HookEvent::Stop,
+                            Some(turn_id),
+                            None,
+                            None,
+                            None,
+                            None,
+                            event_tx,
+                        )
+                        .await;
+                    let reason = match report.decision {
+                        crate::hooks::HookDecision::Deny | crate::hooks::HookDecision::Block => {
+                            Some(report.reason().unwrap_or("blocked by hook").to_string())
+                        }
+                        _ => self.run_turn_stopping(turn_id, step_index),
+                    };
+                    if let Some(reason) = reason {
+                        stop_hook_used = true;
+                        self.log_event(
+                            event_tx,
+                            SessionEvent::UserMessage {
+                                source: InputSource::RuntimeContext,
+                                content: vec![ContentBlock::Text(reason)],
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
                 }
                 return Ok(completed(event_tx, turn_id, final_text));
             }

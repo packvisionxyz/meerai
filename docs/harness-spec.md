@@ -177,8 +177,8 @@ Rules:
 ├── session.v<N>.jsonl         # active append-only log (plain, one JSON object per line)
 ├── session.v<N>.jsonl.zstd    # sealed older generations (zstd, write-once)
 ├── blobs/<hash>-<len>.txt     # spilled tool outputs (§7.2)
-├── snapshots/<turn-id>/       # planned only; checkpoints (M6), not created today
-└── meta.json                  # title, cwd, git branch/sha, model, created/updated
+├── snapshots/<turn-id>/       # M6 v1 checkpoints: manifest.json + captured blobs
+└── meta.json                  # cwd, git, title, model, approval mode, harness/remote id, timestamps
 ```
 
 - The active generation is plain JSONL: crash-resilient at line granularity and
@@ -695,6 +695,10 @@ context:
 - The snapshot store lives at `sessions/<id>/snapshots/<turn-id>/`. A turn
   directory holds `manifest.json` plus one blob per captured file. The manifest
   maps workspace-relative paths to `{ blob, existed }`.
+- Restore stages each file in its target directory and renames it into place.
+  A failed step rolls back the applied steps from the snapshot blobs and reports
+  the rollback failures. This is per-file atomicity, not crash durability; a
+  host crash mid-restore can still leave a mixed workspace.
 - Capture runs in `execute_tool_calls` before a write-class tool executes
   (`write_file`, `edit_file`). It captures the original bytes once per file per
   turn, skips symlinks and files over 2 MiB, and records `existed: false` for a
@@ -738,6 +742,20 @@ Deterministic, user-supplied extensions that run *in code*, not in the model.
   and surfaced as `hook started/completed` notifications like Codex.
 - **Trust:** project hooks run only after the workspace is trusted (first-run
   prompt; Codex trust-review rule).
+- **Landed v1:** `meerai_common::hooks` defines `HookEvent`, `HookEntry`, and
+  `load_hooks`; `meerai_agents::hooks` runs matching entries concurrently with a
+  10 s default timeout (60 s max), JSON on stdin, exit `0`/`2`, and JSON
+  decisions for `PreToolUse` and `Stop`. Every firing logs `HookFired`. Project
+  hooks load only with `MEERAI_TRUST_PROJECT_HOOKS=1|true|yes`, user
+  `hooks.trust_project: true`, or the canonical project root in user
+  `hooks.trusted_projects` (`meerai hooks trust|untrust|status`). The TUI path
+  prompts once on a terminal and defaults to no. Hooks
+  may tighten policy but cannot loosen `plan`, an explicit `deny`/`ask` rule, or
+  the outside-workspace approval. `SessionStart`/`SessionEnd` are log-only.
+  Hooks run outside `ExecutionWorld`. Every firing also emits
+  `AgentEvent::HookCompleted`; the TUI appends a System line and headless NDJSON
+  carries it. Load-time `timeout_ms` outside 1..60000 warns and resets to the
+  default. `/reload` re-reads both hook files and sends `AgentCommand::SetHooks`.
 
 ### 9.3 Stop hook & verification
 
@@ -984,8 +1002,8 @@ the `explore` budget viable once subagents land.
 ## 13. Observability & evals (source spec §2.6)
 
 - **Traces**: the log *is* the trace. `meerai export <session> --json` is
-  planned, not built; `transcript_from_events` already renders the human
-  projection. Per-turn rollups: token usage, wall time, `git diff` stat at
+  planned, not built; `meerai_session::replay::replay_from_events` already
+  produces the human projection. Per-turn rollups: token usage, wall time, `git diff` stat at
   `TurnEnded`. `est_cost_usd` is computed from the provider catalog's
   per-million prices when both are configured; otherwise it is `None`.
 - **Replay/evals**: `derive_messages` purity means an offline runner can replay
@@ -1027,15 +1045,15 @@ Extends the roadmap in [architecture.md](architecture.md); each milestone keeps
 | M4 | **Policy engine + approvals** | `meerai-policy`: ordered rules, approval request/response loop, TUI approval overlay wired to `ApprovalRequested`, session grants | new crate, TUI | landed (R1–R3) |
 | M5 | **Context engine v1** | spill policy, ephemera/reasoning pruning, prefix ordering, watermark compaction with bracket lock + `:compact` | `meerai-session`, `meerai-agents` | landed (R1–R3); prefix ordering partial: root `AGENTS.md` + `.meerai/instructions.md` + scoped per-turn injection are implemented; full static-first multi-section prefix remains future work |
 | D1 | **Distribution hardening** | Apache-2.0 license, workspace metadata, CI gate, tag-driven 5-target release, Pages installers | repo root, `.github/`, `site/` | landed |
-| M6 | **Checkpoints + rewind** | per-turn snapshots, `/rewind` menu, restore-code/conversation flows | `meerai-session`, `meerai-agents`, TUI | landed v1: capture before write tools, `RewindScope::{Both,Code,Conversation}`, `/rewind` menu. Shell-only edits, gitignored files, and summarize-from-here remain backlog |
-| M7 | **Hooks** | v1 event set, JSON stdin/exit-2 contract, trust gate, `HookFired` logging | `meerai-policy`, `meerai-agents` | backlog |
+| M6 | **Checkpoints + rewind** | per-turn snapshots, `/rewind` menu, restore-code/conversation flows | `meerai-session`, `meerai-agents`, TUI | landed v1: capture before write tools, `RewindScope::{Both,Code,Conversation}`, `/rewind` menu, staged restore with rollback. Shell-only edits, gitignored files, and summarize-from-here remain backlog |
+| M7 | **Hooks** | 12-event v1 set, JSON stdin/exit-2 contract, explicit project-trust gate, concurrent execution with timeouts, `HookFired` logging, tighten-only policy integration | `meerai-common`, `meerai-policy`, `meerai-agents`, `meerai-cli` | landed v1: TTY trust prompt plus `hooks trust|untrust|status`; `SessionStart`/`SessionEnd` are log-only; `/reload` reloads hooks; hooks run outside `ExecutionWorld` |
 | M8 | **Subagent runtime** | child sessions (`parent_session_id`), depth-1 isolation, built-ins (`build`/`plan`/`explore`/`general`), `subagent-run` tool, forwarded child approvals, usage rollup, `SubagentRun` items, read-only `Plan` execution for M12 custom definitions | `meerai-agents`, `meerai-session`, `meerai-tui` | landed (M8): child sessions and `SubagentToolset` landed; M12 frontmatter `tools`/`permissions` remain prompt-only |
 | M9 | **CLI + resume/fork** | `meerai-cli` crate: `--prompt`, `--json`, `--continue`, `--resume <id>`, `--fork <id>`, `sessions fork <id> [--turn <turn-id>]`, `auth`/`sessions`, config/env wiring | `meerai-cli`, `meerai-session` | landed (M9): `meerai-cli`, `sessions fork`, and `--fork` landed (`-p` stays `--provider`); `export` and TUI `/fork` are not built |
-| M10 | **Retrieval v2/v3** | `RepoMapToolset` (`retrieval-repo_map` via tree-sitter + PageRank), `LspToolset` (`lsp-go_to_definition`, `lsp-find_references`, `lsp-get_diagnostics`), `SearchAsCodeToolset` (`sac-run_script`) | `meerai-tools`, `meerai-cli` | landed (M10): repo map, LSP stdio tools, and search-as-code landed; automatic post-edit diagnostics waits on M7 hooks |
+| M10 | **Retrieval v2/v3** | `RepoMapToolset` (`retrieval-repo_map` via tree-sitter + PageRank), `LspToolset` (`lsp-go_to_definition`, `lsp-find_references`, `lsp-get_diagnostics`), `SearchAsCodeToolset` (`sac-run_script`) | `meerai-tools`, `meerai-cli` | landed (M10): repo map, LSP stdio tools, and search-as-code landed; opt-in post-edit diagnostics (`context.post_edit_diagnostics`) landed |
 | M11 | **Security & supply chain** | landed: path guards, sensitive-file path + policy blocks, `plan` hard read-only, approval gates, provider-secret env scrub, best-effort redaction, heuristic injection screening (`screen_run`/`screen_untrusted_text`), session permissions, retention, budgets, `ExecutionWorld` (`SeatbeltWorld`/`BubblewrapWorld` + `HostWorld` fallback), OS keychain (`KeychainSecretStore`) with `auth.json` fallback, `cargo-deny` CI audit (`deny.toml`), conditional release signing, and [threat-model.md](threat-model.md) | `meerai-tools`, `meerai-policy`, `meerai-providers`, `meerai-agents`, `meerai-cli`, `.github/workflows/`, `docs/threat-model.md` | landed (M11): core runtime controls, CI audit, threat model, and conditional signing landed; repository signing secrets remain operator-configured and Windows uses `HostWorld` |
 | M12 | **Agents & skills discovery** | read-only markdown discovery: `.agents/agents/*.md` + `.agents/skills/*/SKILL.md` over `.claude/...`; duplicate ids resolve to `.agents`; frontmatter `name`/`description`/`model`/`steps`/`mode`; startup `--agent`/`--skill`; TUI `/agent`/`/skill`, the `@` Mentions popup, and composer chips | `meerai-common` (`definitions`), `meerai-tui`, `meerai-agents` (`ApplyAgent`/`ApplySkill`) | landed (R5): prompt instructions only. No subagent runtime (M8), no tool/permission mapping, no MCP, and no supporting skill files |
-| M13 | **ACP client (external harnesses)** | adapter presets in user config only; spawn via `AcpAgent`; `session/new`/`session/prompt`/`session/cancel`; map chunks, tool calls, plans, usage, and permission requests to `AgentEvent`; `--acp`/`/acp`; `acp doctor`. Target order: Antigravity (`agy acp`), then OpenCode (`opencode acp`), then Gemini/Claude/Codex. Design in [acp.md](acp.md) | new `meerai-acp` crate, `meerai-tui`, `meerai-session` (meta fields) | backlog (P0 spike first). External agents keep their own tools and policy: meerai rules, path guards, and redaction do not apply; permission requests are advisory |
-| M14 | **ACP agent (meerai in editors)** | `meerai acp` on stdio: `initialize`, `session/new`, `session/load`, `session/prompt`, `session/cancel`, `set_mode`; stream `AgentEvent` as `session/update`; approvals as `session/request_permission`; `session/load` reuses `transcript_from_events`. Design in [acp.md](acp.md) | `meerai-acp`, `meerai-agents`, `meerai-tui` | backlog. Gates on the ACP compatibility kit plus an editor smoke |
+| M13 | **ACP client (external harnesses)** | adapter presets in user config only; spawn via `AcpAgent`; `session/new`/`session/prompt`/`session/cancel`; map chunks, tool calls, plans, usage, and permission requests to `AgentEvent`; `--acp`/`/acp`; `acp doctor`. Target order: Antigravity (`agy acp`), then OpenCode (`opencode acp`), then Gemini/Claude/Codex. Design in [acp.md](acp.md) | `meerai-acp`, `meerai-tui`, `meerai-session` (meta fields) | P1 landed: `meerai-acp` spawns `agy acp`, exposes a typed `AcpEvent` stream, permission replies, cancel, and an ignored live test. P2/P3 (`--acp`, `/acp`, `acp doctor`, OpenCode preset) remain backlog. External agents keep their own tools and policy: meerai rules, path guards, and redaction do not apply; permission requests are advisory |
+| M14 | **ACP agent (meerai in editors)** | `meerai acp` on stdio: `initialize`, `session/new`, `session/load`, `session/prompt`, `session/cancel`, `set_mode`; stream `AgentEvent` as `session/update`; approvals as `session/request_permission`; `session/load` reuses `meerai_session::replay::replay_from_events`. Design in [acp.md](acp.md) | `meerai-acp`, `meerai-agents`, `meerai-tui` | backlog. Gates on the ACP compatibility kit plus an editor smoke |
 
 Ordering rationale: M1–M2 establish the two load-bearing patterns (log,
 protocol) before features accrete; everything after is projection rules,
@@ -1139,10 +1157,13 @@ contention is normal, not a hang.
   rest of the batch, and returns a JSON answer or a structured cancellation.
   Subagents do not get the tool.
 - **Step interceptor seam.** `meerai-agents::intercept` is the extension point
-  for M6/M7: an ordered `Vec<Arc<dyn Interceptor>>` runs `before_step`,
-  `after_tool`, and `turn_stopping` without editing the loop body. `ToolOutcome`
-  carries the post-redaction, post-spill observation. Hooks and checkpoints must
-  register here, not add branches to `turn.rs`.
+  for in-loop extensions: an ordered `Vec<Arc<dyn Interceptor>>` runs
+  `before_step`, async `before_tool`, `after_tool`, and `turn_stopping` without
+  editing the loop body. `ToolContext` carries the workspace and snapshot store;
+  `ToolOutcome` carries the post-redaction, post-spill observation. Checkpoint
+  capture is the built-in `CheckpointInterceptor`. Hooks use a separate
+  `HookEngine`, because they await host processes at lifecycle points outside
+  the loop.
 - **Provider model metadata.** `ModelInfo` lives in `ProviderCatalog`, not in
   `HarnessConfig`. The catalog supplies only defaults; user settings and the
   project file still win, and a project cannot raise a cap. Pricing is never
@@ -1519,7 +1540,7 @@ the Post-M5 R5 note).
   `lsp-get_diagnostics` over stdio JSON-RPC), and `SearchAsCodeToolset`
   (`sac-run_script` running `python3 -I` / `node -e` with env scrubbing and
   `EffectClass::Execute` policy gating). Automatic post-edit LSP diagnostics
-  remains queued behind M7 hooks.
+  remains backlog.
 
 ---
 
