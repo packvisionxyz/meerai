@@ -3,14 +3,16 @@ use anyhow::{Result, bail};
 pub(crate) const HELP_TEXT: &str = "Usage:\n  \
     meerai [-p|--provider <PROVIDER>] [-m|--model <MODEL>] [--system <INSTRUCTIONS>]\n          \
     [--mode <plan|ask|auto-edit|auto-approve|yolo>] [--continue | --resume <ID> | --fork <ID>] [--env-file <PATH>]\n          \
-    [--agent <ID>] [--skill <ID>]... [-h|--help] [-V|--version]\n  \
-    meerai --prompt <TEXT> [--json] [--continue | --resume <ID> | --fork <ID>] [--mode <MODE>]\n          \
+    [--acp] [--agent <ID>] [--skill <ID>]... [-h|--help] [-V|--version]\n  \
+    meerai --prompt <TEXT> [--json] [--acp] [--continue | --resume <ID> | --fork <ID>] [--mode <MODE>]\n          \
     [--agent <ID>] [--skill <ID>]...\n  \
+    meerai acp doctor\n  \
     meerai auth <list|login|logout>\n  \
     meerai sessions <list|rm|prune|fork>\n  \
     meerai hooks <trust|untrust|status>\n\
     \n\
     Commands:\n  \
+    acp doctor                      Connect to the agy ACP adapter, print capabilities, exit\n  \
     auth list                       Show credentials across auth.json, config, and env\n  \
     auth login <provider> [key]     Save an API key in ~/.local/share/meerai/auth.json\n  \
     auth logout <provider>          Remove a stored API key from auth.json\n  \
@@ -39,6 +41,7 @@ pub(crate) const HELP_TEXT: &str = "Usage:\n  \
         --fork <ID>            Fork a session from its latest closed turn and open it\n  \
         --json                 Print one NDJSON AgentEvent per line (with --prompt)\n  \
         --mode <MODE>          Approval mode: plan, ask, auto-edit, auto-approve, yolo\n  \
+        --acp                  Use the external ACP agent (agy) instead of the built-in harness\n  \
         --agent <ID>           Apply a markdown agent by id\n  \
         --skill <ID>           Apply a markdown skill by id (repeatable)\n  \
         --env-file <PATH>         Load variables from PATH (no implicit .env loading)\n  \
@@ -78,8 +81,14 @@ pub(crate) enum HooksCommand {
     Status,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AcpCommand {
+    Doctor,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CliSubcommand {
+    Acp(AcpCommand),
     Auth(AuthCommand),
     Hooks(HooksCommand),
     Sessions(SessionsCommand),
@@ -93,6 +102,7 @@ pub(crate) struct CliArgs {
     pub(crate) system: String,
     pub(crate) prompt: Option<String>,
     pub(crate) json: bool,
+    pub(crate) acp: bool,
     pub(crate) mode: Option<String>,
     pub(crate) env_file: Option<String>,
     pub(crate) continue_session: bool,
@@ -126,6 +136,7 @@ where
     let mut system = String::new();
     let mut prompt = None;
     let mut json = false;
+    let mut acp = false;
     let mut mode = None;
     let mut env_file = None;
     let mut continue_session = false;
@@ -145,6 +156,23 @@ where
             "-V" | "--version" => {
                 version = true;
             }
+            "acp" if subcommand.is_none() => match iter.next().as_deref() {
+                None | Some("doctor") => {
+                    if let Some(extra) = iter.next() {
+                        match extra.as_str() {
+                            "-h" | "--help" => show_help = true,
+                            _ => bail!("unexpected argument for acp doctor: {extra}"),
+                        }
+                    }
+                    subcommand = Some(CliSubcommand::Acp(AcpCommand::Doctor));
+                }
+                Some("-h" | "--help") => {
+                    show_help = true;
+                }
+                Some(other) => {
+                    bail!("unknown acp subcommand: {other}. Expected: doctor");
+                }
+            },
             "auth" if subcommand.is_none() => match iter.next().as_deref() {
                 None | Some("list") | Some("ls") => {
                     if let Some(extra) = iter.next() {
@@ -389,6 +417,9 @@ where
             "--json" => {
                 json = true;
             }
+            "--acp" => {
+                acp = true;
+            }
             "--continue" => {
                 continue_session = true;
             }
@@ -485,6 +516,20 @@ where
     if agents.len() > 1 {
         bail!("--agent can be given only once");
     }
+    if acp && (!agents.is_empty() || !skills.is_empty()) {
+        bail!(
+            "--acp cannot be combined with --agent or --skill; the external agent controls its own instructions"
+        );
+    }
+    if acp && mode.is_some() {
+        eprintln!(
+            "Warning: --mode is ignored with --acp; the external agent controls its own modes"
+        );
+    }
+    #[cfg(not(feature = "tui"))]
+    if acp && prompt.is_none() {
+        bail!("ACP without --prompt requires a TUI build");
+    }
 
     Ok(CliArgs {
         subcommand,
@@ -493,6 +538,7 @@ where
         system,
         prompt,
         json,
+        acp,
         mode,
         env_file,
         continue_session,

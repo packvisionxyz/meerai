@@ -121,16 +121,16 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             let inner = dialog_frame(frame, app, popup, &title, true);
 
             let rows = Layout::vertical([
-                Constraint::Length(1), // status
-                Constraint::Length(1), // gap
-                Constraint::Length(1), // api key label
-                Constraint::Length(1), // api key input
-                Constraint::Length(1), // gap
-                Constraint::Length(1), // base url label
-                Constraint::Length(1), // base url input
-                Constraint::Min(1),    // gap / note
-                Constraint::Length(1), // status/err
-                Constraint::Length(1), // footer
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
             ])
             .split(inner);
 
@@ -267,13 +267,13 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             let inner = dialog_frame(frame, app, popup, &title, true);
 
             let rows = Layout::vertical([
-                Constraint::Length(1), // input
-                Constraint::Length(1), // gap
-                Constraint::Length(1), // section label
-                Constraint::Min(1),    // list
-                Constraint::Length(1), // gap
-                Constraint::Length(1), // status
-                Constraint::Length(1), // footer
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
             ])
             .split(inner);
 
@@ -471,11 +471,11 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             let inner = dialog_frame(frame, app, popup, &title, true);
 
             let layout = Layout::vertical([
-                Constraint::Length(1), // query band
-                Constraint::Length(1), // gap
-                Constraint::Min(5),    // panes
-                Constraint::Length(1), // gap
-                Constraint::Length(1), // footer
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(5),
+                Constraint::Length(1),
+                Constraint::Length(1),
             ])
             .split(inner);
 
@@ -685,11 +685,11 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             let inner = dialog_frame(frame, app, popup, "Commands (Ctrl-p)", true);
 
             let rows = Layout::vertical([
-                Constraint::Length(1), // filter
-                Constraint::Length(1), // gap
-                Constraint::Min(3),    // list
-                Constraint::Length(1), // gap
-                Constraint::Length(1), // footer
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
             ])
             .split(inner);
 
@@ -792,11 +792,11 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             let inner = dialog_frame(frame, app, popup, "Rewind", true);
 
             let rows = Layout::vertical([
-                Constraint::Length(1), // intro
-                Constraint::Length(1), // gap
-                Constraint::Min(2),    // options
-                Constraint::Length(1), // gap
-                Constraint::Length(1), // footer
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(2),
+                Constraint::Length(1),
+                Constraint::Length(1),
             ])
             .split(inner);
 
@@ -1016,11 +1016,11 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             );
 
             let rows = Layout::vertical([
-                Constraint::Length(2), // header
-                Constraint::Length(1), // gap
-                Constraint::Min(3),    // preview card
-                Constraint::Length(1), // gap
-                Constraint::Length(2), // footer / reason
+                Constraint::Length(2),
+                Constraint::Length(1),
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(2),
             ])
             .split(inner);
 
@@ -1028,6 +1028,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 ApprovalKind::ToolCall => "tool call",
                 ApprovalKind::Spend => "spend",
                 ApprovalKind::SandboxEscape => "sandbox escape",
+                ApprovalKind::ExternalAgent => "external agent permission",
             };
             let effect = match request.effect {
                 Some(EffectClass::Read) => " · effect: read",
@@ -1177,11 +1178,11 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             let inner = dialog_frame(frame, app, popup, "Switch Session (/sessions)", true);
 
             let rows = Layout::vertical([
-                Constraint::Length(1), // filter
-                Constraint::Length(1), // gap
-                Constraint::Min(3),    // list
-                Constraint::Length(1), // gap
-                Constraint::Length(1), // footer
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
             ])
             .split(inner);
 

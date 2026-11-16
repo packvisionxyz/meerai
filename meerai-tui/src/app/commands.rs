@@ -86,6 +86,20 @@ impl AppState {
             "/close" => {
                 self.close_active_tab();
             }
+            "/acp" => {
+                if self.session_opener.is_some() {
+                    self.status_notice = Some("Opening ACP session (agy)...".to_string());
+                    self.pending_session_actions
+                        .push(PendingSessionAction::CreateAcpTab {
+                            preset: "agy".to_string(),
+                        });
+                } else {
+                    self.tab_mut().transcript.push(TranscriptEntry::Error {
+                        text: "ACP sessions are not available in this context.".to_string(),
+                        expanded: false,
+                    });
+                }
+            }
             "/auth" => {
                 let data_dir = default_data_dir();
                 let auth_path = data_dir.as_deref().map(auth_file_path);

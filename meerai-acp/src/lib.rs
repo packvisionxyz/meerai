@@ -1,22 +1,17 @@
-//! meerai's ACP client bridge.
-//!
-//! The crate spawns one external ACP agent from a preset, performs the
-//! `initialize` and `session/new` handshake, and exposes a typed event stream
-//! plus permission replies. Every `agent-client-protocol` type stays inside
-//! this crate.
-//!
-//! There is no CLI, TUI, settings, or agent-loop integration yet, and no claim
-//! that meerai's permission rules, path guards, redaction, or sandbox applies
-//! to the external agent process.
+//! meerai's ACP client bridge. It spawns an external agent and adapts it to
+//! `AgentCommand`/`AgentEvent`. meerai's permission rules, path guards,
+//! redaction, and sandbox do not apply to the external process.
 
 mod client;
 mod events;
+mod worker;
 
-pub use client::{AcpSession, connect};
+pub use client::{AcpHandshake, AcpSession, AcpStart, connect, connect_with};
 pub use events::{
     AcpEvent, AcpPermissionKind, AcpPermissionOption, AcpPermissionRequest, AcpPlanStep,
     AcpToolCall, AcpToolCallUpdate,
 };
+pub use worker::{AcpWorkerConfig, spawn_acp_worker};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcpPreset {

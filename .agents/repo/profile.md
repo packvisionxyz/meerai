@@ -11,7 +11,7 @@
 - **Product:** `meerai` (Pack Vision) — a pure, provider-agnostic terminal coding-agent harness
   written in Rust, featuring a selection-first modal TUI and a scriptable headless CLI mode.
 - **Shape:** Rust Cargo workspace (`edition = "2024"`, toolchain pinned to `1.100.0`). Eleven
-  library crates plus the `meerai` binary, built by `meerai-cli`. Milestones M1–M12 of
+  library crates plus the `meerai` binary, built by `meerai-cli`. Milestones M1–M13 of
   `docs/harness-spec.md` have landed; the repo is distribution-hardened (Apache-2.0
   license, CI, tag-driven releases, Pages site) and includes project-root config discovery, TUI
   transcript replay, opt-in automatic session retention, best-effort tool-output redaction,
@@ -19,8 +19,9 @@
   (`repo_map`, `lsp`, `search_as_code`), security & supply-chain controls (**M11**),
   read-only agent/skill discovery from `.agents`/`.claude` (**M12**), checkpoints/rewind (**M6**)
   v1, and hooks (**M7**) v1. Project hooks require explicit trust through a one-time TTY prompt,
-  `meerai hooks trust`, or user settings. `meerai-acp` holds the M13-P1 `agy` bridge; no ACP CLI,
-  TUI, or provider surface exists yet.
+  `meerai hooks trust`, or user settings. M13 is landed for `agy`: `meerai-acp`, `--acp`, `/acp`,
+  `acp doctor`, the `ACP:agy` badge and `agy (acp)` header, and `session/load` resume. OpenCode/
+  Claude presets and M14 remain backlog.
 - **Clients:** `meerai-tui` provides the modal terminal UI library (including replay of an
   existing session selected by `--continue`/`--resume <ID>`/`--fork <ID>` and subagent items);
   `meerai-cli` builds the `meerai` binary with CLI flag parsing, headless one-shot runner
@@ -63,9 +64,10 @@
 
 ### ACP (see `docs/acp.md`)
 
-- `meerai-acp/` — M13-P1 client bridge: `AGY` preset, `connect`, typed `AcpEvent` stream,
-  permission replies, cancel, stderr tail, ignored live test. No CLI/TUI/settings wiring.
-  M13-P2/P3 and M14 remain backlog.
+- `meerai-acp/` — ACP client bridge: `AGY` preset, `connect`/`connect_with`, `AcpHandshake`,
+  typed `AcpEvent` stream, `AcpWorker` (`AgentCommand`/`AgentEvent` + session log), permission
+  replies, cancel, `session/load`, stderr tail, ignored live tests. The CLI/TUI depend on it.
+  OpenCode/Claude presets and M14 remain backlog.
 
 ## 3. Commands
 
@@ -191,6 +193,13 @@ Notes:
     exposes `/agent`/`/skill` and a `@` Mentions popup (agents, skills, files; `<id>|agent` /
     `<id>|skill` badges; Tab accepts, Enter accepts without submitting, Esc dismisses); there is no
     `/agents`/`/skills` list command.
+22. **ACP client (M13, agy):** `--acp` drives `agy acp`; `/acp` opens a new tab; `acp doctor`
+    prints the handshake. `AcpWorker` maps `AcpEvent` to `AgentEvent` and `SessionEvent`, sets
+    `harness: acp:agy`/`remote_session_id`, and uses `session/load` for resume. Pre-`Connected`
+    replay updates are drained. `ApprovalKind::ExternalAgent` forwards a decision that is advisory.
+    ACP does not consult `PolicyEngine`, grants, path guards, redaction, or `ExecutionWorld`;
+    `plan` refuses `--acp`. Never describe ACP as a safety boundary. OpenCode/Claude presets and
+    M14 are backlog.
 
 ## 5. Patterns
 
@@ -217,7 +226,7 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 | User questions | `question-ask` tool + `QuestionAsked`/`QuestionResolved` events + `AnswerQuestion`; TUI overlay; headless auto-cancel | `meerai-agents/src/question.rs`, `meerai-tui/src/app/modals.rs` |
 | Rewind | capture before write tools, `Rewind { turn_id, scope }`, `/rewind` menu, one `RewindApplied` event | `meerai-session/src/snapshot.rs`, `meerai-agents/src/multi_turn_agent/tools.rs`, `meerai-tui/src/app/modals.rs` |
 | TUI overlay | `ActiveModal` variant + `handle_agent_event` queue + key handler | `meerai-tui/src/app.rs` (`ActiveModal::Approval`) |
-| ACP bridge | `connect(preset, cwd)` spawns `AcpAgent`, handshake, typed `AcpEvent`, permission oneshot replies, cancel | `meerai-acp/src/client.rs`, `events.rs` |
+| ACP bridge | `connect_with` spawns `AcpAgent`, handshake/`session/load`, typed `AcpEvent`, `AcpWorker` to `AgentCommand`/`AgentEvent`, permission oneshot replies, cancel | `meerai-acp/src/{client,events,worker}.rs`, `meerai-cli/src/{acp_cmd,main,headless}.rs`, `meerai-tui/src/{lib,app,ui}` |
 
 ## 6. Generated and vendored paths
 
@@ -238,7 +247,7 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 | `meerai-tools` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-tools` |
 | `meerai-agents` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-agents` |
 | `meerai-tui` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-tui` |
-| `meerai-acp` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-acp`; live `cargo test -p meerai-acp --test live_agy -- --ignored` |
+| `meerai-acp` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-acp`; live `cargo test -p meerai-acp --test live_agy -- --ignored` and `--test live_worker -- --ignored` |
 | Repo-wide | `cargo fmt --all -- --check && cargo clippy --workspace --all-targets && cargo test --workspace` (or `make verify`) |
 | Docs only | Re-run the repo-wide check when code claims changed; otherwise verify links and the stale-claim grep |
 
@@ -407,7 +416,7 @@ Detail in [`infra.md`](infra.md). Summary:
 | How is the system prompt composed and scoped instructions injected? | `meerai-agents/src/prompt.rs`, `multi_turn_agent/mod.rs` (`inject_scoped_instructions`) |
 | How does the agent loop and harness work? | `meerai-agents/src/multi_turn_agent/`, `harness.rs`, `events.rs` |
 | How is tool output redacted, titled, and summarized? | `meerai-agents/src/redact.rs`, `multi_turn_agent/mod.rs` (`new_session_title`, `record_summary_usage`, summarizer selection) |
-| How does ACP integrate external harnesses or expose meerai to editors? | `docs/acp.md`; `meerai-acp/src/{client.rs,events.rs}` (M13-P1 `agy` bridge); M13-P2/P3 and M14 are backlog |
+| How does ACP integrate external harnesses or expose meerai to editors? | `docs/acp.md`; `meerai-acp/src/{client,events,worker}.rs`; `meerai-cli/src/{acp_cmd,main,headless}.rs`; `meerai-tui/src/{lib,app,ui}`; M13 is landed for `agy`, M14 is backlog |
 | How do TUI approvals, slash commands, and transcript replay work? | `meerai-tui/src/app/` (`ActiveModal::Approval`, `transcript_from_events`, `/compact`, `/mode`) |
 | How are CLI flags parsed, sessions resumed/forked, pruned, and headless output printed? | `meerai-cli/src/{cli.rs,main.rs,sessions_cmd.rs,headless.rs}` (`parse_args`, `run_sessions`, `select_prunable`, `run_headless`, `format_token_summary`) |
 | How do `.env` opt-in and env scrubbing work? | `meerai-cli/src/main.rs` (`load_dotenv`), `meerai-tools/src/code/shell.rs` |

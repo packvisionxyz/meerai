@@ -150,6 +150,7 @@ pub enum ApprovalKind {
     ToolCall,
     Spend,
     SandboxEscape,
+    ExternalAgent,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

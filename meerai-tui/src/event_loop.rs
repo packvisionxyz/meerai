@@ -22,7 +22,7 @@ const GIT_POLL_TICKS: usize = 40;
 enum SessionResolveOutcome {
     AlreadyOpen(SessionId),
     Opened {
-        opened: OpenedSession,
+        opened: Box<OpenedSession>,
         draft: Option<String>,
     },
 }
@@ -41,6 +41,7 @@ enum LoopMsg {
         replace_empty_tab: bool,
         result: Result<SessionResolveOutcome>,
     },
+    AcpResolved(Result<OpenedSession>),
     ChildSessionRead {
         tab_id: u64,
         item_id: String,
@@ -218,7 +219,7 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
                 tokio::spawn(async move {
                     let result = opener.open_session(&id).await.map(|opened| {
                         SessionResolveOutcome::Opened {
-                            opened,
+                            opened: Box::new(opened),
                             draft: None,
                         }
                     });
@@ -251,13 +252,21 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
                             .create_session()
                             .await
                             .map(|opened| SessionResolveOutcome::Opened {
-                                opened,
+                                opened: Box::new(opened),
                                 draft: None,
                             });
                     let _ = tx.send(LoopMsg::SessionResolved {
                         replace_empty_tab: false,
                         result,
                     });
+                });
+            }
+            PendingSessionAction::CreateAcpTab { preset } => {
+                let opener = opener.clone();
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let result = opener.create_acp_session(&preset).await;
+                    let _ = tx.send(LoopMsg::AcpResolved(result));
                 });
             }
             PendingSessionAction::DeleteSession(id) => {
@@ -298,7 +307,7 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
                             None => opener.create_session().await?,
                         };
                         Ok(SessionResolveOutcome::Opened {
-                            opened,
+                            opened: Box::new(opened),
                             draft: Some(draft),
                         })
                     }
@@ -329,7 +338,7 @@ async fn resolve_and_open_query(
             .open_session(&exact.id)
             .await
             .map(|opened| SessionResolveOutcome::Opened {
-                opened,
+                opened: Box::new(opened),
                 draft: None,
             });
     }
@@ -347,7 +356,7 @@ async fn resolve_and_open_query(
                 .open_session(&single.id)
                 .await
                 .map(|opened| SessionResolveOutcome::Opened {
-                    opened,
+                    opened: Box::new(opened),
                     draft: None,
                 })
         }
@@ -432,7 +441,7 @@ fn handle_loop_msg(
                 }
                 Ok(SessionResolveOutcome::Opened { opened, draft }) => {
                     if let Some((new_tab_id, event_rx)) =
-                        app.apply_opened_session(opened, replace_empty_tab)
+                        app.apply_opened_session(*opened, replace_empty_tab)
                     {
                         if let Some(draft) = draft
                             && let Some(idx) = app.tab_index_by_id(new_tab_id)
@@ -451,6 +460,23 @@ fn handle_loop_msg(
                         text: format!("Failed to open session: {msg}"),
                         expanded: false,
                     });
+                }
+            }
+            false
+        }
+        LoopMsg::AcpResolved(result) => {
+            match result {
+                Ok(opened) => {
+                    if let Some((tab_id, event_rx)) = app.apply_opened_session(opened, false) {
+                        spawn_tab_forwarder(tab_id, event_rx, loop_tx.clone());
+                    }
+                }
+                Err(err) => {
+                    let text = format!("ACP session unavailable: {err:#}");
+                    app.status_notice = Some(truncate_notice(&text));
+                    app.tab_mut()
+                        .transcript
+                        .push(TranscriptEntry::System { text });
                 }
             }
             false

@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write as _};
+use std::time::Duration;
 
 use anyhow::Result;
 use meerai_agents::events::{
     ApprovalDecision, ApprovalKind, ApprovalRequest, ItemStatus, RequestId,
 };
-use meerai_agents::{AgentCommand, AgentEvent, ItemId, MultiTurnAgent, SessionItem};
+use meerai_agents::{AgentCommand, AgentEvent, ItemId, MultiTurnAgent, SessionItem, spawn_worker};
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 pub(crate) const EXIT_APPROVAL_REQUIRED: i32 = 2;
 
@@ -78,7 +78,7 @@ pub(crate) enum HeadlessApprovalAction {
 impl HeadlessApprovalAction {
     pub(crate) fn for_request(request: &ApprovalRequest) -> Self {
         match request.kind {
-            ApprovalKind::Spend => Self::Decline {
+            ApprovalKind::Spend | ApprovalKind::ExternalAgent => Self::Decline {
                 request_id: request.request_id.clone(),
             },
             _ => Self::Cancel,
@@ -262,26 +262,29 @@ impl PlainEventPrinter {
     }
 }
 
-pub(crate) async fn run_headless(
-    mut agent: MultiTurnAgent,
+pub(crate) async fn run_headless(agent: MultiTurnAgent, prompt: String, json: bool) -> Result<i32> {
+    let (cmd_tx, event_rx) = spawn_worker(agent);
+    run_headless_channels(cmd_tx, event_rx, prompt, json).await
+}
+
+async fn shutdown_worker(
+    cmd_tx: &mpsc::UnboundedSender<AgentCommand>,
+    event_rx: &mut mpsc::UnboundedReceiver<AgentEvent>,
+) {
+    let _ = cmd_tx.send(AgentCommand::Quit);
+    let _ = tokio::time::timeout(Duration::from_millis(500), async {
+        while event_rx.recv().await.is_some() {}
+    })
+    .await;
+}
+
+pub(crate) async fn run_headless_channels(
+    cmd_tx: mpsc::UnboundedSender<AgentCommand>,
+    mut event_rx: mpsc::UnboundedReceiver<AgentEvent>,
     prompt: String,
     json: bool,
 ) -> Result<i32> {
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-    let turn = tokio::spawn(async move {
-        agent.start_session(&event_tx).await;
-        let result = agent
-            .prompt_streaming_with_commands(
-                &prompt,
-                &event_tx,
-                CancellationToken::new(),
-                &mut cmd_rx,
-            )
-            .await;
-        agent.end_session(&event_tx).await;
-        result
-    });
+    let _ = cmd_tx.send(AgentCommand::SubmitPrompt(prompt));
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -290,58 +293,73 @@ pub(crate) async fn run_headless(
     let mut last_usage: Option<meerai_agents::Usage> = None;
 
     while let Some(event) = event_rx.recv().await {
-        if let AgentEvent::QuestionAsked { request } = &event {
-            eprintln!(
-                "question required but headless mode cannot answer: {}; rerun in the TUI",
-                request
-                    .questions
-                    .first()
-                    .map(|question| question.header.as_str())
-                    .unwrap_or("question")
-            );
-            let _ = cmd_tx.send(question_cancel_command(request));
-        }
-        if let AgentEvent::ApprovalRequested { request } = &event {
-            let action = HeadlessApprovalAction::for_request(request);
-            match &action {
-                HeadlessApprovalAction::Decline { .. } => eprintln!(
-                    "session token budget reached; raise context.max_session_tokens in settings.yml or unset it"
-                ),
-                HeadlessApprovalAction::Cancel => {
-                    eprintln!("approval required: {}", request.preview.title);
-                    eprintln!("rerun with --mode auto-edit or --mode yolo, or use the TUI");
-                }
-            }
-            let _ = cmd_tx.send(action.command());
-        }
-        exit.observe(headless_outcome(&event));
-
         if json {
             writeln!(out, "{}", serde_json::to_string(&event)?)?;
             out.flush()?;
-            continue;
         }
 
-        if let AgentEvent::UsageUpdated { cumulative, .. } = &event {
-            last_usage = Some(*cumulative);
+        match &event {
+            AgentEvent::QuestionAsked { request } => {
+                eprintln!(
+                    "question required but headless mode cannot answer: {}; rerun in the TUI",
+                    request
+                        .questions
+                        .first()
+                        .map(|question| question.header.as_str())
+                        .unwrap_or("question")
+                );
+                let _ = cmd_tx.send(question_cancel_command(request));
+            }
+            AgentEvent::ApprovalRequested { request } => {
+                let action = HeadlessApprovalAction::for_request(request);
+                match &action {
+                    HeadlessApprovalAction::Decline { .. }
+                        if request.kind == ApprovalKind::ExternalAgent =>
+                    {
+                        eprintln!(
+                            "external agent permission required; use the TUI or configure agy to allow the action"
+                        );
+                    }
+                    HeadlessApprovalAction::Decline { .. } => eprintln!(
+                        "session token budget reached; raise context.max_session_tokens in settings.yml or unset it"
+                    ),
+                    HeadlessApprovalAction::Cancel => {
+                        eprintln!("approval required: {}", request.preview.title);
+                        eprintln!("rerun with --mode auto-edit or --mode yolo, or use the TUI");
+                    }
+                }
+                let _ = cmd_tx.send(action.command());
+            }
+            _ => {}
         }
-        printer.handle(&event, &mut out)?;
+
+        if !json {
+            if let AgentEvent::UsageUpdated { cumulative, .. } = &event {
+                last_usage = Some(*cumulative);
+            }
+            printer.handle(&event, &mut out)?;
+        }
+        exit.observe(headless_outcome(&event));
+
+        match &event {
+            AgentEvent::TurnCompleted { .. } => {
+                shutdown_worker(&cmd_tx, &mut event_rx).await;
+                break;
+            }
+            AgentEvent::Error { message, .. } => {
+                if json {
+                    eprintln!("error: {message}");
+                }
+                exit.mark_failed();
+                shutdown_worker(&cmd_tx, &mut event_rx).await;
+                break;
+            }
+            _ => {}
+        }
     }
 
     printer.finish(&mut out)?;
     drop(out);
-
-    match turn.await {
-        Ok(Ok(_)) => {}
-        Ok(Err(err)) => {
-            eprintln!("error: {err:#}");
-            exit.mark_failed();
-        }
-        Err(err) => {
-            eprintln!("error: headless turn task failed: {err}");
-            exit.mark_failed();
-        }
-    }
 
     if !json && let Some(summary) = last_usage.as_ref().and_then(format_token_summary) {
         eprintln!("{summary}");

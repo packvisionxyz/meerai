@@ -12,6 +12,23 @@ async fn live_agy_replies_with_ok() {
     let mut session = connect(AGY, cwd).await.expect("connect to agy acp");
     assert!(!session.session_id.is_empty());
 
+    let handshake = session.handshake();
+    println!(
+        "handshake: protocol={} agent={:?} title={:?} version={:?} load_session={} auth_methods={:?} modes={:?} session={} resumed={}",
+        handshake.protocol_version,
+        handshake.agent_name,
+        handshake.agent_title,
+        handshake.agent_version,
+        handshake.load_session,
+        handshake.auth_methods,
+        handshake.modes,
+        handshake.session_id,
+        handshake.resumed,
+    );
+    assert_eq!(handshake.protocol_version, 1);
+    assert_eq!(handshake.session_id, session.session_id);
+    assert!(!handshake.resumed);
+
     timeout(STEP_TIMEOUT, async {
         while let Some(event) = session.events.recv().await {
             if matches!(event, AcpEvent::Connected { .. }) {

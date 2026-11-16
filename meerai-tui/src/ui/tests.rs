@@ -1012,6 +1012,47 @@ fn statusline_renders_approval_mode_badge() {
 }
 
 #[test]
+fn acp_tab_renders_backend_badge_and_external_agent_header() {
+    let mut app = test_app();
+    assert!(render_to_string(&mut app).contains("gemini / gemini-3.8-flash"));
+
+    app.tab_mut().backend = crate::Backend::Acp {
+        preset: "agy".to_string(),
+        remote_session_id: None,
+    };
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("ACP:agy"));
+    assert!(rendered.contains("agy (acp)"));
+    assert!(rendered.contains("policy not applied"));
+    assert!(rendered.contains("ASK"));
+    assert!(!rendered.contains("gemini / gemini-3.8-flash"));
+}
+
+#[test]
+fn initial_acp_backend_renders_badge_and_header() {
+    let mut app = test_app();
+    app.set_initial_session(
+        meerai_session::SessionId::from_raw("sess-acp-launch"),
+        Some("ACP launch".to_string()),
+        crate::Backend::Acp {
+            preset: "agy".to_string(),
+            remote_session_id: None,
+        },
+        Vec::new(),
+        &[],
+        ApprovalMode::Ask,
+    );
+
+    assert!(app.tab().is_acp());
+    assert_eq!(app.tab().acp_preset(), Some("agy"));
+
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("ACP:agy"));
+    assert!(rendered.contains("agy (acp)"));
+    assert!(rendered.contains("policy not applied"));
+}
+
+#[test]
 fn renders_approval_overlay_with_preview_and_key_hints() {
     use meerai_agents::events::{ApprovalKind, ApprovalPreview, ApprovalRequest, RequestId};
     use meerai_core::EffectClass;
@@ -1256,6 +1297,7 @@ fn renders_session_tabs_badges_and_session_select_modal() {
         crate::OpenedSession {
             session_id: meerai_session::SessionId::from_raw("sess-second"),
             title: Some("Second Tab".to_string()),
+            backend: crate::Backend::Native,
             provider: "gemini".to_string(),
             model: "gemini-3.8-flash".to_string(),
             approval_mode: ApprovalMode::Ask,

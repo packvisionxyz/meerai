@@ -5,10 +5,11 @@ autonomous and interactive software engineering in the terminal with a
 selection-first, modal TUI and a scriptable headless CLI.
 
 **Status:** early-stage, distribution-hardened. The workspace has eleven library
-crates plus the `meerai` binary (built by `meerai-cli`). Milestones **M1–M12**
+crates plus the `meerai` binary (built by `meerai-cli`). Milestones **M1–M13**
 (session log, harness, checkpoints, hooks, subagent runtime, `meerai-cli` +
-session fork, retrieval v2/v3, security & supply chain, and agents/skills
-discovery) of the [harness specification](docs/harness-spec.md) have landed. CI (`cargo-deny` +
+session fork, retrieval v2/v3, security & supply chain, agents/skills discovery,
+and the `agy` ACP client) of the [harness specification](docs/harness-spec.md)
+have landed. CI (`cargo-deny` +
 test gate), tag-driven release builds, installers, [the threat
 model](docs/threat-model.md), and an Apache-2.0 license are in place.
 Checkpoints (M6) v1 and hooks (M7) v1 have landed with an explicit project-trust
@@ -115,6 +116,12 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   timeout, receive JSON on stdin, use exit `0`/`2` plus JSON decisions, log
   `HookFired`, emit live `HookCompleted` events with TUI system lines, and can
   tighten policy but not loosen it.
+- **ACP client (`meerai-acp`):** `--acp` drives `agy acp` as an external agent;
+  `acp doctor` prints the handshake; `/acp` opens an ACP tab; the statusline and
+  transcript header mark the external engine; `--continue`/`--resume` use
+  `session/load`. ACP permissions use the approval overlay and are advisory.
+  meerai policy, path guards, redaction, and the sandbox do not apply to the
+  external process. OpenCode/Claude presets and `meerai acp` (M14) are backlog.
 - **Subagent runtime (`meerai-agents::subagent`):** `SubagentToolset`
   (`subagent-run`) launches isolated depth-1 child sessions (`parent_session_id`),
   supporting built-in profiles (`explore`, `plan`, `build`, `general`) with
@@ -185,10 +192,9 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   model. The bundled catalog ships context windows only, so cost stays `None`
   unless a user `providers.yml` adds pricing.
 - Progressive tool disclosure.
-- ACP CLI/TUI integration (M13-P2/P3, M14). The `meerai-acp` P1 client bridge
-  spawns `agy acp` and exposes typed events, but there is no `--acp`, `/acp`,
-  `acp doctor`, or provider setting. An ACP backend runs an external agent with
-  its own tools; meerai policy does not apply to it.
+- ACP OpenCode/Claude presets and M14 (`meerai acp` for editors). The `agy`
+  client is landed. An ACP backend runs an external agent with its own tools;
+  meerai policy does not apply to it.
 - Repository signing secrets (`APPLE_CERTIFICATE` / `WINDOWS_CERTIFICATE`) for
   non-empty signed/notarized GitHub Release binaries (conditional steps exist in
   `release.yml`).
@@ -210,7 +216,7 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 | `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent` v2, `prompt::{BASE_SYSTEM_PROMPT, compose_system_prompt}`, `spawn_worker`, `subagent` (`SubagentToolset` + child sessions), and best-effort tool-output redaction |
 | `meerai-tui` | Modal terminal UI library (`ratatui` + `crossterm`) with transcript replay, subagent items, and approval overlay |
 | `meerai-cli` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions`/`hooks` subcommands, TUI launcher |
-| `meerai-acp` | M13-P1 ACP client bridge: `agy acp` preset, handshake, typed events, permission replies, cancel. No CLI/TUI integration |
+| `meerai-acp` | ACP client bridge: `agy acp` preset, handshake, typed events, `AcpWorker`, permission replies, cancel, `session/load`; used by the CLI and TUI |
 
 ## Usage
 
@@ -227,6 +233,9 @@ meerai --mode plan|ask|auto-edit|yolo           # approval mode (default: ask)
 meerai -p <provider> -m <model> --system "..."  # provider, model, system prompt
 meerai --agent reviewer --prompt "review this change"  # apply an agent
 meerai --skill orchestrate                      # apply a skill (repeatable)
+meerai --acp                                    # TUI with an agy ACP session
+meerai --acp --prompt "fix the test"            # headless ACP turn
+meerai acp doctor                               # print the ACP handshake
 meerai --env-file .env.local                    # load variables from a file
 meerai auth list|login|logout                   # inspect, save, remove API keys
 meerai sessions list|rm|prune|fork              # list, delete, prune, or fork sessions
@@ -678,7 +687,7 @@ OS sandboxing on Windows hosts.
 - [docs/threat-model.md](docs/threat-model.md) — M11 security threat model, trust boundaries, controls, and residual risks
 - [docs/architecture.md](docs/architecture.md) — current implementation notes, target harness architecture, protocol/loop design, and migration plan
 - [docs/tui-design.md](docs/tui-design.md) — modal TUI design, keybindings, pickers, diff review, and async Rust rendering architecture
-- [docs/acp.md](docs/acp.md) — Agent Client Protocol: the M13-P1 `agy` bridge and the planned CLI/TUI (M13) and `meerai acp` editor surface (M14), with the trust boundary
+- [docs/acp.md](docs/acp.md) — Agent Client Protocol: the landed `agy` client (M13), the planned `meerai acp` editor surface (M14), and the trust boundary
 - [AGENTS.md](AGENTS.md) — repository guide for AI coding agents (commands, macro conventions, known traps)
 
 ## License

@@ -1,4 +1,5 @@
 use super::*;
+use crate::Backend;
 
 pub(super) fn display_model(app: &AppState) -> &str {
     let trimmed = app.tab().model.trim();
@@ -49,17 +50,29 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
             .add_modifier(Modifier::BOLD),
     ));
 
-    let key_status = app.active_key_status();
-    let (key_badge, key_color) = key_status_style(&key_status);
+    if let Backend::Acp { preset, .. } = &tab.backend {
+        spans.push(Span::styled(
+            format!(" ACP:{preset} "),
+            Style::default()
+                .fg(theme::p().info)
+                .bg(theme::p().surface_high)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
 
-    spans.push(Span::styled(
-        format!(" {} / {} ", tab.active_provider, display_model(app)),
-        Style::default().fg(theme::p().muted),
-    ));
-    spans.push(Span::styled(
-        format!("[{key_badge}]"),
-        Style::default().fg(key_color),
-    ));
+    if !tab.is_acp() {
+        let key_status = app.active_key_status();
+        let (key_badge, key_color) = key_status_style(&key_status);
+
+        spans.push(Span::styled(
+            format!(" {} / {} ", tab.active_provider, display_model(app)),
+            Style::default().fg(theme::p().muted),
+        ));
+        spans.push(Span::styled(
+            format!("[{key_badge}]"),
+            Style::default().fg(key_color),
+        ));
+    }
 
     let usage_str = format_usage_compact(app);
     if usage_str != "-" {

@@ -104,34 +104,50 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area:
 const LOGO_M_ROWS: [&str; 4] = ["██      ██", "████  ████", "██  ██  ██", "██      ██"];
 
 fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
-    let key_status = app.active_key_status();
-    let (badge, badge_color) = key_status_style(&key_status);
     let logo_style = Style::default()
         .fg(theme::p().accent)
         .add_modifier(Modifier::BOLD);
 
-    let mut lines = vec![
-        tagged_line(
-            Line::from(vec![
-                Span::styled(LOGO_M_ROWS[0], logo_style),
-                Span::raw("  "),
-                Span::styled(
-                    "meerai",
-                    Style::default()
-                        .fg(theme::p().accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    format!("{} / {}", app.tab().active_provider, display_model(app)),
-                    Style::default().fg(theme::p().text),
-                ),
-                Span::raw(" "),
-                Span::styled(format!("[{badge}]"), Style::default().fg(badge_color)),
-            ]),
-            None,
-            0,
+    let mut identity = vec![
+        Span::styled(LOGO_M_ROWS[0], logo_style),
+        Span::raw("  "),
+        Span::styled(
+            "meerai",
+            Style::default()
+                .fg(theme::p().accent)
+                .add_modifier(Modifier::BOLD),
         ),
+        Span::raw("  "),
+    ];
+    match app.tab().acp_preset() {
+        Some(preset) => {
+            identity.push(Span::styled(
+                format!("{preset} (acp)"),
+                Style::default().fg(theme::p().text),
+            ));
+            identity.push(Span::raw("  "));
+            identity.push(Span::styled(
+                "external agent · policy not applied",
+                Style::default().fg(theme::p().warning),
+            ));
+        }
+        None => {
+            let key_status = app.active_key_status();
+            let (badge, badge_color) = key_status_style(&key_status);
+            identity.push(Span::styled(
+                format!("{} / {}", app.tab().active_provider, display_model(app)),
+                Style::default().fg(theme::p().text),
+            ));
+            identity.push(Span::raw(" "));
+            identity.push(Span::styled(
+                format!("[{badge}]"),
+                Style::default().fg(badge_color),
+            ));
+        }
+    }
+
+    let mut lines = vec![
+        tagged_line(Line::from(identity), None, 0),
         tagged_line(
             Line::from(vec![
                 Span::styled(LOGO_M_ROWS[1], logo_style),

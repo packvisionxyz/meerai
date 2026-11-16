@@ -279,6 +279,38 @@ fn compact_and_mode_commands_emit_agent_commands() {
 }
 
 #[test]
+fn acp_command_requests_an_acp_tab() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.session_opener = Some(Arc::new(DummySessionOpener));
+
+    submit(&mut app, "/acp");
+
+    assert_eq!(
+        app.take_pending_session_actions(),
+        vec![PendingSessionAction::CreateAcpTab {
+            preset: "agy".to_string()
+        }]
+    );
+    assert_eq!(
+        app.status_notice.as_deref(),
+        Some("Opening ACP session (agy)...")
+    );
+}
+
+#[test]
+fn acp_command_requires_a_session_opener() {
+    let (mut app, _rx, _secrets) = test_app();
+
+    submit(&mut app, "/acp");
+
+    assert!(app.take_pending_session_actions().is_empty());
+    assert!(matches!(
+        app.tab().transcript.last(),
+        Some(TranscriptEntry::Error { text, .. }) if text.contains("not available")
+    ));
+}
+
+#[test]
 fn ctrl_p_opens_the_command_palette_and_esc_closes_it() {
     let (mut app, _rx, _secrets) = test_app();
     app.handle_key_event(key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL));

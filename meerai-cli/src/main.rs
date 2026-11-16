@@ -3,6 +3,7 @@
     allow(dead_code, unused_imports, unused_variables)
 )]
 
+mod acp_cmd;
 mod auth_cmd;
 mod cli;
 mod headless;
@@ -13,9 +14,11 @@ mod tests;
 
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Result, bail};
+use meerai_acp::{AGY, AcpStart, AcpWorkerConfig, spawn_acp_worker};
 #[cfg(feature = "tui")]
 use meerai_agents::spawn_worker;
 use meerai_agents::{
@@ -46,11 +49,11 @@ use meerai_tools::{
     detect_execution_world,
 };
 #[cfg(feature = "tui")]
-use meerai_tui::{OpenedSession, SessionOpener, TuiLaunchConfig, transcript_from_events};
+use meerai_tui::{Backend, OpenedSession, SessionOpener, TuiLaunchConfig, transcript_from_events};
 
 use auth_cmd::run_auth;
 use cli::{CliSubcommand, HELP_TEXT, parse_args};
-use headless::run_headless;
+use headless::{run_headless, run_headless_channels};
 use hooks_cmd::run_hooks;
 use sessions_cmd::{
     auto_prune_sessions, continue_session_id, fork_session, prune_empty_sessions, run_sessions,
@@ -309,6 +312,9 @@ async fn main() -> Result<()> {
 
     let workspace_root = std::env::current_dir()?;
     let project_root = find_project_root(&workspace_root);
+    if let Some(CliSubcommand::Acp(command)) = cli.subcommand.as_ref() {
+        return acp_cmd::run(*command, &workspace_root).await;
+    }
     let definitions = load_definitions(&project_root);
     for warning in &definitions.warnings {
         eprintln!("Warning: {warning}");
@@ -521,6 +527,25 @@ async fn main() -> Result<()> {
     prune_empty_sessions(session.id()).await;
     auto_prune_sessions(&settings, session.id()).await;
 
+    let session_is_acp = session.meta().harness.as_deref() == Some("acp:agy");
+    let use_acp = cli.acp || session_is_acp;
+    if use_acp && matches!(approval_mode, ApprovalMode::Plan) {
+        bail!("ACP cannot run in plan mode; the external agent cannot be made read-only");
+    }
+    if use_acp && (cli.continue_session || cli.resume.is_some()) && !session_is_acp {
+        bail!("selected session is not an ACP session; remove --acp to resume it natively");
+    }
+    let acp_start = if cli.fork.is_some() {
+        AcpStart::New
+    } else {
+        session
+            .meta()
+            .remote_session_id
+            .clone()
+            .map(|id| AcpStart::Load { session_id: id })
+            .unwrap_or(AcpStart::New)
+    };
+
     let execution_world = detect_execution_world(true).await;
     if let Some(warning) = execution_world.warning() {
         eprintln!("Warning: {warning}");
@@ -608,41 +633,65 @@ async fn main() -> Result<()> {
     });
 
     if let Some(prompt) = cli.prompt {
+        if use_acp {
+            let (cmd_tx, event_rx) = spawn_acp_worker(AcpWorkerConfig {
+                session,
+                preset: AGY,
+                cwd: workspace_root.clone(),
+                start: acp_start,
+                resumed: Arc::new(AtomicBool::new(false)),
+            });
+            let exit_code = run_headless_channels(cmd_tx, event_rx, prompt, cli.json).await?;
+            std::process::exit(exit_code);
+        }
         let agent = host.build_agent(session, &active_provider, &active_model, initial_system)?;
         let exit_code = run_headless(agent, prompt, cli.json).await?;
         std::process::exit(exit_code);
     }
 
     #[cfg(feature = "tui")]
-    let initial_meta = session.meta();
-    #[cfg(feature = "tui")]
-    let initial_events = session.events();
-    #[cfg(feature = "tui")]
-    let initial_transcript = transcript_from_events(&initial_events);
-    #[cfg(feature = "tui")]
-    let agent = host.build_agent(session, &active_provider, &active_model, initial_system)?;
-    #[cfg(feature = "tui")]
-    let (cmd_tx, event_rx) = spawn_worker(agent);
+    let opened = if use_acp {
+        host.build_acp_opened_session(session, acp_start)?
+    } else {
+        let meta = session.meta();
+        let events = session.events();
+        let transcript = transcript_from_events(&events);
+        let agent = host.build_agent(session, &active_provider, &active_model, initial_system)?;
+        let (cmd_tx, event_rx) = spawn_worker(agent);
+        OpenedSession {
+            session_id: meta.id,
+            title: meta.title,
+            backend: Backend::Native,
+            provider: active_provider.clone(),
+            model: active_model.clone(),
+            approval_mode,
+            transcript,
+            events,
+            cmd_tx,
+            event_rx,
+        }
+    };
     #[cfg(feature = "tui")]
     let update_available = meerai_tui::update::check_latest().await;
 
     #[cfg(feature = "tui")]
     return meerai_tui::run_tui(
-        cmd_tx,
-        event_rx,
+        opened.cmd_tx,
+        opened.event_rx,
         TuiLaunchConfig {
-            initial_session_id: initial_meta.id,
-            initial_session_title: initial_meta.title,
-            initial_provider: active_provider,
-            initial_model: active_model,
+            initial_session_id: opened.session_id,
+            initial_session_title: opened.title,
+            initial_backend: opened.backend,
+            initial_provider: opened.provider,
+            initial_model: opened.model,
             workspace_root,
             runtime,
             secrets,
             settings: user_settings,
             config_dir,
-            approval_mode,
-            initial_transcript,
-            initial_events,
+            approval_mode: opened.approval_mode,
+            initial_transcript: opened.transcript,
+            initial_events: opened.events,
             agents: definitions.agents,
             skills: definitions.skills,
             session_opener: Some(host),
@@ -813,6 +862,14 @@ impl CliSessionHost {
         model: String,
     ) -> Result<OpenedSession> {
         let meta = session.meta();
+        if meta.harness.as_deref() == Some("acp:agy") {
+            let start = meta
+                .remote_session_id
+                .clone()
+                .map(|id| AcpStart::Load { session_id: id })
+                .unwrap_or(AcpStart::New);
+            return self.build_acp_opened_session(session, start);
+        }
         let events = session.events();
         let transcript = transcript_from_events(&events);
         let agent = self.build_agent(session, &provider, &model, self.base_system.clone())?;
@@ -825,8 +882,43 @@ impl CliSessionHost {
         Ok(OpenedSession {
             session_id: meta.id,
             title: meta.title,
+            backend: Backend::Native,
             provider,
             model,
+            approval_mode,
+            transcript,
+            events,
+            cmd_tx,
+            event_rx,
+        })
+    }
+
+    #[cfg(feature = "tui")]
+    fn build_acp_opened_session(&self, session: Session, start: AcpStart) -> Result<OpenedSession> {
+        let meta = session.meta();
+        let events = session.events();
+        let transcript = transcript_from_events(&events);
+        let (cmd_tx, event_rx) = spawn_acp_worker(AcpWorkerConfig {
+            session,
+            preset: AGY,
+            cwd: self.workspace_root.clone(),
+            start,
+            resumed: Arc::new(AtomicBool::new(false)),
+        });
+        let approval_mode = meta
+            .approval_mode
+            .as_deref()
+            .and_then(parse_approval_mode)
+            .unwrap_or(self.approval_mode);
+        Ok(OpenedSession {
+            session_id: meta.id,
+            title: meta.title,
+            backend: Backend::Acp {
+                preset: "agy".to_string(),
+                remote_session_id: meta.remote_session_id.clone(),
+            },
+            provider: "acp:agy".to_string(),
+            model: "agy".to_string(),
             approval_mode,
             transcript,
             events,
@@ -883,10 +975,34 @@ impl SessionOpener for CliSessionHost {
             self.workspace_root.clone(),
         )
         .await?;
+        let source_is_acp = source.meta().harness.as_deref() == Some("acp:agy");
         let forked = Session::fork(&self.session_config, &source, turn).await?;
+        if source_is_acp {
+            return self.build_acp_opened_session(forked, AcpStart::New);
+        }
         let meta = forked.meta();
         let (provider, model) = self.resolve_session_provider_model(meta.model.as_deref());
         self.build_opened_session(forked, provider, model)
+    }
+
+    async fn create_acp_session(&self, preset: &str) -> Result<OpenedSession> {
+        if preset != AGY.id {
+            bail!(
+                "unknown ACP preset: {preset}. Available: {}",
+                meerai_acp::presets()
+                    .iter()
+                    .map(|preset| preset.id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        let session = Session::open_or_create(
+            &self.session_config,
+            SessionId::new(),
+            self.workspace_root.clone(),
+        )
+        .await?;
+        self.build_acp_opened_session(session, AcpStart::New)
     }
 
     async fn read_session_events(&self, id: &SessionId) -> Result<Vec<LoggedEvent>> {

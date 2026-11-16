@@ -10,6 +10,7 @@ fn make_opened_session(
     let opened = OpenedSession {
         session_id: SessionId::from_raw(id),
         title: title.map(str::to_string),
+        backend: Backend::Native,
         provider: "gemini".to_string(),
         model: "gemini-3.8-flash".to_string(),
         approval_mode: ApprovalMode::Ask,
@@ -19,6 +20,20 @@ fn make_opened_session(
         event_rx,
     };
     (opened, cmd_rx)
+}
+
+fn make_opened_acp_session(
+    id: &str,
+    preset: &str,
+) -> (OpenedSession, mpsc::UnboundedReceiver<AgentCommand>) {
+    let (mut opened, rx) = make_opened_session(id, Some("ACP session"), Vec::new());
+    opened.provider = String::new();
+    opened.model = String::new();
+    opened.backend = Backend::Acp {
+        preset: preset.to_string(),
+        remote_session_id: None,
+    };
+    (opened, rx)
 }
 
 fn make_session_summary(
@@ -335,4 +350,37 @@ fn session_picker_refuses_to_delete_an_open_session() {
         Some(ActiveModal::SessionSelect { error: Some(message), .. })
             if message.contains("Close the tab")
     ));
+}
+
+#[test]
+fn acp_tabs_keep_the_provider_runtime_untouched_on_switch() {
+    let (mut app, _rx, _secrets) = test_app();
+    let (opened, _event_rx) = make_opened_acp_session("ses-acp", "agy");
+    assert!(app.apply_opened_session(opened, false).is_some());
+
+    assert_eq!(app.active_tab_index(), 1);
+    assert!(app.tab().is_acp());
+    assert_eq!(app.tab().acp_preset(), Some("agy"));
+    assert_eq!(
+        app.tab().backend,
+        Backend::Acp {
+            preset: "agy".to_string(),
+            remote_session_id: None,
+        }
+    );
+
+    assert!(app.switch_to_tab(0));
+    app.runtime.write().unwrap().active_provider = "openrouter".to_string();
+    assert!(app.switch_to_tab(1));
+    assert_eq!(app.runtime.read().unwrap().active_provider, "openrouter");
+}
+
+#[tokio::test]
+async fn default_acp_session_creation_reports_unsupported() {
+    let opener = DummySessionOpener;
+    let err = match opener.create_acp_session("agy").await {
+        Ok(_) => panic!("default create_acp_session must fail"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("not supported"));
 }

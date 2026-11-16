@@ -37,7 +37,7 @@ use crate::completion::CompletionEngine;
 use crate::diff::FileDiffView;
 use crate::search::{SearchMatch, SearchMode, SearchPreview};
 use crate::workspace::{WorkspaceQuery, local_workspace};
-use crate::{OpenedSession, SessionOpener};
+use crate::{Backend, OpenedSession, SessionOpener};
 
 const DOUBLE_CTRL_C_WINDOW: Duration = Duration::from_secs(2);
 const NOTICE_TTL: Duration = Duration::from_secs(4);
@@ -136,6 +136,9 @@ pub enum PendingSessionAction {
     },
     DeleteSession(SessionId),
     CreateNewTab,
+    CreateAcpTab {
+        preset: String,
+    },
     ReadChildSession {
         tab_id: u64,
         item_id: String,
@@ -348,6 +351,7 @@ pub struct SessionTab {
     pub tab_id: u64,
     pub session_id: SessionId,
     pub title: Option<String>,
+    pub backend: Backend,
     pub active_provider: String,
     pub model: String,
     pub approval_mode: ApprovalMode,
@@ -391,6 +395,7 @@ impl SessionTab {
             tab_id,
             session_id,
             title: title.and_then(normalize_tab_title),
+            backend: Backend::default(),
             active_provider: canonical_provider_id(&active_provider.into()),
             model: model.into(),
             approval_mode,
@@ -417,6 +422,17 @@ impl SessionTab {
             tool_items: HashMap::new(),
             subagent_items: HashMap::new(),
             cmd_tx,
+        }
+    }
+
+    pub fn is_acp(&self) -> bool {
+        matches!(self.backend, Backend::Acp { .. })
+    }
+
+    pub fn acp_preset(&self) -> Option<&str> {
+        match &self.backend {
+            Backend::Acp { preset, .. } => Some(preset),
+            Backend::Native => None,
         }
     }
 
@@ -710,6 +726,7 @@ impl AppState {
         &mut self,
         session_id: SessionId,
         title: Option<String>,
+        backend: Backend,
         transcript: Vec<TranscriptEntry>,
         events: &[LoggedEvent],
         approval_mode: ApprovalMode,
@@ -717,6 +734,7 @@ impl AppState {
         let tab = self.tab_mut();
         tab.session_id = session_id;
         tab.title = title.and_then(normalize_tab_title);
+        tab.backend = backend;
         tab.approval_mode = approval_mode;
         tab.transcript = transcript;
         tab.user_turns = user_turn_map(&tab.transcript, events);
@@ -748,6 +766,16 @@ impl AppState {
         self.tabs.len() == 1 && !self.tab().has_conversation()
     }
 
+    fn sync_active_provider_runtime(&mut self) {
+        if self.tab().is_acp() {
+            return;
+        }
+        let provider = self.tab().active_provider.clone();
+        if let Ok(mut rt) = self.runtime.write() {
+            rt.active_provider = provider;
+        }
+    }
+
     pub fn switch_to_tab(&mut self, index: usize) -> bool {
         if index >= self.tabs.len() || index == self.active_tab {
             if let Some(tab) = self.tabs.get_mut(index) {
@@ -765,10 +793,7 @@ impl AppState {
         self.reset_ephemeral_ui_state();
         self.persist_tabs();
 
-        let provider = self.tabs[index].active_provider.clone();
-        if let Ok(mut rt) = self.runtime.write() {
-            rt.active_provider = provider;
-        }
+        self.sync_active_provider_runtime();
         self.sync_completion_models();
         self.open_pending_question();
 
@@ -833,10 +858,7 @@ impl AppState {
         self.reset_ephemeral_ui_state();
         self.persist_tabs();
 
-        let provider = self.tabs[self.active_tab].active_provider.clone();
-        if let Ok(mut rt) = self.runtime.write() {
-            rt.active_provider = provider;
-        }
+        self.sync_active_provider_runtime();
         self.sync_completion_models();
         self.open_pending_question();
 
@@ -876,6 +898,7 @@ impl AppState {
             opened.approval_mode,
             opened.cmd_tx,
         );
+        tab.backend = opened.backend;
         tab.transcript = opened.transcript;
         tab.user_turns = user_turn_map(&tab.transcript, &opened.events);
         tab.seed_usage_from_events(&opened.events);
@@ -888,10 +911,7 @@ impl AppState {
             let _ = old.cmd_tx.send(AgentCommand::Quit);
             self.active_tab = 0;
             self.reset_ephemeral_ui_state();
-            let provider = self.tabs[0].active_provider.clone();
-            if let Ok(mut rt) = self.runtime.write() {
-                rt.active_provider = provider;
-            }
+            self.sync_active_provider_runtime();
             self.sync_completion_models();
             self.open_pending_question();
             self.persist_tabs();
@@ -946,6 +966,9 @@ impl AppState {
     }
 
     pub fn active_key_status(&self) -> KeyStatus {
+        if self.tab().is_acp() {
+            return KeyStatus::NotRequired;
+        }
         let provider_id = &self.tab().active_provider;
         let provider = {
             let mut rt = self.runtime.write().unwrap();

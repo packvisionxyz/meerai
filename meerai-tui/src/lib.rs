@@ -39,9 +39,20 @@ pub use search::{SearchMatch, SearchMode, SearchPreview};
 pub use terminal::TerminalGuard;
 pub use workspace::{LocalWorkspace, WorkspaceMatch, WorkspaceQuery, local_workspace};
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Backend {
+    #[default]
+    Native,
+    Acp {
+        preset: String,
+        remote_session_id: Option<String>,
+    },
+}
+
 pub struct OpenedSession {
     pub session_id: SessionId,
     pub title: Option<String>,
+    pub backend: Backend,
     pub provider: String,
     pub model: String,
     pub approval_mode: ApprovalMode,
@@ -58,6 +69,9 @@ pub trait SessionOpener: Send + Sync {
     async fn create_session(&self) -> Result<OpenedSession>;
     async fn fork_session(&self, id: &SessionId, turn: &TurnId) -> Result<OpenedSession>;
     async fn delete_session(&self, id: &SessionId) -> Result<bool>;
+    async fn create_acp_session(&self, _preset: &str) -> Result<OpenedSession> {
+        anyhow::bail!("ACP sessions are not supported by this client")
+    }
     async fn read_session_events(&self, _id: &SessionId) -> Result<Vec<LoggedEvent>> {
         Err(anyhow::anyhow!("reading session events is not supported"))
     }
@@ -66,6 +80,7 @@ pub trait SessionOpener: Send + Sync {
 pub struct TuiLaunchConfig {
     pub initial_session_id: SessionId,
     pub initial_session_title: Option<String>,
+    pub initial_backend: Backend,
     pub initial_provider: String,
     pub initial_model: String,
     pub workspace_root: PathBuf,
@@ -109,6 +124,7 @@ pub async fn run_tui(
     app.set_initial_session(
         config.initial_session_id,
         config.initial_session_title,
+        config.initial_backend,
         config.initial_transcript,
         &config.initial_events,
         config.approval_mode,

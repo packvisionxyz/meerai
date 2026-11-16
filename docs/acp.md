@@ -1,12 +1,14 @@
-# ACP integration (planned)
+# ACP integration
 
-**Status: M13-P1 landed as the `meerai-acp` crate; nothing is wired into the
-CLI, TUI, settings, or the agent loop.** The work is tracked as **M13** (meerai
-as an ACP client) and **M14** (meerai as an ACP agent) in
+**Status: M13 is landed for `agy`.** `meerai-acp` is a client bridge; the CLI
+and TUI expose `--acp`, `/acp`, `acp doctor`, an `ACP:agy` badge, an
+`agy (acp)` transcript header, and `session/load` resume. OpenCode/Claude
+presets and M14 (`meerai acp` for editors) remain backlog. The work is tracked
+as **M13** (meerai as an ACP client) and **M14** (meerai as an ACP agent) in
 [harness-spec.md](harness-spec.md) §15.1. Every protocol statement below was
 checked against the ACP specification and the Rust SDK. Sections that describe
 surfaces beyond the crate are a plan, not a description of the tree; §10.2
-records what P1 actually ships.
+records what M13 actually ships.
 
 ## 1. Why
 
@@ -389,8 +391,8 @@ that says why.
 | --- | --- | --- |
 | M13-P0 | Throwaway spike: client against `agy acp`, one prompt, one permission, one cancel. Decide the runtime question. | **Landed.** Connection future runs under tokio without a dedicated thread (§10.1) |
 | M13-P1 | `meerai-acp`: `agy` preset, spawn, handshake, typed event bridge, permission bridge, cancel, stderr tail | **Landed.** 14 unit tests over the preset catalog and mappings; one `#[ignore = "live agy"]` test (§10.2) |
-| M13-P2 | `--acp`, `/acp`, statusline badge, transcript header, resume semantics | TUI tests; live `agy` smoke |
-| M13-P3 | OpenCode preset, `acp doctor`, docs, M13 row | Live `opencode acp` smoke |
+| M13-P2 | `--acp`, `/acp`, statusline badge, transcript header, resume semantics | **Landed for `agy`.** TUI tests; live `agy` headless smoke and `session/load` resume |
+| M13-P3 | OpenCode preset, `acp doctor`, docs, M13 row | **Partial.** `acp doctor`, docs, and the M13 row are landed; the OpenCode preset remains backlog |
 | M14-P1 | `meerai acp`: initialize, session new/load, prompt, cancel, modes | Compatibility kit |
 | M14-P2 | Editor smoke, docs, M14 row | Zed manual test |
 
@@ -466,8 +468,8 @@ and needs `agy` installed and authenticated.
 
 ## 11. Open questions
 
-1. Should `meerai --acp` in `plan` mode fail, or run with a warning? Proposal:
-   fail.
+1. Should `meerai --acp` in `plan` mode fail, or run with a warning? **Resolved:
+   fail.** The external agent cannot be made read-only.
 2. Should the transcript header repeat the policy warning on every turn, or
    once per session? Proposal: once per session, plus the statusline badge.
 3. Advertise `fs.read_text_file` in phase 1 so reads get path guards? Proposal:

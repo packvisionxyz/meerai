@@ -19,6 +19,7 @@ default = ["tui"]
 tui = ["dep:meerai-tui"]
 
 [dependencies]
+meerai-acp = { path = "../meerai-acp/" }
 meerai-agents = { path = "../meerai-agents/" }
 meerai-client = { path = "../meerai-client/" }
 meerai-common = { path = "../meerai-common/" }

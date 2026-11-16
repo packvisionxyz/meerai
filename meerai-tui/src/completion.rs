@@ -16,6 +16,7 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
         false,
     ),
     ("/new", "Open a new session tab", false),
+    ("/acp", "Start an ACP session (agy)", false),
     ("/close", "Close the current session tab", false),
     ("/auth", "Show active credential sources", false),
     ("/connect", "Configure provider API key and model", false),
@@ -739,6 +740,21 @@ mod tests {
             body: String::new(),
             path: PathBuf::from(format!(".agents/skills/{id}/SKILL.md")),
         }
+    }
+
+    #[test]
+    fn acp_command_is_listed_and_completes() {
+        assert!(SLASH_COMMANDS.iter().any(|(name, hint, takes_arg)| {
+            *name == "/acp" && *hint == "Start an ACP session (agy)" && !*takes_arg
+        }));
+
+        let mut engine = CompletionEngine::new(PathBuf::from("."));
+        engine.update("/ac", 3);
+        assert!(engine.is_active());
+        assert_eq!(engine.items()[0].label, "/acp");
+        let (accepted, cursor) = engine.accept("/ac", 3).unwrap();
+        assert_eq!(accepted, "/acp");
+        assert_eq!(cursor, 4);
     }
 
     #[test]

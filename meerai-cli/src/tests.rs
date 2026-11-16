@@ -3,6 +3,7 @@ use meerai_agents::{AgentCommand, AgentEvent};
 use meerai_common::settings::{AppSettings, ContextSettings};
 use meerai_core::env::now_millis;
 use meerai_session::{SessionSummary, latest_session};
+use tokio::sync::mpsc;
 
 use super::cli::*;
 use super::headless::*;
@@ -1670,4 +1671,147 @@ fn headless_question_cancel_builds_answer_command() {
             answers: None,
         }
     );
+}
+
+#[test]
+fn parses_acp_flag_and_subcommand() {
+    let flag = parse_args(vec![
+        "--acp".to_string(),
+        "--prompt".to_string(),
+        "hi".to_string(),
+    ])
+    .unwrap();
+    assert!(flag.acp);
+    assert_eq!(flag.subcommand, None);
+
+    let with_mode = parse_args(vec![
+        "--acp".to_string(),
+        "--mode".to_string(),
+        "plan".to_string(),
+        "--prompt".to_string(),
+        "hi".to_string(),
+    ])
+    .unwrap();
+    assert!(with_mode.acp);
+    assert_eq!(with_mode.mode.as_deref(), Some("plan"));
+
+    let doctor = parse_args(vec!["acp".to_string(), "doctor".to_string()]).unwrap();
+    assert_eq!(
+        doctor.subcommand,
+        Some(CliSubcommand::Acp(AcpCommand::Doctor))
+    );
+
+    let default = parse_args(vec!["acp".to_string()]).unwrap();
+    assert_eq!(
+        default.subcommand,
+        Some(CliSubcommand::Acp(AcpCommand::Doctor))
+    );
+
+    assert!(
+        parse_args(vec!["acp".to_string(), "-h".to_string()])
+            .unwrap()
+            .show_help
+    );
+    assert!(
+        parse_args(vec![
+            "acp".to_string(),
+            "doctor".to_string(),
+            "--help".to_string()
+        ])
+        .unwrap()
+        .show_help
+    );
+    assert!(parse_args(vec!["acp".to_string(), "bogus".to_string()]).is_err());
+    assert!(
+        parse_args(vec![
+            "acp".to_string(),
+            "doctor".to_string(),
+            "extra".to_string()
+        ])
+        .is_err()
+    );
+
+    assert!(HELP_TEXT.contains("meerai acp doctor"));
+    assert!(HELP_TEXT.contains("--acp"));
+}
+
+#[test]
+fn acp_rejects_agent_and_skill_flags() {
+    for args in [
+        vec!["--acp", "--agent", "reviewer"],
+        vec!["--acp", "--skill", "explore"],
+    ] {
+        let error = parse_args(args.iter().map(|arg| arg.to_string())).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--acp cannot be combined with --agent or --skill"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+fn sample_external_agent_approval_event() -> AgentEvent {
+    use meerai_agents::events::ApprovalPreview;
+
+    AgentEvent::ApprovalRequested {
+        request: ApprovalRequest {
+            request_id: RequestId::from_raw("req-external"),
+            turn_id: meerai_agents::TurnId::from_raw("turn-headless"),
+            kind: ApprovalKind::ExternalAgent,
+            preview: ApprovalPreview {
+                title: "External agent permission: Edit src/lib.rs".to_string(),
+                detail: "external agent".to_string(),
+            },
+            effect: None,
+        },
+    }
+}
+
+#[test]
+fn headless_external_agent_approval_declines_and_exits_2() {
+    let event = sample_external_agent_approval_event();
+    assert_eq!(headless_outcome(&event), HeadlessOutcome::ApprovalRequired);
+
+    let action = HeadlessApprovalAction::for_request(approval_request(&event));
+    assert_eq!(
+        action,
+        HeadlessApprovalAction::Decline {
+            request_id: RequestId::from_raw("req-external"),
+        }
+    );
+
+    let mut exit = HeadlessExit::new();
+    exit.observe(headless_outcome(&event));
+    assert_eq!(exit.code, EXIT_APPROVAL_REQUIRED);
+    assert!(exit.approval_cancelled);
+}
+
+#[tokio::test]
+async fn run_headless_channels_completes_on_turn_end() {
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+
+    let driver = tokio::spawn(async move {
+        assert_eq!(
+            cmd_rx.recv().await,
+            Some(AgentCommand::SubmitPrompt("hi".to_string()))
+        );
+        let _ = event_tx.send(AgentEvent::TurnCompleted {
+            turn_id: meerai_agents::TurnId::from_raw("turn-headless"),
+            reason: meerai_agents::TurnEndReason::Completed,
+        });
+        loop {
+            match cmd_rx.recv().await {
+                Some(AgentCommand::Quit) | None => break,
+                _ => {}
+            }
+        }
+    });
+
+    let code = run_headless_channels(cmd_tx, event_rx, "hi".to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(code, 0);
+    driver.await.unwrap();
 }

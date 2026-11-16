@@ -301,7 +301,6 @@ fn doc_selection_copies_while_scrolling_across_long_and_wrapped_content() {
     assert!(app.transcript_wrapped_lines.len() > inner.height as usize);
     assert!(app.tab().scroll_offset > 0);
 
-    // Drag across top-most visible line and scroll up with wheel while holding Left button.
     let initial_scroll = app.tab().scroll_offset;
     assert!(app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
@@ -334,7 +333,6 @@ fn doc_selection_copies_while_scrolling_across_long_and_wrapped_content() {
     let wheel_copied = app.last_copied_text.as_deref().unwrap_or("");
     assert!(!wheel_copied.is_empty());
 
-    // Now scroll to top, click at "Start marker", scroll back to bottom, and Shift+Click on OMEGA_END.
     app.scroll_to_top();
     terminal
         .draw(|frame| crate::ui::render(frame, &mut app))

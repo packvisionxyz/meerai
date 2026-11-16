@@ -13,4 +13,7 @@ publish.workspace = true
 [dependencies]
 agent-client-protocol = { version = "5.3.0", features = ["process"] }
 anyhow = { workspace = true }
+meerai-agents = { path = "../meerai-agents/" }
+meerai-core = { path = "../meerai-core/" }
+meerai-session = { path = "../meerai-session/" }
 tokio = { workspace = true }

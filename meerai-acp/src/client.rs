@@ -7,9 +7,10 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    CancelNotification, ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionId, SessionNotification, TextContent,
+    AuthMethod, CancelNotification, ContentBlock, InitializeRequest, InitializeResponse,
+    LoadSessionRequest, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionId,
+    SessionModeState, SessionNotification, TextContent,
 };
 use agent_client_protocol::{AcpAgent, Agent, Client, LineDirection};
 use tokio::sync::{mpsc, oneshot};
@@ -24,15 +25,39 @@ const STDERR_TAIL_LINES: usize = 200;
 
 type PendingPermission = (AcpPermissionRequest, oneshot::Sender<Option<String>>);
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AcpHandshake {
+    pub protocol_version: u16,
+    pub agent_name: Option<String>,
+    pub agent_title: Option<String>,
+    pub agent_version: Option<String>,
+    pub load_session: bool,
+    pub auth_methods: Vec<String>,
+    pub modes: Vec<String>,
+    pub session_id: String,
+    pub resumed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AcpStart {
+    New,
+    Load { session_id: String },
+}
+
 pub struct AcpSession {
     pub session_id: String,
     pub events: mpsc::UnboundedReceiver<AcpEvent>,
+    handshake: AcpHandshake,
     commands: mpsc::UnboundedSender<Command>,
     stderr: Arc<Mutex<VecDeque<String>>>,
     task: JoinHandle<Result<(), agent_client_protocol::Error>>,
 }
 
 impl AcpSession {
+    pub fn handshake(&self) -> &AcpHandshake {
+        &self.handshake
+    }
+
     pub async fn prompt(&self, text: impl Into<String>) -> anyhow::Result<()> {
         self.send(Command::Prompt(text.into()))
     }
@@ -90,6 +115,14 @@ enum Command {
 }
 
 pub async fn connect(preset: AcpPreset, cwd: PathBuf) -> anyhow::Result<AcpSession> {
+    connect_with(preset, cwd, AcpStart::New).await
+}
+
+pub async fn connect_with(
+    preset: AcpPreset,
+    cwd: PathBuf,
+    start: AcpStart,
+) -> anyhow::Result<AcpSession> {
     let mut args = Vec::with_capacity(1 + preset.args.len());
     args.push(preset.command.to_string());
     args.extend(preset.args.iter().map(|arg| (*arg).to_string()));
@@ -112,7 +145,7 @@ pub async fn connect(preset: AcpPreset, cwd: PathBuf) -> anyhow::Result<AcpSessi
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (permission_tx, permission_rx) = mpsc::unbounded_channel();
-    let (ready_tx, ready_rx) = oneshot::channel();
+    let (ready_tx, ready_rx) = oneshot::channel::<Result<AcpHandshake, String>>();
     let request_ids = Arc::new(AtomicU64::new(0));
 
     let connection = Client
@@ -167,38 +200,50 @@ pub async fn connect(preset: AcpPreset, cwd: PathBuf) -> anyhow::Result<AcpSessi
                 }
             };
 
-            let new_session = connection
-                .send_request(NewSessionRequest::new(cwd))
-                .block_task()
-                .await;
-            let new_session = match new_session {
-                Ok(response) => response,
-                Err(error) => {
-                    let _ = ready_tx.send(Err(error.to_string()));
-                    return Err(error);
+            let load_session = initialize.agent_capabilities.load_session;
+            let (session_id, modes, resumed) = match plan_session(&start, load_session) {
+                SessionPlan::Load(session_id) => {
+                    let request = LoadSessionRequest::new(session_id.clone(), cwd.clone());
+                    let response = connection.send_request(request).block_task().await;
+                    match response {
+                        Ok(response) => (session_id, response.modes, true),
+                        Err(error) => {
+                            let _ = ready_tx.send(Err(error.to_string()));
+                            return Err(error);
+                        }
+                    }
+                }
+                SessionPlan::New => {
+                    let request = NewSessionRequest::new(cwd);
+                    let response = connection.send_request(request).block_task().await;
+                    match response {
+                        Ok(response) => (response.session_id.to_string(), response.modes, false),
+                        Err(error) => {
+                            let _ = ready_tx.send(Err(error.to_string()));
+                            return Err(error);
+                        }
+                    }
                 }
             };
 
-            let session_id = new_session.session_id;
-            let (agent_name, agent_version) = match initialize.agent_info {
-                Some(info) => (Some(info.name), Some(info.version)),
-                None => (None, None),
-            };
+            let handshake =
+                handshake_from_initialize(&initialize, modes.as_ref(), session_id.clone(), resumed);
             let _ = events_tx.send(AcpEvent::Connected {
-                agent_name,
-                agent_version,
-                session_id: session_id.to_string(),
+                agent_name: handshake.agent_name.clone(),
+                agent_version: handshake.agent_version.clone(),
+                session_id: session_id.clone(),
             });
-            let _ = ready_tx.send(Ok(session_id.to_string()));
+            let _ = ready_tx.send(Ok(handshake.clone()));
 
+            let session_id = SessionId::new(session_id);
             run_commands(connection, session_id, command_rx, permission_rx, events_tx).await;
             Ok(())
         });
 
     let task = tokio::spawn(connection);
 
-    let session_id = match timeout(CONNECT_TIMEOUT, ready_rx).await {
-        Ok(Ok(Ok(session_id))) => session_id,
+    let handshake = match timeout(CONNECT_TIMEOUT, ready_rx).await {
+        Ok(Ok(Ok(handshake))) => handshake,
         Ok(Ok(Err(message))) => {
             task.abort();
             return Err(anyhow::anyhow!(message));
@@ -219,12 +264,72 @@ pub async fn connect(preset: AcpPreset, cwd: PathBuf) -> anyhow::Result<AcpSessi
     };
 
     Ok(AcpSession {
-        session_id,
+        session_id: handshake.session_id.clone(),
+        handshake,
         events: events_rx,
         commands: command_tx,
         stderr,
         task,
     })
+}
+
+enum SessionPlan {
+    New,
+    Load(String),
+}
+
+fn plan_session(start: &AcpStart, load_session: bool) -> SessionPlan {
+    match start {
+        AcpStart::Load { session_id } if load_session => SessionPlan::Load(session_id.clone()),
+        _ => SessionPlan::New,
+    }
+}
+
+fn handshake_from_initialize(
+    initialize: &InitializeResponse,
+    modes: Option<&SessionModeState>,
+    session_id: String,
+    resumed: bool,
+) -> AcpHandshake {
+    let (agent_name, agent_title, agent_version) = match &initialize.agent_info {
+        Some(info) => (
+            Some(info.name.clone()),
+            info.title.clone(),
+            Some(info.version.clone()),
+        ),
+        None => (None, None, None),
+    };
+    AcpHandshake {
+        protocol_version: initialize.protocol_version.as_u16(),
+        agent_name,
+        agent_title,
+        agent_version,
+        load_session: initialize.agent_capabilities.load_session,
+        auth_methods: initialize
+            .auth_methods
+            .iter()
+            .filter_map(auth_method_name)
+            .collect(),
+        modes: modes
+            .map(|state| {
+                state
+                    .available_modes
+                    .iter()
+                    .map(|mode| mode.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        session_id,
+        resumed,
+    }
+}
+
+fn auth_method_name(method: &AuthMethod) -> Option<String> {
+    match method {
+        AuthMethod::Terminal(method) => Some(method.name.clone()),
+        AuthMethod::Agent(method) => Some(method.name.clone()),
+        _ => None,
+    }
 }
 
 async fn run_commands(
@@ -288,5 +393,97 @@ async fn run_commands(
                 let _ = events.send(AcpEvent::PermissionRequest(event));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::v1::schema::{
+        AgentCapabilities, AuthMethodAgent, AuthMethodTerminal, Implementation, SessionMode,
+        SessionModeId,
+    };
+
+    fn load_start() -> AcpStart {
+        AcpStart::Load {
+            session_id: "remote-1".to_string(),
+        }
+    }
+
+    #[test]
+    fn load_plan_uses_session_load_when_supported() {
+        match plan_session(&load_start(), true) {
+            SessionPlan::Load(session_id) => assert_eq!(session_id, "remote-1"),
+            SessionPlan::New => panic!("expected a session/load plan"),
+        }
+    }
+
+    #[test]
+    fn load_plan_falls_back_to_new_without_the_capability() {
+        assert!(matches!(
+            plan_session(&load_start(), false),
+            SessionPlan::New
+        ));
+    }
+
+    #[test]
+    fn new_plan_ignores_the_load_capability() {
+        assert!(matches!(
+            plan_session(&AcpStart::New, true),
+            SessionPlan::New
+        ));
+        assert!(matches!(
+            plan_session(&AcpStart::New, false),
+            SessionPlan::New
+        ));
+    }
+
+    #[test]
+    fn handshake_reports_initialize_and_session_metadata() {
+        let mut capabilities = AgentCapabilities::default();
+        capabilities.load_session = true;
+        let mut initialize = InitializeResponse::new(ProtocolVersion::V1)
+            .agent_capabilities(capabilities)
+            .auth_methods(vec![
+                AuthMethod::Agent(AuthMethodAgent::new("api-key", "API key")),
+                AuthMethod::Terminal(AuthMethodTerminal::new("login", "Sign in")),
+            ]);
+        initialize.agent_info = Some(Implementation::new("agy", "1.5.9").title("Antigravity"));
+        let modes = SessionModeState::new(
+            SessionModeId::new("ask"),
+            vec![
+                SessionMode::new("ask", "Ask"),
+                SessionMode::new("plan", "Plan"),
+            ],
+        );
+
+        let handshake =
+            handshake_from_initialize(&initialize, Some(&modes), "remote-1".to_string(), true);
+
+        assert_eq!(handshake.protocol_version, 1);
+        assert_eq!(handshake.agent_name.as_deref(), Some("agy"));
+        assert_eq!(handshake.agent_title.as_deref(), Some("Antigravity"));
+        assert_eq!(handshake.agent_version.as_deref(), Some("1.5.9"));
+        assert!(handshake.load_session);
+        assert_eq!(handshake.auth_methods, vec!["API key", "Sign in"]);
+        assert_eq!(handshake.modes, vec!["Ask", "Plan"]);
+        assert_eq!(handshake.session_id, "remote-1");
+        assert!(handshake.resumed);
+    }
+
+    #[test]
+    fn handshake_without_agent_info_or_modes_is_empty() {
+        let initialize = InitializeResponse::new(ProtocolVersion::V1);
+        let handshake = handshake_from_initialize(&initialize, None, "remote-2".to_string(), false);
+
+        assert_eq!(handshake.protocol_version, 1);
+        assert_eq!(handshake.agent_name, None);
+        assert_eq!(handshake.agent_title, None);
+        assert_eq!(handshake.agent_version, None);
+        assert!(!handshake.load_session);
+        assert!(handshake.auth_methods.is_empty());
+        assert!(handshake.modes.is_empty());
+        assert_eq!(handshake.session_id, "remote-2");
+        assert!(!handshake.resumed);
     }
 }

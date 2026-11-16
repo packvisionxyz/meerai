@@ -1985,6 +1985,9 @@ version = "0.0.1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "meerai-agents",
+ "meerai-core",
+ "meerai-session",
  "tokio",
 ]
 
@@ -2014,6 +2017,7 @@ dependencies = [
  "anyhow",
  "dotenvy",
  "futures",
+ "meerai-acp",
  "meerai-agents",
  "meerai-client",
  "meerai-common",
