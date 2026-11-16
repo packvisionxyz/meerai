@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use crossterm::event::EventStream;
 use futures::StreamExt;
 use meerai_agents::{AgentEvent, SessionItem};
-use meerai_session::{SessionId, SessionSummary};
+use meerai_session::{LoggedEvent, SessionId, SessionSummary};
 use tokio::sync::mpsc;
 use tokio::time::{self, MissedTickBehavior};
 
@@ -40,6 +40,11 @@ enum LoopMsg {
     SessionResolved {
         replace_empty_tab: bool,
         result: Result<SessionResolveOutcome>,
+    },
+    ChildSessionRead {
+        tab_id: u64,
+        item_id: String,
+        result: Result<Vec<LoggedEvent>>,
     },
 }
 
@@ -263,6 +268,22 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
                     let _ = tx.send(LoopMsg::SessionDeleted(result));
                 });
             }
+            PendingSessionAction::ReadChildSession {
+                tab_id,
+                item_id,
+                session_id,
+            } => {
+                let opener = opener.clone();
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let result = opener.read_session_events(&session_id).await;
+                    let _ = tx.send(LoopMsg::ChildSessionRead {
+                        tab_id,
+                        item_id,
+                        result,
+                    });
+                });
+            }
             PendingSessionAction::ForkSession {
                 session_id,
                 turn,
@@ -372,6 +393,14 @@ fn handle_loop_msg(
         }
         LoopMsg::SessionsListed(result) => {
             app.apply_listed_sessions(result);
+            false
+        }
+        LoopMsg::ChildSessionRead {
+            tab_id,
+            item_id,
+            result,
+        } => {
+            app.apply_child_session_read(tab_id, &item_id, result);
             false
         }
         LoopMsg::SessionDeleted(result) => {

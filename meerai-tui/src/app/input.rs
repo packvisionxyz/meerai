@@ -190,6 +190,7 @@ impl AppState {
                 self.composer_drag_anchor = None;
 
                 self.pending_toggle = self.entry_at(mouse.column, mouse.row);
+                self.pending_digest = self.digest_at(mouse.column, mouse.row);
 
                 if let Some(doc_pos) = self.screen_to_doc_pos_exact(mouse.column, mouse.row) {
                     self.selection = None;
@@ -244,6 +245,7 @@ impl AppState {
                     if let Some(head) = self.screen_to_doc_pos_clamped(mouse.column, mouse.row) {
                         if head != sel.anchor {
                             self.pending_toggle = None;
+                            self.pending_digest = None;
                         }
                         sel.head = head;
                     }
@@ -253,6 +255,7 @@ impl AppState {
                 if let Some(sel) = &mut self.selection {
                     if pos != sel.anchor {
                         self.pending_toggle = None;
+                        self.pending_digest = None;
                     }
                     sel.head = pos;
                     sel.active = true;
@@ -297,8 +300,12 @@ impl AppState {
                         }
                     }
                 }
-                if was_click && let Some(idx) = self.pending_toggle.take() {
-                    self.toggle_entry_index(idx);
+                if was_click {
+                    if let Some(idx) = self.pending_digest.take() {
+                        self.toggle_turn_activity(idx);
+                    } else if let Some(idx) = self.pending_toggle.take() {
+                        self.toggle_entry_index(idx);
+                    }
                 }
                 return true;
             }
@@ -678,6 +685,26 @@ impl AppState {
         self.hovered_zone_at(area, scroll, self.last_mouse_pos?)
     }
 
+    pub(crate) fn hovered_digest_at_screen(&self, area: Rect, scroll: usize) -> Option<usize> {
+        if self.modal.is_some() {
+            return None;
+        }
+        let pos = self.last_mouse_pos?;
+        if area.width == 0
+            || pos.col < area.x
+            || pos.col >= area.x + area.width
+            || pos.row < area.y
+            || pos.row >= area.y + area.height
+        {
+            return None;
+        }
+        let row = scroll.saturating_add((pos.row - area.y) as usize);
+        self.digest_hit_zones
+            .iter()
+            .find(|zone| row >= zone.start_line && row < zone.end_line)
+            .map(|zone| zone.entry_idx)
+    }
+
     fn hovered_zone_at(&self, area: Rect, scroll: usize, pos: ScreenPos) -> Option<usize> {
         if area.width == 0
             || pos.col < area.x
@@ -721,8 +748,51 @@ impl AppState {
         }
     }
 
+    fn open_first_diff(&mut self) -> bool {
+        if self.file_changes.is_empty() {
+            self.status_notice = Some("No file changes to review".to_string());
+        } else {
+            self.open_diff_modal(0);
+        }
+        true
+    }
+
+    fn digest_at(&self, column: u16, row: u16) -> Option<usize> {
+        let area = self.transcript_inner_area;
+        if area.width == 0
+            || area.height == 0
+            || column < area.x
+            || column >= area.x + area.width
+            || row < area.y
+            || row >= area.y + area.height
+        {
+            return None;
+        }
+        let virtual_line = self
+            .effective_scroll()
+            .saturating_add((row - area.y) as usize);
+        self.digest_hit_zones
+            .iter()
+            .find(|z| virtual_line >= z.start_line && virtual_line < z.end_line)
+            .map(|z| z.entry_idx)
+    }
+
+    fn toggle_turn_activity(&mut self, user_idx: usize) -> bool {
+        if !matches!(
+            self.tab().transcript.get(user_idx),
+            Some(TranscriptEntry::User { .. })
+        ) {
+            return false;
+        }
+        let tab = self.tab_mut();
+        let expanded = tab.turn_activity.get(&user_idx).copied().unwrap_or(false);
+        tab.turn_activity.insert(user_idx, !expanded);
+        true
+    }
+
     fn toggle_entry_index(&mut self, entry_idx: usize) -> bool {
-        match self.tab_mut().transcript.get_mut(entry_idx) {
+        let mut load_child: Option<String> = None;
+        let toggled = match self.tab_mut().transcript.get_mut(entry_idx) {
             Some(TranscriptEntry::Assistant {
                 reasoning,
                 reasoning_expanded,
@@ -739,6 +809,13 @@ impl AppState {
                 tc.expanded = !tc.expanded;
                 true
             }
+            Some(TranscriptEntry::Subagent(entry)) if entry.child_session_id.is_some() => {
+                entry.expanded = !entry.expanded;
+                if entry.expanded {
+                    load_child = Some(entry.id.clone());
+                }
+                true
+            }
             Some(TranscriptEntry::User { .. }) => {
                 self.modal = Some(ActiveModal::UserMessageActions {
                     entry_idx,
@@ -747,7 +824,11 @@ impl AppState {
                 true
             }
             _ => false,
+        };
+        if let Some(item_id) = load_child {
+            self.request_child_session_load(&item_id);
         }
+        toggled
     }
 
     pub(super) fn run_user_action(&mut self, entry_idx: usize, action: UserAction) -> bool {
@@ -783,6 +864,7 @@ impl AppState {
         let tab = self.tab_mut();
         tab.transcript.truncate(entry_idx);
         tab.user_turns.retain(|idx, _| *idx < entry_idx);
+        tab.turn_activity.retain(|idx, _| *idx < entry_idx);
         tab.auto_follow = true;
         self.status_notice =
             Some("Rewound code and conversation to before this message".to_string());
@@ -928,6 +1010,22 @@ impl AppState {
                 }
                 KeyCode::Char('p') | KeyCode::Char('P') if !self.completion.is_active() => {
                     self.open_command_palette();
+                    return true;
+                }
+                KeyCode::Char('s') => {
+                    self.open_session_select();
+                    return true;
+                }
+                KeyCode::Char('o') => {
+                    self.open_model_input();
+                    return true;
+                }
+                KeyCode::Char('a') => {
+                    self.open_provider_select();
+                    return true;
+                }
+                KeyCode::Char('e') => {
+                    self.open_first_diff();
                     return true;
                 }
                 KeyCode::PageUp => {

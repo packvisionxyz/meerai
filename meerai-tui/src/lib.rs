@@ -18,6 +18,7 @@ pub mod diff;
 pub mod event_loop;
 pub mod markdown;
 pub mod search;
+pub mod syntax;
 pub mod tabs;
 pub mod terminal;
 pub mod theme;
@@ -57,6 +58,9 @@ pub trait SessionOpener: Send + Sync {
     async fn create_session(&self) -> Result<OpenedSession>;
     async fn fork_session(&self, id: &SessionId, turn: &TurnId) -> Result<OpenedSession>;
     async fn delete_session(&self, id: &SessionId) -> Result<bool>;
+    async fn read_session_events(&self, _id: &SessionId) -> Result<Vec<LoggedEvent>> {
+        Err(anyhow::anyhow!("reading session events is not supported"))
+    }
 }
 
 pub struct TuiLaunchConfig {

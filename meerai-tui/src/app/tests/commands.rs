@@ -1,6 +1,39 @@
 use super::*;
 
 #[test]
+fn ctrl_shortcuts_open_menus_and_reports_missing_diff() {
+    let (mut app, _rx, _secrets) = test_app();
+
+    app.handle_key_event(key_mod(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    assert!(matches!(app.modal, Some(ActiveModal::SessionSelect { .. })));
+    app.modal = None;
+
+    app.handle_key_event(key_mod(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert!(matches!(app.modal, Some(ActiveModal::ModelInput { .. })));
+    app.modal = None;
+
+    app.handle_key_event(key_mod(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::ProviderSelect { .. })
+    ));
+    app.modal = None;
+
+    app.handle_key_event(key_mod(KeyCode::Char('e'), KeyModifiers::CONTROL));
+    assert_eq!(
+        app.status_notice.as_deref(),
+        Some("No file changes to review")
+    );
+
+    app.file_changes.push(crate::FileChangeEntry {
+        status: "M".to_string(),
+        path: "src/lib.rs".to_string(),
+    });
+    app.handle_key_event(key_mod(KeyCode::Char('e'), KeyModifiers::CONTROL));
+    assert!(matches!(app.modal, Some(ActiveModal::DiffView { .. })));
+}
+
+#[test]
 fn slash_command_handling() {
     let (mut app, mut rx, _secrets) = test_app();
 

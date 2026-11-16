@@ -102,6 +102,31 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
             .map(|ms| format!(" ({})", format_compact_ms(ms)))
             .unwrap_or_default();
         let activity = match &tab.active_tool {
+            Some(tool) if tool == "subagent-run" => {
+                let agents: Vec<&str> = tab
+                    .transcript
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        TranscriptEntry::Subagent(sub)
+                            if matches!(
+                                sub.status,
+                                ToolCallStatus::Running | ToolCallStatus::Proposed
+                            ) =>
+                        {
+                            Some(sub.agent.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let label = if agents.is_empty() {
+                    "subagents".to_string()
+                } else if agents.len() <= 2 {
+                    agents.join(", ")
+                } else {
+                    format!("{}, +{}", agents[..2].join(", "), agents.len() - 2)
+                };
+                format!(" · {frame_char} {label}{elapsed}")
+            }
             Some(tool) => format!(" · {frame_char} {tool}{elapsed}"),
             None => format!(" · {frame_char} running{elapsed}"),
         };
@@ -124,21 +149,27 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
         ));
     } else {
         let hint = if tab.is_running {
+            let cancel = crate::app::ctrl_label('c');
+            let steer = crate::app::ctrl_label('g');
+            let palette = crate::app::ctrl_label('p');
             if tab.queued.is_empty() {
-                " · Ctrl-c cancel · Ctrl-g send now · Ctrl-p commands"
+                format!(" · {cancel} cancel · {steer} send now · {palette} commands")
             } else {
-                " · Ctrl-c cancel · Ctrl-g send queued · Ctrl-p commands"
+                format!(" · {cancel} cancel · {steer} send queued · {palette} commands")
             }
         } else {
             match app.mode {
                 InputMode::Insert => {
                     if app.completion.is_active() {
-                        " · Tab/Enter accept · Esc dismiss"
+                        " · Tab/Enter accept · Esc dismiss".to_string()
                     } else {
-                        " · Ctrl-p commands · Ctrl-b side · Esc normal"
+                        format!(" · {} commands · Esc normal", crate::app::ctrl_label('p'))
                     }
                 }
-                InputMode::Normal => " · Ctrl-p commands · i insert · / search · q quit",
+                InputMode::Normal => format!(
+                    " · {} commands · i insert · / search · q quit",
+                    crate::app::ctrl_label('p')
+                ),
             }
         };
         spans.push(Span::styled(hint, Style::default().fg(theme::p().faint)));

@@ -107,6 +107,12 @@ jobs:
             os: windows-latest
             archive: meerai-x86_64-pc-windows-msvc.zip
     runs-on: ${{ matrix.os }}
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -127,10 +133,9 @@ jobs:
         run: cargo build --release --locked -p meerai-cli --target "${{ matrix.target }}"
 
       - name: Sign macOS binary
-        if: runner.os == 'macOS' && secrets.APPLE_CERTIFICATE != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         shell: bash
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
@@ -161,12 +166,8 @@ jobs:
           rm -f "${CERT_PATH}"
 
       - name: Notarize macOS binary
-        if: runner.os == 'macOS' && secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_PASSWORD != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != '' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''
         shell: bash
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           set -euo pipefail
           NOTARIZE_ZIP="${RUNNER_TEMP}/${BIN_NAME}-notarize.zip"
@@ -179,7 +180,7 @@ jobs:
           rm -f "${NOTARIZE_ZIP}"
 
       - name: Clean up macOS signing keychain
-        if: always() && runner.os == 'macOS' && secrets.APPLE_CERTIFICATE != ''
+        if: always() && runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         shell: bash
         run: |
           rm -f "${RUNNER_TEMP}/apple-cert.p12" "${RUNNER_TEMP}/${BIN_NAME}-notarize.zip"
@@ -201,10 +202,9 @@ jobs:
           fi
 
       - name: Sign Windows binary
-        if: runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE != ''
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE != ''
         shell: pwsh
         env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
         run: |

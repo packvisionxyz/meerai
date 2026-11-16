@@ -128,6 +128,7 @@ struct TaggedTranscriptLine {
     band: bool,
     code_band: bool,
     hover_tag: Option<usize>,
+    digest_tag: Option<usize>,
 }
 
 fn tagged_line(
@@ -142,6 +143,7 @@ fn tagged_line(
         band: false,
         code_band: false,
         hover_tag: None,
+        digest_tag: None,
     }
 }
 
@@ -157,6 +159,7 @@ fn banded_line(
         band: true,
         code_band: false,
         hover_tag: None,
+        digest_tag: None,
     }
 }
 
@@ -167,6 +170,11 @@ fn code_line(mut tagged: TaggedTranscriptLine) -> TaggedTranscriptLine {
 
 fn with_hover(mut tagged: TaggedTranscriptLine, entry_idx: usize) -> TaggedTranscriptLine {
     tagged.hover_tag = Some(entry_idx);
+    tagged
+}
+
+fn with_digest(mut tagged: TaggedTranscriptLine, user_idx: usize) -> TaggedTranscriptLine {
+    tagged.digest_tag = Some(user_idx);
     tagged
 }
 

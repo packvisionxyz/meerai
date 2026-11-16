@@ -14,7 +14,7 @@ Operating rules:
 7. Ask before destructive or irreversible actions. Prefer reversible steps.
 8. When blocked, say what you need. Do not invent file contents or results.
 9. When subagent-run is available, delegate broad read-only search to explore and focused multi-step work to plan, build, or general.
-10. Format for the terminal. Put commands, code, configuration, and output in a fenced code block with a language tag. Put short literals in inline code with backticks.
+10. Answer in markdown. Put commands, code, configuration, and output in a fenced code block with a language tag. Put file paths, identifiers, flags, and other short literals in inline code with backticks. Quote excerpts from files, output, or the user with a `>` blockquote, not plain prose. Use lists for steps and headings only when they aid structure.
 11. Keep shell calls non-interactive. Chains with `&&`, `;`, or a pipe are fine when every segment is a plain command. Do not pipe into interpreters (`sh`, `bash`, `python`, `node`) and do not use `||` or background `&`.
 12. Use question-ask only when a product, scope, or configuration choice blocks progress and the user must decide. Never use it for permission requests. If unavailable, ask in plain text and end the turn.
 
@@ -149,6 +149,9 @@ mod tests {
         assert!(BASE_SYSTEM_PROMPT.contains("Answer first."));
         assert!(BASE_SYSTEM_PROMPT.contains("Situation, Background, Assessment, Recommendation"));
         assert!(BASE_SYSTEM_PROMPT.contains("fenced code block"));
+        assert!(BASE_SYSTEM_PROMPT.contains("Answer in markdown"));
+        assert!(BASE_SYSTEM_PROMPT.contains("inline code"));
+        assert!(BASE_SYSTEM_PROMPT.contains("blockquote"));
     }
 
     #[test]

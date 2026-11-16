@@ -82,6 +82,8 @@ pub enum SessionItem {
         agent: String,
         status: ItemStatus,
         report: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_session_id: Option<String>,
     },
     Compaction {
         id: ItemId,

@@ -41,6 +41,16 @@ use crate::{OpenedSession, SessionOpener};
 
 const DOUBLE_CTRL_C_WINDOW: Duration = Duration::from_secs(2);
 const NOTICE_TTL: Duration = Duration::from_secs(4);
+const CHILD_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+
+pub fn ctrl_label(key: char) -> String {
+    let key = key.to_ascii_uppercase();
+    if cfg!(target_os = "macos") {
+        format!("^{key}")
+    } else {
+        format!("Ctrl-{key}")
+    }
+}
 pub const MIN_SIDEBAR_WIDTH: u16 = 110;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,6 +136,11 @@ pub enum PendingSessionAction {
     },
     DeleteSession(SessionId),
     CreateNewTab,
+    ReadChildSession {
+        tab_id: u64,
+        item_id: String,
+        session_id: SessionId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,6 +227,11 @@ pub struct SubagentEntry {
     pub agent: String,
     pub status: ToolCallStatus,
     pub report: Option<String>,
+    pub child_session_id: Option<String>,
+    pub expanded: bool,
+    pub nested: Option<Vec<TranscriptEntry>>,
+    pub nested_refreshed_at: Option<Instant>,
+    pub nested_loading: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -347,6 +367,7 @@ pub struct SessionTab {
     pub is_running: bool,
     pub queued: Vec<String>,
     pub user_turns: HashMap<usize, TurnId>,
+    pub turn_activity: HashMap<usize, bool>,
     pub turn_id: Option<TurnId>,
     pub active_tool: Option<String>,
     pub scroll_offset: usize,
@@ -390,6 +411,7 @@ impl SessionTab {
             queued: Vec::new(),
             pending_questions: Vec::new(),
             user_turns: HashMap::new(),
+            turn_activity: HashMap::new(),
             turn_id: None,
             active_tool: None,
             scroll_offset: 0,
@@ -485,8 +507,10 @@ pub struct AppState {
     pub visible_file_change_rows: usize,
     pub hovered_file_change: Option<usize>,
     pub thinking_hit_zones: Vec<ThinkingHitZone>,
+    pub digest_hit_zones: Vec<ThinkingHitZone>,
     pub hover_zones: Vec<HoverZone>,
     pub hovered_entry: Option<usize>,
+    pub hovered_digest: Option<usize>,
     pub modal_hit_zones: Vec<ModalHitZone>,
     pub hovered_modal_hit: Option<ModalHitKind>,
     pub completion_hit_zones: Vec<CompletionHitZone>,
@@ -504,6 +528,7 @@ pub struct AppState {
     pub composer_selection: Option<(usize, usize)>,
     pub(super) composer_drag_anchor: Option<usize>,
     pub(super) pending_toggle: Option<usize>,
+    pub(super) pending_digest: Option<usize>,
     pub selection: Option<TextSelection>,
     pub doc_selection: Option<DocSelection>,
     pub last_transcript_anchor: Option<DocPos>,
@@ -619,8 +644,10 @@ impl AppState {
             visible_file_change_rows: 0,
             hovered_file_change: None,
             thinking_hit_zones: Vec::new(),
+            digest_hit_zones: Vec::new(),
             hover_zones: Vec::new(),
             hovered_entry: None,
+            hovered_digest: None,
             modal_hit_zones: Vec::new(),
             hovered_modal_hit: None,
             completion_hit_zones: Vec::new(),
@@ -638,6 +665,7 @@ impl AppState {
             composer_selection: None,
             composer_drag_anchor: None,
             pending_toggle: None,
+            pending_digest: None,
             selection: None,
             doc_selection: None,
             last_transcript_anchor: None,
@@ -700,6 +728,7 @@ impl AppState {
         tab.approval_mode = approval_mode;
         tab.transcript = transcript;
         tab.user_turns = user_turn_map(&tab.transcript, events);
+        tab.turn_activity.clear();
         tab.seed_usage_from_events(events);
         self.persist_tabs();
     }
@@ -715,6 +744,7 @@ impl AppState {
     fn reset_ephemeral_ui_state(&mut self) {
         self.completion.reset();
         self.thinking_hit_zones.clear();
+        self.digest_hit_zones.clear();
         self.selection = None;
         self.doc_selection = None;
         self.last_transcript_anchor = None;
@@ -1031,6 +1061,7 @@ impl AppState {
         if self.tabs.iter().any(|tab| tab.is_running) {
             self.spinner_tick = self.spinner_tick.wrapping_add(1);
         }
+        self.queue_child_session_refreshes();
         if self
             .last_ctrl_c
             .is_some_and(|t| t.elapsed() >= DOUBLE_CTRL_C_WINDOW)

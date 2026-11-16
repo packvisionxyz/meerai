@@ -207,23 +207,23 @@ fn running_tools_expand_to_show_full_arguments() {
             output: None,
             expanded: false,
         }));
+    app.tab_mut().turn_activity.insert(0, true);
 
     let collapsed = render_to_string(&mut app);
-    assert!(collapsed.contains("[click to expand]"));
+    assert!(collapsed.contains("Searching"));
     assert!(!collapsed.contains("TARGET-VALUE"));
 
     let row = (0..28)
         .find(|y| {
             app.screen_lines
                 .get(*y as usize)
-                .is_some_and(|line| line.join("").contains("code-grep"))
+                .is_some_and(|line| line.join("").contains("Searching"))
         })
         .expect("tool row");
     let col = app.transcript_inner_area.x + 2;
     assert!(app.toggle_entry_at(col, row));
 
     let expanded = render_to_string(&mut app);
-    assert!(expanded.contains("[click to hide]"));
     assert!(expanded.contains("TARGET-VALUE"));
 }
 
@@ -286,13 +286,14 @@ fn hover_highlights_the_row_under_the_pointer() {
             output: None,
             expanded: false,
         }));
+    app.tab_mut().turn_activity.insert(0, true);
 
     let _ = render_to_string(&mut app);
     let tool_row = (0..28)
         .find(|y| {
             app.screen_lines
                 .get(*y as usize)
-                .is_some_and(|line| line.join("").contains("code-read_file"))
+                .is_some_and(|line| line.join("").contains("Read"))
         })
         .expect("tool row");
 
@@ -352,9 +353,10 @@ fn clicking_a_tool_row_expands_and_collapses_its_output() {
             ),
             expanded: false,
         }));
+    app.tab_mut().turn_activity.insert(0, true);
 
     let collapsed = render_to_string(&mut app);
-    assert!(collapsed.contains("[click to expand]"));
+    assert!(collapsed.contains("+ Read"));
     assert!(collapsed.contains("line-11"));
     assert!(!collapsed.contains("line-0"));
 
@@ -362,20 +364,20 @@ fn clicking_a_tool_row_expands_and_collapses_its_output() {
         .find(|y| {
             app.screen_lines
                 .get(*y as usize)
-                .is_some_and(|line| line.join("").contains("code-read_file"))
+                .is_some_and(|line| line.join("").contains("Read"))
         })
         .expect("tool row");
     let col = app.transcript_inner_area.x + 2;
     assert!(app.toggle_entry_at(col, row));
 
     let expanded = render_to_string(&mut app);
-    assert!(expanded.contains("[click to hide]"));
+    assert!(expanded.contains("- Read"));
     assert!(expanded.contains("line-11"));
     assert!(expanded.contains("line-0"));
 
     assert!(app.toggle_entry_at(col, row));
     let collapsed_again = render_to_string(&mut app);
-    assert!(collapsed_again.contains("[click to expand]"));
+    assert!(collapsed_again.contains("+ Read"));
     assert!(!collapsed_again.contains("line-0"));
 }
 
@@ -399,12 +401,13 @@ fn tool_runs_have_a_band_and_shaded_text_when_finished() {
         .transcript
         .push(TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
             call_id: "done".to_string(),
-            name: "code_edit_file".to_string(),
+            name: "code-edit_file".to_string(),
             args: "{}".to_string(),
             status: ToolCallStatus::Succeeded,
             output: None,
             expanded: false,
         }));
+    app.tab_mut().turn_activity.insert(0, true);
 
     let backend = TestBackend::new(120, 28);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -422,8 +425,8 @@ fn tool_runs_have_a_band_and_shaded_text_when_finished() {
         panic!("row for {needle}")
     };
 
-    let (run_col, run_row) = locate("code-shell");
-    let (done_col, done_row) = locate("code_edit_file");
+    let (run_col, run_row) = locate("[running]");
+    let (done_col, done_row) = locate("Edited");
     assert_eq!(
         buffer[(run_col, run_row)].bg,
         palette.surface,
@@ -470,13 +473,282 @@ fn renders_turn_digest_grouping_tools_and_thoughts() {
             }));
     }
 
-    let rendered = render_to_string(&mut app);
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: "All done.".to_string(),
+        reasoning: String::new(),
+        streaming: false,
+        reasoning_expanded: false,
+    });
+    app.tab_mut().transcript.push(TranscriptEntry::Error {
+        text: "boom".to_string(),
+        expanded: false,
+    });
+
+    let collapsed = render_to_string(&mut app);
     assert!(
-        rendered.contains("1 command · 1 edit · 1 read · 1 thought"),
-        "{rendered}"
+        collapsed.contains("+ 1 command · 1 read · 1 edit · 1 thought"),
+        "{collapsed}"
     );
-    assert!(rendered.contains("▸ Thought (1 line)"));
-    assert!(rendered.contains("[click to expand]"));
+    assert!(!collapsed.contains("Thought (1 line)"));
+    assert!(!collapsed.contains("Ran"));
+    assert!(collapsed.contains("All done."));
+    assert!(collapsed.contains("[error]"));
+
+    app.tab_mut().turn_activity.insert(0, true);
+    let expanded = render_to_string(&mut app);
+    assert!(expanded.contains("- 1 command · 1 read · 1 edit · 1 thought"));
+    assert!(expanded.contains("+ Thought (1 line)"));
+    assert!(expanded.contains("Ran {}"));
+}
+
+#[test]
+fn clicking_the_digest_expands_and_collapses_turn_activity() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "go".to_string(),
+    });
+    app.tab_mut()
+        .transcript
+        .push(TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
+            call_id: "call-1".to_string(),
+            name: "code-grep".to_string(),
+            args: "{}".to_string(),
+            status: ToolCallStatus::Succeeded,
+            output: None,
+            expanded: false,
+        }));
+
+    let collapsed = render_to_string(&mut app);
+    assert!(collapsed.contains("+ 1 tool"));
+    assert!(!collapsed.contains("Searched"));
+
+    let zone = app
+        .digest_hit_zones
+        .iter()
+        .find(|zone| zone.entry_idx == 0)
+        .copied()
+        .expect("digest hit zone");
+    let col = app.transcript_inner_area.x + 2;
+    let row = app.transcript_inner_area.y + zone.start_line as u16;
+    assert!(app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), col, row)));
+    assert!(app.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), col, row)));
+    assert_eq!(app.tab().turn_activity.get(&0), Some(&true));
+
+    let expanded = render_to_string(&mut app);
+    assert!(expanded.contains("Searched"));
+
+    let zone = app.digest_hit_zones[0];
+    let row = app.transcript_inner_area.y + zone.start_line as u16;
+    assert!(app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), col, row)));
+    assert!(app.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), col, row)));
+    assert_eq!(app.tab().turn_activity.get(&0), Some(&false));
+    let recollapsed = render_to_string(&mut app);
+    assert!(!recollapsed.contains("Searched"));
+}
+
+#[test]
+fn subagent_expands_to_show_child_conversation() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "go".to_string(),
+    });
+    app.tab_mut()
+        .transcript
+        .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
+            id: "sub-1".to_string(),
+            agent: "explore".to_string(),
+            status: ToolCallStatus::Succeeded,
+            report: Some("final report".to_string()),
+            child_session_id: Some("ses-child".to_string()),
+            expanded: false,
+            nested: None,
+            nested_refreshed_at: None,
+            nested_loading: false,
+        }));
+    app.tab_mut().turn_activity.insert(0, true);
+
+    let collapsed = render_to_string(&mut app);
+    assert!(collapsed.contains("+ [subagent] explore [ok]"));
+    assert!(collapsed.contains("final report"));
+
+    let zone = app
+        .thinking_hit_zones
+        .iter()
+        .find(|zone| zone.entry_idx == 1)
+        .copied()
+        .expect("subagent hit zone");
+    let col = app.transcript_inner_area.x + 2;
+    let row = app.transcript_inner_area.y + zone.start_line as u16;
+    assert!(app.toggle_entry_at(col, row));
+
+    let loading = render_to_string(&mut app);
+    assert!(loading.contains("- [subagent] explore [ok]"));
+    assert!(loading.contains("loading conversation…"));
+
+    if let Some(TranscriptEntry::Subagent(entry)) = app.tab_mut().transcript.get_mut(1) {
+        entry.nested = Some(vec![
+            TranscriptEntry::User {
+                text: "find the bug".to_string(),
+            },
+            TranscriptEntry::Assistant {
+                text: "Found it.".to_string(),
+                reasoning: "checking".to_string(),
+                streaming: false,
+                reasoning_expanded: false,
+            },
+            TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
+                call_id: "c1".to_string(),
+                name: "code-grep".to_string(),
+                args: "{}".to_string(),
+                status: ToolCallStatus::Succeeded,
+                output: Some("src/lib.rs:10".to_string()),
+                expanded: false,
+            }),
+        ]);
+    }
+    let expanded = render_to_string(&mut app);
+    assert!(expanded.contains("you: find the bug"));
+    assert!(expanded.contains("thought (1 line)"));
+    assert!(expanded.contains("Found it."));
+    assert!(expanded.contains("[tool] code-grep [ok]"));
+    assert!(!expanded.contains("final report"));
+
+    let zone = app
+        .thinking_hit_zones
+        .iter()
+        .find(|zone| zone.entry_idx == 1)
+        .copied()
+        .expect("subagent hit zone");
+    let row = app.transcript_inner_area.y + zone.start_line as u16;
+    assert!(app.toggle_entry_at(col, row));
+    let recollapsed = render_to_string(&mut app);
+    assert!(recollapsed.contains("final report"));
+    assert!(!recollapsed.contains("you: find the bug"));
+}
+
+#[test]
+fn digest_uses_gerunds_for_active_work() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "go".to_string(),
+    });
+    app.tab_mut()
+        .transcript
+        .push(TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
+            call_id: "c1".to_string(),
+            name: "code-read_file".to_string(),
+            args: "{\"path\":\"src/lib.rs\"}".to_string(),
+            status: ToolCallStatus::Running,
+            output: None,
+            expanded: false,
+        }));
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("+ Reading 1"), "{rendered}");
+}
+
+#[test]
+fn digest_hover_marks_summary_for_text_highlight() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "go".to_string(),
+    });
+    app.tab_mut()
+        .transcript
+        .push(TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
+            call_id: "c1".to_string(),
+            name: "code-grep".to_string(),
+            args: "{}".to_string(),
+            status: ToolCallStatus::Succeeded,
+            output: None,
+            expanded: false,
+        }));
+    let _ = render_to_string(&mut app);
+    let zone = app.digest_hit_zones[0];
+    let col = app.transcript_inner_area.x + 4;
+    let row = app.transcript_inner_area.y + zone.start_line as u16;
+    let _ = app.handle_mouse_event(mouse(crossterm::event::MouseEventKind::Moved, col, row));
+    let _ = render_to_string(&mut app);
+    assert_eq!(app.hovered_digest, Some(0));
+}
+
+#[test]
+fn expanded_edit_renders_colored_diff_with_counts() {
+    let mut app = test_app();
+    let diff = "Edited src/lib.rs\n\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,2 @@\n fn main() {\n-    old();\n+    new();\n }\n";
+    app.tab_mut()
+        .transcript
+        .push(TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
+            call_id: "e1".to_string(),
+            name: "code-edit_file".to_string(),
+            args: "{\"path\":\"src/lib.rs\",\"old_string\":\"old\",\"new_string\":\"new\"}"
+                .to_string(),
+            status: ToolCallStatus::Succeeded,
+            output: Some(diff.to_string()),
+            expanded: false,
+        }));
+
+    let collapsed = render_to_string(&mut app);
+    assert!(collapsed.contains("+ Edited src/lib.rs [ok] +1 -1"));
+    assert!(!collapsed.contains("new();"));
+
+    let row = (0..28)
+        .find(|y| {
+            app.screen_lines
+                .get(*y as usize)
+                .is_some_and(|line| line.join("").contains("Edited"))
+        })
+        .expect("edit row");
+    let col = app.transcript_inner_area.x + 2;
+    assert!(app.toggle_entry_at(col, row));
+
+    let backend = TestBackend::new(120, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let palette = crate::theme::Palette::default();
+    let find = |needle: &str| -> u16 {
+        for y in 0..28 {
+            let text: String = (0..120).map(|x| buffer[(x, y)].symbol()).collect();
+            if text.contains(needle) {
+                return y;
+            }
+        }
+        panic!("row for {needle}");
+    };
+    let row_has_fg =
+        |row: u16, color: ratatui::style::Color| (0..120).any(|x| buffer[(x, row)].fg == color);
+    assert!(row_has_fg(find("old();"), palette.diff_removed));
+    assert!(row_has_fg(find("new();"), palette.diff_added));
+
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("- Edited src/lib.rs [ok] +1 -1"));
+    assert!(rendered.contains("@@ -1,2 +1,2 @@"));
+}
+
+#[test]
+fn statusline_shows_running_subagent_names() {
+    let mut app = test_app();
+    app.tab_mut().is_running = true;
+    app.tab_mut().active_tool = Some("subagent-run".to_string());
+    for (id, agent) in [("s1", "explore"), ("s2", "build")] {
+        app.tab_mut()
+            .transcript
+            .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
+                id: id.to_string(),
+                agent: agent.to_string(),
+                status: ToolCallStatus::Running,
+                report: None,
+                child_session_id: None,
+                expanded: false,
+                nested: None,
+                nested_refreshed_at: None,
+                nested_loading: false,
+            }));
+    }
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("explore, build"));
 }
 
 #[test]
@@ -835,9 +1107,9 @@ fn renders_collapsible_thinking_and_records_click_hit_zone() {
         delta: ItemDelta::AgentText("Hello!".to_string()),
     });
 
+    app.tab_mut().turn_activity.insert(0, true);
     let collapsed = render_to_string(&mut app);
-    assert!(collapsed.contains("▸ Thinking (2 lines)"));
-    assert!(collapsed.contains("[click to expand]"));
+    assert!(collapsed.contains("+ Thinking (2 lines)"));
     assert!(!collapsed.contains("secret thought step 1"));
     assert!(collapsed.contains("File Changes (1)"));
     assert!(collapsed.contains("meerai-tui/src/ui.rs"));
@@ -854,7 +1126,7 @@ fn renders_collapsible_thinking_and_records_click_hit_zone() {
     assert!(app.toggle_entry_at(click_col, click_row));
 
     let expanded = render_to_string(&mut app);
-    assert!(expanded.contains("▾ Thinking (2 lines)"));
+    assert!(expanded.contains("- Thinking (2 lines)"));
     assert!(expanded.contains("secret thought step 1"));
 }
 
@@ -949,11 +1221,10 @@ fn renders_collapsible_single_line_error_and_expands_on_click() {
 
     let collapsed = render_to_string(&mut app);
     assert!(
-        collapsed.contains("▸ [error] MissingSessionID: Request is missing x-opencode-session")
+        collapsed.contains("+ [error] MissingSessionID: Request is missing x-opencode-session")
     );
-    assert!(collapsed.contains("[click to expand]"));
     assert!(!collapsed.contains("line 2 details"));
-    assert!(!collapsed.contains("▾ [error]"));
+    assert!(!collapsed.contains("- [error]"));
     assert_eq!(app.thinking_hit_zones.len(), 1);
 
     let zone = app.thinking_hit_zones[0];
@@ -962,14 +1233,14 @@ fn renders_collapsible_single_line_error_and_expands_on_click() {
     assert!(app.toggle_entry_at(click_col, click_row));
 
     let expanded = render_to_string(&mut app);
-    assert!(expanded.contains("▾ [error] (2 lines)"));
+    assert!(expanded.contains("- [error] (2 lines)"));
     assert!(expanded.contains("line 2 details"));
 
     let zone2 = app.thinking_hit_zones[0];
     let click_row2 = app.transcript_inner_area.y + zone2.start_line as u16;
     assert!(app.toggle_entry_at(click_col, click_row2));
     let recollapsed = render_to_string(&mut app);
-    assert!(recollapsed.contains("▸ [error]"));
+    assert!(recollapsed.contains("+ [error]"));
     assert!(!recollapsed.contains("line 2 details"));
 }
 
@@ -1072,15 +1343,16 @@ fn renders_distinct_user_thinking_tool_and_response_roles() {
         streaming: false,
         reasoning_expanded: true,
     });
+    app.tab_mut().turn_activity.insert(0, true);
 
     let rendered = render_to_string(&mut app);
-    assert!(rendered.contains("▌ you"));
+    assert!(!rendered.contains("▌ you"));
     assert!(rendered.contains("▌ Inspect Cargo.toml"));
-    assert!(rendered.contains("▸ [tool] code-read_file [ok]"));
+    assert!(rendered.contains("+ Read Cargo.toml [ok]"));
     assert!(rendered.contains("↳ [workspace]"));
     assert!(rendered.contains("members = []"));
-    assert!(rendered.contains("▾ Thought (1 line)"));
-    assert!(rendered.contains("● Response"));
+    assert!(rendered.contains("- Thought (1 line)"));
+    assert!(!rendered.contains("● Response"));
     assert!(rendered.contains("Summary"));
     assert!(rendered.contains("name = \"meerai\""));
     assert!(!rendered.contains("```toml"));

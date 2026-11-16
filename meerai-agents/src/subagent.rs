@@ -505,16 +505,6 @@ impl Toolset for SubagentToolset {
 
         let bridge = SUBAGENT_BRIDGE.try_with(Clone::clone).ok();
         let item_id = ItemId::new();
-        if let Some(bridge) = &bridge {
-            let _ = bridge.event_tx.send(AgentEvent::ItemStarted {
-                item: SessionItem::SubagentRun {
-                    id: item_id.clone(),
-                    agent: agent_id.clone(),
-                    status: ItemStatus::InProgress,
-                    report: None,
-                },
-            });
-        }
 
         let max_steps = bridge.as_ref().map_or(preset_max_steps, |bridge| {
             preset_max_steps.min(bridge.parent_harness_config.max_steps_per_turn)
@@ -578,6 +568,18 @@ impl Toolset for SubagentToolset {
                 child_initial_cap = Some(adjusted);
                 child_agent.set_max_session_tokens(Some(adjusted));
             }
+        }
+
+        if let Some(bridge) = &bridge {
+            let _ = bridge.event_tx.send(AgentEvent::ItemStarted {
+                item: SessionItem::SubagentRun {
+                    id: item_id.clone(),
+                    agent: agent_id.clone(),
+                    status: ItemStatus::InProgress,
+                    report: None,
+                    child_session_id: child_session_id.clone(),
+                },
+            });
         }
 
         let (child_event_tx, mut child_event_rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -660,6 +662,7 @@ impl Toolset for SubagentToolset {
                     agent: agent_id,
                     status: final_status,
                     report: Some(report),
+                    child_session_id: child_session_id.clone(),
                 },
             });
         }

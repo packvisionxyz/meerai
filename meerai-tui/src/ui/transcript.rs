@@ -1,5 +1,6 @@
 use super::statusline::{display_model, key_status_style, summarize_error_line};
 use super::*;
+use crate::app::ToolCallEntry;
 
 pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     let inner = Rect {
@@ -17,6 +18,7 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area:
         WrappedTranscript {
             lines: Vec::new(),
             hit_zones: Vec::new(),
+            digest_hit_zones: Vec::new(),
             doc_lines: Vec::new(),
             bands: Vec::new(),
             code_bands: Vec::new(),
@@ -25,6 +27,7 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area:
     };
 
     app.thinking_hit_zones = std::mem::take(&mut wrapped.hit_zones);
+    app.digest_hit_zones = std::mem::take(&mut wrapped.digest_hit_zones);
     app.transcript_wrapped_lines = std::mem::take(&mut wrapped.doc_lines);
 
     let scroll_y = {
@@ -42,6 +45,15 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area:
 
     let hovered = app.hovered_entry_at_screen(inner, scroll_y as usize);
     app.hovered_entry = hovered;
+    app.hovered_digest = app.hovered_digest_at_screen(inner, scroll_y as usize);
+    let paint_hover = hovered.is_some_and(|idx| {
+        matches!(
+            app.tab().transcript.get(idx),
+            Some(TranscriptEntry::ToolCall(_))
+                | Some(TranscriptEntry::Subagent(_))
+                | Some(TranscriptEntry::Error { .. })
+        )
+    });
     let hover_zones = std::mem::take(&mut wrapped.hover_zones);
     let hover_range = hovered.and_then(|idx| {
         hover_zones
@@ -82,7 +94,9 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area:
 
     paint(frame, &wrapped.code_bands, 2, theme::p().surface_high);
     paint(frame, &wrapped.bands, 0, theme::p().surface);
-    if let Some(range) = hover_range {
+    if let Some(range) = hover_range
+        && paint_hover
+    {
         paint(frame, &[range], 0, theme::p().surface_high);
     }
 }
@@ -133,7 +147,11 @@ fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
             Line::from(vec![
                 Span::styled(LOGO_M_ROWS[2], logo_style),
                 Span::styled(
-                    "  Shortcuts: Ctrl-j newline, Ctrl-t think, Drag/Shift+Click copy.",
+                    format!(
+                        "  Shortcuts: {} newline, {} commands, Drag/Shift+Click copy.",
+                        crate::app::ctrl_label('j'),
+                        crate::app::ctrl_label('p')
+                    ),
                     Style::default().fg(theme::p().muted),
                 ),
             ]),
@@ -222,40 +240,90 @@ fn tool_status_badge(status: &ToolCallStatus) -> (&'static str, Color) {
 #[derive(Default)]
 struct TurnDigest {
     commands: usize,
-    edits: usize,
+    commands_active: bool,
+    tools: usize,
+    tools_active: bool,
     reads: usize,
+    reads_active: bool,
+    edits: usize,
+    edits_active: bool,
     agents: usize,
+    agents_active: bool,
     thoughts: usize,
+    thoughts_active: bool,
 }
 
 impl TurnDigest {
-    fn record_tool(&mut self, name: &str) {
+    fn record_tool(&mut self, name: &str, status: &ToolCallStatus) {
+        let active = matches!(status, ToolCallStatus::Proposed | ToolCallStatus::Running);
         match name {
-            "code-shell" | "sac-run_script" => self.commands += 1,
-            "code-write_file" | "code-edit_file" => self.edits += 1,
-            "subagent-run" => self.agents += 1,
-            _ => self.reads += 1,
+            "code-shell" | "sac-run_script" => {
+                self.commands += 1;
+                self.commands_active |= active;
+            }
+            "code-read_file" => {
+                self.reads += 1;
+                self.reads_active |= active;
+            }
+            "code-write_file" | "code-edit_file" => {
+                self.edits += 1;
+                self.edits_active |= active;
+            }
+            "subagent-run" => {
+                self.agents += 1;
+                self.agents_active |= active;
+            }
+            _ => {
+                self.tools += 1;
+                self.tools_active |= active;
+            }
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.commands + self.edits + self.reads + self.agents + self.thoughts == 0
+        self.commands + self.tools + self.reads + self.edits + self.agents + self.thoughts == 0
     }
 
     fn summary(&self) -> String {
-        fn part(count: usize, singular: &str, plural: &str) -> Option<String> {
+        fn part(
+            count: usize,
+            active: bool,
+            gerund: &str,
+            singular: &str,
+            plural: &str,
+        ) -> Option<String> {
             match count {
                 0 => None,
+                n if active => Some(format!("{gerund} {n}")),
                 1 => Some(format!("1 {singular}")),
                 n => Some(format!("{n} {plural}")),
             }
         }
         [
-            part(self.commands, "command", "commands"),
-            part(self.edits, "edit", "edits"),
-            part(self.reads, "read", "reads"),
-            part(self.agents, "agent", "agents"),
-            part(self.thoughts, "thought", "thoughts"),
+            part(
+                self.commands,
+                self.commands_active,
+                "Running",
+                "command",
+                "commands",
+            ),
+            part(self.tools, self.tools_active, "Calling", "tool", "tools"),
+            part(self.reads, self.reads_active, "Reading", "read", "reads"),
+            part(self.edits, self.edits_active, "Editing", "edit", "edits"),
+            part(
+                self.agents,
+                self.agents_active,
+                "Delegating",
+                "agent",
+                "agents",
+            ),
+            part(
+                self.thoughts,
+                self.thoughts_active,
+                "Thinking",
+                "thought",
+                "thoughts",
+            ),
         ]
         .into_iter()
         .flatten()
@@ -264,9 +332,8 @@ impl TurnDigest {
     }
 }
 
-fn turn_digests(transcript: &[TranscriptEntry]) -> (Vec<Option<TurnDigest>>, Option<usize>) {
+fn turn_digests(transcript: &[TranscriptEntry]) -> Vec<Option<TurnDigest>> {
     let mut digests: Vec<Option<TurnDigest>> = (0..transcript.len()).map(|_| None).collect();
-    let mut last_user = None;
     let mut current: Option<usize> = None;
     let mut digest = TurnDigest::default();
 
@@ -276,15 +343,25 @@ fn turn_digests(transcript: &[TranscriptEntry]) -> (Vec<Option<TurnDigest>>, Opt
                 digests[start] = Some(std::mem::take(&mut digest));
             }
             current = Some(idx);
-            last_user = Some(idx);
             digest = TurnDigest::default();
         }
         match entry {
-            TranscriptEntry::Assistant { reasoning, .. } if !reasoning.is_empty() => {
+            TranscriptEntry::Assistant {
+                reasoning,
+                streaming,
+                ..
+            } if !reasoning.is_empty() => {
                 digest.thoughts += 1;
+                digest.thoughts_active |= *streaming;
             }
-            TranscriptEntry::ToolCall(call) => digest.record_tool(&call.name),
-            TranscriptEntry::Subagent(_) => digest.agents += 1,
+            TranscriptEntry::ToolCall(call) => digest.record_tool(&call.name, &call.status),
+            TranscriptEntry::Subagent(sub) => {
+                digest.agents += 1;
+                digest.agents_active |= matches!(
+                    sub.status,
+                    ToolCallStatus::Proposed | ToolCallStatus::Running
+                );
+            }
             _ => {}
         }
     }
@@ -292,84 +369,77 @@ fn turn_digests(transcript: &[TranscriptEntry]) -> (Vec<Option<TurnDigest>>, Opt
     if let Some(start) = current {
         digests[start] = Some(digest);
     }
-    (digests, last_user)
+    digests
 }
 
-fn digest_line(digest: &TurnDigest, running: bool, spinner: &str) -> Option<Line<'static>> {
+fn digest_line(digest: &TurnDigest, expanded: bool, hovered: bool) -> Option<Line<'static>> {
     if digest.is_empty() {
         return None;
     }
-    let marker = if running {
-        format!("  {spinner} ")
-    } else {
-        "  · ".to_string()
-    };
-    let marker_style = if running {
-        Style::default().fg(theme::p().warning)
+    let text_style = if hovered {
+        Style::default().fg(theme::p().text)
     } else {
         Style::default().fg(theme::p().faint)
     };
     Some(Line::from(vec![
-        Span::styled(marker, marker_style),
-        Span::styled(digest.summary(), Style::default().fg(theme::p().faint)),
+        Span::styled(
+            if expanded { "- " } else { "+ " },
+            Style::default().fg(theme::p().faint),
+        ),
+        Span::styled(digest.summary(), text_style),
     ]))
 }
 
 fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
     let mut lines = build_header_lines(app);
-    let transcript = &app.tab().transcript;
+    let tab = app.tab();
+    let transcript = &tab.transcript;
     if transcript.is_empty() {
         return lines;
     }
 
-    let (digests, last_user) = turn_digests(transcript);
-    let spinner = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
+    let digests = turn_digests(transcript);
 
     lines.push(tagged_line(Line::default(), None, 0));
+    let mut current_turn: Option<usize> = None;
     for (idx, entry) in transcript.iter().enumerate() {
+        if matches!(entry, TranscriptEntry::User { .. }) {
+            current_turn = Some(idx);
+        }
+        let collapsed = current_turn
+            .map(|turn| !tab.turn_activity.get(&turn).copied().unwrap_or(false))
+            .unwrap_or(false);
+        let hidden = collapsed
+            && match entry {
+                TranscriptEntry::ToolCall(_) | TranscriptEntry::Subagent(_) => true,
+                TranscriptEntry::Assistant {
+                    text, reasoning, ..
+                } => text.is_empty() && !reasoning.is_empty(),
+                _ => false,
+            };
+        if hidden {
+            continue;
+        }
         if idx > 0 {
             lines.push(tagged_line(Line::default(), None, 0));
         }
         match entry {
             TranscriptEntry::User { text } => {
-                let mut header = vec![Span::styled(
-                    "▌ you",
-                    Style::default()
-                        .fg(theme::p().accent)
-                        .add_modifier(Modifier::BOLD),
-                )];
-                if app.hovered_entry == Some(idx) {
-                    header.push(Span::styled(
-                        "  [click for actions]",
-                        Style::default()
-                            .fg(theme::p().faint)
-                            .add_modifier(Modifier::ITALIC),
-                    ));
-                }
-                lines.push(with_hover(
-                    banded_line(Line::from(header), Some(idx), 2),
-                    idx,
-                ));
                 for line in text.split('\n') {
-                    lines.push(with_hover(
-                        banded_line(
-                            Line::from(vec![
-                                Span::styled("▌ ", Style::default().fg(theme::p().accent)),
-                                Span::styled(
-                                    line.to_string(),
-                                    Style::default().fg(theme::p().text),
-                                ),
-                            ]),
-                            Some(idx),
-                            2,
-                        ),
-                        idx,
+                    lines.push(banded_line(
+                        Line::from(vec![
+                            Span::styled("▌ ", Style::default().fg(theme::p().accent)),
+                            Span::styled(line.to_string(), Style::default().fg(theme::p().text)),
+                        ]),
+                        Some(idx),
+                        2,
                     ));
                 }
                 if let Some(digest) = digests.get(idx).and_then(|d| d.as_ref()) {
-                    let running = app.tab().is_running && last_user == Some(idx);
-                    if let Some(line) = digest_line(digest, running, spinner) {
-                        lines.push(tagged_line(line, None, 2));
+                    let expanded = tab.turn_activity.get(&idx).copied().unwrap_or(false);
+                    let hovered = app.hovered_digest == Some(idx);
+                    if let Some(line) = digest_line(digest, expanded, hovered) {
+                        lines.push(with_digest(tagged_line(line, None, 2), idx));
                     }
                 }
             }
@@ -379,7 +449,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                 streaming,
                 reasoning_expanded,
             } => {
-                if !reasoning.is_empty() {
+                if !reasoning.is_empty() && !collapsed {
                     let line_count = reasoning.lines().count().max(1);
                     let label = if *streaming { "Thinking" } else { "Thought" };
                     let count = if line_count == 1 {
@@ -387,14 +457,21 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     } else {
                         format!("{line_count} lines")
                     };
+                    let header_style = if app.hovered_entry == Some(idx) {
+                        Style::default()
+                            .fg(theme::p().text)
+                            .add_modifier(Modifier::ITALIC)
+                    } else {
+                        Style::default()
+                            .fg(theme::p().muted)
+                            .add_modifier(Modifier::ITALIC)
+                    };
                     if *reasoning_expanded {
                         lines.push(with_hover(
                             tagged_line(
                                 Line::from(Span::styled(
-                                    format!("  ▾ {label} ({count})  [click to hide]"),
-                                    Style::default()
-                                        .fg(theme::p().muted)
-                                        .add_modifier(Modifier::ITALIC),
+                                    format!("- {label} ({count})"),
+                                    header_style,
                                 )),
                                 Some(idx),
                                 2,
@@ -423,10 +500,8 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                         lines.push(with_hover(
                             tagged_line(
                                 Line::from(Span::styled(
-                                    format!("  ▸ {label} ({count})  [click to expand]"),
-                                    Style::default()
-                                        .fg(theme::p().muted)
-                                        .add_modifier(Modifier::ITALIC),
+                                    format!("+ {label} ({count})"),
+                                    header_style,
                                 )),
                                 Some(idx),
                                 2,
@@ -434,22 +509,6 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                             idx,
                         ));
                     }
-                }
-                if !text.is_empty() || *streaming {
-                    let mut header_spans = vec![Span::styled(
-                        "  ● Response",
-                        Style::default()
-                            .fg(theme::p().muted)
-                            .add_modifier(Modifier::BOLD),
-                    )];
-                    if *streaming {
-                        let ch = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
-                        header_spans.push(Span::styled(
-                            format!(" {ch}"),
-                            Style::default().fg(theme::p().muted),
-                        ));
-                    }
-                    lines.push(tagged_line(Line::from(header_spans), None, 2));
                 }
                 if !text.is_empty() {
                     let mut in_code_block = false;
@@ -476,24 +535,27 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
             TranscriptEntry::ToolCall(tc) => {
                 let (badge, badge_color) = tool_status_badge(&tc.status);
                 let script = script_from_args(&tc.name, &tc.args);
-                let args_preview = match &script {
-                    Some((language, code)) => {
-                        let first = code.lines().next().unwrap_or("").trim();
-                        truncate_single_line(&format!("{language} · {first}"), 60)
-                    }
-                    None => truncate_single_line(&tc.args, 60),
-                };
                 let active = matches!(
                     tc.status,
                     ToolCallStatus::Proposed | ToolCallStatus::Running
                 );
-                let lead = if tc.status == ToolCallStatus::Running {
+                let diff = edit_diff(tc);
+                let (added, removed) = diff
+                    .as_deref()
+                    .map(crate::diff::diff_counts)
+                    .unwrap_or((0, 0));
+                let (gerund, past) = activity_verbs(&tc.name);
+                let verb = if active { gerund } else { past };
+                let target = tool_target(&tc.name, &tc.args, &script);
+                let marker = if active {
                     let ch = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
-                    format!("{ch} [tool] ")
+                    format!("{ch} ")
+                } else if tc.expanded {
+                    "- ".to_string()
                 } else {
-                    "▸ [tool] ".to_string()
+                    "+ ".to_string()
                 };
-                let (lead_style, name_style, badge_style, args_style) = if active {
+                let (marker_style, name_style, badge_style, args_style) = if active {
                     (
                         Style::default().fg(theme::p().interactive),
                         Style::default()
@@ -524,35 +586,21 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                 };
                 const PREVIEW_LINES: usize = 8;
                 let full_args = tc.args.trim().to_string();
-                let args_collapsible = full_args.chars().count() > 60;
-                let collapsible = script.is_some()
-                    || args_collapsible
-                    || !output_lines.is_empty()
-                    || output_lines
-                        .first()
-                        .is_some_and(|line| line.chars().count() > 120);
 
                 let mut header = vec![
-                    Span::styled(lead, lead_style),
-                    Span::styled(tc.name.clone(), name_style),
-                    Span::styled(" ", Style::default()),
-                    Span::styled(format!("[{badge}]"), badge_style),
+                    Span::styled(marker, marker_style),
+                    Span::styled(verb.to_string(), name_style),
                 ];
-                if args_preview.is_empty() {
-                    header.push(Span::raw(""));
-                } else {
-                    header.push(Span::styled(format!(" {args_preview}"), args_style));
+                if !target.is_empty() {
+                    header.push(Span::styled(" ", Style::default()));
+                    header.push(Span::styled(target, args_style));
                 }
-                if collapsible {
+                header.push(Span::styled(" ", Style::default()));
+                header.push(Span::styled(format!("[{badge}]"), badge_style));
+                if diff.is_some() {
                     header.push(Span::styled(
-                        if tc.expanded {
-                            "  [click to hide]"
-                        } else {
-                            "  [click to expand]"
-                        },
-                        Style::default()
-                            .fg(theme::p().faint)
-                            .add_modifier(Modifier::ITALIC),
+                        format!(" +{added} -{removed}"),
+                        Style::default().fg(theme::p().faint),
                     ));
                 }
                 lines.push(with_hover(
@@ -560,7 +608,16 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     idx,
                 ));
 
-                if tc.expanded && !full_args.is_empty() {
+                if tc.expanded
+                    && let Some(diff) = &diff
+                {
+                    let language = tool_path(tc)
+                        .as_deref()
+                        .and_then(crate::syntax::language_for_path);
+                    render_edit_diff(&mut lines, diff, language, idx);
+                }
+
+                if tc.expanded && diff.is_none() && !full_args.is_empty() {
                     let pretty = serde_json::from_str::<serde_json::Value>(&full_args)
                         .ok()
                         .and_then(|value| serde_json::to_string_pretty(&value).ok())
@@ -583,6 +640,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     }
                 }
                 if tc.expanded
+                    && diff.is_none()
                     && let Some((_, code)) = &script
                 {
                     const MAX_SCRIPT_LINES: usize = 100;
@@ -619,7 +677,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                         ));
                     }
                 }
-                if !output_lines.is_empty() {
+                if diff.is_none() && !output_lines.is_empty() {
                     if tc.expanded {
                         const MAX_EXPANDED_LINES: usize = 200;
                         for line in output_lines.iter().take(MAX_EXPANDED_LINES) {
@@ -702,14 +760,34 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                         Style::default().fg(badge_color),
                     )
                 };
-                let line = Line::from(vec![
-                    Span::styled("▸ [subagent] ", lead_style),
+                let lead = if sub.expanded {
+                    "- [subagent] "
+                } else {
+                    "+ [subagent] "
+                };
+                let header = vec![
+                    Span::styled(lead, lead_style),
                     Span::styled(sub.agent.clone(), name_style),
                     Span::styled(" ", Style::default()),
                     Span::styled(format!("[{badge}]"), badge_style),
-                ]);
-                lines.push(with_hover(banded_line(line, None, 2), idx));
-                if let Some(report) = &sub.report {
+                ];
+                lines.push(with_hover(
+                    banded_line(Line::from(header), Some(idx), 2),
+                    idx,
+                ));
+                if sub.expanded {
+                    match &sub.nested {
+                        Some(nested) => render_nested_conversation(&mut lines, nested, idx),
+                        None => {
+                            let label = if sub.nested_loading {
+                                "loading conversation…"
+                            } else {
+                                "conversation unavailable"
+                            };
+                            lines.push(nested_line(idx, label.to_string(), true));
+                        }
+                    }
+                } else if let Some(report) = &sub.report {
                     let preview = truncate_single_line(report, 120);
                     if !preview.is_empty() {
                         lines.push(with_hover(
@@ -718,7 +796,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                                     Span::styled("  ↳ ", Style::default().fg(theme::p().faint)),
                                     Span::styled(preview, Style::default().fg(theme::p().faint)),
                                 ]),
-                                None,
+                                Some(idx),
                                 4,
                             ),
                             idx,
@@ -749,7 +827,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     lines.push(with_hover(
                         banded_line(
                             Line::from(Span::styled(
-                                format!("  ▾ [error] ({line_count} lines)  [click to hide]"),
+                                format!("- [error] ({line_count} lines)"),
                                 Style::default()
                                     .fg(theme::p().error)
                                     .add_modifier(Modifier::BOLD),
@@ -783,54 +861,17 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     };
                     let max_summary = avail_width.saturating_sub(14).max(12);
                     let summary = summarize_error_line(text, max_summary);
-                    let prefix_len = 12;
-                    let hint_len = 19;
-                    if prefix_len + summary.chars().count() + hint_len <= avail_width {
-                        lines.push(with_hover(
-                            banded_line(
-                                Line::from(vec![
-                                    Span::styled(
-                                        format!("  ▸ [error] {summary}"),
-                                        Style::default().fg(theme::p().error),
-                                    ),
-                                    Span::styled(
-                                        "  [click to expand]",
-                                        Style::default()
-                                            .fg(theme::p().faint)
-                                            .add_modifier(Modifier::ITALIC),
-                                    ),
-                                ]),
-                                Some(idx),
-                                2,
-                            ),
-                            idx,
-                        ));
-                    } else {
-                        lines.push(with_hover(
-                            banded_line(
-                                Line::from(Span::styled(
-                                    format!("  ▸ [error] {summary}"),
-                                    Style::default().fg(theme::p().error),
-                                )),
-                                Some(idx),
-                                2,
-                            ),
-                            idx,
-                        ));
-                        lines.push(with_hover(
-                            banded_line(
-                                Line::from(Span::styled(
-                                    "    [click to expand]",
-                                    Style::default()
-                                        .fg(theme::p().faint)
-                                        .add_modifier(Modifier::ITALIC),
-                                )),
-                                Some(idx),
-                                4,
-                            ),
-                            idx,
-                        ));
-                    }
+                    lines.push(with_hover(
+                        banded_line(
+                            Line::from(Span::styled(
+                                format!("+ [error] {summary}"),
+                                Style::default().fg(theme::p().error),
+                            )),
+                            Some(idx),
+                            2,
+                        ),
+                        idx,
+                    ));
                 }
             }
         }
@@ -839,9 +880,280 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
     lines
 }
 
+fn activity_verbs(name: &str) -> (&'static str, &'static str) {
+    match name {
+        "code-read_file" => ("Reading", "Read"),
+        "code-write_file" | "code-edit_file" => ("Editing", "Edited"),
+        "code-shell" => ("Running", "Ran"),
+        "sac-run_script" => ("Running script", "Ran script"),
+        "code-grep" => ("Searching", "Searched"),
+        "code-glob" => ("Matching", "Matched"),
+        "code-list_dir" => ("Listing", "Listed"),
+        "retrieval-repo_map" => ("Mapping", "Mapped"),
+        "question-ask" => ("Asking", "Asked"),
+        name if name.starts_with("lsp-") => ("Inspecting", "Inspected"),
+        _ => ("Using", "Used"),
+    }
+}
+
+fn tool_target(name: &str, args: &str, script: &Option<(String, String)>) -> String {
+    if let Some((language, code)) = script {
+        let first = code.lines().next().unwrap_or("").trim();
+        return truncate_single_line(&format!("{language} · {first}"), 60);
+    }
+    let value = serde_json::from_str::<serde_json::Value>(args).ok();
+    let field = |keys: &[&str]| -> Option<String> {
+        let value = value.as_ref()?;
+        keys.iter().find_map(|key| {
+            value
+                .get(*key)
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+    };
+    let target = match name {
+        "code-read_file" | "code-write_file" | "code-edit_file" => {
+            field(&["path", "file", "file_path"])
+        }
+        "code-list_dir" => field(&["path", "dir"]),
+        "code-grep" => field(&["query", "pattern", "regex"]),
+        "code-glob" => field(&["query", "pattern", "glob"]),
+        "code-shell" => field(&["command", "cmd"]),
+        _ => None,
+    };
+    match target {
+        Some(target) if !target.trim().is_empty() => truncate_single_line(target.trim(), 60),
+        _ => truncate_single_line(args.trim(), 60),
+    }
+}
+
+fn tool_path(tc: &ToolCallEntry) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(&tc.args)
+        .ok()
+        .and_then(|value| {
+            ["path", "file", "file_path"].iter().find_map(|key| {
+                value
+                    .get(*key)
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+        })
+        .or_else(|| {
+            tc.output.as_deref().and_then(|output| {
+                output.lines().find_map(|line| {
+                    line.strip_prefix("+++ b/")
+                        .or_else(|| line.strip_prefix("+++ "))
+                        .map(str::to_string)
+                })
+            })
+        })
+}
+
+fn edit_diff(tc: &ToolCallEntry) -> Option<Vec<crate::diff::UnifiedLine>> {
+    if !matches!(tc.name.as_str(), "code-write_file" | "code-edit_file") {
+        return None;
+    }
+    if let Some(output) = tc.output.as_deref() {
+        let parsed = crate::diff::parse_unified_diff(output);
+        if !parsed.is_empty() {
+            return Some(parsed);
+        }
+    }
+    let value = serde_json::from_str::<serde_json::Value>(&tc.args).ok()?;
+    let path = value.get("path").and_then(|v| v.as_str())?;
+    let old = value
+        .get("old_string")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let new = value
+        .get("new_string")
+        .and_then(|v| v.as_str())
+        .or_else(|| value.get("content").and_then(|v| v.as_str()))?;
+    let lines = crate::diff::build_edit_diff(path, old, new);
+    (!lines.is_empty()).then_some(lines)
+}
+
+fn render_edit_diff(
+    lines: &mut Vec<TaggedTranscriptLine>,
+    diff: &[crate::diff::UnifiedLine],
+    language: Option<&str>,
+    idx: usize,
+) {
+    use crate::diff::UnifiedLineKind;
+    const MAX_DIFF_LINES: usize = 200;
+    let mut rendered = 0usize;
+    for line in diff {
+        if line.kind == UnifiedLineKind::FileHeader {
+            continue;
+        }
+        if rendered >= MAX_DIFF_LINES {
+            lines.push(nested_line(idx, "…".to_string(), true));
+            break;
+        }
+        let tagged = match line.kind {
+            UnifiedLineKind::HunkHeader => with_hover(
+                banded_line(
+                    Line::from(vec![
+                        Span::styled("  ", Style::default()),
+                        Span::styled(line.text.clone(), Style::default().fg(theme::p().faint)),
+                    ]),
+                    Some(idx),
+                    4,
+                ),
+                idx,
+            ),
+            UnifiedLineKind::Context => {
+                code_diff_line(idx, " ", theme::p().diff_context, language, &line.text)
+            }
+            UnifiedLineKind::Added => {
+                code_diff_line(idx, "+", theme::p().diff_added, language, &line.text)
+            }
+            UnifiedLineKind::Removed => {
+                code_diff_line(idx, "-", theme::p().diff_removed, language, &line.text)
+            }
+            UnifiedLineKind::FileHeader => continue,
+        };
+        rendered += 1;
+        lines.push(tagged);
+    }
+}
+
+fn code_diff_line(
+    idx: usize,
+    sign: &str,
+    color: Color,
+    language: Option<&str>,
+    text: &str,
+) -> TaggedTranscriptLine {
+    let base = Style::default().fg(color);
+    let mut spans = vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(format!("{sign} "), Style::default().fg(color)),
+        Span::styled("  ", Style::default()),
+    ];
+    spans.extend(crate::syntax::highlight(language, text, base));
+    with_hover(banded_line(Line::from(spans), Some(idx), 4), idx)
+}
+
+fn nested_line(parent_idx: usize, text: String, faint: bool) -> TaggedTranscriptLine {
+    let color = if faint {
+        theme::p().faint
+    } else {
+        theme::p().muted
+    };
+    with_hover(
+        banded_line(
+            Line::from(vec![
+                Span::styled("  │ ", Style::default().fg(theme::p().faint)),
+                Span::styled(text, Style::default().fg(color)),
+            ]),
+            Some(parent_idx),
+            4,
+        ),
+        parent_idx,
+    )
+}
+
+fn render_nested_conversation(
+    lines: &mut Vec<TaggedTranscriptLine>,
+    nested: &[TranscriptEntry],
+    parent_idx: usize,
+) {
+    const MAX_ENTRIES: usize = 60;
+    const MAX_TEXT_LINES: usize = 12;
+    let start = nested.len().saturating_sub(MAX_ENTRIES);
+    if start > 0 {
+        lines.push(nested_line(
+            parent_idx,
+            format!("… {start} earlier entries"),
+            true,
+        ));
+    }
+    for entry in &nested[start..] {
+        match entry {
+            TranscriptEntry::User { text } => {
+                let first = text.lines().next().unwrap_or("");
+                lines.push(nested_line(
+                    parent_idx,
+                    format!("you: {}", truncate_single_line(first, 100)),
+                    false,
+                ));
+            }
+            TranscriptEntry::Assistant {
+                text, reasoning, ..
+            } => {
+                if !reasoning.is_empty() {
+                    let count = reasoning.lines().count().max(1);
+                    let label = if count == 1 {
+                        "1 line".to_string()
+                    } else {
+                        format!("{count} lines")
+                    };
+                    lines.push(nested_line(parent_idx, format!("thought ({label})"), true));
+                }
+                let total = text.lines().count();
+                for (index, line) in text.lines().enumerate() {
+                    if index >= MAX_TEXT_LINES {
+                        lines.push(nested_line(
+                            parent_idx,
+                            format!("… {} more lines", total - MAX_TEXT_LINES),
+                            true,
+                        ));
+                        break;
+                    }
+                    lines.push(nested_line(parent_idx, line.to_string(), false));
+                }
+            }
+            TranscriptEntry::ToolCall(tc) => {
+                let (badge, _) = tool_status_badge(&tc.status);
+                let preview = truncate_single_line(&tc.args, 60);
+                lines.push(nested_line(
+                    parent_idx,
+                    format!("[tool] {} [{badge}] {preview}", tc.name),
+                    false,
+                ));
+                if let Some(output) = &tc.output {
+                    let output_lines: Vec<&str> = output.lines().collect();
+                    let tail = &output_lines[output_lines.len().saturating_sub(2)..];
+                    for line in tail {
+                        lines.push(nested_line(
+                            parent_idx,
+                            format!("  ↳ {}", truncate_single_line(line, 100)),
+                            true,
+                        ));
+                    }
+                }
+            }
+            TranscriptEntry::Subagent(sub) => {
+                let (badge, _) = tool_status_badge(&sub.status);
+                lines.push(nested_line(
+                    parent_idx,
+                    format!("[subagent] {} [{badge}]", sub.agent),
+                    false,
+                ));
+            }
+            TranscriptEntry::System { text } => {
+                lines.push(nested_line(
+                    parent_idx,
+                    format!("[system] {}", truncate_single_line(text, 100)),
+                    true,
+                ));
+            }
+            TranscriptEntry::Error { text, .. } => {
+                lines.push(nested_line(
+                    parent_idx,
+                    format!("[error] {}", summarize_error_line(text, 100)),
+                    false,
+                ));
+            }
+        }
+    }
+}
+
 struct WrappedTranscript {
     lines: Vec<Line<'static>>,
     hit_zones: Vec<ThinkingHitZone>,
+    digest_hit_zones: Vec<ThinkingHitZone>,
     doc_lines: Vec<TranscriptWrappedLine>,
     bands: Vec<(usize, usize)>,
     code_bands: Vec<(usize, usize)>,
@@ -853,6 +1165,7 @@ fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedT
         return WrappedTranscript {
             lines: Vec::new(),
             hit_zones: Vec::new(),
+            digest_hit_zones: Vec::new(),
             doc_lines: Vec::new(),
             bands: Vec::new(),
             code_bands: Vec::new(),
@@ -863,11 +1176,13 @@ fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedT
     let mut out = Vec::with_capacity(lines.len());
     let mut doc_lines = Vec::with_capacity(lines.len());
     let mut hit_zones: Vec<ThinkingHitZone> = Vec::new();
+    let mut digest_hit_zones: Vec<ThinkingHitZone> = Vec::new();
     let mut bands: Vec<(usize, usize)> = Vec::new();
     let mut code_bands: Vec<(usize, usize)> = Vec::new();
     let mut hover_zones: Vec<HoverZone> = Vec::new();
     let mut hover_active: Option<(usize, usize)> = None;
     let mut active_zone: Option<(usize, usize)> = None;
+    let mut active_digest: Option<(usize, usize)> = None;
 
     for tagged in lines {
         let TaggedTranscriptLine {
@@ -877,6 +1192,7 @@ fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedT
             band,
             code_band,
             hover_tag,
+            digest_tag,
         } = tagged;
         let line_style = line.style;
         let line_start = out.len();
@@ -979,10 +1295,41 @@ fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedT
             }
             (None, None) => {}
         }
+        match (active_digest, digest_tag) {
+            (Some((cur_idx, _start)), Some(idx)) if cur_idx == idx => {}
+            (Some((cur_idx, start)), Some(idx)) => {
+                digest_hit_zones.push(ThinkingHitZone {
+                    entry_idx: cur_idx,
+                    start_line: start,
+                    end_line: line_start,
+                });
+                active_digest = Some((idx, line_start));
+            }
+            (Some((cur_idx, start)), None) => {
+                digest_hit_zones.push(ThinkingHitZone {
+                    entry_idx: cur_idx,
+                    start_line: start,
+                    end_line: line_start,
+                });
+                active_digest = None;
+            }
+            (None, Some(idx)) => {
+                active_digest = Some((idx, line_start));
+            }
+            (None, None) => {}
+        }
     }
 
     if let Some((cur_idx, start)) = active_zone {
         hit_zones.push(ThinkingHitZone {
+            entry_idx: cur_idx,
+            start_line: start,
+            end_line: out.len(),
+        });
+    }
+
+    if let Some((cur_idx, start)) = active_digest {
+        digest_hit_zones.push(ThinkingHitZone {
             entry_idx: cur_idx,
             start_line: start,
             end_line: out.len(),
@@ -1000,6 +1347,7 @@ fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedT
     WrappedTranscript {
         lines: out,
         hit_zones,
+        digest_hit_zones,
         doc_lines,
         bands,
         code_bands,

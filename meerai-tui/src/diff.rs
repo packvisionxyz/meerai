@@ -37,6 +37,81 @@ pub struct FileDiffView {
     pub rows: Vec<DiffRow>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnifiedLineKind {
+    FileHeader,
+    HunkHeader,
+    Context,
+    Added,
+    Removed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnifiedLine {
+    pub kind: UnifiedLineKind,
+    pub text: String,
+}
+
+pub fn parse_unified_diff(text: &str) -> Vec<UnifiedLine> {
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let parsed = if line.starts_with("--- ") || line.starts_with("+++ ") {
+            UnifiedLine {
+                kind: UnifiedLineKind::FileHeader,
+                text: line.to_string(),
+            }
+        } else if line.starts_with("@@") {
+            UnifiedLine {
+                kind: UnifiedLineKind::HunkHeader,
+                text: line.to_string(),
+            }
+        } else if let Some(rest) = line.strip_prefix('+') {
+            UnifiedLine {
+                kind: UnifiedLineKind::Added,
+                text: rest.to_string(),
+            }
+        } else if let Some(rest) = line.strip_prefix('-') {
+            UnifiedLine {
+                kind: UnifiedLineKind::Removed,
+                text: rest.to_string(),
+            }
+        } else if let Some(rest) = line.strip_prefix(' ') {
+            UnifiedLine {
+                kind: UnifiedLineKind::Context,
+                text: rest.to_string(),
+            }
+        } else {
+            continue;
+        };
+        lines.push(parsed);
+    }
+    lines
+}
+
+pub fn diff_counts(lines: &[UnifiedLine]) -> (usize, usize) {
+    let added = lines
+        .iter()
+        .filter(|line| line.kind == UnifiedLineKind::Added)
+        .count();
+    let removed = lines
+        .iter()
+        .filter(|line| line.kind == UnifiedLineKind::Removed)
+        .count();
+    (added, removed)
+}
+
+pub fn build_edit_diff(path: &str, old: &str, new: &str) -> Vec<UnifiedLine> {
+    if old == new {
+        return Vec::new();
+    }
+    let unified = TextDiff::from_lines(old, new)
+        .unified_diff()
+        .context_radius(3)
+        .header(&format!("a/{path}"), &format!("b/{path}"))
+        .to_string();
+    parse_unified_diff(&unified)
+}
+
 pub fn list_git_changes(workspace_root: &Path) -> Vec<FileChangeEntry> {
     let Ok(repo) = Repository::discover(workspace_root) else {
         return Vec::new();

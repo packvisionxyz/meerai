@@ -35,7 +35,7 @@ use meerai_policy::{ApprovalMode, PolicyEngine, parse_approval_mode, rules_from_
 use meerai_providers::providers::build_genai_client;
 use meerai_providers::secrets::default_secret_store;
 use meerai_session::{
-    Session, SessionConfig, SessionId, SessionSummary, TurnId, default_sessions_root,
+    LoggedEvent, Session, SessionConfig, SessionId, SessionSummary, TurnId, default_sessions_root,
     delete_session as delete_session_dir, list_sessions,
 };
 use meerai_tools::search_as_code::ScriptRuntime;
@@ -761,5 +761,15 @@ impl SessionOpener for CliSessionHost {
         let meta = forked.meta();
         let (provider, model) = self.resolve_session_provider_model(meta.model.as_deref());
         self.build_opened_session(forked, provider, model)
+    }
+
+    async fn read_session_events(&self, id: &SessionId) -> Result<Vec<LoggedEvent>> {
+        let session = Session::open(
+            &self.session_config,
+            id.clone(),
+            self.workspace_root.clone(),
+        )
+        .await?;
+        Ok(session.events())
     }
 }

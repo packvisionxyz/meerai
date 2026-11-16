@@ -112,7 +112,9 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   supporting built-in profiles (`explore`, `plan`, `build`, `general`) with
   typed tool subsets and read-only execution for M12 custom markdown definitions,
   forwarded parent approval prompts, usage rollup into parent counters, and
-  `SubagentRun` TUI/headless items.
+  `SubagentRun` TUI/headless items. In the TUI, each subagent row expands to
+  show the child's own conversation, refreshed about once per second while it
+  runs; the statusline names the running agents.
 - **Checkpoints and rewind (M6 v1):** write-class tools capture the original
   file before a change. `/rewind` restores code, conversation, or both for the
   latest turn. Shell-only edits, external edits, and files over 2 MiB are not
@@ -139,9 +141,11 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   multi-session tabs (`/new`, `/close`, `[ + ]`, `Alt-1..9`, `gt`/`gT`), `/sessions`
   switcher modal, provider and model pickers, sidebar with file changes, subagent
   items, diff and search views, approval overlay, `/compact`, `/mode`,
-  `/agent`/`/skill`, a `@` Mentions popup for agents, skills, and files, and a
-  `Ctrl-p` command palette with sectioned actions and a right-hand shortcut
-  column;
+  `/agent`/`/skill`, a `@` Mentions popup for agents, skills, and files,
+  collapsible per-turn activity summaries (`+`/`-`) with inline
+  syntax-highlighted edit diffs, menu shortcuts (`Ctrl-s` sessions, `Ctrl-o`
+  models, `Ctrl-a` provider, `Ctrl-e` diff), and a `Ctrl-p` command palette
+  with sectioned actions and a right-hand shortcut column;
   one-shot headless turns with a token summary on stderr, NDJSON event stream,
   `sessions list|rm|prune|fork` management, `--fork <ID>`, startup cleanup of
   unused sessions, and opt-in startup retention (`sessions.auto_prune_days`).

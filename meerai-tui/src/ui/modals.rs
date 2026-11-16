@@ -741,9 +741,10 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(cmd_idx));
                 let label = format!(" {}", command.label);
                 let label_len = label.chars().count();
-                let hint_len = command.hint.chars().count();
+                let hint = command.display_hint();
+                let hint_len = hint.chars().count();
                 let gap = width.saturating_sub(label_len + hint_len + 1).max(1);
-                let hint_style = if command.hint.starts_with('/') {
+                let hint_style = if hint.starts_with('/') {
                     Style::default().fg(theme::p().faint)
                 } else {
                     Style::default().fg(theme::p().muted)
@@ -751,7 +752,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 let row = ListItem::new(Line::from(vec![
                     Span::styled(label, Style::default().fg(theme::p().text)),
                     Span::raw(" ".repeat(gap)),
-                    Span::styled(command.hint, hint_style),
+                    Span::styled(hint, hint_style),
                 ]));
                 items.push(if is_hovered && cmd_idx != selected_idx {
                     row.style(hover_row_style())

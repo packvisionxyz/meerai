@@ -1532,6 +1532,7 @@ impl AppState {
                 let tab = self.tab_mut();
                 tab.transcript.truncate(index);
                 tab.user_turns.retain(|idx, _| *idx < index);
+                tab.turn_activity.retain(|idx, _| *idx < index);
                 tab.is_running = false;
                 tab.turn_id = None;
                 tab.queued.clear();

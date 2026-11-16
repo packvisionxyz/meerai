@@ -634,6 +634,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
             agent: "reviewer".to_string(),
             status: ItemStatus::Proposed,
             report: None,
+            child_session_id: Some("ses-child-1".to_string()),
         },
     });
     assert_eq!(
@@ -643,6 +644,11 @@ fn subagent_run_lifecycle_folds_and_renders() {
             agent: "reviewer".to_string(),
             status: ToolCallStatus::Proposed,
             report: None,
+            child_session_id: Some("ses-child-1".to_string()),
+            expanded: false,
+            nested: None,
+            nested_refreshed_at: None,
+            nested_loading: false,
         }))
     );
 
@@ -657,6 +663,11 @@ fn subagent_run_lifecycle_folds_and_renders() {
             agent: "reviewer".to_string(),
             status: ToolCallStatus::Running,
             report: None,
+            child_session_id: Some("ses-child-1".to_string()),
+            expanded: false,
+            nested: None,
+            nested_refreshed_at: None,
+            nested_loading: false,
         }))
     );
 
@@ -666,6 +677,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
             agent: "reviewer".to_string(),
             status: ItemStatus::Succeeded,
             report: Some("Line one\nLine two".to_string()),
+            child_session_id: Some("ses-child-1".to_string()),
         },
     });
     assert_eq!(
@@ -675,6 +687,11 @@ fn subagent_run_lifecycle_folds_and_renders() {
             agent: "reviewer".to_string(),
             status: ToolCallStatus::Succeeded,
             report: Some("Line one\nLine two".to_string()),
+            child_session_id: Some("ses-child-1".to_string()),
+            expanded: false,
+            nested: None,
+            nested_refreshed_at: None,
+            nested_loading: false,
         }))
     );
 
@@ -690,7 +707,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(rendered.contains("▸ [subagent] reviewer [ok]"));
+    assert!(rendered.contains("+ [subagent] reviewer [ok]"));
     assert!(rendered.contains("Line one Line two"));
 }
 
@@ -708,6 +725,7 @@ fn subagent_entry_finalizes_on_parent_turn_failure_and_abort() {
             agent: "explore".to_string(),
             status: ItemStatus::InProgress,
             report: None,
+            child_session_id: None,
         },
     });
     app.handle_agent_event(AgentEvent::TurnCompleted {
@@ -733,6 +751,7 @@ fn subagent_entry_finalizes_on_parent_turn_failure_and_abort() {
             agent: "build".to_string(),
             status: ItemStatus::InProgress,
             report: None,
+            child_session_id: None,
         },
     });
     app.handle_agent_event(AgentEvent::TurnCompleted {
@@ -747,6 +766,130 @@ fn subagent_entry_finalizes_on_parent_turn_failure_and_abort() {
             TranscriptEntry::Subagent(s) if s.id == "sub-fail" && s.status == ToolCallStatus::Failed
         )
     }));
+}
+
+#[test]
+fn child_session_load_queues_action_and_folds_nested_transcript() {
+    use meerai_core::ToolObservation;
+    use meerai_session::{CallId, ContentBlock, InputSource, LoggedEvent, Seq, SessionEvent};
+
+    let (mut app, _rx, _secrets) = test_app();
+    app.handle_agent_event(AgentEvent::TurnStarted {
+        turn_id: TurnId::from_raw("turn-child-read"),
+        model: "gemini::gemini-3.8-flash".to_string(),
+    });
+    app.handle_agent_event(AgentEvent::ItemStarted {
+        item: SessionItem::SubagentRun {
+            id: ItemId::from_raw("sub-read"),
+            agent: "explore".to_string(),
+            status: ItemStatus::InProgress,
+            report: None,
+            child_session_id: Some("ses-child-read".to_string()),
+        },
+    });
+
+    let entry = app
+        .tab_mut()
+        .transcript
+        .iter_mut()
+        .find_map(|entry| match entry {
+            TranscriptEntry::Subagent(sub) if sub.id == "sub-read" => Some(sub),
+            _ => None,
+        })
+        .expect("subagent entry");
+    entry.expanded = true;
+
+    app.request_child_session_load("sub-read");
+    let tab_id = app.tab().tab_id;
+    assert!(matches!(
+        app.pending_session_actions.last(),
+        Some(PendingSessionAction::ReadChildSession { item_id, session_id, tab_id: t })
+            if item_id == "sub-read" && session_id.as_str() == "ses-child-read" && *t == tab_id
+    ));
+    app.request_child_session_load("sub-read");
+    assert_eq!(app.pending_session_actions.len(), 1);
+
+    let events = vec![
+        LoggedEvent {
+            seq: Seq(1),
+            event: SessionEvent::UserMessage {
+                source: InputSource::User,
+                content: vec![ContentBlock::Text("find the bug".to_string())],
+            },
+        },
+        LoggedEvent {
+            seq: Seq(2),
+            event: SessionEvent::ToolCall {
+                call_id: CallId::from_raw("c1"),
+                name: "code-grep".to_string(),
+                args: "{}".to_string(),
+            },
+        },
+        LoggedEvent {
+            seq: Seq(3),
+            event: SessionEvent::ToolResult {
+                call_id: CallId::from_raw("c1"),
+                output: ToolObservation::success("match at src/lib.rs:10"),
+            },
+        },
+    ];
+    app.apply_child_session_read(tab_id, "sub-read", Ok(events));
+
+    let entry = app
+        .tab()
+        .transcript
+        .iter()
+        .find_map(|entry| match entry {
+            TranscriptEntry::Subagent(sub) if sub.id == "sub-read" => Some(sub),
+            _ => None,
+        })
+        .expect("subagent entry");
+    assert!(!entry.nested_loading);
+    assert!(entry.nested_refreshed_at.is_some());
+    let nested = entry.nested.as_ref().expect("nested transcript");
+    assert_eq!(nested.len(), 2);
+    assert!(matches!(&nested[0], TranscriptEntry::User { text } if text == "find the bug"));
+    assert!(
+        matches!(&nested[1], TranscriptEntry::ToolCall(tc) if tc.name == "code-grep" && tc.status == ToolCallStatus::Succeeded)
+    );
+}
+
+#[test]
+fn transcript_from_events_converts_subagent_run_with_child_hint() {
+    use meerai_core::ToolObservation;
+    use meerai_session::{CallId, LoggedEvent, Seq, SessionEvent};
+
+    let events = vec![
+        LoggedEvent {
+            seq: Seq(1),
+            event: SessionEvent::ToolCall {
+                call_id: CallId::from_raw("sub-call"),
+                name: "subagent-run".to_string(),
+                args: "{\"agent\":\"explore\",\"task\":\"find it\"}".to_string(),
+            },
+        },
+        LoggedEvent {
+            seq: Seq(2),
+            event: SessionEvent::ToolResult {
+                call_id: CallId::from_raw("sub-call"),
+                output: ToolObservation {
+                    hint: Some("child_session_id: ses-child-replay".to_string()),
+                    ..ToolObservation::success("found it")
+                },
+            },
+        },
+    ];
+    let transcript = transcript_from_events(&events);
+    assert_eq!(transcript.len(), 1);
+    match &transcript[0] {
+        TranscriptEntry::Subagent(entry) => {
+            assert_eq!(entry.agent, "explore");
+            assert_eq!(entry.child_session_id.as_deref(), Some("ses-child-replay"));
+            assert_eq!(entry.status, ToolCallStatus::Succeeded);
+            assert!(!entry.expanded);
+        }
+        other => panic!("expected Subagent, got {other:?}"),
+    }
 }
 
 #[test]

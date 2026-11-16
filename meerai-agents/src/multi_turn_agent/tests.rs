@@ -4317,6 +4317,83 @@ async fn subagent_creates_child_session_and_caps_explore_steps() {
 }
 
 #[tokio::test]
+async fn subagent_items_carry_child_session_id() {
+    use crate::subagent::SubagentToolset;
+
+    let root = std::env::temp_dir().join(format!(
+        "meerai-subagent-item-id-{}-{}",
+        std::process::id(),
+        SessionId::new().as_str()
+    ));
+    let parent_session = persistent_session(&root).await;
+
+    let parent_streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![subagent_call(
+            "c1",
+            "explore",
+            "search symbols",
+        )]))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+    let child_streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("summary"),
+    )]]));
+
+    let model = Arc::new(std::sync::RwLock::new("gpt-4o-mini".to_string()));
+    let subagent = SubagentToolset::new(child_streamer, model, mock_tool_factory());
+    let mut agent = harness_agent(
+        parent_streamer,
+        vec![Box::new(subagent)],
+        "",
+        &parent_session,
+        yolo(),
+        HarnessConfig::default(),
+    );
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("find symbols", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let mut started_id = None;
+    let mut completed_id = None;
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            AgentEvent::ItemStarted {
+                item:
+                    SessionItem::SubagentRun {
+                        child_session_id, ..
+                    },
+            } => started_id = child_session_id,
+            AgentEvent::ItemCompleted {
+                item:
+                    SessionItem::SubagentRun {
+                        child_session_id, ..
+                    },
+            } => completed_id = child_session_id,
+            _ => {}
+        }
+    }
+    let started_id = started_id.expect("ItemStarted carries child_session_id");
+    assert_eq!(completed_id.as_deref(), Some(started_id.as_str()));
+
+    let hint_session_id = session_events(&parent_session)
+        .into_iter()
+        .find_map(|ev| match ev {
+            SessionEvent::ToolResult { output, .. } => output.hint,
+            _ => None,
+        })
+        .expect("child_session_id hint");
+    assert_eq!(
+        hint_session_id.strip_prefix("child_session_id: "),
+        Some(started_id.as_str())
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test]
 async fn subagent_forwards_child_approval_through_parent_channel() {
     use crate::subagent::SubagentToolset;
 

@@ -15,6 +15,22 @@ pub(crate) struct PaletteCommand {
     pub(crate) action: PaletteAction,
 }
 
+impl PaletteCommand {
+    pub(crate) fn display_hint(&self) -> String {
+        let shortcut = match self.action {
+            PaletteAction::Slash("/sessions") => Some('s'),
+            PaletteAction::Slash("/models") => Some('o'),
+            PaletteAction::Slash("/connect") => Some('a'),
+            PaletteAction::Slash("/diff") => Some('e'),
+            _ => None,
+        };
+        match shortcut {
+            Some(key) => format!("{}  {}", crate::app::ctrl_label(key), self.hint),
+            None => self.hint.to_string(),
+        }
+    }
+}
+
 pub(crate) const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         section: "Session",

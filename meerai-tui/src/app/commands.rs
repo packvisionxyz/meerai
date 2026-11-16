@@ -154,6 +154,7 @@ impl AppState {
                 tab.assistant_items.clear();
                 tab.tool_items.clear();
                 tab.subagent_items.clear();
+                tab.turn_activity.clear();
                 tab.scroll_offset = 0;
                 tab.total_lines = 0;
                 tab.auto_follow = true;
@@ -165,6 +166,7 @@ impl AppState {
                 tab.assistant_items.clear();
                 tab.tool_items.clear();
                 tab.subagent_items.clear();
+                tab.turn_activity.clear();
                 tab.turn_id = None;
                 tab.usage = UsageStats::default();
                 tab.metrics = TurnMetrics::default();

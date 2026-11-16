@@ -228,6 +228,7 @@ impl SessionTab {
                     agent,
                     status,
                     report,
+                    child_session_id,
                 } => {
                     self.finalize_pending_assistant();
                     let idx = self.transcript.len();
@@ -237,6 +238,11 @@ impl SessionTab {
                             agent,
                             status: map_item_status(status),
                             report,
+                            child_session_id,
+                            expanded: false,
+                            nested: None,
+                            nested_refreshed_at: None,
+                            nested_loading: false,
                         }));
                     self.subagent_items.insert(id, idx);
                 }
@@ -369,6 +375,7 @@ impl SessionTab {
                     agent,
                     status,
                     report,
+                    child_session_id,
                 } => {
                     let status = map_completed_item_status(status);
                     let id_str = id.to_string();
@@ -395,6 +402,9 @@ impl SessionTab {
                         if report.is_some() {
                             entry.report = report;
                         }
+                        if child_session_id.is_some() {
+                            entry.child_session_id = child_session_id;
+                        }
                     } else {
                         self.finalize_pending_assistant();
                         self.transcript
@@ -403,6 +413,11 @@ impl SessionTab {
                                 agent,
                                 status,
                                 report,
+                                child_session_id,
+                                expanded: false,
+                                nested: None,
+                                nested_refreshed_at: None,
+                                nested_loading: false,
                             }));
                     }
                 }
@@ -681,7 +696,129 @@ pub fn transcript_from_events(events: &[LoggedEvent]) -> Vec<TranscriptEntry> {
             entry.output = None;
         }
     }
+    for entry in &mut transcript {
+        if let TranscriptEntry::ToolCall(tc) = entry
+            && tc.name == "subagent-run"
+            && let Some(child_id) = tc.output.as_deref().and_then(parse_child_session_hint)
+        {
+            let agent = serde_json::from_str::<serde_json::Value>(&tc.args)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("agent")
+                        .and_then(|agent| agent.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "subagent".to_string());
+            *entry = TranscriptEntry::Subagent(SubagentEntry {
+                id: tc.call_id.clone(),
+                agent,
+                status: tc.status.clone(),
+                report: tc.output.clone(),
+                child_session_id: Some(child_id),
+                expanded: false,
+                nested: None,
+                nested_refreshed_at: None,
+                nested_loading: false,
+            });
+        }
+    }
     transcript
+}
+
+fn parse_child_session_hint(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Hint: child_session_id: ")
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+    })
+}
+
+impl AppState {
+    pub(super) fn request_child_session_load(&mut self, item_id: &str) {
+        let action = {
+            let tab = self.tab_mut();
+            let Some(entry) = tab.transcript.iter_mut().find_map(|entry| match entry {
+                TranscriptEntry::Subagent(sub) if sub.id == item_id => Some(sub),
+                _ => None,
+            }) else {
+                return;
+            };
+            if !entry.expanded || entry.nested_loading {
+                return;
+            }
+            if entry.nested.is_some()
+                && entry
+                    .nested_refreshed_at
+                    .is_some_and(|t| t.elapsed() < CHILD_REFRESH_INTERVAL)
+            {
+                return;
+            }
+            let Some(child_id) = entry.child_session_id.clone() else {
+                return;
+            };
+            entry.nested_loading = true;
+            PendingSessionAction::ReadChildSession {
+                tab_id: tab.tab_id,
+                item_id: item_id.to_string(),
+                session_id: SessionId::from_raw(child_id),
+            }
+        };
+        self.pending_session_actions.push(action);
+    }
+
+    pub(super) fn queue_child_session_refreshes(&mut self) {
+        if !self.tab().is_running {
+            return;
+        }
+        let stale: Vec<String> = self
+            .tab()
+            .transcript
+            .iter()
+            .filter_map(|entry| match entry {
+                TranscriptEntry::Subagent(sub)
+                    if sub.expanded
+                        && matches!(
+                            sub.status,
+                            ToolCallStatus::Running | ToolCallStatus::Proposed
+                        )
+                        && sub
+                            .nested_refreshed_at
+                            .is_none_or(|t| t.elapsed() >= CHILD_REFRESH_INTERVAL) =>
+                {
+                    Some(sub.id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        for id in stale {
+            self.request_child_session_load(&id);
+        }
+    }
+
+    pub fn apply_child_session_read(
+        &mut self,
+        tab_id: u64,
+        item_id: &str,
+        result: anyhow::Result<Vec<LoggedEvent>>,
+    ) {
+        let Some(idx) = self.tab_index_by_id(tab_id) else {
+            return;
+        };
+        let tab = &mut self.tabs[idx];
+        let Some(entry) = tab.transcript.iter_mut().find_map(|entry| match entry {
+            TranscriptEntry::Subagent(sub) if sub.id == item_id => Some(sub),
+            _ => None,
+        }) else {
+            return;
+        };
+        entry.nested_loading = false;
+        entry.nested_refreshed_at = Some(Instant::now());
+        if let Ok(events) = result {
+            entry.nested = Some(transcript_from_events(&events));
+        }
+    }
 }
 
 pub fn session_usage_from_events(events: &[LoggedEvent]) -> Option<meerai_agents::Usage> {
