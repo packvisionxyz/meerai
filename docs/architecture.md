@@ -5,7 +5,7 @@ This document mixes two views and labels them:
 - **Current** — what the tree does today. Verified against the code.
 - **Target** — the intended end state. Not built unless a status line says so.
 
-The target is a **pure, provider-agnostic terminal coding-agent harness** driven
+The target is a **pure, provider-agnostic terminal agent harness** driven
 by a **selection-first modal terminal UI** ([docs/tui-design.md](tui-design.md))
 and a scriptable headless CLI mode. The protocol and context design live in
 [docs/harness-spec.md](harness-spec.md).

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use meerai_core::text::floor_char_boundary;
 
-pub const BASE_SYSTEM_PROMPT: &str = r#"You are meerai, a terminal assistant. You work inside the user's workspace with the provided tools: read and change files, run commands, search, fetch, and delegate. You handle coding, research, writing, data work, operations, and any other request.
+pub const BASE_SYSTEM_PROMPT: &str = r#"You are meerai, a terminal agent harness. You work inside the user's workspace with the provided tools: read and change files, run commands, search, fetch, and delegate. You handle coding, research, writing, data work, operations, and any other request.
 
 Operating rules:
 1. Inspect before you change. Prefer read_file, list_dir, grep, glob, and retrieval or LSP tools over shell for reading, listing, searching, or viewing line ranges. Use shell for builds, tests, git, or tasks dedicated tools cannot do. Do not guess file contents.
@@ -140,9 +140,8 @@ mod tests {
     }
 
     #[test]
-    fn base_prompt_covers_non_coding_work_and_communication_rules() {
-        assert!(BASE_SYSTEM_PROMPT.contains("You are meerai, a terminal assistant"));
-        assert!(!BASE_SYSTEM_PROMPT.contains("terminal coding agent"));
+    fn base_prompt_covers_identity_and_communication_rules() {
+        assert!(BASE_SYSTEM_PROMPT.contains("You are meerai, a terminal agent harness"));
         assert!(BASE_SYSTEM_PROMPT.contains("research, writing, data work, operations"));
         assert!(BASE_SYSTEM_PROMPT.contains("Answer in the user's language"));
         assert!(BASE_SYSTEM_PROMPT.contains("short sentences"));

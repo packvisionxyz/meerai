@@ -1323,6 +1323,11 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             let selected_id = filtered.get(selected_idx).map(|summary| summary.id.clone());
             let confirming = app.session_delete_confirm.is_some()
                 && app.session_delete_confirm.as_ref() == selected_id.as_ref();
+            let confirming_current = confirming
+                && selected_id
+                    .as_ref()
+                    .and_then(|id| app.tab_index_for_session(id))
+                    == Some(app.active_tab_index());
             let footer_line = if loading {
                 key_hints_line(&[
                     ("Refreshing...", ""),
@@ -1331,8 +1336,13 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                     ("Esc", "close"),
                 ])
             } else if confirming {
+                let text = if confirming_current && app.tabs().len() == 1 {
+                    "Press ctrl+d again to delete and open a new session · Esc cancel"
+                } else {
+                    "Press ctrl+d again to delete · Esc cancel"
+                };
                 Line::from(Span::styled(
-                    "Press ctrl+d again to delete · Esc cancel",
+                    text,
                     Style::default()
                         .fg(theme::p().error)
                         .add_modifier(Modifier::BOLD),

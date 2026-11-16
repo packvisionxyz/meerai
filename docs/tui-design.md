@@ -1,7 +1,7 @@
 # TUI Design: Selection-First Modal Agent Harness
 
 This document specifies the interactive terminal UI (`meerai-tui`) for Pack
-Vision's `meerai` coding-agent harness. It focuses on modal, selection-first,
+Vision's `meerai` agent harness. It focuses on modal, selection-first,
 zero-memorization keyboard ergonomics tailored for inspecting multi-step tool
 execution, reviewing code diffs, and steering long coding sessions in the
 terminal.

@@ -22,8 +22,8 @@ use meerai_acp::{AGY, AcpStart, AcpWorkerConfig, spawn_acp_worker};
 #[cfg(feature = "tui")]
 use meerai_agents::spawn_worker;
 use meerai_agents::{
-    AgentHarness, HarnessConfig, HookEngine, MultiTurnAgent, QuestionToolset, SubagentToolFactory,
-    SubagentToolset, TokenPricing,
+    AcpChild, AcpRunToolset, AcpSpawner, AgentHarness, HarnessConfig, HookEngine, MultiTurnAgent,
+    QuestionToolset, SubagentToolFactory, SubagentToolset, TokenPricing,
 };
 use meerai_client::providers::{
     ProviderCatalog, RuntimeProviderState, canonical_provider_id, first_configured_provider,
@@ -712,6 +712,21 @@ async fn main() -> Result<()> {
     }
 }
 
+struct CliAcpSpawner;
+
+impl AcpSpawner for CliAcpSpawner {
+    fn spawn(&self, session: Session, cwd: PathBuf) -> AcpChild {
+        let (cmd_tx, event_rx) = spawn_acp_worker(AcpWorkerConfig {
+            session,
+            preset: AGY,
+            cwd,
+            start: AcpStart::New,
+            resumed: Arc::new(AtomicBool::new(false)),
+        });
+        AcpChild { cmd_tx, event_rx }
+    }
+}
+
 struct CliSessionHost {
     workspace_root: PathBuf,
     session_config: SessionConfig,
@@ -793,6 +808,9 @@ impl CliSessionHost {
         }
         let mut initial_tools = build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, false);
         initial_tools.push(Box::new(QuestionToolset));
+        initial_tools.push(Box::new(
+            AcpRunToolset::new(Arc::new(CliAcpSpawner)).with_hooks(self.hooks.clone()),
+        ));
         let subagent_factory: SubagentToolFactory = Arc::new(move |read_only| {
             build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, read_only)
         });

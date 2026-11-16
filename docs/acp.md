@@ -380,7 +380,8 @@ that says why.
 ## 9. Non-goals
 
 - MCP-over-ACP, proxies, and the `Conductor`.
-- Agent-to-agent delegation through ACP (M8 stays a native subagent runtime).
+- A full agent-to-agent runtime through ACP. M8 stays native; `acp-run` delegates
+  one external task. The ACP agent's own subagents are outside local control.
 - Streaming terminal widgets for adapter tool calls.
 - Replaying a remote session that the adapter cannot load.
 - Cost normalization across vendors.
@@ -398,6 +399,19 @@ that says why.
 
 P0 answered one question: does the SDK connection future run under tokio
 without a dedicated thread? It does, so P1 is a small bridge.
+
+### M13 delegation (`acp-run`)
+
+The top-level native agent can call `acp-run` with
+`{"agent":"agy","task":"..."}`. The tool creates a child session
+(`parent_session_id`, `harness: acp:agy`, `remote_session_id`), sends one
+prompt, forwards `session/request_permission` to the parent approval overlay as
+`ApprovalKind::ExternalAgent`, emits `SubagentRun` items, and returns the
+report. The child session appears under the parent session and its nested view
+loads from the child log. The wall-clock cap defaults to 600 s
+(30..3600). There is no token or grant rollup. The tool is registered only on
+the top-level native agent, not on native subagents or ACP children. `plan`
+denies it; the external agent still has its own tools and policy.
 
 ### 10.1 P0 result
 

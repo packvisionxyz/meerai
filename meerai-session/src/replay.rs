@@ -128,7 +128,7 @@ pub fn replay_from_events(events: &[LoggedEvent]) -> Vec<ReplayEntry> {
     }
     for entry in &mut replay {
         if let ReplayEntry::ToolCall(tc) = entry
-            && tc.name == "subagent-run"
+            && matches!(tc.name.as_str(), "subagent-run" | "acp-run")
             && let Some(child_id) = tc.output.as_deref().and_then(parse_child_session_hint)
         {
             let agent = serde_json::from_str::<serde_json::Value>(&tc.args)
@@ -462,6 +462,41 @@ mod tests {
                 status: ToolCallStatus::Succeeded,
                 report: Some("found it\nHint: child_session_id: ses-child-replay".to_string()),
                 child_session_id: Some("ses-child-replay".to_string()),
+            })]
+        );
+    }
+
+    #[test]
+    fn converts_acp_run_with_child_hint() {
+        let events = vec![
+            LoggedEvent {
+                seq: Seq(1),
+                event: SessionEvent::ToolCall {
+                    call_id: CallId::from_raw("acp-call"),
+                    name: "acp-run".to_string(),
+                    args: "{\"agent\":\"agy\",\"task\":\"fix the test\"}".to_string(),
+                },
+            },
+            LoggedEvent {
+                seq: Seq(2),
+                event: SessionEvent::ToolResult {
+                    call_id: CallId::from_raw("acp-call"),
+                    output: ToolObservation {
+                        hint: Some("child_session_id: ses-acp-child".to_string()),
+                        ..ToolObservation::success("test fixed")
+                    },
+                },
+            },
+        ];
+
+        assert_eq!(
+            replay_from_events(&events),
+            vec![ReplayEntry::Subagent(ReplaySubagent {
+                id: "acp-call".to_string(),
+                agent: "agy".to_string(),
+                status: ToolCallStatus::Succeeded,
+                report: Some("test fixed\nHint: child_session_id: ses-acp-child".to_string()),
+                child_session_id: Some("ses-acp-child".to_string()),
             })]
         );
     }

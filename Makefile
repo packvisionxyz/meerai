@@ -117,8 +117,9 @@ build: ## Build release binary (optional target=<triple>, e.g. target=x86_64-unk
 build-debug: ## Build debug binary
 	$(CARGO) build -p $(BIN_PKG) $(ARGS)
 
-install: ## Install meerai locally into Cargo bin directory
-	$(CARGO) install --path $(BIN_PKG) --locked
+install: ## Build the release binary and install it locally, replacing the installed version
+	$(CARGO) install --path $(BIN_PKG) --locked --force --target-dir target $(if $(target),--target $(target),) $(ARGS)
+	@echo "Installed $(BIN_NAME) from $(BIN_PKG)"
 
 package: ## Build and package release archive + SHA256 into dist/ (optional target=<triple>)
 	@mkdir -p $(DIST_DIR)

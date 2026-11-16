@@ -1,6 +1,7 @@
 use meerai_agents::events::{ApprovalDecision, ApprovalKind, ApprovalRequest, RequestId};
 use meerai_agents::{AgentCommand, AgentEvent};
 use meerai_common::settings::{AppSettings, ContextSettings};
+use meerai_core::EffectClass;
 use meerai_core::env::now_millis;
 use meerai_session::{SessionSummary, latest_session};
 use tokio::sync::mpsc;
@@ -1746,6 +1747,21 @@ fn acp_rejects_agent_and_skill_flags() {
             "unexpected error: {error}"
         );
     }
+}
+
+#[test]
+fn cli_acp_spawner_backs_the_acp_run_tool() {
+    let toolset = AcpRunToolset::new(Arc::new(CliAcpSpawner));
+    assert_eq!(toolset.name(), "acp");
+    assert!(toolset.contain("acp-run"));
+    assert!(!toolset.contain("subagent-run"));
+    assert_eq!(toolset.effect_of("acp-run"), EffectClass::External);
+    let names: Vec<String> = toolset
+        .definition()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    assert_eq!(names, vec!["acp-run".to_string()]);
 }
 
 fn sample_external_agent_approval_event() -> AgentEvent {

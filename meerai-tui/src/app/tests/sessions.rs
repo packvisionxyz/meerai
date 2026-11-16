@@ -324,12 +324,12 @@ fn session_picker_deletes_after_a_second_ctrl_d() {
     assert!(app.session_delete_confirm.is_none());
     assert!(matches!(
         app.pending_session_actions.last(),
-        Some(PendingSessionAction::DeleteSession(id)) if id == &summary.id
+        Some(PendingSessionAction::DeleteSession { session_id }) if session_id == &summary.id
     ));
 }
 
 #[test]
-fn session_picker_refuses_to_delete_an_open_session() {
+fn session_picker_deletes_an_open_session_without_asking_to_close_the_tab() {
     let (mut app, _rx, _secrets) = test_app();
     let (opened, _event_rx) = make_opened_session("ses-open", Some("Open"), Vec::new());
     let _ = app.apply_opened_session(opened, false);
@@ -343,12 +343,17 @@ fn session_picker_refuses_to_delete_an_open_session() {
     });
 
     app.handle_key_event(key_mod(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert_eq!(app.session_delete_confirm.as_ref(), Some(&summary.id));
+
+    app.handle_key_event(key_mod(KeyCode::Char('d'), KeyModifiers::CONTROL));
     assert!(app.session_delete_confirm.is_none());
-    assert!(app.pending_session_actions.is_empty());
+    assert!(matches!(
+        app.pending_session_actions.last(),
+        Some(PendingSessionAction::DeleteSession { session_id }) if session_id == &summary.id
+    ));
     assert!(matches!(
         &app.modal,
-        Some(ActiveModal::SessionSelect { error: Some(message), .. })
-            if message.contains("Close the tab")
+        Some(ActiveModal::SessionSelect { error: None, .. })
     ));
 }
 

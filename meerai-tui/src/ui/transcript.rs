@@ -285,7 +285,7 @@ impl TurnDigest {
                 self.edits += 1;
                 self.edits_active |= active;
             }
-            "subagent-run" => {
+            "subagent-run" | "acp-run" => {
                 self.agents += 1;
                 self.agents_active |= active;
             }

@@ -37,6 +37,10 @@ enum LoopMsg {
     },
     SessionsListed(Result<Vec<SessionSummary>>),
     SessionDeleted(Result<bool>),
+    SessionCreatedForDelete {
+        session_id: SessionId,
+        created: Result<OpenedSession>,
+    },
     SessionResolved {
         replace_empty_tab: bool,
         result: Result<SessionResolveOutcome>,
@@ -101,6 +105,9 @@ pub async fn run_event_loop(
                             if handle_loop_msg(app, next_msg, &loop_tx) {
                                 should_refresh_git = true;
                             }
+                        }
+                        if dispatch_pending_actions(app, &loop_tx) {
+                            should_refresh_git = true;
                         }
                         if should_refresh_git {
                             spawn_git_status_refresh(
@@ -269,13 +276,30 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
                     let _ = tx.send(LoopMsg::AcpResolved(result));
                 });
             }
-            PendingSessionAction::DeleteSession(id) => {
-                let opener = opener.clone();
-                let tx = loop_tx.clone();
-                tokio::spawn(async move {
-                    let result = opener.delete_session(&id).await;
-                    let _ = tx.send(LoopMsg::SessionDeleted(result));
-                });
+            PendingSessionAction::DeleteSession { session_id } => {
+                let close_tab = app.tab_index_for_session(&session_id);
+                let create_replacement = close_tab == Some(app.active_tab) && app.tabs.len() == 1;
+                if create_replacement {
+                    let opener = opener.clone();
+                    let tx = loop_tx.clone();
+                    tokio::spawn(async move {
+                        let created = opener.create_session().await;
+                        let _ = tx.send(LoopMsg::SessionCreatedForDelete {
+                            session_id,
+                            created,
+                        });
+                    });
+                } else {
+                    if let Some(idx) = close_tab {
+                        changed |= app.close_tab(idx);
+                    }
+                    let opener = opener.clone();
+                    let tx = loop_tx.clone();
+                    tokio::spawn(async move {
+                        let result = opener.delete_session(&session_id).await;
+                        let _ = tx.send(LoopMsg::SessionDeleted(result));
+                    });
+                }
             }
             PendingSessionAction::ReadChildSession {
                 tab_id,
@@ -426,6 +450,30 @@ fn handle_loop_msg(
             }
             app.pending_session_actions
                 .push(PendingSessionAction::RefreshSessions);
+            true
+        }
+        LoopMsg::SessionCreatedForDelete {
+            session_id,
+            created,
+        } => {
+            match created {
+                Ok(opened) => {
+                    if let Some((tab_id, event_rx)) = app.apply_opened_session(opened, false) {
+                        spawn_tab_forwarder(tab_id, event_rx, loop_tx.clone());
+                    }
+                    if let Some(idx) = app.tab_index_for_session(&session_id) {
+                        app.close_tab(idx);
+                    }
+                    app.pending_session_actions
+                        .push(PendingSessionAction::DeleteSession { session_id });
+                }
+                Err(err) => {
+                    let msg = format!("Could not create a new session: {err:#}");
+                    app.status_notice = Some(truncate_notice(&msg));
+                    app.pending_session_actions
+                        .push(PendingSessionAction::RefreshSessions);
+                }
+            }
             true
         }
         LoopMsg::SessionResolved {

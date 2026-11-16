@@ -1,6 +1,6 @@
 # meerai
 
-Pack Vision's terminal coding-agent harness — written in Rust, designed for
+Pack Vision's terminal agent harness — written in Rust, designed for
 autonomous and interactive software engineering in the terminal with a
 selection-first, modal TUI and a scriptable headless CLI.
 
@@ -118,7 +118,9 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 - **ACP client (`meerai-acp`):** `--acp` drives `agy acp` as an external agent;
   `acp doctor` prints the handshake; `/acp` opens an ACP tab; the statusline and
   transcript header mark the external engine; `--continue`/`--resume` use
-  `session/load`. ACP permissions use the approval overlay and are advisory.
+  `session/load`. The native agent can call the `acp-run` tool to delegate one
+  task to `agy` in a child session; permissions appear in the approval overlay
+  and the child appears under the parent session. ACP permissions are advisory.
   meerai policy, path guards, redaction, and the sandbox do not apply to the
   external process. OpenCode/Claude presets and `meerai acp` (M14) are backlog.
 - **Subagent runtime (`meerai-agents::subagent`):** `SubagentToolset`
@@ -235,6 +237,7 @@ meerai --skill orchestrate                      # apply a skill (repeatable)
 meerai --acp                                    # TUI with an agy ACP session
 meerai --acp --prompt "fix the test"            # headless ACP turn
 meerai acp doctor                               # print the ACP handshake
+meerai --mode auto-approve --prompt 'Use acp-run with agent "agy" and task "Reply with OK".'
 meerai --env-file .env.local                    # load variables from a file
 meerai auth list|login|logout                   # inspect, save, remove API keys
 meerai sessions list|rm|prune|fork              # list, delete, prune, or fork sessions

@@ -129,7 +129,9 @@ pub enum PendingSessionAction {
         turn: Option<TurnId>,
         draft: String,
     },
-    DeleteSession(SessionId),
+    DeleteSession {
+        session_id: SessionId,
+    },
     CreateNewTab,
     CreateAcpTab {
         preset: String,

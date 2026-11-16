@@ -629,6 +629,27 @@ fn subagent_expands_to_show_child_conversation() {
 }
 
 #[test]
+fn digest_counts_acp_run_as_agent() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "go".to_string(),
+    });
+    app.tab_mut()
+        .transcript
+        .push(TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
+            call_id: "acp-1".to_string(),
+            name: "acp-run".to_string(),
+            args: "{\"agent\":\"agy\",\"task\":\"fix it\"}".to_string(),
+            status: ToolCallStatus::Succeeded,
+            output: None,
+            expanded: false,
+        }));
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("+ 1 agent"), "{rendered}");
+    assert!(!rendered.contains("1 tool"), "{rendered}");
+}
+
+#[test]
 fn digest_uses_gerunds_for_active_work() {
     let mut app = test_app();
     app.tab_mut().transcript.push(TranscriptEntry::User {

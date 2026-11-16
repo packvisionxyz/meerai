@@ -970,16 +970,16 @@ impl AppState {
                         });
                     }
                     KeyCode::Char('d') if has_ctrl => {
-                        if let Some((session_id, open_tab)) = filtered_ids.get(selected) {
-                            if open_tab.is_some() {
-                                error = Some("Close the tab before deleting this session".into());
-                                self.session_delete_confirm = None;
-                            } else if self.session_delete_confirm.as_ref() == Some(session_id) {
+                        if let Some((session_id, _)) = filtered_ids.get(selected) {
+                            if self.session_delete_confirm.as_ref() == Some(session_id) {
                                 self.session_delete_confirm = None;
                                 loading = true;
                                 error = None;
-                                self.pending_session_actions
-                                    .push(PendingSessionAction::DeleteSession(session_id.clone()));
+                                self.pending_session_actions.push(
+                                    PendingSessionAction::DeleteSession {
+                                        session_id: session_id.clone(),
+                                    },
+                                );
                             } else {
                                 self.session_delete_confirm = Some(session_id.clone());
                                 error = None;
