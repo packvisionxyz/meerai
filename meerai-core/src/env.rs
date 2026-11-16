@@ -25,6 +25,54 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+pub fn config_dir() -> Option<PathBuf> {
+    xdg_dir("XDG_CONFIG_HOME", &[".config"])
+}
+
+pub fn data_dir() -> Option<PathBuf> {
+    xdg_dir("XDG_DATA_HOME", &[".local", "share"])
+}
+
+pub fn sessions_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("MEERAI_SESSION_DIR") {
+        return PathBuf::from(dir);
+    }
+    match data_dir() {
+        Some(dir) => dir.join("sessions"),
+        None => PathBuf::from(".local/share/meerai/sessions"),
+    }
+}
+
+pub fn display_path(path: &Path) -> String {
+    let raw = path.display().to_string();
+    if let Some(home) = home_dir() {
+        let home = home.display().to_string();
+        if raw == home {
+            return "~".to_string();
+        }
+        if let Some(rest) = raw.strip_prefix(&home)
+            && (rest.starts_with('/') || rest.starts_with('\\'))
+        {
+            return format!("~{rest}");
+        }
+    }
+    raw
+}
+
+fn xdg_dir(var: &str, fallback_parts: &[&str]) -> Option<PathBuf> {
+    let base = match std::env::var_os(var).filter(|value| !value.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => {
+            let mut path = home_dir()?;
+            for part in fallback_parts {
+                path.push(part);
+            }
+            path
+        }
+    };
+    Some(base.join("meerai"))
+}
+
 pub fn resolve_lexical_subpath(root: &Path, raw: &str) -> Option<PathBuf> {
     let candidate = if Path::new(raw).is_absolute() {
         PathBuf::from(raw)

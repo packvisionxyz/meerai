@@ -7,12 +7,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use meerai_core::fs_perms::{create_private_dir_sync, write_private_sync};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 pub use meerai_client::secrets::{MemorySecretStore, SecretStore, auth_file_path};
 
-const AUTH_FILE_NAME: &str = "auth.json";
-const LEGACY_AUTH_FILE_NAME: &str = "auth.yml";
 const KEYCHAIN_SERVICE: &str = "meerai";
 const KEYCHAIN_INDEX_ACCOUNT: &str = "__providers__";
 const DISABLE_KEYCHAIN_ENV: &str = "MEERAI_DISABLE_KEYCHAIN";
@@ -27,13 +25,6 @@ struct ApiAuthEntry<'a> {
     key: &'a str,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum LegacyYamlAuth {
-    Wrapped { providers: BTreeMap<String, String> },
-    Flat(BTreeMap<String, String>),
-}
-
 fn insert_non_empty(target: &mut BTreeMap<String, String>, provider_id: &str, key: &str) {
     let trimmed = key.trim();
     if !trimmed.is_empty() {
@@ -46,47 +37,23 @@ fn parse_auth_entries(path: &Path, raw: &str) -> Result<BTreeMap<String, String>
     if trimmed.is_empty() {
         return Ok(BTreeMap::new());
     }
-    if trimmed.starts_with('{') {
-        let root: serde_json::Value = serde_json::from_str(trimmed)
-            .with_context(|| format!("failed to parse credentials file {}", path.display()))?;
-        let obj = root
-            .as_object()
-            .with_context(|| format!("expected JSON object in {}", path.display()))?;
-        let mut out = BTreeMap::new();
-        for (key, value) in obj {
-            match value {
-                serde_json::Value::String(secret) => insert_non_empty(&mut out, key, secret),
-                serde_json::Value::Object(map) => {
-                    if key == "providers" && map.values().all(|v| v.is_string()) && !map.is_empty()
-                    {
-                        for (p, s) in map {
-                            if let Some(secret) = s.as_str() {
-                                insert_non_empty(&mut out, p, secret);
-                            }
-                        }
-                    } else if map
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .is_none_or(|kind| kind == "api")
-                        && let Some(secret) = map.get("key").and_then(|v| v.as_str())
-                    {
-                        insert_non_empty(&mut out, key, secret);
-                    }
-                }
-                _ => {}
-            }
-        }
-        return Ok(out);
-    }
-
-    let parsed: LegacyYamlAuth = serde_yaml::from_str(trimmed)
+    let root: serde_json::Value = serde_json::from_str(trimmed)
         .with_context(|| format!("failed to parse credentials file {}", path.display()))?;
-    let raw_map = match parsed {
-        LegacyYamlAuth::Wrapped { providers } | LegacyYamlAuth::Flat(providers) => providers,
-    };
+    let obj = root
+        .as_object()
+        .with_context(|| format!("expected JSON object in {}", path.display()))?;
     let mut out = BTreeMap::new();
-    for (k, v) in raw_map {
-        insert_non_empty(&mut out, &k, &v);
+    for (provider, value) in obj {
+        let Some(entry) = value.as_object() else {
+            continue;
+        };
+        let is_api = entry
+            .get("type")
+            .and_then(|kind| kind.as_str())
+            .is_none_or(|kind| kind == "api");
+        if is_api && let Some(secret) = entry.get("key").and_then(|key| key.as_str()) {
+            insert_non_empty(&mut out, provider, secret);
+        }
     }
     Ok(out)
 }
@@ -120,19 +87,7 @@ impl FileSecretStore {
         }
         let loaded = match fs::read_to_string(&self.path) {
             Ok(raw) => parse_auth_entries(&self.path, &raw)?,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                let legacy_path = self.path.with_file_name(LEGACY_AUTH_FILE_NAME);
-                if self.path.file_name().is_some_and(|n| n == AUTH_FILE_NAME)
-                    && legacy_path.exists()
-                {
-                    let raw = fs::read_to_string(&legacy_path).with_context(|| {
-                        format!("failed to read credentials file {}", legacy_path.display())
-                    })?;
-                    parse_auth_entries(&legacy_path, &raw)?
-                } else {
-                    BTreeMap::new()
-                }
-            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
             Err(err) => {
                 return Err(err).with_context(|| {
                     format!("failed to read credentials file {}", self.path.display())
@@ -698,23 +653,11 @@ mod tests {
     }
 
     #[test]
-    fn file_secret_store_reads_legacy_auth_yml_and_ignores_oauth() {
+    fn file_secret_store_ignores_non_api_entries() {
         let dir =
-            std::env::temp_dir().join(format!("meerai-secrets-legacy-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("meerai-secrets-oauth-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("auth.yml"),
-            "providers:\n  anthropic: sk-ant-legacy\n",
-        )
-        .unwrap();
-
-        let store = FileSecretStore::in_dir(&dir);
-        assert_eq!(
-            store.get_key("anthropic").unwrap().as_deref(),
-            Some("sk-ant-legacy")
-        );
-
         fs::write(
             dir.join("auth.json"),
             r#"{
@@ -723,16 +666,11 @@ mod tests {
 }"#,
         )
         .unwrap();
-        let json_store = FileSecretStore::in_dir(&dir);
-        assert_eq!(
-            json_store.get_key("openai").unwrap().as_deref(),
-            Some("sk-json")
-        );
-        assert_eq!(json_store.get_key("github-copilot").unwrap(), None);
-        assert_eq!(
-            json_store.list_providers().unwrap(),
-            vec!["openai".to_string()]
-        );
+
+        let store = FileSecretStore::in_dir(&dir);
+        assert_eq!(store.get_key("openai").unwrap().as_deref(), Some("sk-json"));
+        assert_eq!(store.get_key("github-copilot").unwrap(), None);
+        assert_eq!(store.list_providers().unwrap(), vec!["openai".to_string()]);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -896,42 +834,6 @@ mod tests {
         assert!(store.list_providers().unwrap().is_empty());
         assert_eq!(
             backend.raw_get(KEYCHAIN_SERVICE, KEYCHAIN_INDEX_ACCOUNT),
-            None
-        );
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn keychain_secret_store_reads_legacy_auth_yml_when_not_in_keychain() {
-        let dir = temp_secrets_dir("keychain-legacy-yml");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("auth.yml"),
-            "providers:\n  anthropic: sk-ant-legacy\n",
-        )
-        .unwrap();
-
-        let backend = MockKeychainBackend::new(true);
-        let store =
-            KeychainSecretStore::with_backend(FileSecretStore::in_dir(&dir), backend.clone());
-
-        assert_eq!(
-            store.get_key("anthropic").unwrap().as_deref(),
-            Some("sk-ant-legacy")
-        );
-        assert_eq!(
-            store.list_providers().unwrap(),
-            vec!["anthropic".to_string()]
-        );
-
-        store.set_key("anthropic", "sk-ant-migrated").unwrap();
-        assert_eq!(
-            store.get_key("anthropic").unwrap().as_deref(),
-            Some("sk-ant-migrated")
-        );
-        assert_eq!(
-            FileSecretStore::in_dir(&dir).get_key("anthropic").unwrap(),
             None
         );
 

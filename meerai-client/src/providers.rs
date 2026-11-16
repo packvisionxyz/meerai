@@ -5,8 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use meerai_common::settings::{
-    AppSettings, ProviderOptions, legacy_user_models_path, resolve_config_api_key,
-    user_providers_path,
+    AppSettings, ProviderOptions, resolve_config_api_key, user_providers_path,
 };
 use serde::Deserialize;
 
@@ -187,23 +186,16 @@ impl ProviderCatalog {
         let mut catalog = Self::new();
         let mut warnings = Vec::new();
         if let Some(dir) = config_dir {
-            let primary = user_providers_path(dir);
-            let path = if primary.is_file() {
-                Some(primary)
-            } else {
-                let legacy = legacy_user_models_path(dir);
-                legacy.is_file().then_some(legacy)
-            };
-            if let Some(custom_path) = path {
-                match fs::read_to_string(&custom_path) {
+            let path = user_providers_path(dir);
+            if path.is_file() {
+                match fs::read_to_string(&path) {
                     Ok(raw) => match serde_yaml::from_str::<ProvidersFile>(&raw) {
                         Ok(parsed) => catalog.merge_file(parsed),
-                        Err(err) => warnings
-                            .push(format!("Failed to parse {}: {err}", custom_path.display())),
+                        Err(err) => {
+                            warnings.push(format!("Failed to parse {}: {err}", path.display()))
+                        }
                     },
-                    Err(err) => {
-                        warnings.push(format!("Failed to read {}: {err}", custom_path.display()))
-                    }
+                    Err(err) => warnings.push(format!("Failed to read {}: {err}", path.display())),
                 }
             }
         }

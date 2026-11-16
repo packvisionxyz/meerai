@@ -29,9 +29,9 @@
   `--skill`), and `auth` / `sessions` (`list`, `rm`, `prune`, `fork`) subcommands.
 - **Data:** `settings.yml` and `providers.yml` in the config dir, an optional
   `<project-root>/.meerai/settings.yml` project overlay (root found by walking up from the CWD),
-  agent/skill definitions under `<project-root>/.agents` then `.claude`, `auth.json` in the app
-  data dir, and an append-only session log with `meta.json` and blobs under the platform data dir
-  (`dirs::data_dir()`) or `MEERAI_SESSION_DIR`.
+  agent/skill definitions under `<project-root>/.agents` then `.claude`, `auth.json` in the XDG
+  data dir, and an append-only session log with `meta.json` and blobs under the same data dir
+  (`$XDG_DATA_HOME/meerai`, default `~/.local/share/meerai`) or `MEERAI_SESSION_DIR`.
 - **Runtime stance:** Local-first terminal binary; outbound HTTPS only to configured LLM providers
   (a `genai` 0.7 client over the provider catalog in `meerai-providers`) and an optional update
   check. `ExecutionWorld` provides best-effort Seatbelt/bubblewrap sandboxing with a host fallback.
@@ -373,8 +373,8 @@ Detail in [`infra.md`](infra.md). Summary:
   a user message. `context.summarizer_model` overrides the compaction model (default: session
   model); summarizer usage counts toward the session token cap.
 - `.env` is opt-in (`MEERAI_LOAD_DOTENV`, `--env-file`); nothing loads implicitly.
-- Session files/dirs are `0600`/`0700` on Unix; root is `MEERAI_SESSION_DIR` or the platform data
-  dir; `sessions list|rm|prune` is the management surface. Prune defaults to 30 days and keeps 0
+- Session files/dirs are `0600`/`0700` on Unix; root is `MEERAI_SESSION_DIR` or the XDG data
+  dir (`$XDG_DATA_HOME/meerai/sessions`); `sessions list|rm|prune` is the management surface. Prune defaults to 30 days and keeps 0
   unless `--keep N`; `--continue` resumes by last activity. Automatic retention is opt-in through
   user `sessions.auto_prune_days`/`sessions.keep`, spares the active session, and is never
   controlled by a project file.

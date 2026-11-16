@@ -65,7 +65,6 @@ pub fn is_sensitive_path(path: &Path) -> bool {
             | ".npmrc"
             | ".pypirc"
             | "auth.json"
-            | "auth.yml"
             | "credentials.json"
             | "credentials"
             | ".htpasswd"
@@ -353,7 +352,6 @@ mod tests {
             ".npmrc",
             ".pypirc",
             "auth.json",
-            "auth.yml",
             "credentials.json",
             "credentials",
             ".htpasswd",

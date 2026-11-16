@@ -247,11 +247,11 @@ fn session_picker_shows_delete_and_confirmation_hints() {
         error: None,
     });
     let rendered = render_to_string(&mut app);
-    assert!(rendered.contains("Ctrl-d delete"));
+    assert!(rendered.contains("ctrl+d delete"));
 
     app.session_delete_confirm = Some(meerai_session::SessionId::from_raw("ses-old"));
     let confirming = render_to_string(&mut app);
-    assert!(confirming.contains("Press Ctrl-d again to delete"));
+    assert!(confirming.contains("Press ctrl+d again to delete"));
 }
 
 #[test]
@@ -262,7 +262,7 @@ fn renders_command_palette_with_shortcuts() {
         selected: 0,
     });
     let rendered = render_to_string(&mut app);
-    assert!(rendered.contains("Commands (Ctrl-p)"));
+    assert!(rendered.contains("Commands (ctrl+p)"));
     assert!(rendered.contains(" SESSION "));
     assert!(rendered.contains("New session tab"));
     assert!(rendered.contains("/new"));

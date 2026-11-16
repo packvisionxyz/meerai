@@ -157,7 +157,7 @@ pub(super) fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Re
     }
 
     let used = (col.saturating_sub(area.x)) as usize;
-    let hint = "/sessions · /new · Ctrl-w close";
+    let hint = "/sessions · /new · ctrl+w close";
     if width.saturating_sub(used) >= hint.len() + 3 {
         let pad = width - used - hint.len() - 2;
         spans.push(Span::styled(

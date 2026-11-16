@@ -44,12 +44,7 @@ const NOTICE_TTL: Duration = Duration::from_secs(4);
 const CHILD_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 pub fn ctrl_label(key: char) -> String {
-    let key = key.to_ascii_uppercase();
-    if cfg!(target_os = "macos") {
-        format!("^{key}")
-    } else {
-        format!("Ctrl-{key}")
-    }
+    format!("ctrl+{}", key.to_ascii_lowercase())
 }
 pub const MIN_SIDEBAR_WIDTH: u16 = 110;
 
@@ -1082,7 +1077,7 @@ impl AppState {
             .is_some_and(|t| t.elapsed() >= DOUBLE_CTRL_C_WINDOW)
         {
             self.last_ctrl_c = None;
-            if self.status_notice.as_deref() == Some("Press Ctrl-c again to exit") {
+            if self.status_notice.as_deref() == Some("Press ctrl+c again to exit") {
                 self.status_notice = None;
             }
         }

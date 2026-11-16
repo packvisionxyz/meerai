@@ -139,7 +139,6 @@ async fn persistent_session(root: &Path) -> Session {
     let config = SessionConfig {
         root: root.to_path_buf(),
         workspace: root.to_path_buf(),
-        project_local: false,
     };
     Session::open_or_create(&config, SessionId::new(), PathBuf::from("/tmp/workspace"))
         .await

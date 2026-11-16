@@ -9,11 +9,10 @@ crates plus the `meerai` binary (built by `meerai-cli`). Milestones **M1–M13**
 (session log, harness, checkpoints, hooks, subagent runtime, `meerai-cli` +
 session fork, retrieval v2/v3, security & supply chain, agents/skills discovery,
 and the `agy` ACP client) of the [harness specification](docs/harness-spec.md)
-have landed. CI (`cargo-deny` +
-test gate), tag-driven release builds, installers, [the threat
-model](docs/threat-model.md), and an Apache-2.0 license are in place.
-Checkpoints (M6) v1 and hooks (M7) v1 have landed with an explicit project-trust
-gate. `meerai export` does not exist yet (see
+have landed. CI (`cargo-deny` + test gate), tag-driven release builds, installers,
+[the threat model](docs/threat-model.md), and an Apache-2.0 license are in
+place. Checkpoints (M6) v1 and hooks (M7) v1 have landed with an explicit
+project-trust gate. `meerai export` does not exist yet (see
 [Security roadmap](#security-roadmap)).
 
 ## Install
@@ -108,14 +107,14 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   store, and spill plus compaction primitives.
 - **Policy engine (`meerai-policy`):** ordered `action/resource/effect` rules
   (globset, last match wins), `ApprovalMode` presets (`plan`, `ask`, `auto-edit`,
-  `yolo`), turn and session grants, and YAML rule parsing.
+  `auto-approve`, `yolo`), turn and session grants, and YAML rule parsing.
 - **Hooks (`meerai-common::hooks`, `meerai-agents::hooks`):** user and project
-  shell hooks for twelve lifecycle events. User hooks load from
-  `~/.config/meerai/hooks.json`; project hooks load from
-  `.meerai/hooks.json` only after explicit trust. Hooks run concurrently with a
-  timeout, receive JSON on stdin, use exit `0`/`2` plus JSON decisions, log
-  `HookFired`, emit live `HookCompleted` events with TUI system lines, and can
-  tighten policy but not loosen it.
+  shell hooks for twelve lifecycle events. User hooks load from the config dir
+  (`~/.config/meerai/hooks.json`); project hooks load from `.meerai/hooks.json`
+  only after explicit trust. Hooks run concurrently with a timeout, receive JSON
+  on stdin, use exit `0`/`2` plus JSON decisions, log `HookFired`, emit live
+  `HookCompleted` events with TUI system lines, and can tighten policy but not
+  loosen it.
 - **ACP client (`meerai-acp`):** `--acp` drives `agy acp` as an external agent;
   `acp doctor` prints the handshake; `/acp` opens an ACP tab; the statusline and
   transcript header mark the external engine; `--continue`/`--resume` use
@@ -154,18 +153,18 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   lookups.
 - **Modal TUI (`meerai-tui`) and CLI/headless runner (`meerai-cli`):** modal
   transcript (including sessions replayed by `--continue`/`--resume`/`--fork`),
-  multi-session tabs (`/new`, `/close`, `[ + ]`, `Alt-1..9`, `gt`/`gT`), `/sessions`
+  multi-session tabs (`/new`, `/close`, `[ + ]`, `alt+1..9`, `gt`/`gT`), `/sessions`
   switcher modal, provider and model pickers, sidebar with file changes, subagent
   items, diff and search views, approval overlay, `/compact`, `/mode`,
   `/agent`/`/skill`, a `@` Mentions popup for agents, skills, and files,
   collapsible per-turn activity summaries (`+`/`-`) with inline
-  syntax-highlighted edit diffs, menu shortcuts (`Ctrl-s` sessions, `Ctrl-o`
-  models, `Ctrl-a` provider, `Ctrl-e` diff), and a `Ctrl-p` command palette
+  syntax-highlighted edit diffs, menu shortcuts (`ctrl+s` sessions, `ctrl+o`
+  models, `ctrl+a` provider, `ctrl+e` diff), and a `ctrl+p` command palette
   with sectioned actions and a right-hand shortcut column;
   one-shot headless turns with a token summary on stderr, NDJSON event stream,
   `sessions list|rm|prune|fork` management, `--fork <ID>`, startup cleanup of
   unused sessions, and opt-in startup retention (`sessions.auto_prune_days`).
-  While a turn runs, `Enter` queues the message for the next turn and `Ctrl-g`
+  While a turn runs, `Enter` queues the message for the next turn and `ctrl+g`
   steers it now.
 - **Config (`meerai-common`) and providers (`meerai-providers`):** a `genai`
   0.7 client factory over a provider catalog (bundled `providers.yml` plus user
@@ -229,7 +228,7 @@ meerai --prompt "explain this repository"       # one headless turn
 meerai --prompt "..." --json                    # one NDJSON AgentEvent per line
 meerai --prompt "..." --continue                # resume the last session headless
 meerai --prompt "..." --resume <ID>             # resume a session by id headless
-meerai --mode plan|ask|auto-edit|yolo           # approval mode (default: ask)
+meerai --mode plan|ask|auto-edit|auto-approve|yolo  # approval mode (default: ask)
 meerai -p <provider> -m <model> --system "..."  # provider, model, system prompt
 meerai --agent reviewer --prompt "review this change"  # apply an agent
 meerai --skill orchestrate                      # apply a skill (repeatable)
@@ -276,6 +275,7 @@ only, so the default is token-only reporting.
 | `plan` | Hard read-only. Reads allowed; writes, shell, and external effects are denied even when a rule would allow them. |
 | `ask` | Reads allowed; writes, shell, and external effects ask. Default. |
 | `auto-edit` | Reads and workspace writes allowed; shell and external effects ask. |
+| `auto-approve` | Allows every tier default, but still honors explicit `ask` and `deny` rules. Alias: `auto`. |
 | `yolo` | Allow everything except explicit `deny` rules. The statusline shows a loud `YOLO` badge. |
 
 Grants skip later prompts for the same action and exact resource. In the
@@ -297,8 +297,8 @@ as prompt text.
 
 - `.agents` has higher priority than `.claude`. If both define the same id,
   `.agents` wins and a warning names both paths. The output is sorted by id.
-- `.meerai` holds configuration, sessions, and instructions only. meerai does
-  not scan or create `.meerai/agents` or `.meerai/skills`.
+- `.meerai` holds configuration and instructions only. meerai does not scan or
+  create `.meerai/agents` or `.meerai/skills`.
 - Discovery is read-only. meerai copies nothing, writes no import lock, and
   never edits the definition files. Symlinks are skipped with a warning.
 - Frontmatter fields: `name`, `description`, `model`, `steps`, and `mode`.
@@ -353,7 +353,7 @@ hidden only in the display. Unknown ids and partial tokens such as
 on one line render as separate chips, and the surrounding text stays in place.
 
 Filtering matches `@agent/<id>`, `@skill/<id>`, the bare `<id>`, and fuzzy id
-prefixes. Up/Down or Ctrl-p/Ctrl-n move the selection; Tab accepts; Enter accepts
+prefixes. Up/Down or ctrl+p/ctrl+n move the selection; Tab accepts; Enter accepts
 the highlighted row without submitting; Esc dismisses. Accepting inserts
 `@agent/<id> `, `@skill/<id> `, or `@path ` with one trailing space and stays in
 Insert mode, so a second Enter sends the prompt. An exact agent or skill id keeps
@@ -412,38 +412,62 @@ messages, assistant text and reasoning, tool calls and results, and compaction
 markers. An unmatched tool call shows as cancelled. System and runtime events
 are skipped. Session metadata records the workspace `cwd`, git branch and SHA,
 title, model, approval mode, lineage, optional harness and remote session id,
-and created/updated timestamps. On Unix, session directories are `0700` and
-files are `0600`.
+and created/updated timestamps. See [Data locations](#data-locations).
+
 The agent sets the session title from the first user prompt: first non-empty
 line, at most 80 characters. A session that already has a
 user message is not retitled by the agent.
 
-## Config and data locations
+## Data locations
 
-- `$XDG_CONFIG_HOME/meerai` (default `~/.config/meerai`): `settings.yml`
-  (`active_provider`, `active_model`, `providers`, `approval_mode`,
-  `permissions`, `context`, `sessions`, `theme`) and `providers.yml` (user
-  provider overrides and an optional `models:` list with `context_window`,
-  `input_cost_per_mtok`, and `output_cost_per_mtok`).
-- `<project-root>/.meerai/settings.yml`: optional project settings, merged over
-  the user `settings.yml`. The project root is found by walking up from the
-  process CWD. See [Project config](#project-config).
-- `<project-root>/.agents/` (default) and `<project-root>/.claude/`: optional
-  markdown agent and skill definitions. See [Agents and skills](#agents-and-skills).
-- `~/.config/meerai/hooks.json` and `<project-root>/.meerai/hooks.json`:
-  optional hook definitions. Project hooks need
-  `MEERAI_TRUST_PROJECT_HOOKS=1|true|yes`, `hooks.trust_project: true`, or the
-  canonical project root in `hooks.trusted_projects` (managed by
-  `meerai hooks trust|untrust|status`). `hooks.enabled: false` disables hooks.
-- `$XDG_DATA_HOME/meerai` (default `~/.local/share/meerai`): `auth.json` written
-  by `meerai auth login` (mode `0600`); legacy `auth.yml` is still read.
-- Sessions: `<dirs::data_dir()>/meerai/sessions/<session-id>/` (on macOS
-  `~/Library/Application Support/meerai/sessions`; on Linux
-  `$XDG_DATA_HOME/meerai/sessions`), or `$MEERAI_SESSION_DIR/<session-id>/`. A
-  directory holds `session.v<N>.jsonl` (active), `session.v<N>.jsonl.zstd`
-  (sealed), `meta.json`, and `blobs/`. `SessionConfig { project_local: true }`
-  switches to `<workspace>/.meerai/sessions` and writes a `.gitignore`; the
-  current binary uses the global root.
+meerai writes two XDG roots. Sessions live under the data root. Project files
+are read-only inputs.
+
+| Purpose | Path | Override |
+| --- | --- | --- |
+| Configuration | `$XDG_CONFIG_HOME/meerai` (default `~/.config/meerai`) | `XDG_CONFIG_HOME` |
+| Auth and app data | `$XDG_DATA_HOME/meerai` (default `~/.local/share/meerai`) | `XDG_DATA_HOME` |
+| Sessions | `<data>/sessions` (default `~/.local/share/meerai/sessions`) | `MEERAI_SESSION_DIR` |
+
+macOS and Linux use the same paths. If `HOME` is unset, config and data lookup
+returns nothing.
+
+### Configuration (`~/.config/meerai`)
+
+- `settings.yml` — `active_provider`, `active_model`, `providers`,
+  `approval_mode`, `permissions`, `context`, `sessions`, and `theme`.
+- `providers.yml` — provider overrides and an optional `models:` list with
+  `context_window`, `input_cost_per_mtok`, and `output_cost_per_mtok`.
+- `hooks.json` — user hooks.
+
+### Auth and app data (`~/.local/share/meerai`)
+
+- `auth.json` — API keys, mode `0600`. The OS keychain (`security` on macOS,
+  `secret-tool` on Linux) is tried first; this file is the fallback.
+- `open-tabs.json` — TUI tab session ids and active index.
+- `sessions/<session-id>/` — one directory per session:
+  - `session.v<N>.jsonl` — active append-only log.
+  - `session.v<N>.jsonl.zstd` — sealed generation.
+  - `meta.json` — cwd, git branch/SHA, title, model, approval mode, lineage,
+    timestamps.
+  - `blobs/` — spilled tool output.
+  - `snapshots/<turn-id>/` — checkpoint manifest and captured files.
+
+Session directories are `0700` and session files are `0600` on Unix.
+
+### Read-only project inputs
+
+- `<project-root>/.meerai/settings.yml` — project settings. See
+  [Project config](#project-config).
+- `<project-root>/.meerai/hooks.json` — project hooks, loaded only after trust.
+- `<project-root>/.meerai/instructions.md` and `<project-root>/AGENTS.md` —
+  prompt instructions. See
+  [Prompt and repository instructions](#prompt-and-repository-instructions).
+- `<project-root>/.agents/...` then `<project-root>/.claude/...` — agent and
+  skill definitions. See [Agents and skills](#agents-and-skills).
+
+meerai never writes project files, `.meerai/agents`, `.meerai/skills`, or
+project-local sessions.
 
 ### Project config
 
@@ -608,7 +632,14 @@ for example `OPENROUTER_API_KEY` (also `OPEN_ROUTER_API_KEY`) and
 `GEMINI_API_KEY`.
 
 - `MEERAI_PROVIDER`, `MEERAI_MODEL` — default provider and model; CLI flags win.
-- `MEERAI_SESSION_DIR` — session root override.
+- `XDG_CONFIG_HOME`, `XDG_DATA_HOME` — move the config and data roots. See
+  [Data locations](#data-locations).
+- `MEERAI_SESSION_DIR` — move only the session root.
+- `MEERAI_DISABLE_KEYCHAIN=1` — store API keys in `auth.json` instead of the OS
+  keychain.
+- `MEERAI_NO_NOTIFY=1` — disable the window title, tab color, bell, and desktop
+  notification.
+- `MEERAI_NO_UPDATE_CHECK=1` — skip the startup release check.
 - `MEERAI_LOAD_DOTENV=1|true|yes` — load `./.env` with `dotenvy`. Nothing loads
   implicitly.
 - `MEERAI_TRUST_PROJECT_HOOKS=1|true|yes` — load project `.meerai/hooks.json`.

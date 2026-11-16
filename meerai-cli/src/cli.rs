@@ -1,6 +1,12 @@
 use anyhow::{Result, bail};
 
-pub(crate) const HELP_TEXT: &str = "Usage:\n  \
+pub(crate) fn help_text() -> String {
+    let auth_path = meerai_common::settings::default_data_dir()
+        .map(|dir| meerai_client::secrets::auth_file_path(&dir))
+        .map(|path| meerai_core::env::display_path(&path))
+        .unwrap_or_else(|| "auth.json".to_string());
+    format!(
+        "Usage:\n  \
     meerai [-p|--provider <PROVIDER>] [-m|--model <MODEL>] [--system <INSTRUCTIONS>]\n          \
     [--mode <plan|ask|auto-edit|auto-approve|yolo>] [--continue | --resume <ID> | --fork <ID>] [--env-file <PATH>]\n          \
     [--acp] [--agent <ID>] [--skill <ID>]... [-h|--help] [-V|--version]\n  \
@@ -14,7 +20,7 @@ pub(crate) const HELP_TEXT: &str = "Usage:\n  \
     Commands:\n  \
     acp doctor                      Connect to the agy ACP adapter, print capabilities, exit\n  \
     auth list                       Show credentials across auth.json, config, and env\n  \
-    auth login <provider> [key]     Save an API key in ~/.local/share/meerai/auth.json\n  \
+    auth login <provider> [key]     Save an API key in {auth_path}\n  \
     auth logout <provider>          Remove a stored API key from auth.json\n  \
     sessions list                   List saved sessions: id, updated ms, bytes, title/model\n  \
     sessions rm <ID>                Delete one session\n  \
@@ -46,7 +52,9 @@ pub(crate) const HELP_TEXT: &str = "Usage:\n  \
         --skill <ID>           Apply a markdown skill by id (repeatable)\n  \
         --env-file <PATH>         Load variables from PATH (no implicit .env loading)\n  \
     -h, --help                 Show this help message\n  \
-    -V, --version              Print version and exit";
+    -V, --version              Print version and exit"
+    )
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AuthCommand {

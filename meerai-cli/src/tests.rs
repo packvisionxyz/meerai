@@ -280,10 +280,10 @@ fn help_text_lists_agent_and_skill_surfaces() {
         "@agent/<id>",
         "@skill/<id>",
     ] {
-        assert!(HELP_TEXT.contains(needle), "help is missing {needle}");
+        assert!(help_text().contains(needle), "help is missing {needle}");
     }
     for removed in ["/agents", "/skills"] {
-        assert!(!HELP_TEXT.contains(removed), "help still lists {removed}");
+        assert!(!help_text().contains(removed), "help still lists {removed}");
     }
 }
 
@@ -777,7 +777,6 @@ async fn resume_missing_session_errors_without_creating_it() {
     let config = SessionConfig {
         root: root.clone(),
         workspace: root.clone(),
-        project_local: false,
     };
     let id = SessionId::new();
     let error = Session::open(&config, id.clone(), root.clone())
@@ -1080,8 +1079,8 @@ fn parses_sessions_fork_and_top_level_fork_flags() {
     .unwrap_err();
     assert!(fork_resume.to_string().contains("cannot be combined"));
 
-    assert!(HELP_TEXT.contains("sessions fork <ID> [--turn <TURN_ID>]"));
-    assert!(HELP_TEXT.contains("--fork <ID>"));
+    assert!(help_text().contains("sessions fork <ID> [--turn <TURN_ID>]"));
+    assert!(help_text().contains("--fork <ID>"));
 }
 
 #[tokio::test]
@@ -1094,7 +1093,6 @@ async fn fork_session_helper_forks_latest_or_explicit_turn_and_rejects_missing()
     let config = SessionConfig {
         root: root.clone(),
         workspace: root.clone(),
-        project_local: false,
     };
 
     let empty_id = SessionId::new();
@@ -1511,7 +1509,6 @@ async fn empty_session_cleanup_removes_unused_sessions_only() {
     let config = SessionConfig {
         root: root.clone(),
         workspace: root.clone(),
-        project_local: false,
     };
 
     let unused_id = SessionId::new();
@@ -1589,7 +1586,7 @@ fn parses_hooks_subcommands() {
     assert!(parse_args(hooks(&["status", "extra"])).is_err());
     assert!(parse_args(hooks(&["trust", "extra"])).is_err());
     assert!(parse_args(hooks(&["bogus"])).is_err());
-    assert!(HELP_TEXT.contains("hooks <trust|untrust|status>"));
+    assert!(help_text().contains("hooks <trust|untrust|status>"));
 }
 
 #[test]
@@ -1731,8 +1728,8 @@ fn parses_acp_flag_and_subcommand() {
         .is_err()
     );
 
-    assert!(HELP_TEXT.contains("meerai acp doctor"));
-    assert!(HELP_TEXT.contains("--acp"));
+    assert!(help_text().contains("meerai acp doctor"));
+    assert!(help_text().contains("--acp"));
 }
 
 #[test]

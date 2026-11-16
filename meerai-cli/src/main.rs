@@ -52,7 +52,7 @@ use meerai_tools::{
 use meerai_tui::{Backend, OpenedSession, SessionOpener, TuiLaunchConfig, transcript_from_events};
 
 use auth_cmd::run_auth;
-use cli::{CliSubcommand, HELP_TEXT, parse_args};
+use cli::{CliSubcommand, help_text, parse_args};
 use headless::{run_headless, run_headless_channels};
 use hooks_cmd::run_hooks;
 use sessions_cmd::{
@@ -297,7 +297,7 @@ async fn main() -> Result<()> {
     load_dotenv(cli.env_file.as_deref().map(Path::new))?;
 
     if cli.show_help {
-        println!("{HELP_TEXT}");
+        println!("{}", help_text());
         return Ok(());
     }
 

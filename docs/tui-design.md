@@ -8,7 +8,7 @@ terminal.
 
 **Status:** sections marked **Current** match `meerai-tui/src/app/` and
 `meerai-tui/src/ui/`. Sections marked **Planned** are design, not implemented.
-Today the TUI has `NOR` and `INS` modes, slash commands, a `Ctrl-p` command
+Today the TUI has `NOR` and `INS` modes, slash commands, a `ctrl+p` command
 palette, multi-session tabs, approvals, user-choice questions, a sidebar with
 file changes, diff/search modals, transcript replay for a resumed session, a `@`
 mentions popup, and a config-driven color palette. It has no Select mode, `Space` leader, `:`
@@ -37,7 +37,7 @@ Current layout (illustrative):
 
 ```text
 ┌─────────────────────────────────────────────────┬──────────────────────────┐
-│ Conversation & tool stream                      │ Sidebar (Ctrl-b)          │
+│ Conversation & tool stream                      │ Sidebar (ctrl+b)          │
 │                                                 │  Overview                 │
 │ > You                                           │  File changes             │
 │   Refactor the agent loop                       │                           │
@@ -47,7 +47,7 @@ Current layout (illustrative):
 │ ◆ Assistant (streaming...)                      │                           │
 │   I replaced stdout logging with events...      │                           │
 ├─────────────────────────────────────────────────┴──────────────────────────┤
-│ Prompt (INS) — @ files, / commands, Shift+Alt+Enter newline                │
+│ Prompt (INS) — @ files, / commands, shift+alt+enter newline                │
 │ > Also add a test with @meerai-agents/█                                     │
 ├────────────────────────────────────────────────────────────────────────────┤
 │ INS ASK  openrouter / deepseek-v4.1-flash [KEY] | 18.4k tok | 42.1 tok/s   │
@@ -55,7 +55,7 @@ Current layout (illustrative):
 ```
 
 The sidebar is hidden below a minimum width (`MIN_SIDEBAR_WIDTH`) and waits for
-a resize. Pressing `Ctrl-b` toggles it; clicking a changed file opens the diff
+a resize. Pressing `ctrl+b` toggles it; clicking a changed file opens the diff
 modal. There is no separate "Context / Diff Drawer". The palette follows the
 opencode dark theme and is overridable through the `theme` block in
 `settings.yml` or `.meerai/settings.yml`.
@@ -70,15 +70,15 @@ opencode dark theme and is overridable through the `theme` block in
 | --- | --- |
 | `i` / `a` | Focus the prompt composer and enter **Insert Mode** |
 | `j` / `k` / `Down` / `Up` | Scroll the transcript |
-| `Ctrl-d` / `Ctrl-u` | Half-page down / up |
+| `ctrl+d` / `ctrl+u` | Half-page down / up |
 | `gg` / `G` | Top / bottom |
-| `Ctrl-p` | Open the command palette |
+| `ctrl+p` | Open the command palette |
 | `y` | Yank the latest assistant (or error/system) text to the clipboard |
-| `/` or `Ctrl-f` | Open the workspace file/search modal |
-| `Ctrl-b` | Toggle the sidebar |
+| `/` or `ctrl+f` | Open the workspace file/search modal |
+| `ctrl+b` | Toggle the sidebar |
 | `Esc` | Cancel the running turn (when one is active) |
 | `q` | Quit |
-| `Ctrl-c` | Cancel the running turn; otherwise press twice to exit |
+| `ctrl+c` | Cancel the running turn; otherwise press twice to exit |
 
 Clipboard writes use the OSC 52 escape sequence plus a native helper
 (`pbcopy` / `clip` / `wl-copy` / `xclip` / `xsel`) when available. Dragging with
@@ -89,7 +89,7 @@ no keyboard Select mode.
 
 - A multi-line prompt buffer with cursor motions, backspace/delete, and
   bracketed paste from crossterm.
-- `Enter` submits. `Shift+Enter` or `Alt+Enter` inserts a newline.
+- `Enter` submits. `shift+enter` or `alt+enter` inserts a newline.
 - `@` opens file completion. `/` on an empty line opens slash-command
   completion. `/model ` opens model completion.
 - `Tab` accepts a completion; `Enter` accepts a completion or submits when the
@@ -97,11 +97,11 @@ no keyboard Select mode.
   without discarding the draft.
 - While a turn runs, `Enter` queues the message. The next queued message is
   sent when the turn ends, in order.
-- `Ctrl-g` sends now: it steers the oldest queued message (or the current draft
+- `ctrl+g` sends now: it steers the oldest queued message (or the current draft
   when the queue is empty) at the next step boundary.
 - Click the thought header to expand or collapse it. There is no keyboard
   toggle.
-- `Ctrl-p` (or `Ctrl-Shift-p`) opens the command palette when the completion
+- `ctrl+p` (or `ctrl+shift+p`) opens the command palette when the completion
   popup is closed. The palette groups actions into sections, shows each
   shortcut in a right-hand column, filters as you type, and runs the
   highlighted row with `Enter`.
@@ -141,7 +141,7 @@ which append a System instruction at the next step boundary. Typing `@` opens th
 badge, and each shows its source and description; file rows show a path and no
 badge. Rows show the bare id, not the `@agent/` or `@skill/` prefix. One id can
 appear as both an agent and a skill. Filtering matches `@agent/<id>`,
-`@skill/<id>`, the bare id, and fuzzy prefixes. Up/Down or Ctrl-p/Ctrl-n move;
+`@skill/<id>`, the bare id, and fuzzy prefixes. Up/Down or ctrl+p/ctrl+n move;
 Tab accepts; Enter accepts without submitting; Esc dismisses. Accepting inserts
 `@agent/<id> `, `@skill/<id> `, or `@path ` with one trailing space and stays in
 Insert. An exact agent or skill id keeps the popup open; an exact file path
@@ -291,5 +291,5 @@ locally by `LocalWorkspace` and injectable through `TuiLaunchConfig`.
    the UI loop updates `AppState` and redraws on a capped tick.
 2. **Streaming text:** `ItemDelta::AgentText` appends to the open assistant
    entry; `ItemCompleted` settles the final text.
-3. **Cancellation:** `Esc`/`Ctrl-c` send `AgentCommand::Cancel` and trip the
-   turn's `CancellationToken`; a second `Ctrl-c` while idle exits.
+3. **Cancellation:** `Esc`/`ctrl+c` send `AgentCommand::Cancel` and trip the
+   turn's `CancellationToken`; a second `ctrl+c` while idle exits.

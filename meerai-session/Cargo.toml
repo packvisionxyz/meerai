@@ -14,7 +14,6 @@ publish.workspace = true
 meerai-core = { path = "../meerai-core/" }
 
 anyhow = { workspace = true }
-dirs = { workspace = true }
 genai = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

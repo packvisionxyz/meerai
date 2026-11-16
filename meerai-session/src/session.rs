@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use anyhow::{Context, Result};
 use genai::chat::ChatMessage;
-use meerai_core::env::{home_dir, now_millis};
+use meerai_core::env::now_millis;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
@@ -25,34 +25,13 @@ const META_FILE: &str = "meta.json";
 pub const DEFAULT_ROTATION_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 
 pub fn default_sessions_root() -> PathBuf {
-    if let Some(dir) = std::env::var_os("MEERAI_SESSION_DIR") {
-        return PathBuf::from(dir);
-    }
-    match dirs::data_dir() {
-        Some(dir) => dir.join("meerai").join("sessions"),
-        None => home_fallback(),
-    }
-}
-
-fn home_fallback() -> PathBuf {
-    match home_dir() {
-        Some(home) => home
-            .join(".local")
-            .join("share")
-            .join("meerai")
-            .join("sessions"),
-        None => PathBuf::from(".local")
-            .join("share")
-            .join("meerai")
-            .join("sessions"),
-    }
+    meerai_core::env::sessions_dir()
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionConfig {
     pub root: PathBuf,
     pub workspace: PathBuf,
-    pub project_local: bool,
 }
 
 impl SessionConfig {
@@ -60,15 +39,6 @@ impl SessionConfig {
         Self {
             root: default_sessions_root(),
             workspace: workspace.into(),
-            project_local: false,
-        }
-    }
-
-    fn effective_root(&self) -> PathBuf {
-        if self.project_local {
-            self.workspace.join(".meerai").join("sessions")
-        } else {
-            self.root.clone()
         }
     }
 }
@@ -276,16 +246,9 @@ impl Session {
         cwd: PathBuf,
         create: bool,
     ) -> Result<Self> {
-        let dir = session_dir(&config.effective_root(), &id)?;
+        let dir = session_dir(&config.root, &id)?;
         if create {
             perms::create_private_dir(&dir).await?;
-            if config.project_local {
-                let root = config.effective_root();
-                let ignore = root.join(".gitignore");
-                if fs::metadata(&ignore).await.is_err() {
-                    let _ = fs::write(ignore, "*\n!.gitignore\n").await;
-                }
-            }
         } else if path_is_dir(&dir).await? {
             perms::tighten_dir(&dir).await?;
         } else {
@@ -932,7 +895,6 @@ mod tests {
         SessionConfig {
             root: root.to_path_buf(),
             workspace: root.to_path_buf(),
-            project_local: false,
         }
     }
 
@@ -1011,46 +973,6 @@ mod tests {
         assert_eq!(next, Seq(3));
 
         fs::remove_dir_all(&root).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn project_local_sessions_are_gitignored() {
-        let workspace = temp_root("project-local-ignore");
-        let mut config = SessionConfig::new(&workspace);
-        config.project_local = true;
-
-        Session::open_or_create(&config, SessionId::new(), workspace.clone())
-            .await
-            .unwrap();
-
-        let ignore = workspace
-            .join(".meerai")
-            .join("sessions")
-            .join(".gitignore");
-        let raw = fs::read_to_string(ignore).await.unwrap();
-        assert_eq!(raw, "*\n!.gitignore\n");
-    }
-
-    #[tokio::test]
-    async fn project_local_config_uses_workspace_directory() {
-        let workspace = temp_root("project");
-        let root = temp_root("project-root");
-        let config = SessionConfig {
-            root,
-            workspace: workspace.clone(),
-            project_local: true,
-        };
-        let id = SessionId::new();
-
-        let session = Session::open_or_create(&config, id.clone(), workspace.clone())
-            .await
-            .unwrap();
-
-        let expected_dir = workspace.join(".meerai").join("sessions").join(id.as_str());
-        assert_eq!(session.dir(), Some(expected_dir.as_path()));
-        assert!(expected_dir.join(META_FILE).exists());
-
-        fs::remove_dir_all(&workspace).await.unwrap();
     }
 
     #[tokio::test]
@@ -1602,7 +1524,6 @@ mod tests {
         let config = SessionConfig {
             root: root.clone(),
             workspace: workspace.clone(),
-            project_local: false,
         };
         let session = Session::open_or_create(&config, SessionId::new(), workspace.clone())
             .await
@@ -1644,7 +1565,6 @@ mod tests {
         let config = SessionConfig {
             root: root.clone(),
             workspace: workspace.clone(),
-            project_local: false,
         };
         let session = Session::open_or_create(&config, SessionId::new(), workspace.clone())
             .await
@@ -1670,7 +1590,6 @@ mod tests {
         let config = SessionConfig {
             root: root.clone(),
             workspace: workspace.clone(),
-            project_local: false,
         };
         let session = Session::open_or_create(&config, SessionId::new(), workspace.clone())
             .await
@@ -1692,7 +1611,6 @@ mod tests {
         let config = SessionConfig {
             root: root.clone(),
             workspace: workspace.clone(),
-            project_local: false,
         };
         let session = Session::open_or_create(&config, SessionId::new(), workspace.clone())
             .await
@@ -1979,7 +1897,6 @@ mod tests {
         let config = SessionConfig {
             root: root.clone(),
             workspace: root.clone(),
-            project_local: false,
         };
         let parent_id = SessionId::from_raw("parent-1");
         let parent = Session::open_or_create(&config, parent_id.clone(), root.clone())

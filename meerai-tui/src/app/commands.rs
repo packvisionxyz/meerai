@@ -475,10 +475,10 @@ fn format_help_text() -> String {
         .join(", ");
     format!(
         "Commands: {commands}\n\
-         Tabs: Alt-1..9 / Alt-Left/Right / Ctrl-PageUp/Down / click tab, Ctrl-w close tab, click [+] new tab\n\
-         Shortcuts: Ctrl-p command palette, Ctrl-f search, Ctrl-b toggle sidebar, drag+scroll or click then Shift+click to copy, click a thought block to expand it\n\
-         Insert: Enter send (queues while a turn runs), Ctrl-g send queued now, Shift/Alt/Ctrl+Enter or Ctrl-j or \\+Enter newline, @ file, / command, Esc Normal\n\
-         Normal: j/k/Up/Down scroll, gt/gT/[ / ] switch tab, / search, t toggle thinking, y copy reply, Ctrl-d/Ctrl-u half-page, gg/G top/bottom, i/a Insert, q quit"
+         Tabs: alt+1..9 / alt+left/right / ctrl+pageup/down / click tab, ctrl+w close tab, click [+] new tab\n\
+         Shortcuts: ctrl+p command palette, ctrl+f search, ctrl+b toggle sidebar, drag+scroll or click then shift+click to copy, click a thought block to expand it\n\
+         Insert: Enter send (queues while a turn runs), ctrl+g send queued now, shift/alt/ctrl+enter or ctrl+j or \\+Enter newline, @ file, / command, Esc Normal\n\
+         Normal: j/k/Up/Down scroll, gt/gT/[ / ] switch tab, / search, t toggle thinking, y copy reply, ctrl+d/ctrl+u half-page, gg/G top/bottom, i/a Insert, q quit"
     )
 }
 

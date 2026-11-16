@@ -115,7 +115,7 @@ Rules for all shapes:
   skills, then files. Agent rows show `<id>|agent` (cyan), skill rows `<id>|skill` (magenta), each
   with source and description; files show a path with no badge; one id can appear as both kinds.
   Filtering matches `@agent/<id>`, `@skill/<id>`, the bare id, and fuzzy prefixes. Up/Down or
-  Ctrl-p/Ctrl-n move, Tab accepts, Enter accepts without submitting, Esc dismisses. Accepting
+  ctrl+p/ctrl+n move, Tab accepts, Enter accepts without submitting, Esc dismisses. Accepting
   inserts `@agent/<id> `, `@skill/<id> `, or `@path ` with one trailing space and stays in Insert;
   an exact agent/skill id keeps the popup open, an exact file path auto-dismisses. On submit, skills
   apply before the agent (`parse_mentions`/`apply_mentions`), mentions are stripped, repeats apply
@@ -201,13 +201,13 @@ Rules for all shapes:
   plus writable roots, reads to the workspace plus readable roots (including the session dir).
 - `meerai-tui` keeps rendering (`ratatui` + `crossterm`) decoupled from providers/tools via
   `AgentEvent` / `AgentCommand` channels. Use `tokio::select!` in the UI loop.
-- Current TUI surface: `NOR`/`INS` modes, multi-session tab bar (`[ + ]`, `Alt-1..9`,
-  `Ctrl-PageUp`/`PageDown`, `Alt-Left`/`Right`, `Ctrl-w`, `gt`/`gT`/`[`/`]`, mouse click), `/`
+- Current TUI surface: `NOR`/`INS` modes, multi-session tab bar (`[ + ]`, `alt+1..9`,
+  `ctrl+pageup/pagedown`, `alt+left`/`Right`, `ctrl+w`, `gt`/`gT`/`[`/`]`, mouse click), `/`
   slash commands (completion list in `completion.rs`, including `/sessions [id-or-prefix]`,
   `/new`, `/close`, `/agent`/`/skill`), `/sessions` picker modal, `@` Mentions popup (agents,
   skills, files; Tab accepts, Enter accepts without submitting), approval overlay (`y`/Enter, `t`,
   `a`, `n`, `r`, Esc), sidebar with file changes, diff/search modals, transcript replay on resume,
-  `Ctrl-b` sidebar, `Ctrl-t` thinking, `Ctrl-c` cancel-then-quit.
+  `ctrl+b` sidebar, `ctrl+t` thinking, `ctrl+c` cancel-then-quit.
 - Planned only (do not describe as implemented): `Space` leader menu, Select mode, `:` command
   mode, transcript search, `/rewind`, themes, OSC 52 clipboard fallback.
 

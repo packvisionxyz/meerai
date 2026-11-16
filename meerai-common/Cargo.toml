@@ -15,7 +15,6 @@ meerai-core = { path = "../meerai-core/" }
 meerai-policy = { path = "../meerai-policy/" }
 
 anyhow = { workspace = true }
-dirs = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }

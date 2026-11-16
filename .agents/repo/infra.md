@@ -14,7 +14,7 @@ Repository knowledge for `.agents/skills/*`.
 | `.github/workflows/release.yml` | Tag-driven (`v*`) release: verify, tag/version gate, 5-target build, GitHub Release |
 | `.github/workflows/pages.yml` | Deploys `site/` to GitHub Pages (`meerai.packvision.xyz`) |
 | `.github/scripts/compose_installers.py` | Splices `site/requirements.json` into the generated blocks of both installers |
-| `.github/scripts/verify_release_version.sh` | Resolves the release tag, compares it with `[workspace.package] version`, emits `tag`/`prerelease` outputs |
+| `.github/scripts/verify_release_version.py` | Resolves the release tag, compares it with `[workspace.package] version`, emits `tag`/`prerelease` outputs |
 | `site/` | Landing page, `install.sh`, `install.ps1`, `requirements.json`, `CNAME`, `.nojekyll` |
 | `Makefile` | Local task entry points (`make help`) |
 | `LICENSE` | Apache-2.0 |
@@ -51,7 +51,7 @@ Jobs run `verify`, `audit`, and `version` before `build -> publish`:
 | :--- | :--- | :--- |
 | `verify` | `ubuntu-24.04` | Same toolchain/cache setup as CI: fmt check, clippy, workspace tests. |
 | `audit` | `ubuntu-24.04` | `EmbarkStudios/cargo-deny-action@v2` (`deny.toml` advisories, licenses, bans, sources). |
-| `version` | `ubuntu-24.04` | `needs: verify`. Runs `.github/scripts/verify_release_version.sh` to resolve the release tag and compare it with the workspace version. Runs before the matrix, so a tag/version mismatch costs one short job instead of five builds. |
+| `version` | `ubuntu-24.04` | `needs: verify`. Runs `.github/scripts/verify_release_version.py` to resolve the release tag and compare it with the workspace version. Runs before the matrix, so a tag/version mismatch costs one short job instead of five builds. |
 | `build` | matrix | `needs: [verify, audit, version]`. `cargo build --release --locked -p meerai-cli --target <triple>`, conditional macOS `codesign`/`notarytool` (when `APPLE_CERTIFICATE` + Apple credentials exist) and Windows `signtool` (when `WINDOWS_CERTIFICATE` exists), archive plus `.sha256`, `actions/upload-artifact` (1-day retention) |
 | `publish` | `ubuntu-24.04` | `needs: build`. Checkout, download artifacts, build `SHA256SUMS.txt`, re-run the same tag/version script (defense in depth, also resolves `tag`/`prerelease` outputs), create the GitHub Release |
 
@@ -65,7 +65,7 @@ Build matrix — five published targets:
 | `x86_64-apple-darwin` | `macos-15` | `meerai-x86_64-apple-darwin.tar.gz` |
 | `x86_64-pc-windows-msvc` | `windows-latest` | `meerai-x86_64-pc-windows-msvc.zip` |
 
-Tag/version gate: `.github/scripts/verify_release_version.sh` resolves the tag (from `REF_NAME` on a
+Tag/version gate: `.github/scripts/verify_release_version.py` resolves the tag (from `REF_NAME` on a
 tag push, or `INPUT_TAG` on `workflow_dispatch`), strips a leading `v` and any `-pre`/`+build`
 suffix, then compares it with the `version` inside `[workspace.package]` of the root `Cargo.toml`.
 It writes `tag`/`prerelease` to `$GITHUB_OUTPUT` and fails on a mismatch, so bump the workspace
@@ -133,7 +133,7 @@ For infrastructure edits, also validate syntax:
 ```sh
 ruby -ryaml -e 'ARGV.each{|f| YAML.load_file(f)}' .github/workflows/*.yml
 sh -n site/install.sh
-sh -n .github/scripts/verify_release_version.sh
+python3 -m py_compile .github/scripts/verify_release_version.py
 actionlint .github/workflows/*.yml
 ```
 
@@ -143,9 +143,9 @@ is available at `~/go/bin/actionlint`; it checks expressions, action inputs, and
 The tag/version script can be exercised locally without GitHub:
 
 ```sh
-GITHUB_OUTPUT=/dev/null EVENT_NAME=push REF_NAME=v0.0.1 sh .github/scripts/verify_release_version.sh
+GITHUB_OUTPUT=/dev/null EVENT_NAME=push REF_NAME=v0.0.1 python3 .github/scripts/verify_release_version.py
 GITHUB_OUTPUT=/dev/null EVENT_NAME=workflow_dispatch INPUT_TAG=v0.0.1 INPUT_PRERELEASE=true \
-  sh .github/scripts/verify_release_version.sh
+  python3 .github/scripts/verify_release_version.py
 ```
 
 ## Escalate

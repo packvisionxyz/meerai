@@ -56,7 +56,7 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: R
     );
 
     if !app.tab().queued.is_empty() && area.width >= 30 {
-        let badge = format!("{} queued · Ctrl-g steer", app.tab().queued.len());
+        let badge = format!("{} queued · ctrl+g steer", app.tab().queued.len());
         let badge_w = badge.chars().count() as u16;
         if badge_w + 4 < area.width {
             frame.render_widget(

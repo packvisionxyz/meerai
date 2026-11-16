@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -11,7 +10,6 @@ use serde::{Deserialize, Serialize};
 
 const SETTINGS_FILE: &str = "settings.yml";
 const USER_PROVIDERS_FILE: &str = "providers.yml";
-const LEGACY_USER_MODELS_FILE: &str = "models.yml";
 const MAX_RECENT_MODELS: usize = 20;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,55 +283,16 @@ impl AppSettings {
     }
 }
 
-fn resolve_xdg_dir<F>(
-    env_override: Option<&OsStr>,
-    home: Option<&Path>,
-    rel_parts: &[&str],
-    fallback: F,
-) -> Option<PathBuf>
-where
-    F: FnOnce() -> Option<PathBuf>,
-{
-    let base = env_override
-        .filter(|val| !val.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            home.map(|h| {
-                let mut path = h.to_path_buf();
-                for part in rel_parts {
-                    path.push(part);
-                }
-                path
-            })
-        })
-        .or_else(fallback)?;
-    Some(base.join("meerai"))
-}
-
 pub fn default_config_dir() -> Option<PathBuf> {
-    resolve_xdg_dir(
-        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
-        dirs::home_dir().as_deref(),
-        &[".config"],
-        dirs::config_dir,
-    )
+    meerai_core::env::config_dir()
 }
 
 pub fn default_data_dir() -> Option<PathBuf> {
-    resolve_xdg_dir(
-        std::env::var_os("XDG_DATA_HOME").as_deref(),
-        dirs::home_dir().as_deref(),
-        &[".local", "share"],
-        dirs::data_local_dir,
-    )
+    meerai_core::env::data_dir()
 }
 
 pub fn user_providers_path(dir: &Path) -> PathBuf {
     dir.join(USER_PROVIDERS_FILE)
-}
-
-pub fn legacy_user_models_path(dir: &Path) -> PathBuf {
-    dir.join(LEGACY_USER_MODELS_FILE)
 }
 
 pub fn load_settings_from(dir: &Path) -> Result<AppSettings> {
@@ -757,36 +716,6 @@ providers:
         let raw = serde_yaml::to_string(&parsed).unwrap();
         assert!(!raw.contains("context_window_tokens"));
         assert!(!raw.contains("tool_timeout_ms"));
-    }
-
-    #[test]
-    fn xdg_dir_resolution_prefers_env_then_home_dotdirs() {
-        let home = Path::new("/tmp/test-home");
-        assert_eq!(
-            resolve_xdg_dir(None, Some(home), &[".config"], || Some(PathBuf::from(
-                "/legacy"
-            ))),
-            Some(PathBuf::from("/tmp/test-home/.config/meerai"))
-        );
-        assert_eq!(
-            resolve_xdg_dir(None, Some(home), &[".local", "share"], || Some(
-                PathBuf::from("/legacy")
-            )),
-            Some(PathBuf::from("/tmp/test-home/.local/share/meerai"))
-        );
-        assert_eq!(
-            resolve_xdg_dir(
-                Some(OsStr::new("/tmp/custom-xdg")),
-                Some(home),
-                &[".local", "share"],
-                || None
-            ),
-            Some(PathBuf::from("/tmp/custom-xdg/meerai"))
-        );
-        assert_eq!(
-            resolve_xdg_dir(Some(OsStr::new("")), Some(home), &[".config"], || None),
-            Some(PathBuf::from("/tmp/test-home/.config/meerai"))
-        );
     }
 
     fn settings_from_yaml(raw: &str) -> AppSettings {

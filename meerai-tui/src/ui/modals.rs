@@ -2,6 +2,13 @@ use super::statusline::key_status_style;
 use super::*;
 use crate::app::ApprovalClickAction;
 
+fn auth_file_display() -> String {
+    meerai_common::settings::default_data_dir()
+        .map(|dir| meerai_client::secrets::auth_file_path(&dir))
+        .map(|path| meerai_core::env::display_path(&path))
+        .unwrap_or_else(|| "auth.json".to_string())
+}
+
 pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     let Some(modal) = app.modal.clone() else {
         return;
@@ -233,7 +240,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 ))
             } else {
                 Line::from(Span::styled(
-                    "Saved in ~/.local/share/meerai/auth.json (0600).",
+                    format!("Saved in {} (0600).", auth_file_display()),
                     Style::default().fg(theme::p().faint),
                 ))
             };
@@ -242,7 +249,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 Paragraph::new(key_hints_line(&[
                     ("Enter", "save"),
                     ("Tab", "switch field"),
-                    ("Ctrl-d", "delete key"),
+                    ("ctrl+d", "delete key"),
                     ("Esc", "back"),
                 ])),
                 rows[9],
@@ -376,7 +383,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 Paragraph::new(key_hints_line(&[
                     ("Enter", "apply"),
                     ("↑↓", "recent"),
-                    ("Ctrl-u", "clear"),
+                    ("ctrl+u", "clear"),
                     ("Esc", "close"),
                 ])),
                 rows[6],
@@ -445,7 +452,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             frame.render_widget(
                 Paragraph::new(key_hints_line(&[
                     ("j/k", "scroll"),
-                    ("Ctrl-d/u", "page"),
+                    ("ctrl+d/u", "page"),
                     ("g/G", "top/bot"),
                     ("Tab/[/]", "next/prev file"),
                     ("Esc/q", "close"),
@@ -682,7 +689,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
         ActiveModal::CommandPalette { filter, selected } => {
             let popup = cap_width(centered_rect(area, 54, 66, 48, 14), 62);
             dim_backdrop(frame, area, popup);
-            let inner = dialog_frame(frame, app, popup, "Commands (Ctrl-p)", true);
+            let inner = dialog_frame(frame, app, popup, "Commands (ctrl+p)", true);
 
             let rows = Layout::vertical([
                 Constraint::Length(1),
@@ -1325,7 +1332,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 ])
             } else if confirming {
                 Line::from(Span::styled(
-                    "Press Ctrl-d again to delete · Esc cancel",
+                    "Press ctrl+d again to delete · Esc cancel",
                     Style::default()
                         .fg(theme::p().error)
                         .add_modifier(Modifier::BOLD),
@@ -1333,7 +1340,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             } else {
                 key_hints_line(&[
                     ("Enter", "switch"),
-                    ("Ctrl-d", "delete"),
+                    ("ctrl+d", "delete"),
                     ("↑↓", "move"),
                     ("Type", "filter"),
                     ("Esc", "close"),

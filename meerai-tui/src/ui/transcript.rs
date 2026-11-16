@@ -164,7 +164,7 @@ fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                 Span::styled(LOGO_M_ROWS[2], logo_style),
                 Span::styled(
                     format!(
-                        "  Shortcuts: {} newline, {} commands, Drag/Shift+Click copy.",
+                        "  Shortcuts: {} newline, {} commands, drag/shift+click copy.",
                         crate::app::ctrl_label('j'),
                         crate::app::ctrl_label('p')
                     ),
@@ -217,8 +217,8 @@ fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
             0,
         ));
         lines.push(banded_line(Line::default(), None, 0));
-        lines.push(tip("Ctrl-p", "Command palette"));
-        lines.push(tip("Ctrl-f  /", "Search workspace files & content"));
+        lines.push(tip("ctrl+p", "Command palette"));
+        lines.push(tip("ctrl+f  /", "Search workspace files & content"));
         lines.push(tip("@", "Mention agents, skills, or files"));
         lines.push(tip("/connect", "Configure provider or API key"));
         lines.push(tip("/help", "List all commands & shortcuts"));

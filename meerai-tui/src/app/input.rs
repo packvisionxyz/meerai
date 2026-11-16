@@ -1082,7 +1082,7 @@ impl AppState {
             self.quit();
         } else {
             self.last_ctrl_c = Some(Instant::now());
-            self.status_notice = Some("Press Ctrl-c again to exit".to_string());
+            self.status_notice = Some("Press ctrl+c again to exit".to_string());
         }
     }
 
@@ -1407,7 +1407,7 @@ impl AppState {
             tab.auto_follow = true;
             tab.queued.push(remaining);
             let depth = tab.queued.len();
-            self.status_notice = Some(format!("Queued {depth} message(s) · Ctrl-g sends now"));
+            self.status_notice = Some(format!("Queued {depth} message(s) · ctrl+g sends now"));
             self.completion.reset();
             return;
         }

@@ -173,7 +173,7 @@ Rules:
 ### 3.2 Persistence
 
 ```text
-~/.local/share/meerai/sessions/<session-id>/     # Linux; macOS uses dirs::data_dir()
+~/.local/share/meerai/sessions/<session-id>/     # $XDG_DATA_HOME/meerai/sessions
 ├── session.v<N>.jsonl         # active append-only log (plain, one JSON object per line)
 ├── session.v<N>.jsonl.zstd    # sealed older generations (zstd, write-once)
 ├── blobs/<hash>-<len>.txt     # spilled tool outputs (§7.2)
@@ -185,10 +185,8 @@ Rules:
   easy to tail. Rotation seals the active file to `.jsonl.zstd`; committed
   generations are never rewritten. A format change writes a new generation
   through an adjacent `vN → vN+1` migration.
-- The root is `dirs::data_dir()/meerai/sessions` (on macOS
-  `~/Library/Application Support/meerai/sessions`), or `MEERAI_SESSION_DIR`.
-  `SessionConfig { project_local: true }` uses `<workspace>/.meerai/sessions`;
-  the current binary uses the global root.
+- The root is `$XDG_DATA_HOME/meerai/sessions` (default
+  `~/.local/share/meerai/sessions`), or `MEERAI_SESSION_DIR`.
 - On Unix, session directories are `0700` and session files are `0600`
   (`meerai-session/src/perms.rs`); Windows has no equivalent enforcement.
 - Crash recovery: on open, an unsealed trailing turn gets a synthesized
@@ -929,7 +927,7 @@ Review the current changes. List findings by severity with file:line references.
   row shows its path with no badge. The row shows the bare id, not the
   `@agent/`/`@skill/` prefix. One id can appear as both an agent and a skill.
   Filtering matches `@agent/<id>`, `@skill/<id>`, the bare id, and fuzzy
-  prefixes. Up/Down or Ctrl-p/Ctrl-n move; Tab accepts; Enter accepts without
+  prefixes. Up/Down or ctrl+p/ctrl+n move; Tab accepts; Enter accepts without
   submitting; Esc dismisses. Accepting inserts `@agent/<id> `, `@skill/<id> `,
   or `@path ` with one trailing space and stays in Insert. An exact agent or
   skill id keeps the popup open; an exact file path auto-dismisses. A known
@@ -1172,8 +1170,8 @@ contention is normal, not a hang.
   `meerai-cli` has a default `tui` feature. `--no-default-features` builds a
   headless binary without ratatui, git2, comrak, or the TUI crate. genai still
   pulls reqwest in both builds.
-- **Session root.** `dirs::data_dir()/meerai/sessions` (platform-correct),
-  `MEERAI_SESSION_DIR` env override, optional project-local `.meerai/sessions`.
+- **Session root.** `$XDG_DATA_HOME/meerai/sessions` (default
+  `~/.local/share/meerai/sessions`), `MEERAI_SESSION_DIR` env override.
 - **Persistence.** Active generation is plain append-only JSONL (crash-resilient
   line granularity, human-tailable); zstd applies to sealed/rotated generations.
 - **No commits without user authorization.** Round checkpoints are recorded as
@@ -1388,10 +1386,8 @@ the Post-M5 R5 note).
   Orchestrator rulings on its open questions: (1) `#[derive(Schema)]` stayed in
   the tree at this point, documented as unused/broken against schemars 1.x — the
   fix-or-remove follow-up resolved as **removal** in Post-M5 R4; the macOS
-  data-dir split (sessions under
-  `dirs::data_dir()/meerai/sessions`, `auth.json` under the XDG-style
-  `default_data_dir()`) stays as shipped — both are documented; unifying on one
-  helper is a follow-up.
+  data-dir split was later unified on `meerai_core::env` (see
+  `default_data_dir`/`sessions_dir`).
 - **Delivery complete for M1–M5.** Final state: 8 crates + `meerai` binary,
   workspace gate green (203 tests), no commits made — the full delivery sits
   in the working tree for review.
@@ -1503,7 +1499,7 @@ the Post-M5 R5 note).
   and are not applied. TUI `/agent <id>` and `/skill <id>` send
   `AgentCommand::ApplyAgent`/`ApplySkill`; typing `@` opens the Mentions popup
   (agents, then skills, then files; `<id>|agent` cyan, `<id>|skill` magenta,
-  files with no badge). Up/Down or Ctrl-p/Ctrl-n move, Tab accepts, Enter accepts
+  files with no badge). Up/Down or ctrl+p/ctrl+n move, Tab accepts, Enter accepts
   without submitting, Esc dismisses; an exact agent/skill id keeps the popup
   open. On submit, skills apply before the agent, mentions are stripped, repeats
   apply once, and an unknown mention stays as text; a mention-only prompt applies

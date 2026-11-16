@@ -223,7 +223,7 @@ Application is prompt-only:
   `AgentCommand::ApplyAgent`/`ApplySkill`, which the loop records as a System
   message at the next step boundary. Typing `@` opens the Mentions popup
   (agents, then skills, then files; `<id>|agent` cyan, `<id>|skill` magenta,
-  files with no badge). Up/Down or Ctrl-p/Ctrl-n move, Tab accepts, Enter accepts
+  files with no badge). Up/Down or ctrl+p/ctrl+n move, Tab accepts, Enter accepts
   without submitting, Esc dismisses; an exact agent/skill id keeps the popup
   open. A known accepted mention renders as an `<id>` chip (bold cyan agent,
   bold magenta skill) while the raw token stays in the input buffer; unknown and

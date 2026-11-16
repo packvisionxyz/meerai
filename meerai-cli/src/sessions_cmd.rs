@@ -209,7 +209,6 @@ pub(crate) async fn fork_session(
     let config = SessionConfig {
         root: root.to_path_buf(),
         workspace: workspace.to_path_buf(),
-        project_local: false,
     };
     let source = Session::open(&config, source_id, workspace.to_path_buf()).await?;
     match turn_raw {

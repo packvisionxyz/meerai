@@ -49,21 +49,21 @@ pub(crate) const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         section: "Session",
         label: "Close tab",
-        hint: "Ctrl-w",
+        hint: "ctrl+w",
         keywords: "close tab session",
         action: PaletteAction::Slash("/close"),
     },
     PaletteCommand {
         section: "Session",
         label: "Next tab",
-        hint: "Alt-Right / ]",
+        hint: "alt+right / ]",
         keywords: "switch tab next",
         action: PaletteAction::NextTab,
     },
     PaletteCommand {
         section: "Session",
         label: "Previous tab",
-        hint: "Alt-Left / [",
+        hint: "alt+left / [",
         keywords: "switch tab previous",
         action: PaletteAction::PreviousTab,
     },
@@ -119,7 +119,7 @@ pub(crate) const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         section: "View",
         label: "Search files",
-        hint: "Ctrl-f",
+        hint: "ctrl+f",
         keywords: "find open search",
         action: PaletteAction::Slash("/search"),
     },
@@ -140,7 +140,7 @@ pub(crate) const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         section: "View",
         label: "Toggle sidebar",
-        hint: "Ctrl-b",
+        hint: "ctrl+b",
         keywords: "sidebar panel layout",
         action: PaletteAction::Slash("/sidebar"),
     },
@@ -161,7 +161,7 @@ pub(crate) const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         section: "Turn",
         label: "Cancel running turn",
-        hint: "Ctrl-c",
+        hint: "ctrl+c",
         keywords: "cancel stop abort turn",
         action: PaletteAction::Slash("/cancel"),
     },
@@ -214,7 +214,7 @@ mod tests {
                 .any(|command| command.label == "Toggle sidebar")
         );
         assert!(
-            filtered_commands("ctrl-w")
+            filtered_commands("ctrl+w")
                 .iter()
                 .any(|command| command.label == "Close tab")
         );

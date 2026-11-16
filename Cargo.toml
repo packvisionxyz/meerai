@@ -53,7 +53,6 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 
 # Utilities & Config
-dirs = "7"
 dotenvy = "0.15"
 globset = "0.4"
 git2 = { version = "0.21", default-features = false }

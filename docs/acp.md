@@ -190,7 +190,7 @@ file is P2.
    capability in phase 1.
 4. `session/new`, or `session/load` when the agent advertises `loadSession`.
 5. Run `session/prompt` on submit; stream updates.
-6. `session/cancel` on Esc or Ctrl-C; mark unfinished tool calls cancelled.
+6. `session/cancel` on Esc or ctrl+c; mark unfinished tool calls cancelled.
 7. Kill the process on exit (`kill_on_drop`); flush the stderr log.
 
 One adapter process per meerai session. Adapter stderr is captured through the
