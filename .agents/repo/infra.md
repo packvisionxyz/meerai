@@ -11,10 +11,10 @@ Repository knowledge for `.agents/skills/*`.
 | `.editorconfig` | Line endings (`lf`), indentation (`4` for `.rs`/`.md`/`.json`, `2` default) |
 | `.vscode/settings.json` | Format-on-save and `rust-analyzer.check.command = "clippy"` |
 | `.github/workflows/ci.yml` | Push/PR verification on `ubuntu-24.04` |
-| `.github/workflows/release.yml` | Tag-driven (`v*`) release: verify, tag/version gate, 5-target build, GitHub Release |
+| `.github/workflows/release.yml` | Release on CI success (`main`), `v*` tags, or dispatch: tag/version detect, 5-target build, GitHub Release |
 | `.github/workflows/pages.yml` | Deploys `site/` to GitHub Pages (`meerai.packvision.xyz`) |
 | `.github/scripts/compose_installers.py` | Splices `site/requirements.json` into the generated blocks of both installers |
-| `.github/scripts/verify_release_version.py` | Resolves the release tag, compares it with `[workspace.package] version`, emits `tag`/`prerelease` outputs |
+| `.github/scripts/verify_release_version.py` | Resolves the release tag, compares it with `[workspace.package] version`, emits `tag`/`version`/`prerelease` outputs |
 | `site/` | Landing page, `install.sh`, `install.ps1`, `requirements.json`, `CNAME`, `.nojekyll` |
 | `Makefile` | Local task entry points (`make help`) |
 | `LICENSE` | Apache-2.0 |
@@ -42,18 +42,19 @@ on a Windows runner, so Windows-only behavior is not covered by CI.
 
 ## Release (`release.yml`)
 
-Triggers: push of a `v*` tag, or `workflow_dispatch` with `tag` and `prerelease` inputs.
-Permissions are `contents: read` at workflow level; `publish` raises `contents: write`.
+Triggers: push of a `v*` tag, completion of the CI workflow on `main`, or `workflow_dispatch` with
+`tag` and `prerelease` inputs. The `workflow_run` path starts only when CI concludes successfully
+for a commit of this repository, so release reuses the CI gate and never repeats fmt, clippy,
+tests, or `cargo-deny`. Permissions are `contents: read` at workflow level; `publish` raises
+`contents: write`.
 
-Jobs run `verify`, `audit`, and `version` before `build -> publish`:
+Jobs run `detect -> build -> publish`:
 
 | Job | Runner | Content |
 | :--- | :--- | :--- |
-| `verify` | `ubuntu-24.04` | Same toolchain/cache setup as CI: fmt check, clippy, workspace tests. |
-| `audit` | `ubuntu-24.04` | `EmbarkStudios/cargo-deny-action@v2` (`deny.toml` advisories, licenses, bans, sources). |
-| `version` | `ubuntu-24.04` | `needs: verify`. Runs `.github/scripts/verify_release_version.py` to resolve the release tag and compare it with the workspace version. Runs before the matrix, so a tag/version mismatch costs one short job instead of five builds. |
-| `build` | matrix | `needs: [verify, audit, version]`. `cargo build --release --locked -p meerai-cli --target <triple>`, conditional macOS `codesign`/`notarytool` (when `APPLE_CERTIFICATE` + Apple credentials exist) and Windows `signtool` (when `WINDOWS_CERTIFICATE` exists), archive plus `.sha256`, `actions/upload-artifact` (1-day retention) |
-| `publish` | `ubuntu-24.04` | `needs: build`. Checkout, download artifacts, build `SHA256SUMS.txt`, re-run the same tag/version script (defense in depth, also resolves `tag`/`prerelease` outputs), create the GitHub Release |
+| `detect` | `ubuntu-24.04` | Checks out the built commit (`github.event.workflow_run.head_sha`, else `github.sha`) and runs `.github/scripts/verify_release_version.py`. On `workflow_run` it sets `TAG_FROM_VERSION=1`, so the tag is `v<workspace version>`. Then `gh release view` sets `skip=true` when that release already exists. Runs before the matrix, so a skipped push or a tag/version mismatch costs one short job instead of five builds. |
+| `build` | matrix | `needs: detect`, skipped when `skip` is true. `cargo build --release --locked -p meerai-cli --target <triple>`, conditional macOS `codesign`/`notarytool` (when `APPLE_CERTIFICATE` + Apple credentials exist) and Windows `signtool` (when `WINDOWS_CERTIFICATE` exists), archive plus `.sha256`, `actions/upload-artifact` (1-day retention) |
+| `publish` | `ubuntu-24.04` | `needs: [detect, build]`, skipped when `skip` is true. Checkout, download artifacts, build `SHA256SUMS.txt`, create the GitHub Release with `tag_name`/`prerelease` from `detect` and `target_commitish` set to the built commit |
 
 Build matrix — five published targets:
 
@@ -66,11 +67,23 @@ Build matrix — five published targets:
 | `x86_64-pc-windows-msvc` | `windows-latest` | `meerai-x86_64-pc-windows-msvc.zip` |
 
 Tag/version gate: `.github/scripts/verify_release_version.py` resolves the tag (from `REF_NAME` on a
-tag push, or `INPUT_TAG` on `workflow_dispatch`), strips a leading `v` and any `-pre`/`+build`
-suffix, then compares it with the `version` inside `[workspace.package]` of the root `Cargo.toml`.
-It writes `tag`/`prerelease` to `$GITHUB_OUTPUT` and fails on a mismatch, so bump the workspace
-version before tagging. The `version` job runs it before the build matrix; `publish` runs it again
-before creating the release.
+tag push, or `INPUT_TAG` on `workflow_dispatch`), or derives `v<workspace version>` when
+`TAG_FROM_VERSION` is set on the CI-success path. It strips a leading `v` and any `refs/tags/`
+prefix, then compares the result with the `version` inside `[workspace.package]` of the root
+`Cargo.toml`. A tag passes when its full version equals the workspace version (so `0.1.0-rc.1`
+matches `0.1.0-rc.1`), or when the tag is `vX.Y.Z[-pre][+build]` and the workspace version is that
+same stable `X.Y.Z`. The script writes `tag`/`version`/`prerelease` to `$GITHUB_OUTPUT` and fails
+on a mismatch or a malformed tag, so bump the workspace version before tagging. `detect` runs it
+before the build matrix; `publish` reuses the `detect` outputs.
+
+Release flow on `main`: bump `[workspace.package] version`, run `cargo update -w`, commit
+`Cargo.toml` and `Cargo.lock` together, and push. CI runs the gate, then `release.yml` derives
+`v<version>`, skips when that release exists, builds, and publishes with the tag created at the
+pushed commit. No tag is pushed by hand and no commit is made by CI.
+
+A manual `v*` tag or `workflow_dispatch` does not re-run fmt, clippy, tests, or `cargo-deny`: the
+CI-success path is the normal release and the only one that proves the code passed the gate. Treat
+a manual tag as an operator override for a commit CI already validated.
 
 ## Pages (`pages.yml`)
 
@@ -144,6 +157,8 @@ The tag/version script can be exercised locally without GitHub:
 
 ```sh
 GITHUB_OUTPUT=/dev/null EVENT_NAME=push REF_NAME=v0.0.1 python3 .github/scripts/verify_release_version.py
+GITHUB_OUTPUT=/dev/null EVENT_NAME=workflow_run REF_NAME=main TAG_FROM_VERSION=1 \
+  python3 .github/scripts/verify_release_version.py
 GITHUB_OUTPUT=/dev/null EVENT_NAME=workflow_dispatch INPUT_TAG=v0.0.1 INPUT_PRERELEASE=true \
   python3 .github/scripts/verify_release_version.py
 ```

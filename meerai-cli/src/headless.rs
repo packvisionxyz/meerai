@@ -325,7 +325,7 @@ pub(crate) async fn run_headless_channels(
                     ),
                     HeadlessApprovalAction::Cancel => {
                         eprintln!("approval required: {}", request.preview.title);
-                        eprintln!("rerun with --mode auto-edit or --mode yolo, or use the TUI");
+                        eprintln!("rerun with --mode auto, or use the TUI");
                     }
                 }
                 let _ = cmd_tx.send(action.command());

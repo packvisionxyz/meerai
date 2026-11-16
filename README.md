@@ -9,7 +9,7 @@ crates plus the `meerai` binary (built by `meerai-cli`). Milestones **M1–M13**
 (session log, harness, checkpoints, hooks, subagent runtime, `meerai-cli` +
 session fork, retrieval v2/v3, security & supply chain, agents/skills discovery,
 and the `agy` ACP client) of the [harness specification](docs/harness-spec.md)
-have landed. CI (`cargo-deny` + test gate), tag-driven release builds, installers,
+have landed. CI (`cargo-deny` + test gate), CI-driven release builds, installers,
 [the threat model](docs/threat-model.md), and an Apache-2.0 license are in
 place. Checkpoints (M6) v1 and hooks (M7) v1 have landed with an explicit
 project-trust gate. `meerai export` does not exist yet (see
@@ -69,7 +69,7 @@ x64 build under emulation; other architectures have no prebuilt binary.
 meerai auth login openrouter          # or export OPENROUTER_API_KEY
 meerai                                # full-screen modal TUI
 meerai --prompt "explain this repository" --mode plan
-meerai --prompt "fix the failing test" --mode auto-edit --json
+meerai --prompt "fix the failing test" --mode auto --json
 meerai --agent reviewer --prompt "review this change"
 meerai --skill orchestrate
 ```
@@ -83,7 +83,7 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 ### Available today
 
 - **Agent harness (`meerai-agents`):** `MultiTurnAgent` turn/step loop plus
-  `AgentHarness`; the `AgentEvent` v2 item protocol (`TurnStarted`,
+  `AgentHarness`; the `AgentEvent` item protocol (`TurnStarted`,
   `ItemStarted`, `ItemDelta`, `ItemCompleted`, `ApprovalRequested`,
   `ApprovalResolved`, `UsageUpdated`, `TurnCompleted`, `Error`); session
   dual-write, `derive_messages`-driven requests, approval suspend/resume, spill,
@@ -106,8 +106,8 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   `derive_messages` projection, turn-boundary `fork`, shadowing rewind, a blob
   store, and spill plus compaction primitives.
 - **Policy engine (`meerai-policy`):** ordered `action/resource/effect` rules
-  (globset, last match wins), `ApprovalMode` presets (`plan`, `ask`, `auto-edit`,
-  `auto-approve`, `yolo`), turn and session grants, and YAML rule parsing.
+  (globset, last match wins), `ApprovalMode` presets (`plan`, `ask`, `auto`),
+  turn and session grants, and YAML rule parsing.
 - **Hooks (`meerai-common::hooks`, `meerai-agents::hooks`):** user and project
   shell hooks for twelve lifecycle events. User hooks load from the config dir
   (`~/.config/meerai/hooks.json`); project hooks load from `.meerai/hooks.json`
@@ -215,7 +215,7 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 | `meerai-session` | `Session` append-only event log: JSONL/zstd generations, `derive_messages`, fork/rewind, blob + spill, compaction primitives, listing, deletion, and pruning support |
 | `meerai-policy` | `PolicyEngine`: ordered permission rules, approval modes, turn/session grants |
 | `meerai-tools` | `code` (`CodeTools`, seven `code-*` tools with path guards, unified diffs, observations), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`), `search_as_code` (`SearchAsCodeToolset`) |
-| `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent` v2, `prompt::{BASE_SYSTEM_PROMPT, compose_system_prompt}`, `spawn_worker`, `subagent` (`SubagentToolset` + child sessions), and best-effort tool-output redaction |
+| `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent`, `prompt::{BASE_SYSTEM_PROMPT, compose_system_prompt}`, `spawn_worker`, `subagent` (`SubagentToolset` + child sessions), and best-effort tool-output redaction |
 | `meerai-syntax` | Tree-sitter highlighting for Rust, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML, CSS, and JSON, with a lexical fallback for other languages; returns per-line tokens with no UI dependency |
 | `meerai-tui` | Modal terminal UI library (`ratatui` + `crossterm`) with transcript replay, subagent items, syntax-highlighted code fences and edit diffs, and approval overlay |
 | `meerai-cli` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions`/`hooks` subcommands, TUI launcher |
@@ -232,14 +232,14 @@ meerai --prompt "explain this repository"       # one headless turn
 meerai --prompt "..." --json                    # one NDJSON AgentEvent per line
 meerai --prompt "..." --continue                # resume the last session headless
 meerai --prompt "..." --resume <ID>             # resume a session by id headless
-meerai --mode plan|ask|auto-edit|auto-approve|yolo  # approval mode (default: ask)
+meerai --mode plan|ask|auto                     # approval mode (default: ask)
 meerai -p <provider> -m <model> --system "..."  # provider, model, system prompt
 meerai --agent reviewer --prompt "review this change"  # apply an agent
 meerai --skill orchestrate                      # apply a skill (repeatable)
 meerai --acp                                    # TUI with an agy ACP session
 meerai --acp --prompt "fix the test"            # headless ACP turn
 meerai acp doctor                               # print the ACP handshake
-meerai --mode auto-approve --prompt 'Use acp-run with agent "agy" and task "Reply with OK".'
+meerai --mode auto --prompt 'Use acp-run with agent "agy" and task "Reply with OK".'
 meerai --env-file .env.local                    # load variables from a file
 meerai auth list|login|logout                   # inspect, save, remove API keys
 meerai sessions list|rm|prune|fork              # list, delete, prune, or fork sessions
@@ -279,9 +279,9 @@ only, so the default is token-only reporting.
 | --- | --- |
 | `plan` | Hard read-only. Reads allowed; writes, shell, and external effects are denied even when a rule would allow them. |
 | `ask` | Reads allowed; writes, shell, and external effects ask. Default. |
-| `auto-edit` | Reads and workspace writes allowed; shell and external effects ask. |
-| `auto-approve` | Allows every tier default, but still honors explicit `ask` and `deny` rules. Alias: `auto`. |
-| `yolo` | Allow everything except explicit `deny` rules. The statusline shows a loud `YOLO` badge. |
+| `auto` | Allows every tier default, but still honors explicit `ask` and `deny` rules. |
+
+`shift+tab` cycles `plan` -> `ask` -> `auto` in the TUI.
 
 Grants skip later prompts for the same action and exact resource. In the
 approval overlay, `y`/`Enter` approves once, `t` approves and records a turn
@@ -338,20 +338,22 @@ TUI commands and mentions:
 | Surface | Action |
 | --- | --- |
 | `/agent <id>` | Apply an agent by id |
+| `/agents` | Open the Mentions popup filtered to agents |
 | `/skill <id>` | Apply a skill by id |
+| `/skills` | Open the Mentions popup filtered to skills |
 | `@` | Open the Mentions popup: agents, then skills, then files |
 | `@agent/<id>` | Apply an agent, then send the rest of the prompt |
 | `@skill/<id>` | Apply a skill, then send the rest of the prompt |
 
 Typing `@` opens one **Mentions** popup. Agents are listed first, then skills,
-then files. Agent rows show `<id>|agent` with a cyan badge, skill rows show
-`<id>|skill` with a magenta badge, and both show the source and description after
-the badge. File rows show the path and no badge. The row shows the bare `<id>`,
-not the `@agent/` or `@skill/` prefix. The same id can appear once as an agent and
-once as a skill.
+then files. Agent rows show the id in the purple accent color, skill rows show
+the id in the orange interactive color, and both show the source and description
+after the id. File rows show the path in the normal text color. The row shows the
+bare `<id>`, not the `@agent/` or `@skill/` prefix. The same id can appear once as
+an agent and once as a skill.
 
 After you accept a known `@agent/<id>` or `@skill/<id>` mention, the composer
-shows only `<id>`: a bold cyan agent chip or a bold magenta skill chip. The raw
+shows only `<id>`: a bold purple agent chip or a bold orange skill chip. The raw
 `@agent/<id>` or `@skill/<id>` text stays in the input buffer, and the prefix is
 hidden only in the display. Unknown ids and partial tokens such as
 `@skill/doesnotexist` or `@skill/del` render exactly as typed. Several mentions
@@ -372,7 +374,8 @@ mentions applies the definitions without starting a turn.
 `AgentCommand::ApplyAgent` or `AgentCommand::ApplySkill`, which appends a System
 instruction at the next step boundary. An unknown or missing id prints a System
 error and sends nothing. A colon-free agent `model` is applied within the active
-provider. `/agents` and `/skills` do not exist.
+provider. `/agents` and `/skills` open the Mentions popup filtered to agents or
+skills.
 
 ### Headless exit codes
 
@@ -380,7 +383,7 @@ provider. `/agents` and `/skills` do not exist.
 | --- | --- |
 | `0` | The turn ended `Completed`. |
 | `1` | Failure: turn `Failed`/`Aborted`, `Error` event, task error, or a declined Spend approval. |
-| `2` | A tool-call approval was required. The run fails fast, prints a hint to use `--mode auto-edit`, `--mode yolo`, or the TUI, and cancels the turn. |
+| `2` | A tool-call approval was required. The run fails fast, prints a hint to use `--mode auto`, or the TUI, and cancels the turn. |
 
 A **Spend** approval (session token cap reached) is not a tool approval. In
 headless mode it prints how to raise or unset `context.max_session_tokens`,
@@ -516,7 +519,7 @@ context:
   that directory is below the project root.
 - **Ignored fields** — `active_provider`, `active_model`, `providers`, and
   `approval_mode` are ignored with a warning, so a repository cannot change
-  provider endpoints or switch the approval mode to `yolo`. A project `sessions`
+  provider endpoints or switch the approval mode to `auto`. A project `sessions`
   block is also ignored with a warning: only the user config controls session
   retention.
 - A malformed project file prints a warning and is ignored. Startup never
@@ -622,9 +625,10 @@ meerai-cli --no-default-features` builds the headless surface without ratatui,
 git2, comrak, or `meerai-tui`; `cargo check -p meerai-tui --no-default-features`
 builds the TUI without the reqwest update check. CI runs both reduced-feature
 checks. `.github/workflows/smoke.yml` runs one manual live-provider headless
-turn when `OPENROUTER_API_KEY` is set. `.github/workflows/release.yml`
-rebuilds the same gate on a `v*` tag, builds the five targets, verifies that the
-tag matches `[workspace.package] version`, and publishes archives plus SHA256
+turn when `OPENROUTER_API_KEY` is set. `.github/workflows/release.yml` starts when
+CI succeeds on `main`, on a `v*` tag push, or on manual dispatch. It reuses the
+CI gate instead of re-running it, builds the five targets when
+`v<workspace version>` is not yet released, and publishes archives plus SHA256
 checksums. `.github/workflows/pages.yml` deploys `site/` to GitHub Pages.
 
 Macro expansion is snapshot-tested with insta: update with `cargo insta review`

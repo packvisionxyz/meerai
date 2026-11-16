@@ -8,7 +8,7 @@ pub(crate) fn help_text() -> String {
     format!(
         "Usage:\n  \
     meerai [-p|--provider <PROVIDER>] [-m|--model <MODEL>] [--system <INSTRUCTIONS>]\n          \
-    [--mode <plan|ask|auto-edit|auto-approve|yolo>] [--continue | --resume <ID> | --fork <ID>] [--env-file <PATH>]\n          \
+    [--mode <plan|ask|auto>] [--continue | --resume <ID> | --fork <ID>] [--env-file <PATH>]\n          \
     [--acp] [--agent <ID>] [--skill <ID>]... [-h|--help] [-V|--version]\n  \
     meerai --prompt <TEXT> [--json] [--acp] [--continue | --resume <ID> | --fork <ID>] [--mode <MODE>]\n          \
     [--agent <ID>] [--skill <ID>]...\n  \
@@ -46,7 +46,7 @@ pub(crate) fn help_text() -> String {
         --resume <ID>          Resume a session by id (TUI or headless)\n  \
         --fork <ID>            Fork a session from its latest closed turn and open it\n  \
         --json                 Print one NDJSON AgentEvent per line (with --prompt)\n  \
-        --mode <MODE>          Approval mode: plan, ask, auto-edit, auto-approve, yolo\n  \
+        --mode <MODE>          Approval mode: plan, ask, auto\n  \
         --acp                  Use the external ACP agent (agy) instead of the built-in harness\n  \
         --agent <ID>           Apply a markdown agent by id\n  \
         --skill <ID>           Apply a markdown skill by id (repeatable)\n  \

@@ -73,40 +73,17 @@ fn slash_command_handling() {
 }
 
 #[test]
-fn list_commands_are_removed_and_agent_shortcuts_remain() {
+fn help_lists_the_agents_and_skills_pickers() {
     let (mut app, _rx, _secrets) = test_app();
-    app.agents = vec![sample_agent(
-        "reviewer",
-        DefinitionSource::Agents,
-        None,
-        None,
-        "Review.",
-    )];
 
-    submit(&mut app, "/agents");
-    assert!(matches!(
-        app.tab().transcript.last(),
-        Some(TranscriptEntry::Error { text, .. })
-            if text.contains("Unknown command: /agents")
-    ));
-
-    app.tab_mut().transcript.clear();
-    submit(&mut app, "/skills");
-    assert!(matches!(
-        app.tab().transcript.last(),
-        Some(TranscriptEntry::Error { text, .. })
-            if text.contains("Unknown command: /skills")
-    ));
-
-    app.tab_mut().transcript.clear();
     submit(&mut app, "/help");
     assert!(matches!(
         app.tab().transcript.last(),
         Some(TranscriptEntry::System { text })
             if text.contains("/agent <id>")
                 && text.contains("@agent/<id>")
-                && !text.contains("/agents")
-                && !text.contains("/skills")
+                && text.contains("/agents")
+                && text.contains("/skills")
     ));
 }
 
@@ -214,6 +191,51 @@ fn unknown_definition_ids_error_and_send_nothing() {
 }
 
 #[test]
+fn skills_and_agents_commands_open_filtered_mentions() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.agents = vec![sample_agent(
+        "reviewer",
+        DefinitionSource::Agents,
+        Some("Reviews changes"),
+        None,
+        "Review.",
+    )];
+    app.skills = vec![sample_skill(
+        "orchestrate",
+        DefinitionSource::Agents,
+        Some("Plan a change"),
+        "Plan.",
+    )];
+
+    submit(&mut app, "/skills");
+    assert_eq!(app.tab().input, "@skill/");
+    assert_eq!(app.mode, InputMode::Insert);
+    assert!(app.completion.is_active());
+    assert!(
+        app.completion
+            .items()
+            .iter()
+            .all(|item| item.item_kind == CompletionItemKind::Skill)
+    );
+    assert_eq!(app.completion.items()[0].label, "orchestrate");
+
+    app.tab_mut().input.clear();
+    app.tab_mut().cursor = 0;
+    app.completion.reset();
+
+    submit(&mut app, "/agents");
+    assert_eq!(app.tab().input, "@agent/");
+    assert!(app.completion.is_active());
+    assert!(
+        app.completion
+            .items()
+            .iter()
+            .all(|item| item.item_kind == CompletionItemKind::Agent)
+    );
+    assert_eq!(app.completion.items()[0].label, "reviewer");
+}
+
+#[test]
 fn agent_model_with_provider_prefix_is_not_applied() {
     let (mut app, mut rx, _secrets) = test_app();
     app.agents = vec![sample_agent(
@@ -261,13 +283,13 @@ fn compact_and_mode_commands_emit_agent_commands() {
         Some(TranscriptEntry::System { text }) if text == "Approval mode: ask"
     ));
 
-    type_text(&mut app, "/mode auto-edit");
+    type_text(&mut app, "/mode auto");
     app.handle_key_event(key(KeyCode::Enter));
     assert_eq!(
         rx.try_recv().unwrap(),
-        AgentCommand::SetPermissionMode(ApprovalMode::AutoEdit)
+        AgentCommand::SetPermissionMode(ApprovalMode::Auto)
     );
-    assert_eq!(app.tab().approval_mode, ApprovalMode::AutoEdit);
+    assert_eq!(app.tab().approval_mode, ApprovalMode::Auto);
 
     type_text(&mut app, "/mode nonsense");
     app.handle_key_event(key(KeyCode::Enter));
@@ -276,6 +298,34 @@ fn compact_and_mode_commands_emit_agent_commands() {
         app.tab().transcript.last(),
         Some(TranscriptEntry::Error { text, .. }) if text.contains("Invalid mode")
     ));
+}
+
+#[test]
+fn shift_tab_cycles_approval_modes() {
+    let (mut app, mut rx, _secrets) = test_app();
+    assert_eq!(app.tab().approval_mode, ApprovalMode::Ask);
+
+    app.handle_key_event(key(KeyCode::BackTab));
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::SetPermissionMode(ApprovalMode::Auto)
+    );
+    assert_eq!(app.tab().approval_mode, ApprovalMode::Auto);
+    assert_eq!(app.status_notice.as_deref(), Some("Approval mode: auto"));
+
+    app.handle_key_event(key(KeyCode::BackTab));
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::SetPermissionMode(ApprovalMode::Plan)
+    );
+    assert_eq!(app.tab().approval_mode, ApprovalMode::Plan);
+
+    app.handle_key_event(key(KeyCode::BackTab));
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::SetPermissionMode(ApprovalMode::Ask)
+    );
+    assert_eq!(app.tab().approval_mode, ApprovalMode::Ask);
 }
 
 #[test]

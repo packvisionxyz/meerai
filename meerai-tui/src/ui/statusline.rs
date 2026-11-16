@@ -38,9 +38,7 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
     let mode_color = match tab.approval_mode {
         ApprovalMode::Plan => theme::p().accent,
         ApprovalMode::Ask => theme::p().warning,
-        ApprovalMode::AutoEdit => theme::p().info,
-        ApprovalMode::AutoApprove => theme::p().success,
-        ApprovalMode::Yolo => theme::p().error,
+        ApprovalMode::Auto => theme::p().success,
     };
     spans.push(Span::styled(
         format!(" {} ", approval_mode_badge(tab.approval_mode)),

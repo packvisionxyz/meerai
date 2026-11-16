@@ -212,15 +212,13 @@ fn load_dotenv(explicit: Option<&Path>) -> Result<()> {
 fn resolve_approval_mode(flag: Option<&str>, configured: Option<&str>) -> Result<ApprovalMode> {
     if let Some(raw) = flag {
         return parse_approval_mode(raw).ok_or_else(|| {
-            anyhow::anyhow!(
-                "invalid --mode value '{raw}': expected plan, ask, auto-edit, auto-approve, yolo"
-            )
+            anyhow::anyhow!("invalid --mode value '{raw}': expected plan, ask, auto")
         });
     }
     match configured {
         Some(raw) => parse_approval_mode(raw).ok_or_else(|| {
             anyhow::anyhow!(
-                "invalid approval_mode '{raw}' in settings.yml: expected plan, ask, auto-edit, auto-approve, yolo"
+                "invalid approval_mode '{raw}' in settings.yml: expected plan, ask, auto"
             )
         }),
         None => Ok(ApprovalMode::Ask),
@@ -1024,12 +1022,6 @@ impl SessionOpener for CliSessionHost {
     }
 
     async fn read_session_events(&self, id: &SessionId) -> Result<Vec<LoggedEvent>> {
-        let session = Session::open(
-            &self.session_config,
-            id.clone(),
-            self.workspace_root.clone(),
-        )
-        .await?;
-        Ok(session.events())
+        Session::load_events(&self.session_config, id).await
     }
 }

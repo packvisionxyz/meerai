@@ -268,6 +268,9 @@ pub enum SessionEvent {
         model: String,
         content: Vec<ContentBlock>,
         tool_calls: Vec<ToolCall>,
+        /// Opaque provider reasoning signatures, index-aligned with `tool_calls`.
+        #[serde(default, skip_serializing_if = "signatures_absent")]
+        call_signatures: Vec<Option<Vec<String>>>,
         usage: Usage,
         stream_digest: StreamDigest,
     },
@@ -374,9 +377,52 @@ pub struct LoggedEvent {
     pub event: SessionEvent,
 }
 
+fn signatures_absent(signatures: &[Option<Vec<String>>]) -> bool {
+    signatures.iter().all(Option::is_none)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assistant_message_accepts_legacy_payload_without_call_signatures() {
+        let legacy = r#"{"seq":5,"event":{"type":"assistant_message","provider":"gemini","model":"gemini-2.5-pro","content":[],"tool_calls":[{"id":"c1","name":"code-read_file","args":"{}"}],"usage":{},"stream_digest":{"final_text":"","duration_ms":0,"usage":{}}}}"#;
+        let logged: LoggedEvent = serde_json::from_str(legacy).unwrap();
+        match logged.event {
+            SessionEvent::AssistantMessage {
+                call_signatures,
+                tool_calls,
+                ..
+            } => {
+                assert!(call_signatures.is_empty());
+                assert_eq!(tool_calls[0].id, "c1");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_message_omits_absent_call_signatures() {
+        let logged = LoggedEvent {
+            seq: Seq(6),
+            event: SessionEvent::AssistantMessage {
+                provider: "gemini".to_string(),
+                model: "gemini-2.5-pro".to_string(),
+                content: Vec::new(),
+                tool_calls: vec![meerai_core::ToolCall {
+                    id: "c1".to_string(),
+                    name: "code-read_file".to_string(),
+                    args: "{}".to_string(),
+                }],
+                call_signatures: vec![None],
+                usage: Usage::default(),
+                stream_digest: StreamDigest::default(),
+            },
+        };
+        let raw = serde_json::to_string(&logged).unwrap();
+        assert!(!raw.contains("call_signatures"), "{raw}");
+    }
 
     #[test]
     fn hook_fired_accepts_legacy_payload_without_detail() {

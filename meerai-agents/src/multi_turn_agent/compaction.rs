@@ -294,7 +294,9 @@ impl MultiTurnAgent {
     ) -> Result<(String, Option<Usage>)> {
         let options = ChatOptions::default()
             .with_capture_content(true)
-            .with_capture_usage(true);
+            .with_capture_usage(true)
+            .with_stream_header_timeout(STREAM_HEADER_TIMEOUT)
+            .with_stream_read_timeout(STREAM_READ_TIMEOUT);
         let model = self
             .harness
             .as_ref()

@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use anyhow::{Context, Result};
 use genai::chat::ChatMessage;
+use meerai_core::ToolObservation;
 use meerai_core::env::now_millis;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
@@ -16,11 +17,12 @@ use crate::event::{
     AbortCause, CompactionResult, InputSource, LoggedEvent, RewindScope, Seq, SeqRange,
     SessionEvent, TurnEndReason,
 };
-use crate::ids::{SessionId, TurnId};
-use crate::projection::{ProjectionPolicy, derive_messages};
+use crate::ids::{CallId, SessionId, TurnId};
+use crate::projection::{ProjectionPolicy, derive_messages, shadowed_ranges};
 use crate::{perms, storage};
 
 const META_FILE: &str = "meta.json";
+const TOOL_INTERRUPTED: &str = "tool execution interrupted before completion";
 
 pub const DEFAULT_ROTATION_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -232,6 +234,15 @@ impl Session {
         Self::open_inner(config, id, cwd, false).await
     }
 
+    pub async fn load_events(config: &SessionConfig, id: &SessionId) -> Result<Vec<LoggedEvent>> {
+        let dir = session_dir(&config.root, id)?;
+        if !path_is_dir(&dir).await? {
+            anyhow::bail!("session not found: {id}");
+        }
+        let log = storage::load(&dir).await?;
+        Ok(log.events)
+    }
+
     pub async fn open_or_create(
         config: &SessionConfig,
         id: SessionId,
@@ -313,6 +324,7 @@ impl Session {
                 write_guard: tokio::sync::Mutex::new(()),
             }),
         };
+        session.heal_dangling_tool_calls().await?;
         session.close_open_turns().await?;
         session.close_open_compactions().await?;
         Ok(session)
@@ -588,6 +600,37 @@ impl Session {
                 result: CompactionResult::Failed {
                     error: COMPACTION_INTERRUPTED.to_string(),
                 },
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn heal_dangling_tool_calls(&self) -> Result<()> {
+        let events = self.events();
+        let shadowed = shadowed_ranges(&events);
+        let mut pending: Vec<CallId> = Vec::new();
+        for logged in &events {
+            if shadowed.iter().any(|range| range.contains(logged.seq)) {
+                continue;
+            }
+            match &logged.event {
+                SessionEvent::AssistantMessage { tool_calls, .. } => {
+                    pending = tool_calls
+                        .iter()
+                        .map(|call| CallId::from(call.id.as_str()))
+                        .collect();
+                }
+                SessionEvent::ToolResult { call_id, .. } => {
+                    pending.retain(|id| id != call_id);
+                }
+                _ => {}
+            }
+        }
+        for call_id in pending {
+            self.append(SessionEvent::ToolResult {
+                call_id,
+                output: ToolObservation::error(TOOL_INTERRUPTED),
             })
             .await?;
         }
@@ -881,8 +924,11 @@ fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 mod tests {
     use super::*;
     use crate::compaction::has_open_compaction;
-    use crate::event::{CompactionTrigger, ContentBlock, InputSource, TurnTrigger};
+    use crate::event::{
+        CompactionTrigger, ContentBlock, InputSource, StreamDigest, TurnTrigger, Usage,
+    };
     use crate::ids::CompactionId;
+    use meerai_core::ObservationStatus;
     use std::time::Duration;
 
     const GIT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -1208,6 +1254,210 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_heals_dangling_tool_calls() {
+        let root = temp_root("heal-tools");
+        let config = config(&root);
+        let id = SessionId::new();
+        let turn = TurnId::new();
+
+        let session = Session::open_or_create(&config, id.clone(), PathBuf::from("/tmp/workspace"))
+            .await
+            .unwrap();
+        session.append(started(&turn)).await.unwrap();
+        session.append(user("pending work")).await.unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                provider: "gemini".to_string(),
+                model: "gemini-2.5-pro".to_string(),
+                content: Vec::new(),
+                tool_calls: vec![meerai_core::ToolCall {
+                    id: "call-1".to_string(),
+                    name: "code-read_file".to_string(),
+                    args: "{}".to_string(),
+                }],
+                call_signatures: vec![Some(vec!["sig-1".to_string()])],
+                usage: Usage::default(),
+                stream_digest: StreamDigest::default(),
+            })
+            .await
+            .unwrap();
+        session.flush().await.unwrap();
+        drop(session);
+
+        let reopened =
+            Session::open_or_create(&config, id.clone(), PathBuf::from("/tmp/workspace"))
+                .await
+                .unwrap();
+        let events = reopened.events();
+        let (call_id, output) = events
+            .iter()
+            .find_map(|logged| match &logged.event {
+                SessionEvent::ToolResult { call_id, output } => {
+                    Some((call_id.clone(), output.clone()))
+                }
+                _ => None,
+            })
+            .expect("synthetic tool result");
+        assert_eq!(call_id.as_str(), "call-1");
+        assert_eq!(output.status, ObservationStatus::Error);
+        assert!(output.stderr.contains("interrupted"));
+        assert!(matches!(
+            events.last().map(|logged| &logged.event),
+            Some(SessionEvent::TurnEnded {
+                reason: TurnEndReason::Interrupted,
+                ..
+            })
+        ));
+        assert!(matches!(
+            events
+                .get(events.len().saturating_sub(2))
+                .map(|logged| &logged.event),
+            Some(SessionEvent::ToolResult { .. })
+        ));
+
+        let reopened_again = Session::open_or_create(&config, id, PathBuf::from("/tmp/workspace"))
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened_again.events().len(),
+            events.len(),
+            "healing must not repeat on later opens"
+        );
+
+        fs::remove_dir_all(&root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn load_events_never_heals_a_live_session() {
+        let root = temp_root("read-only-load");
+        let config = config(&root);
+        let id = SessionId::new();
+        let turn = TurnId::new();
+
+        let session = Session::open_or_create(&config, id.clone(), PathBuf::from("/tmp/workspace"))
+            .await
+            .unwrap();
+        session.append(started(&turn)).await.unwrap();
+        session.append(user("pending work")).await.unwrap();
+        session.append(assistant_with_call("call-1")).await.unwrap();
+        session.flush().await.unwrap();
+        drop(session);
+
+        let loaded = Session::load_events(&config, &id).await.unwrap();
+        assert_eq!(
+            loaded.len(),
+            3,
+            "a read-only load must not append recovery events"
+        );
+        assert!(
+            loaded
+                .iter()
+                .all(|logged| !matches!(logged.event, SessionEvent::ToolResult { .. })),
+            "a read-only load must not synthesize tool results"
+        );
+
+        let reopened = Session::open_or_create(&config, id, PathBuf::from("/tmp/workspace"))
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.events().len(),
+            5,
+            "a recovery open still heals the dangling call"
+        );
+
+        fs::remove_dir_all(&root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn healing_skips_rewound_calls() {
+        let root = temp_root("heal-rewound");
+        let config = config(&root);
+        let id = SessionId::new();
+        let turn = TurnId::new();
+
+        let session = Session::open_or_create(&config, id.clone(), PathBuf::from("/tmp/workspace"))
+            .await
+            .unwrap();
+        let start = session.append(started(&turn)).await.unwrap();
+        session.append(user("pending work")).await.unwrap();
+        let end_inclusive = session.append(assistant_with_call("call-1")).await.unwrap();
+        session
+            .append(SessionEvent::RewindApplied {
+                turn_id: turn,
+                scope: RewindScope::Conversation,
+                restored: Vec::new(),
+                replaced: Some(SeqRange {
+                    start,
+                    end_inclusive,
+                }),
+            })
+            .await
+            .unwrap();
+        session.flush().await.unwrap();
+        drop(session);
+
+        let reopened = Session::open_or_create(&config, id, PathBuf::from("/tmp/workspace"))
+            .await
+            .unwrap();
+        assert!(
+            reopened
+                .events()
+                .iter()
+                .all(|logged| !matches!(logged.event, SessionEvent::ToolResult { .. })),
+            "rewound calls must not be healed"
+        );
+
+        fs::remove_dir_all(&root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fork_copies_healed_tool_results() {
+        let root = temp_root("fork-healed");
+        let config = config(&root);
+        let id = SessionId::new();
+        let turn = TurnId::new();
+
+        let session = Session::open_or_create(&config, id.clone(), PathBuf::from("/tmp/workspace"))
+            .await
+            .unwrap();
+        session.append(started(&turn)).await.unwrap();
+        session.append(user("pending work")).await.unwrap();
+        session.append(assistant_with_call("call-1")).await.unwrap();
+        session.flush().await.unwrap();
+        drop(session);
+
+        let source = Session::open_or_create(&config, id, PathBuf::from("/tmp/workspace"))
+            .await
+            .unwrap();
+        let fork = Session::fork_latest(&config, &source).await.unwrap();
+        assert!(
+            fork.events().iter().any(|logged| matches!(
+                &logged.event,
+                SessionEvent::ToolResult { call_id, .. } if call_id.as_str() == "call-1"
+            )),
+            "a fork must copy the healed result that sits before the interrupted turn end"
+        );
+
+        fs::remove_dir_all(&root).await.unwrap();
+    }
+
+    fn assistant_with_call(call_id: &str) -> SessionEvent {
+        SessionEvent::AssistantMessage {
+            provider: "gemini".to_string(),
+            model: "gemini-2.5-pro".to_string(),
+            content: Vec::new(),
+            tool_calls: vec![meerai_core::ToolCall {
+                id: call_id.to_string(),
+                name: "code-read_file".to_string(),
+                args: "{}".to_string(),
+            }],
+            call_signatures: vec![Some(vec!["sig-1".to_string()])],
+            usage: Usage::default(),
+            stream_digest: StreamDigest::default(),
+        }
+    }
+
+    #[tokio::test]
     async fn fork_copies_events_through_boundary_turn() {
         let root = temp_root("fork");
         let config = config(&root);
@@ -1321,15 +1571,12 @@ mod tests {
             .unwrap();
         assert_eq!(session.meta().approval_mode, None);
 
-        session.set_approval_mode("auto-approve").await.unwrap();
+        session.set_approval_mode("auto").await.unwrap();
         let id = session.id().clone();
         drop(session);
 
         let reopened = Session::open(&config, id, workspace).await.unwrap();
-        assert_eq!(
-            reopened.meta().approval_mode.as_deref(),
-            Some("auto-approve")
-        );
+        assert_eq!(reopened.meta().approval_mode.as_deref(), Some("auto"));
         std::fs::remove_dir_all(&root).ok();
     }
 

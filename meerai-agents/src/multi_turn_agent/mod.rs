@@ -67,6 +67,9 @@ const NOT_EXECUTED_STOPPED: &str = "not executed: turn stopped";
 const MAX_PROVIDER_ATTEMPTS: usize = 3;
 const PROVIDER_BACKOFF_MS: u64 = 250;
 
+const STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(120);
+
 const MAX_SCOPED_INSTRUCTION_FILES: usize = 8;
 const MAX_SCOPED_INSTRUCTION_BYTES: usize = 16 * 1024;
 const MAX_TITLE_CHARS: usize = 80;
@@ -645,6 +648,12 @@ impl MultiTurnAgent {
             .shared_model
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.model.clone();
+    }
+
+    pub(super) async fn persist_model(&self) {
+        if let Some(harness) = &self.harness {
+            let _ = harness.session.set_model(self.model.clone()).await;
+        }
     }
 
     pub(super) fn effective_system_prompt(&self) -> String {

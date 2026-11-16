@@ -536,6 +536,7 @@ impl AcpTurnState {
                 model: self.model.clone(),
                 content: vec![ContentBlock::Text(turn.text)],
                 tool_calls: Vec::new(),
+                call_signatures: Vec::new(),
                 usage: Usage::default(),
                 stream_digest: StreamDigest::default(),
             });

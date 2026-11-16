@@ -953,7 +953,6 @@ impl MultiTurnAgent {
         }
         if let Some(path) = outside
             && !matches!(decision, Decision::Deny { .. })
-            && mode != meerai_policy::ApprovalMode::Yolo
             && !self.outside_granted(path)
         {
             decision = Decision::Ask;

@@ -994,10 +994,19 @@ impl AppState {
             return self.handle_modal_key(key);
         }
 
+        if key.code == KeyCode::BackTab {
+            self.cycle_approval_mode();
+            return true;
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('b') => {
                     self.toggle_sidebar();
+                    return true;
+                }
+                KeyCode::Char('f' | 'F') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.handle_slash_command("/grep");
                     return true;
                 }
                 KeyCode::Char('f') => {
@@ -1010,6 +1019,22 @@ impl AppState {
                 }
                 KeyCode::Char('p') | KeyCode::Char('P') if !self.completion.is_active() => {
                     self.open_command_palette();
+                    return true;
+                }
+                KeyCode::Char('n') if !self.completion.is_active() => {
+                    self.handle_slash_command("/new");
+                    return true;
+                }
+                KeyCode::Char('k') => {
+                    self.handle_slash_command("/compact");
+                    return true;
+                }
+                KeyCode::Char('r' | 'R') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.handle_slash_command("/reset");
+                    return true;
+                }
+                KeyCode::Char('q') => {
+                    self.quit();
                     return true;
                 }
                 KeyCode::Char('s') => {
@@ -1040,6 +1065,11 @@ impl AppState {
             }
         }
 
+        if key.code == KeyCode::F(1) {
+            self.handle_slash_command("/help");
+            return true;
+        }
+
         if key.modifiers.contains(KeyModifiers::ALT) {
             match key.code {
                 KeyCode::Left => {
@@ -1065,6 +1095,18 @@ impl AppState {
             InputMode::Insert => self.handle_insert_key(key),
             InputMode::Normal => self.handle_normal_key(key),
         }
+    }
+
+    pub(super) fn cycle_approval_mode(&mut self) {
+        let next = match self.tab().approval_mode {
+            ApprovalMode::Plan => ApprovalMode::Ask,
+            ApprovalMode::Ask => ApprovalMode::Auto,
+            ApprovalMode::Auto => ApprovalMode::Plan,
+        };
+        let tab = self.tab_mut();
+        tab.approval_mode = next;
+        let _ = tab.cmd_tx.send(AgentCommand::SetPermissionMode(next));
+        self.status_notice = Some(format!("Approval mode: {}", approval_mode_label(next)));
     }
 
     pub(super) fn handle_ctrl_c(&mut self) {

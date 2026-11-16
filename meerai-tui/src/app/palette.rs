@@ -4,6 +4,7 @@ pub(crate) enum PaletteAction {
     CopyReply,
     NextTab,
     PreviousTab,
+    CycleApproval,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -17,17 +18,7 @@ pub(crate) struct PaletteCommand {
 
 impl PaletteCommand {
     pub(crate) fn display_hint(&self) -> String {
-        let shortcut = match self.action {
-            PaletteAction::Slash("/sessions") => Some('s'),
-            PaletteAction::Slash("/models") => Some('o'),
-            PaletteAction::Slash("/connect") => Some('a'),
-            PaletteAction::Slash("/diff") => Some('e'),
-            _ => None,
-        };
-        match shortcut {
-            Some(key) => format!("{}  {}", crate::app::ctrl_label(key), self.hint),
-            None => self.hint.to_string(),
-        }
+        self.hint.to_string()
     }
 }
 
@@ -35,15 +26,15 @@ pub(crate) const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         section: "Session",
         label: "New session tab",
-        hint: "/new",
-        keywords: "create tab session",
+        hint: "ctrl+n",
+        keywords: "create tab session new",
         action: PaletteAction::Slash("/new"),
     },
     PaletteCommand {
         section: "Session",
         label: "Switch session",
-        hint: "/sessions",
-        keywords: "open resume tab list",
+        hint: "ctrl+s",
+        keywords: "open resume tab list sessions",
         action: PaletteAction::Slash("/sessions"),
     },
     PaletteCommand {
@@ -70,70 +61,63 @@ pub(crate) const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         section: "Model",
         label: "Connect provider",
-        hint: "/connect",
-        keywords: "provider api key login auth",
+        hint: "ctrl+a",
+        keywords: "provider api key login auth connect",
         action: PaletteAction::Slash("/connect"),
     },
     PaletteCommand {
         section: "Model",
         label: "Set model",
-        hint: "/models",
-        keywords: "model picker provider",
+        hint: "ctrl+o",
+        keywords: "model picker provider set",
         action: PaletteAction::Slash("/models"),
+    },
+    PaletteCommand {
+        section: "Approval",
+        label: "Cycle approval mode",
+        hint: "shift+tab",
+        keywords: "mode plan ask auto cycle permissions",
+        action: PaletteAction::CycleApproval,
     },
     PaletteCommand {
         section: "Approval",
         label: "Approval mode: plan",
         hint: "/mode plan",
-        keywords: "mode read only permissions",
+        keywords: "mode read only permissions plan",
         action: PaletteAction::Slash("/mode plan"),
     },
     PaletteCommand {
         section: "Approval",
         label: "Approval mode: ask",
         hint: "/mode ask",
-        keywords: "mode prompt permissions",
+        keywords: "mode prompt permissions ask",
         action: PaletteAction::Slash("/mode ask"),
     },
     PaletteCommand {
         section: "Approval",
-        label: "Approval mode: auto-edit",
-        hint: "/mode auto-edit",
-        keywords: "mode automatic edit permissions",
-        action: PaletteAction::Slash("/mode auto-edit"),
-    },
-    PaletteCommand {
-        section: "Approval",
-        label: "Approval mode: auto-approve",
-        hint: "/mode auto-approve",
-        keywords: "mode automatic approve allow permissions",
-        action: PaletteAction::Slash("/mode auto-approve"),
-    },
-    PaletteCommand {
-        section: "Approval",
-        label: "Approval mode: yolo",
-        hint: "/mode yolo",
-        keywords: "mode allow all permissions",
-        action: PaletteAction::Slash("/mode yolo"),
+        label: "Approval mode: auto",
+        hint: "/mode auto",
+        keywords: "mode automatic allow permissions auto",
+        action: PaletteAction::Slash("/mode auto"),
     },
     PaletteCommand {
         section: "View",
         label: "Search files",
         hint: "ctrl+f",
-        keywords: "find open search",
+        keywords: "find open search files",
         action: PaletteAction::Slash("/search"),
     },
     PaletteCommand {
         section: "View",
         label: "Search file contents",
-        hint: "/grep",
-        keywords: "grep content search ripgrep",
+        hint: "ctrl+shift+f",
+        keywords: "grep content search ripgrep contents",
         action: PaletteAction::Slash("/grep"),
     },
     PaletteCommand {
         section: "View",
         label: "Review changed files",
-        hint: "/diff",
+        hint: "ctrl+e",
         keywords: "diff changes git review",
         action: PaletteAction::Slash("/diff"),
     },
@@ -141,21 +125,21 @@ pub(crate) const PALETTE_COMMANDS: &[PaletteCommand] = &[
         section: "View",
         label: "Toggle sidebar",
         hint: "ctrl+b",
-        keywords: "sidebar panel layout",
+        keywords: "sidebar panel layout toggle",
         action: PaletteAction::Slash("/sidebar"),
     },
     PaletteCommand {
         section: "Turn",
         label: "Compact context",
-        hint: "/compact",
-        keywords: "compaction summarize context tokens",
+        hint: "ctrl+k",
+        keywords: "compaction summarize context tokens compact",
         action: PaletteAction::Slash("/compact"),
     },
     PaletteCommand {
         section: "Turn",
         label: "Reset conversation",
-        hint: "/reset",
-        keywords: "clear reset history",
+        hint: "ctrl+shift+r",
+        keywords: "clear reset history conversation",
         action: PaletteAction::Slash("/reset"),
     },
     PaletteCommand {
@@ -169,20 +153,20 @@ pub(crate) const PALETTE_COMMANDS: &[PaletteCommand] = &[
         section: "App",
         label: "Copy last reply",
         hint: "y",
-        keywords: "clipboard yank copy",
+        keywords: "clipboard yank copy reply",
         action: PaletteAction::CopyReply,
     },
     PaletteCommand {
         section: "App",
         label: "Show help",
-        hint: "/help",
+        hint: "f1",
         keywords: "help commands shortcuts",
         action: PaletteAction::Slash("/help"),
     },
     PaletteCommand {
         section: "App",
         label: "Quit meerai",
-        hint: "/quit",
+        hint: "ctrl+q",
         keywords: "exit quit close",
         action: PaletteAction::Slash("/quit"),
     },
@@ -224,5 +208,12 @@ mod tests {
                 .any(|command| command.label == "Search file contents")
         );
         assert!(filtered_commands("no-such-command").is_empty());
+    }
+
+    #[test]
+    fn every_command_has_a_shortcut_hint() {
+        for command in PALETTE_COMMANDS {
+            assert!(!command.hint.is_empty(), "{} has no hint", command.label);
+        }
     }
 }

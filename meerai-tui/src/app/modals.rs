@@ -1570,6 +1570,9 @@ impl AppState {
             PaletteAction::PreviousTab => {
                 self.prev_tab();
             }
+            PaletteAction::CycleApproval => {
+                self.cycle_approval_mode();
+            }
         }
     }
 

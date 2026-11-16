@@ -63,10 +63,10 @@ fn parses_headless_and_mode_flags() {
     let mode = parse_args(vec![
         "--prompt".to_string(),
         "hi".to_string(),
-        "--mode=yolo".to_string(),
+        "--mode=auto".to_string(),
     ])
     .unwrap();
-    assert_eq!(mode.mode.as_deref(), Some("yolo"));
+    assert_eq!(mode.mode.as_deref(), Some("auto"));
 
     let provider = parse_args(vec!["-p".to_string(), "gemini".to_string()]).unwrap();
     assert_eq!(provider.provider.as_deref(), Some("gemini"));
@@ -458,16 +458,16 @@ fn resolves_approval_mode_from_flag_then_settings_then_default() {
         ApprovalMode::Ask
     );
     assert_eq!(
-        resolve_approval_mode(Some("plan"), Some("yolo")).unwrap(),
+        resolve_approval_mode(Some("plan"), Some("auto")).unwrap(),
         ApprovalMode::Plan
     );
     assert_eq!(
-        resolve_approval_mode(None, Some("auto-edit")).unwrap(),
-        ApprovalMode::AutoEdit
+        resolve_approval_mode(None, Some("auto")).unwrap(),
+        ApprovalMode::Auto
     );
     assert_eq!(
-        resolve_approval_mode(None, Some("AUTO-EDIT")).unwrap(),
-        ApprovalMode::AutoEdit
+        resolve_approval_mode(None, Some("AUTO")).unwrap(),
+        ApprovalMode::Auto
     );
 
     let error = resolve_approval_mode(Some("wild"), None).unwrap_err();
@@ -1297,7 +1297,7 @@ fn build_workspace_toolsets_exposes_all_and_filters_read_only() {
 }
 
 #[test]
-fn build_policy_denies_sensitive_reads_and_allows_source_files_in_ask_and_yolo() {
+fn build_policy_denies_sensitive_reads_and_allows_source_files_in_ask_and_auto() {
     use meerai_core::EffectClass;
     use meerai_policy::{Decision, PermissionAction, PermissionCheck};
 
@@ -1306,7 +1306,7 @@ fn build_policy_denies_sensitive_reads_and_allows_source_files_in_ask_and_yolo()
     let minimal_rules: serde_yaml::Value = serde_yaml::from_str("[]").unwrap();
 
     for permissions in [None, Some(&minimal_rules)] {
-        for mode in [ApprovalMode::Ask, ApprovalMode::Yolo] {
+        for mode in [ApprovalMode::Ask, ApprovalMode::Auto] {
             let policy = build_policy(mode, permissions, &root).unwrap();
 
             for path in [".env", "secrets.yml", "credentials.json"] {

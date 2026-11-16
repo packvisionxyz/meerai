@@ -23,7 +23,7 @@ SWE-grep line shows RL-tuned search subagents returning only `file:start-end` sp
 materially cut retrieval cost. Both patterns are adopted in §12.
 
 Implementation status is tracked in §15.1. Landed: the session log and
-projection (§3), `AgentEvent` v2 (§4), the ordered step interceptor seam (§5),
+projection (§3), `AgentEvent` (§4), the ordered step interceptor seam (§5),
 coding tools and retrieval v1–v3 (§12), policy and approvals (§8), the context
 engine v1 (§7), OS sandboxing (§8.3), the subagent runtime (§10.2), CLI forking
 (§13), user questions/choices (§4.1), M11 security (§9.6), M12 definitions
@@ -105,7 +105,7 @@ Crate deltas relative to [architecture.md](architecture.md):
 | --- | --- |
 | `meerai-session` | Session event log, persistence, projections, forking, replay, blob (spill) store |
 | `meerai-policy` | Permission rule engine, approval modes, grants; sandbox adapters, hook runner, and checkpoint service are target-only |
-| `meerai-agents` | Turn/Step loop rebuilt around the log + interception points; `AgentEvent` v2 (item protocol) |
+| `meerai-agents` | Turn/Step loop rebuilt around the log + interception points; `AgentEvent` (item protocol) |
 | `meerai-core` | `EffectClass` on tool definitions; structured tool observations; unchanged macros |
 | `meerai-tui` | Consume item protocol; approval overlay; undo/rewind UI; hooks visibility |
 | `meerai-cli` (planned) | Headless `--prompt`/`--print`, `--json` NDJSON item stream, `--continue`/`--resume`; `-p` stays the provider flag |
@@ -234,7 +234,7 @@ pub fn derive_messages(log: &[SessionEvent], policy: &ProjectionPolicy) -> Vec<C
 
 ---
 
-## 4. Typed item protocol (`AgentEvent` v2)
+## 4. Typed item protocol (`AgentEvent`)
 
 Adopted pattern: Codex app-server `item/started` → `item/*/delta` →
 `item/completed`, where `completed` is authoritative.
@@ -278,7 +278,7 @@ pub enum ItemDelta {
 Migration from today's events (`meerai-agents/src/events.rs`,
 `meerai-tui/src/app.rs::handle_agent_event`):
 
-| Current | v2 |
+| Current | Item protocol |
 | --- | --- |
 | `TextDelta(s)` | `ItemDelta::AgentText` against the open `AgentMessage` item |
 | `ReasoningDelta(s)` | `ItemDelta::ReasoningSummary` |
@@ -647,7 +647,7 @@ context:
     disable the turn clock.
   - **Ignored fields:** `active_provider`, `active_model`, `providers`,
     `approval_mode`, and `sessions` are ignored with a warning, so a repository
-    cannot change provider endpoints, switch the mode to `yolo`, or shorten
+    cannot change provider endpoints, switch the mode to `auto`, or shorten
     session retention.
   - A malformed project file warns and is ignored; startup never aborts.
 - Actions: `read`, `edit` (write/patch tools), `shell`, `subagent`, `webfetch`,
@@ -664,9 +664,8 @@ context:
   calls return a structured refusal `ToolObservation` to the model (it can
   adapt), and are logged.
 - `approval_mode` presets: `plan` (hard read-only: non-`Read` effects are denied
-  before rules/grants), `ask` (tier defaults), `auto-edit` (reads and workspace
-  writes allowed, shell/external ask), `yolo` (allow-all except explicit `deny`
-  rules; loud statusline badge).
+  before rules/grants), `ask` (tier defaults), and `auto` (allow-all tier
+  defaults while still honoring explicit `ask` and `deny` rules).
 
 ### 8.3 Sandbox enforcement (Codex pattern, staged)
 
@@ -846,7 +845,7 @@ what the tree enforces today from what is backlog.
 
 - **OS sandbox.** `trait ExecutionWorld` (`SeatbeltWorld` on macOS, `BubblewrapWorld` on Linux, network denied by default) with `HostWorld` fallback and startup warning when unavailable (§8.3).
 - **Sensitive-file blocks.** `is_sensitive_path` in `meerai-tools/src/code/paths.rs` and `PolicyEngine::default_sensitive_rules` block reading/editing `.env*`, key, secret config, and credential files by default.
-- **Dependency audit in CI.** `deny.toml` + `EmbarkStudios/cargo-deny-action@v2` in `.github/workflows/ci.yml` and `release.yml`.
+- **Dependency audit in CI.** `deny.toml` + `EmbarkStudios/cargo-deny-action@v2` in `.github/workflows/ci.yml`.
 - **Written threat model.** Published at [docs/threat-model.md](threat-model.md) covering repository instructions, model output, planned hooks/MCP/ACP, and subagents (M8).
 - **Prompt-injection screening.** Heuristic v1 (`meerai-agents/src/screen.rs`) wraps flagged tool output and repository/definition instructions; pattern-based, not a guarantee.
 - **OS keychain.** `KeychainSecretStore` (`NativeKeychainBackend` using macOS `security` and Linux `secret-tool`) migrates secrets out of plaintext `auth.json` when available, falling back cleanly to `0600` `auth.json`.
@@ -924,22 +923,24 @@ Review the current changes. List findings by severity with file:line references.
 - `--skill <ID>` is repeatable and appends skill text before the agent text at
   startup. `/skill <id>` applies the body as a System message at the next step
   boundary. In the TUI, typing `@` opens the Mentions popup: agents first, then
-  skills, then files. An agent row shows `<id>|agent` (cyan), a skill row shows
-  `<id>|skill` (magenta), each followed by its source and description; a file
-  row shows its path with no badge. The row shows the bare id, not the
-  `@agent/`/`@skill/` prefix. One id can appear as both an agent and a skill.
+  skills, then files. An agent row shows the id in the purple accent color, a
+  skill row shows the id in the orange interactive color, each followed by its
+  source and description; a file row shows its path in the normal text color.
+  The row shows the bare id, not the `@agent/`/`@skill/` prefix. One id can
+  appear as both an agent and a skill.
   Filtering matches `@agent/<id>`, `@skill/<id>`, the bare id, and fuzzy
   prefixes. Up/Down or ctrl+p/ctrl+n move; Tab accepts; Enter accepts without
   submitting; Esc dismisses. Accepting inserts `@agent/<id> `, `@skill/<id> `,
   or `@path ` with one trailing space and stays in Insert. An exact agent or
   skill id keeps the popup open; an exact file path auto-dismisses. A known
-  accepted mention renders as an `<id>` chip (bold cyan for agent, bold magenta
+  accepted mention renders as an `<id>` chip (bold purple for agent, bold orange
   for skill) while the raw `@agent/<id>`/`@skill/<id>` stays in the input buffer;
   unknown ids and partial tokens render as typed. On submit,
   skills apply before the agent, mentions are stripped, repeats apply once, and
   an unknown mention stays as text; a mention-only prompt applies definitions
   without a turn. Unknown or missing `/agent`/`/skill` ids print a System error
-  and send nothing. `/agents` and `/skills` do not exist.
+  and send nothing. `/agents` and `/skills` open the Mentions popup filtered to
+  that kind.
 - Portability: `.agents` and `.claude` layouts are read in place. There is no
   import command, no copy step, and no `.meerai` definition directory.
 - Security: definitions are untrusted repository prompt text. No tool
@@ -1040,7 +1041,7 @@ Extends the roadmap in [architecture.md](architecture.md); each milestone keeps
 | # | Milestone | Content | Touches | Status |
 | --- | --- | --- | --- | --- |
 | M1 | **Session log core** | `meerai-session` crate: `SessionEvent`, JSONL+zstd persistence, `derive_messages` + snapshot tests, crash recovery, meta | new crate; `meerai-agents` logs while keeping in-memory history | landed (R1–R2) |
-| M2 | **Item protocol** | `AgentEvent` v2 (§4) behind the existing channel; TUI `handle_agent_event` folds items; headless NDJSON | `meerai-agents`, `meerai-tui` | landed (R0–R3) |
+| M2 | **Item protocol** | `AgentEvent` (§4) behind the existing channel; TUI `handle_agent_event` folds items; headless NDJSON | `meerai-agents`, `meerai-tui` | landed (R0–R3) |
 | M3 | **Coding tools + effect classes** | `meerai-tools` v1 (architecture.md §coding toolsets) with `EffectClass`, path guards, unified-diff `FileChange` items | new crate, `meerai-core` | landed (R1–R3) |
 | M4 | **Policy engine + approvals** | `meerai-policy`: ordered rules, approval request/response loop, TUI approval overlay wired to `ApprovalRequested`, session grants | new crate, TUI | landed (R1–R3) |
 | M5 | **Context engine v1** | spill policy, ephemera/reasoning pruning, prefix ordering, watermark compaction with bracket lock + `:compact` | `meerai-session`, `meerai-agents` | landed (R1–R3); prefix ordering partial: root `AGENTS.md` + `.meerai/instructions.md` + scoped per-turn injection are implemented; full static-first multi-section prefix remains future work |
@@ -1067,11 +1068,11 @@ orchestrator runs the authoritative workspace gate after every round.
 
 | Round | Workstream | Owned files | Delivers |
 | --- | --- | --- | --- |
-| R0 | Contracts (orchestrator) | `docs/harness-spec.md`, root `Cargo.toml`, `meerai-core/src/tools.rs`+`lib.rs`, crate skeletons (`meerai-session`, `meerai-policy`, `meerai-tools`), `meerai-agents/src/events.rs` | `EffectClass`, `ToolObservation`, `ToolRun`, `Toolset::{effect_of, invoke_structured}` (default methods — no proc-macro codegen change); frozen `SessionEvent` vocabulary + ids; frozen `AgentEvent` v2; frozen policy types; new workspace deps (`zstd`, `globset`, `similar`, `insta`) |
+| R0 | Contracts (orchestrator) | `docs/harness-spec.md`, root `Cargo.toml`, `meerai-core/src/tools.rs`+`lib.rs`, crate skeletons (`meerai-session`, `meerai-policy`, `meerai-tools`), `meerai-agents/src/events.rs` | `EffectClass`, `ToolObservation`, `ToolRun`, `Toolset::{effect_of, invoke_structured}` (default methods — no proc-macro codegen change); the `SessionEvent` vocabulary + ids; the `AgentEvent` item protocol; the policy types; new workspace deps (`zstd`, `globset`, `similar`, `insta`) |
 | R1a | WS-SESSION | `meerai-session/**` | M1: JSONL persistence (+zstd rotation), `meta.json`, crash recovery, `derive_messages` + `ProjectionPolicy` + insta snapshots, fork/rewind, blob store, spill primitives, compaction primitives (M5 lib half) |
 | R1b | WS-TOOLS | `meerai-tools/**` | M3: `read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `shell`; path guards; unified diffs via `similar`; `ToolObservation`/`FileDiff` results; per-tool `EffectClass` |
 | R1c | WS-POLICY | `meerai-policy/**` | M4 lib half: ordered `action/resource/effect` rules (glob via `globset`, last match wins), `ApprovalMode` presets, tier defaults, session grants, YAML config parsing |
-| R1d | WS-MIGRATE | `meerai-agents/src/multi_turn_agent.rs`, `meerai-tui/**` | M2 mechanical: loop emits v2 item lifecycle; TUI folds items into the existing transcript; tests updated; behavior preserved (no session/policy yet) |
+| R1d | WS-MIGRATE | `meerai-agents/src/multi_turn_agent.rs`, `meerai-tui/**` | M2 mechanical: loop emits the item lifecycle; TUI folds items into the existing transcript; tests updated; behavior preserved (no session/policy yet) |
 | R2 | WS-LOOP | `meerai-agents/**`, `meerai-common/src/settings.rs` | M1/M4/M5 wiring: session dual-write, `derive_messages`-driven requests, policy checks + `ApprovalRequested`/`Approve` suspend-resume via in-turn command inbox, spill post-execute, watermark compaction + `ContextOverflow` recovery, budget gate, circuit breakers, `Steer`, prefix-ordered system prompt; additive settings fields (permissions, budgets, context knobs) |
 | R3 | WS-CLIENT | `meerai-tui/**` | M2/M4/M5 client: approval overlay (`ActiveModal` recipe), `/compact`, mode switching, headless `--prompt`/`--print` + `--json` NDJSON printer, `CodeTools` registration in `main.rs` |
 | R4 | Integration (orchestrator) | repo docs | Consolidated gate `cargo fmt --all && cargo clippy --workspace --all-targets && cargo test --workspace`; sync `README.md`, `AGENTS.md`, `.agents/repo/profile.md`; update status column above |
@@ -1086,7 +1087,7 @@ contention is normal, not a hang.
 ### 15.3 Acceptance criteria (M1–M5)
 
 **M1 — Session log core**
-- [x] `SessionEvent` vocabulary frozen per §3.1; ids are cheap newtypes generated without external services.
+- [x] `SessionEvent` vocabulary defined per §3.1; ids are cheap newtypes generated without external services.
 - [x] Append-only JSONL at `<sessions-root>/<id>/session.v0.jsonl`; sealed generations rotate to `.zstd`; committed generations never rewritten.
 - [x] Crash recovery: unsealed trailing turn gets a synthesized `TurnEnded { Interrupted }`; earlier events intact (test).
 - [x] `derive_messages(log, policy)` pure + deterministic; insta snapshots cover: plain transcript, ephemera stripping, reasoning pruning, empty-assistant skip, compaction shadowing.
@@ -1094,7 +1095,7 @@ contention is normal, not a hang.
 - [x] Agent loop dual-writes: in-memory history kept, every model-visible message logged (R2).
 
 **M2 — Item protocol**
-- [x] `AgentEvent` v2 per §4 with serde derives; every delta references an `ItemStarted.id`; `ItemCompleted` payload is authoritative.
+- [x] `AgentEvent` per §4 with serde derives; every delta references an `ItemStarted.id`; `ItemCompleted` payload is authoritative.
 - [x] Migration table (§4) fully applied; v1 variants gone; TUI transcript UX unchanged.
 - [x] Headless: `meerai --prompt "..." [--json]` runs one turn without a TTY; `--json` prints one NDJSON object per event.
 - [x] `ApprovalRequested` suspends the tool item until `AgentCommand::Approve` arrives (in-process test).
@@ -1109,7 +1110,7 @@ contention is normal, not a hang.
 **M4 — Policy engine + approvals**
 - [x] Ordered rules from config YAML; wildcards on action+resource; last match wins (tests).
 - [~] Per-agent rules refine global in the engine (`with_agent_rules`). M12 discovers markdown agents but applies prompt text only: `permissions` and `tools` warn and are not mapped, so no rule set is loaded from a definition.
-- [x] `ApprovalMode` presets `plan|ask|auto-edit|yolo`; `plan` denies non-Read before rules/grants, `yolo` honors explicit `deny`.
+- [x] `ApprovalMode` presets `plan|ask|auto`; `plan` denies non-Read before rules/grants, `auto` honors explicit `ask` and `deny`.
 - [x] `Ask` → `ApprovalRequested` event; `AcceptForSession` stores a logged Session grant; repeats don't re-prompt (test). The TUI `t` key sends `scope: Some(Turn)`; `y`/Enter sends `None`. Grant resources match literally.
 - [x] `Deny` → structured refusal `ToolObservation` fed back to the model; turn continues.
 - [x] TUI approval overlay shows tool + args preview; keys map to Accept / AcceptForTurn (`t`, `scope: Some(Turn)`) / AcceptForSession / Decline / DeclineWithReason / Cancel.
@@ -1179,10 +1180,10 @@ contention is normal, not a hang.
 - **No commits without user authorization.** Round checkpoints are recorded as
   green-gate states in the working tree.
 - **`plan` is a hard read-only mode.** Non-`Read` effects are denied before
-  rules and grants. `yolo` is allow-all *except* explicit `deny` rules. `ask`
-  and `auto-edit` keep the §8.1 tier defaults.
+  rules and grants. `ask` keeps the §8.1 tier defaults. `auto` allows every tier
+  default while still honoring explicit `ask` and `deny` rules.
 - **Headless exit contract.** Tool-call approval: fail fast, hint (`--mode
-  auto-edit|yolo` or the TUI), exit `2`. Spend approval: print the
+  auto` or the TUI), exit `2`. Spend approval: print the
   `context.max_session_tokens` remedy, decline, exit `1` (turn `Failed { Budget }`).
   `Completed` → `0`; other failures → `1`.
 - **Approval scope.** `Approve.scope` is `Option<Turn|Session>`.
@@ -1302,7 +1303,7 @@ the Post-M5 R5 note).
   non-breaking) in `meerai-core`; `SessionEvent` vocabulary, ids, projection
   and persistence skeletons in `meerai-session`; rule/engine skeletons in
   `meerai-policy`; `CodeTools` skeleton in `meerai-tools`; `AgentEvent`
-  v2 in `meerai-agents/src/events.rs` (frozen).
+  in `meerai-agents/src/events.rs`.
 - **Contract amendments (orchestrator):** `SessionItem::ToolCall` gained
   `output: Option<String>` so `ItemCompleted` stays authoritative for the TUI
   output preview; `meerai_core::ToolCall` derives `PartialEq`/`Eq` (required by
@@ -1317,7 +1318,7 @@ the Post-M5 R5 note).
   manifest mid-R0, silently dropping the new crate from all workspace gates.
   Removed. Gate rule: `cargo clippy --workspace` output must name every member
   crate; an excluded member is a red flag.
-- **R1 (WS-MIGRATE) done.** v1→v2 protocol migration landed in
+- **R1 (WS-MIGRATE) done.** Item protocol migration landed in
   `multi_turn_agent.rs` (item lifecycle, cumulative usage, `Steer` queueing,
   typed `TurnError` classification) and the TUI fold (`app.rs`,
   `event_loop.rs`, `ui.rs` tests). Orchestrator-verified consolidated gate:
@@ -1398,10 +1399,10 @@ the Post-M5 R5 note).
 - **WS-POLICY landed (42 tests green), two orchestrator rulings:**
   (1) path rules use gitignore-style semantics — patterns without `/` match
   the file basename at any depth (`*.env*` denies `config/prod.env`), patterns
-  with `/` match the workspace-relative path; (2) `yolo` short-circuited
-  rules/grants per §8.2 "allow-all" at the time — superseded in Post-M5 R2:
-  `yolo` now honors explicit `deny` rules. Additive API: `with_workspace_root`,
-  `warnings()`, `rules_from_yaml`, `approval_preview_for`.
+  with `/` match the workspace-relative path; (2) the allow-all mode
+  short-circuited rules/grants per §8.2 "allow-all" at the time — superseded in
+  Post-M5 R2: `auto` now honors explicit `deny` rules. Additive API:
+  `with_workspace_root`, `warnings()`, `rules_from_yaml`, `approval_preview_for`.
 - **Crate restructure (post-delivery).** `meerai-tools-code` became the `code`
   submodule of the umbrella crate `meerai-tools`: `meerai_tools::code::CodeTools`
   (also re-exported as `meerai_tools::CodeTools`), module file
@@ -1411,8 +1412,9 @@ the Post-M5 R5 note).
 - **Post-M5 R1 — distribution hardening.** Apache-2.0 `LICENSE`; workspace
   metadata (`license`, `repository`, `homepage`, `rust-version = "1.100"`,
   `publish = false`). Workflows: `ci.yml` (fmt/clippy/test on push and PR to
-  `main`), `release.yml` (verify → 5-target build → tag/version gate → GitHub
-  Release with archives and SHA256), `pages.yml` (deploy `site/`). Installers
+  `main`), `release.yml` (tag/version detect → 5-target build → GitHub Release
+  with archives and SHA256; starts after CI succeeds on `main`, on a `v*` tag,
+  or on manual dispatch), `pages.yml` (deploy `site/`). Installers
   (`site/install.sh`, `site/install.ps1`) verify checksums; `Makefile` exposes
   `make verify`. `.agents/repo/infra.md` records the operational detail.
 - **Post-M5 R2 — P1 behavior and docs sync.** Headless: `--prompt`/`--print`,
@@ -1420,7 +1422,7 @@ the Post-M5 R5 note).
   tool-call approvals fail fast with exit `2`, Spend approvals decline and exit
   `1`; sessions `list`/`rm`. Sessions: `0700` dirs / `0600` files on Unix,
   cwd/git/title/model metadata, `--continue` by last activity. Policy: `plan`
-  hard read-only, `yolo` honors `deny`, literal grant resources, `Approve.scope`.
+  hard read-only, `auto` honors `deny`, literal grant resources, `Approve.scope`.
   Prompt: `meerai_agents::prompt` composition plus once-per-turn scoped
   `AGENTS.md`. Loop: provider retry schedule, `max_turn_secs`, concurrent
   consecutive read-only calls, model-visible breaker diagnostic. Tools: Windows
@@ -1502,15 +1504,17 @@ the Post-M5 R5 note).
   default; a colon model is ignored with a warning; `steps`/`mode` print a note
   and are not applied. TUI `/agent <id>` and `/skill <id>` send
   `AgentCommand::ApplyAgent`/`ApplySkill`; typing `@` opens the Mentions popup
-  (agents, then skills, then files; `<id>|agent` cyan, `<id>|skill` magenta,
-  files with no badge). Up/Down or ctrl+p/ctrl+n move, Tab accepts, Enter accepts
+  (agents, then skills, then files; ids in purple for agents and orange for
+  skills, files in the normal text color). Up/Down or ctrl+p/ctrl+n move, Tab
+  accepts, Enter accepts
   without submitting, Esc dismisses; an exact agent/skill id keeps the popup
   open. On submit, skills apply before the agent, mentions are stripped, repeats
   apply once, and an unknown mention stays as text; a mention-only prompt applies
   definitions without a turn. A known accepted mention renders as an `<id>` chip
-  (bold cyan agent, bold magenta skill) while the raw `@agent/<id>`/`@skill/<id>`
+  (bold purple agent, bold orange skill) while the raw `@agent/<id>`/`@skill/<id>`
   stays in the input buffer; unknown and partial tokens render as typed. The
-  composer title says `@ mentions`. `/agents` and `/skills` do not exist.
+  composer title says `@ mentions`. `/agents` and `/skills` open the Mentions
+  popup filtered to that kind.
   Automatic prune now prints `Pruned N sessions (older than N days)`. Definitions
   are untrusted prompt text and grant no tools or permissions. Scope limits: no
   subagent runtime (M8), no tool/permission mapping, no MCP, and no supporting

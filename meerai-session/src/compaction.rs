@@ -183,6 +183,7 @@ mod tests {
                     name: "read_file".to_string(),
                     args: "{}".to_string(),
                 }],
+                call_signatures: Vec::new(),
                 usage: Usage::default(),
                 stream_digest: StreamDigest::default(),
             },

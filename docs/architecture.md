@@ -24,7 +24,7 @@ Twelve library crates plus the `meerai` binary (built by `meerai-cli`):
 | `meerai-session` | Append-only `SessionEvent` log, JSONL/zstd generations, `meta.json`, recovery, `derive_messages`, fork/rewind, snapshot store for rewind, blob store, spill, compaction primitives, session list/delete/prune support |
 | `meerai-policy` | `PolicyEngine`: ordered rules, `ApprovalMode` presets, turn/session grants, YAML parsing |
 | `meerai-tools` | `code` (`CodeTools` with seven `code-*` tools, path guards, unified diffs, observations, `workspace_search`), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`), `search_as_code` (`SearchAsCodeToolset`) |
-| `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent` v2, `intercept` (`Interceptor`/`StepPlan`/`ToolOutcome`), `question-ask` (`QuestionAsked`/`AnswerQuestion`), `prompt`, `spawn_worker`, `subagent` runtime, tool-output redaction |
+| `meerai-agents` | `MultiTurnAgent`, `AgentHarness`, `AgentEvent`, `intercept` (`Interceptor`/`StepPlan`/`ToolOutcome`), `question-ask` (`QuestionAsked`/`AnswerQuestion`), `prompt`, `spawn_worker`, `subagent` runtime, tool-output redaction |
 | `meerai-syntax` | Tree-sitter highlighting for nine languages plus a lexical fallback; `highlight_block` returns per-line tokens and has no UI dependency |
 | `meerai-tui` | Modal terminal UI (`ratatui` + `crossterm`, split `ui/` panels and `app/` modules) with transcript replay, tabs, subagent cards, question and rewind overlays, syntax-highlighted fences and diffs, and the `WorkspaceQuery` seam |
 | `meerai-cli` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions` (`list`/`rm`/`prune`/`fork`) subcommands, TUI launcher |
@@ -55,7 +55,7 @@ or the TUI crate. genai still pulls reqwest in both builds.
 
 ## Current protocol and loop
 
-- **`AgentEvent` v2** (`meerai-agents/src/events.rs`) is the harness→client
+- **`AgentEvent`** (`meerai-agents/src/events.rs`) is the harness→client
   stream: `TurnStarted`, `ItemStarted`, `ItemDelta`, `ItemCompleted`,
   `ApprovalRequested`, `ApprovalResolved`, `UsageUpdated`, `TurnCompleted`,
   `Error`. `ItemCompleted` is authoritative.
@@ -125,7 +125,7 @@ from a subdirectory applies the repository-root policy.
 # user settings.yml
 active_provider: openrouter
 active_model: deepseek-v4.1-flash
-approval_mode: ask                        # plan | ask | auto-edit | yolo
+approval_mode: ask                        # plan | ask | auto
 
 permissions:                              # ordered, last match wins
   - action: read
@@ -225,14 +225,14 @@ Application is prompt-only:
 - TUI `/agent <id>` and `/skill <id>` send
   `AgentCommand::ApplyAgent`/`ApplySkill`, which the loop records as a System
   message at the next step boundary. Typing `@` opens the Mentions popup
-  (agents, then skills, then files; `<id>|agent` cyan, `<id>|skill` magenta,
-  files with no badge). Up/Down or ctrl+p/ctrl+n move, Tab accepts, Enter accepts
+  (agents, then skills, then files; ids in purple for agents and orange for
+  skills, files in the normal text color). Up/Down or ctrl+p/ctrl+n move, Tab accepts, Enter accepts
   without submitting, Esc dismisses; an exact agent/skill id keeps the popup
-  open. A known accepted mention renders as an `<id>` chip (bold cyan agent,
-  bold magenta skill) while the raw token stays in the input buffer; unknown and
+  open. A known accepted mention renders as an `<id>` chip (bold purple agent,
+  bold orange skill) while the raw token stays in the input buffer; unknown and
   partial tokens render as typed. On submit, skills apply first, mentions are
   stripped, repeats apply once, and an unknown mention stays as text. `/agents`
-  and `/skills` do not exist.
+  and `/skills` open the Mentions popup filtered to that kind.
 
 Definitions are untrusted repository prompt text. They grant no tools,
 permissions, scripts, MCP, or sandbox. Under M8 (`subagent-run`), built-in
@@ -338,7 +338,7 @@ concrete providers.
 
 ## Target protocol additions
 
-The enums are frozen additively; these are future variants, not current code.
+The enums are additive; these are future variants, not current code.
 
 - `ChatCompletion`-style provider trait in `meerai-providers` (today the
   abstraction is the `genai` client plus the catalog).
@@ -376,7 +376,7 @@ The enums are frozen additively; these are future variants, not current code.
 ## Migration roadmap (status)
 
 1. **Core protocol & provider split** — done via `genai` and `meerai-providers`.
-2. **Event-driven streaming loop** — done (v2 item protocol, cancellation,
+2. **Event-driven streaming loop** — done (item protocol, cancellation,
    approvals, all-tool execution, async retries).
 3. **Common cleanup** — done: `meerai-common` holds settings/definitions;
    `meerai-providers` holds the provider catalog and secret store.

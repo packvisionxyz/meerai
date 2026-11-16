@@ -218,6 +218,7 @@ fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
         ));
         lines.push(banded_line(Line::default(), None, 0));
         lines.push(tip("ctrl+p", "Command palette"));
+        lines.push(tip("shift+tab", "Cycle plan / ask / auto"));
         lines.push(tip("ctrl+f  /", "Search workspace files & content"));
         lines.push(tip("@", "Mention agents, skills, or files"));
         lines.push(tip("/connect", "Configure provider or API key"));

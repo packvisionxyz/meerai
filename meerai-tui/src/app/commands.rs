@@ -152,6 +152,12 @@ impl AppState {
             "/skill" => {
                 self.apply_skill(arg);
             }
+            "/agents" => {
+                self.open_mention_picker("agent");
+            }
+            "/skills" => {
+                self.open_mention_picker("skill");
+            }
             "/model" => {
                 self.tab_mut().auto_follow = true;
                 if arg.is_empty() {
@@ -230,9 +236,7 @@ impl AppState {
                         }
                         None => {
                             tab.transcript.push(TranscriptEntry::Error {
-                                text: format!(
-                                    "Invalid mode: {arg}. Expected: plan, ask, auto-edit, auto-approve, yolo"
-                                ),
+                                text: format!("Invalid mode: {arg}. Expected: plan, ask, auto"),
                                 expanded: false,
                             });
                         }
@@ -418,6 +422,18 @@ impl AppState {
         });
     }
 
+    fn open_mention_picker(&mut self, kind: &str) {
+        let tab = self.tab_mut();
+        tab.auto_follow = true;
+        tab.input = format!("@{kind}/");
+        tab.cursor = tab.input.len();
+        self.mode = InputMode::Insert;
+        self.update_completion();
+        if !self.completion.is_active() {
+            self.status_notice = Some(format!("No {kind}s available"));
+        }
+    }
+
     pub(super) fn send_agent(&mut self, agent: &AgentDefinition, model: Option<String>) {
         let _ = self.tab().cmd_tx.send(AgentCommand::ApplyAgent {
             name: agent.id.clone(),
@@ -465,7 +481,7 @@ fn format_help_text() -> String {
             "/model" => "/model [name]".to_string(),
             "/agent" => "/agent <id> (or @agent/<id>)".to_string(),
             "/skill" => "/skill <id> (or @skill/<id>)".to_string(),
-            "/mode" => "/mode [plan|ask|auto-edit|auto-approve|yolo]".to_string(),
+            "/mode" => "/mode [plan|ask|auto]".to_string(),
             "/search" => "/search [query]".to_string(),
             "/grep" => "/grep [query]".to_string(),
             "/diff" => "/diff [path]".to_string(),
@@ -476,7 +492,7 @@ fn format_help_text() -> String {
     format!(
         "Commands: {commands}\n\
          Tabs: alt+1..9 / alt+left/right / ctrl+pageup/down / click tab, ctrl+w close tab, click [+] new tab\n\
-         Shortcuts: ctrl+p command palette, ctrl+f search, ctrl+b toggle sidebar, drag+scroll or click then shift+click to copy, click a thought block to expand it\n\
+         Shortcuts: ctrl+p command palette, shift+tab approval mode, ctrl+f search, ctrl+b toggle sidebar, drag+scroll or click then shift+click to copy, click a thought block to expand it\n\
          Insert: Enter send (queues while a turn runs), ctrl+g send queued now, shift/alt/ctrl+enter or ctrl+j or \\+Enter newline, @ file, / command, Esc Normal\n\
          Normal: j/k/Up/Down scroll, gt/gT/[ / ] switch tab, / search, t toggle thinking, y copy reply, ctrl+d/ctrl+u half-page, gg/G top/bottom, i/a Insert, q quit"
     )

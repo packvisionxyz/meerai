@@ -28,11 +28,13 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
         "Apply an agent by id (or mention @agent/<id>)",
         true,
     ),
+    ("/agents", "Choose an agent from the Mentions popup", false),
     (
         "/skill",
         "Apply a skill by id (or mention @skill/<id>)",
         true,
     ),
+    ("/skills", "Choose a skill from the Mentions popup", false),
     (
         "/search",
         "Search files by name or content (ripgrep)",
@@ -49,11 +51,7 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
     ("/reset", "Clear transcript and reset agent history", false),
     ("/cancel", "Cancel the active agent turn", false),
     ("/compact", "Compact older turns to reclaim context", false),
-    (
-        "/mode",
-        "Show or set approval mode (plan|ask|auto-edit|auto-approve|yolo)",
-        true,
-    ),
+    ("/mode", "Show or set approval mode (plan|ask|auto)", true),
     (
         "/rewind",
         "Restore code and/or conversation for the last turn",
@@ -764,8 +762,8 @@ mod tests {
         let labels: Vec<&str> = engine.items().iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"/agent"));
         assert!(labels.contains(&"/skill"));
-        assert!(!labels.contains(&"/agents"));
-        assert!(!labels.contains(&"/skills"));
+        assert!(labels.contains(&"/agents"));
+        assert!(labels.contains(&"/skills"));
 
         engine.update("/agent", 6);
         assert!(engine.is_active());

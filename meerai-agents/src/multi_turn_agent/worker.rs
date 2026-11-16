@@ -131,6 +131,7 @@ pub fn spawn_worker(
 
                         if let Some(model) = pending_model {
                             agent.set_model(model);
+                            agent.persist_model().await;
                         }
                         if pending_reset {
                             agent.end_session(&event_tx).await;
@@ -142,7 +143,10 @@ pub fn spawn_worker(
                         }
                     }
                 }
-                AgentCommand::SetModel(model) => agent.set_model(model),
+                AgentCommand::SetModel(model) => {
+                    agent.set_model(model);
+                    agent.persist_model().await;
+                }
                 AgentCommand::SetPermissionMode(mode) => {
                     agent.set_permission_mode(mode);
                     if let Some(harness) = agent.harness.as_ref() {

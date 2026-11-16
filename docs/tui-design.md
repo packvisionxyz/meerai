@@ -64,6 +64,27 @@ opencode dark theme and is overridable through the `theme` block in
 
 ## Modes & Keybindings
 
+### 0. Global shortcuts (any mode, unless a modal is open)
+
+| Key | Action |
+| --- | --- |
+| `ctrl+p` / `ctrl+shift+p` | Open the command palette |
+| `shift+tab` | Cycle approval mode: `plan` -> `ask` -> `auto` |
+| `ctrl+n` | New session tab |
+| `ctrl+s` | Session picker |
+| `ctrl+w` | Close tab |
+| `ctrl+o` | Model picker |
+| `ctrl+a` | Provider connect |
+| `ctrl+f` | Search files |
+| `ctrl+shift+f` | Search file contents |
+| `ctrl+e` | Review changed files |
+| `ctrl+b` | Toggle sidebar |
+| `ctrl+k` | Compact context |
+| `ctrl+shift+r` | Reset conversation |
+| `ctrl+q` | Quit |
+| `f1` | Help |
+| `ctrl+c` | Cancel the running turn; press twice to exit |
+
 ### 1. Normal Mode (`NOR`) — current
 
 | Key | Action |
@@ -118,7 +139,7 @@ Typing `/` opens completion. The implemented command set is:
 | `/models`, `/model [name]` | Pick or set the model |
 | `/agent <id>` | Apply a markdown agent by id |
 | `/skill <id>` | Apply a markdown skill by id |
-| `/mode [plan\|ask\|auto-edit\|yolo]` | Show or set the approval mode |
+| `/mode [plan\|ask\|auto]` | Show or set the approval mode |
 | `/compact` | Request context compaction |
 | `/search [query]`, `/grep [query]` | Open file/content search |
 | `/diff [path]` | Open the diff view |
@@ -136,17 +157,18 @@ Typing `/` opens completion. The implemented command set is:
 
 `/agent <id>` and `/skill <id>` send `AgentCommand::ApplyAgent`/`ApplySkill`,
 which append a System instruction at the next step boundary. Typing `@` opens the
-**Mentions** popup: agents first, then skills, then files. Agent rows show
-`<id>|agent` with a cyan badge, skill rows show `<id>|skill` with a magenta
-badge, and each shows its source and description; file rows show a path and no
-badge. Rows show the bare id, not the `@agent/` or `@skill/` prefix. One id can
+**Mentions** popup: agents first, then skills, then files. Agent rows show the
+id in the purple accent color, skill rows show the id in the orange interactive
+color, and each shows the source and description; file rows show a path in the
+normal text color. Rows show the bare id, not the `@agent/` or `@skill/` prefix.
+One id can
 appear as both an agent and a skill. Filtering matches `@agent/<id>`,
 `@skill/<id>`, the bare id, and fuzzy prefixes. Up/Down or ctrl+p/ctrl+n move;
 Tab accepts; Enter accepts without submitting; Esc dismisses. Accepting inserts
 `@agent/<id> `, `@skill/<id> `, or `@path ` with one trailing space and stays in
 Insert. An exact agent or skill id keeps the popup open; an exact file path
 auto-dismisses. The composer title says `@ mentions`. A known accepted mention
-renders as an `<id>` chip (bold cyan agent, bold magenta skill) while the raw
+renders as an `<id>` chip (bold purple agent, bold orange skill) while the raw
 `@agent/<id>`/`@skill/<id>` stays in the input buffer and submit detection;
 unknown ids and partial tokens render as typed. Cursor columns use the chip
 display width: before a chip the column is normal, inside a chip it maps to the
@@ -154,7 +176,7 @@ chip end, and after a chip it adds the chip id length. Editing still operates on
 the raw text. On submit, skills
 apply before the agent, mentions are stripped, repeats apply once, and an unknown
 mention stays as text; a mention-only prompt applies definitions without a turn.
-`/agents` and `/skills` do not exist.
+`/agents` and `/skills` open the Mentions popup filtered to that kind.
 
 ### 4. Approval Overlay (`APR`) — current
 
@@ -233,11 +255,11 @@ so a resumed transcript cannot disappear underneath the TUI.
 Current single-row status bar, left to right:
 
 ```text
-[INS|NOR] [PLAN|ASK|EDIT|YOLO]  provider / model [KEY] | 18.4k tok  session ↑120k ↓18k Σ138k  42.1 tok/s  | ⠋ tool:code-shell (1.2s)
+[INS|NOR] [PLAN|ASK|AUTO]  provider / model [KEY] | 18.4k tok  session ↑120k ↓18k Σ138k  42.1 tok/s  | ⠋ tool:code-shell (1.2s)
 ```
 
 - The input-mode badge is blue (`NOR`) or green (`INS`); the approval badge is
-  magenta (`PLAN`), yellow (`ASK`), cyan (`EDIT`), or light red (`YOLO`).
+  magenta (`PLAN`), yellow (`ASK`), or green (`AUTO`).
 - The credential badge reports whether the active provider has a key.
 - Usage shows the current turn's token count and the running session totals
   (`session ↑prompt ↓completion Σtotal`). Session counters seed from the last

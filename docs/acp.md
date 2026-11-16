@@ -30,7 +30,7 @@ In scope:
 
 - Spawn and drive an external ACP agent from the TUI and from headless mode.
 - Map external tool calls, messages, thoughts, plans, and permission requests
-  into the existing `AgentEvent` v2 vocabulary and TUI surfaces.
+  into the existing `AgentEvent` vocabulary and TUI surfaces.
 - Cancel a turn.
 - Keep meerai's session log as the local record, with a replayable transcript.
 - Expose meerai as an ACP agent for editors.
@@ -201,7 +201,7 @@ written. Adapter stdout is protocol traffic only and is never displayed.
 
 ### 6.3 Event mapping (ACP → meerai)
 
-P1 exposes `AcpEvent` (see §10.2). The `AgentEvent` v2 mapping below is P2 and
+P1 exposes `AcpEvent` (see §10.2). The `AgentEvent` mapping below is P2 and
 is not implemented.
 
 | ACP | meerai |
@@ -262,7 +262,7 @@ Mapping rules:
   request is the whole decision surface; adding a local deny on top would be
   theater, because the agent can ignore it.
 
-In `yolo` mode the same rule applies, limited to `allow_once` when the agent
+In `auto` mode the same rule applies, limited to `allow_once` when the agent
 offers it. That is a deliberate, documented reduction of the local guarantee.
 
 ### 6.5 Session record and resume
@@ -329,9 +329,9 @@ Mapping (meerai → ACP):
 | `TurnCompleted` | prompt response with the matching stop reason |
 | `Error` | JSON-RPC error or `notice` |
 
-Mode mapping: `plan` → ACP plan mode, `ask` → ask, `auto-edit` → auto-edit,
-`yolo` → yolo. A client that sends an unknown mode keeps the current mode and
-receives a notice.
+Mode mapping: `plan` → ACP plan mode, `ask` → ask, `auto` → the external
+agent's auto mode. A client that sends an unknown mode keeps the current mode
+and receives a notice.
 
 Agent-side approval reasons come from `PolicyEngine`. `AcceptForSession`
 becomes `allow_always`; a turn grant becomes `allow_once` for that call only,

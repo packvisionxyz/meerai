@@ -17,9 +17,7 @@ pub enum ApprovalMode {
     Plan,
     #[default]
     Ask,
-    AutoEdit,
-    AutoApprove,
-    Yolo,
+    Auto,
 }
 
 impl ApprovalMode {
@@ -40,9 +38,7 @@ pub fn parse_approval_mode(raw: &str) -> Option<ApprovalMode> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "plan" => Some(ApprovalMode::Plan),
         "ask" => Some(ApprovalMode::Ask),
-        "auto-edit" | "auto_edit" => Some(ApprovalMode::AutoEdit),
-        "auto-approve" | "auto_approve" | "auto" => Some(ApprovalMode::AutoApprove),
-        "yolo" => Some(ApprovalMode::Yolo),
+        "auto" => Some(ApprovalMode::Auto),
         _ => None,
     }
 }
@@ -51,9 +47,7 @@ pub fn approval_mode_label(mode: ApprovalMode) -> &'static str {
     match mode {
         ApprovalMode::Plan => "plan",
         ApprovalMode::Ask => "ask",
-        ApprovalMode::AutoEdit => "auto-edit",
-        ApprovalMode::AutoApprove => "auto-approve",
-        ApprovalMode::Yolo => "yolo",
+        ApprovalMode::Auto => "auto",
     }
 }
 
@@ -61,9 +55,7 @@ pub fn approval_mode_badge(mode: ApprovalMode) -> &'static str {
     match mode {
         ApprovalMode::Plan => "PLAN",
         ApprovalMode::Ask => "ASK",
-        ApprovalMode::AutoEdit => "EDIT",
-        ApprovalMode::AutoApprove => "AUTO",
-        ApprovalMode::Yolo => "YOLO",
+        ApprovalMode::Auto => "AUTO",
     }
 }
 
@@ -265,14 +257,6 @@ impl PolicyEngine {
             };
         }
         let candidate = Candidate::new(check.action, &check.resource, &self.workspace_root);
-        if self.mode == ApprovalMode::Yolo {
-            return match self.last_matching_rule(&candidate) {
-                Some(Effect::Deny) => Decision::Deny {
-                    reason: DENY_REASON.to_string(),
-                },
-                _ => Decision::Allow,
-            };
-        }
         if self.grant_applies(&candidate) {
             return Decision::Allow;
         }
@@ -355,10 +339,6 @@ impl PolicyEngine {
 
     fn tier_default(&self, check: &PermissionCheck) -> Decision {
         match self.mode {
-            ApprovalMode::AutoEdit => match check.effect {
-                EffectClass::Read | EffectClass::Write => Decision::Allow,
-                EffectClass::Execute | EffectClass::External => Decision::Ask,
-            },
             ApprovalMode::Plan => match check.effect {
                 EffectClass::Read => Decision::Allow,
                 EffectClass::Write | EffectClass::Execute | EffectClass::External => {
@@ -371,8 +351,7 @@ impl PolicyEngine {
                 EffectClass::Read => Decision::Allow,
                 EffectClass::Write | EffectClass::Execute | EffectClass::External => Decision::Ask,
             },
-            ApprovalMode::AutoApprove => Decision::Allow,
-            ApprovalMode::Yolo => Decision::Allow,
+            ApprovalMode::Auto => Decision::Allow,
         }
     }
 
@@ -576,19 +555,13 @@ permissions:
             Decision::Ask
         );
 
-        let auto_edit = PolicyEngine::new(ApprovalMode::AutoEdit);
+        let auto = PolicyEngine::new(ApprovalMode::Auto);
         assert_eq!(
-            auto_edit.decide(&check(PermissionAction::Edit, "a", EffectClass::Write)),
+            auto.decide(&check(PermissionAction::Edit, "a", EffectClass::Write)),
             Decision::Allow
         );
         assert_eq!(
-            auto_edit.decide(&check(PermissionAction::Shell, "ls", EffectClass::Execute)),
-            Decision::Ask
-        );
-
-        let yolo = PolicyEngine::new(ApprovalMode::Yolo);
-        assert_eq!(
-            yolo.decide(&check(PermissionAction::Shell, "rm", EffectClass::Execute)),
+            auto.decide(&check(PermissionAction::Shell, "rm", EffectClass::Execute)),
             Decision::Allow
         );
     }
@@ -605,7 +578,7 @@ permissions:
                 EffectClass::External,
             ),
         ];
-        let matrix: [(ApprovalMode, [Decision; 4]); 4] = [
+        let matrix: [(ApprovalMode, [Decision; 4]); 3] = [
             (
                 ApprovalMode::Plan,
                 [Decision::Allow, plan_deny(), plan_deny(), plan_deny()],
@@ -615,16 +588,7 @@ permissions:
                 [Decision::Allow, Decision::Ask, Decision::Ask, Decision::Ask],
             ),
             (
-                ApprovalMode::AutoEdit,
-                [
-                    Decision::Allow,
-                    Decision::Allow,
-                    Decision::Ask,
-                    Decision::Ask,
-                ],
-            ),
-            (
-                ApprovalMode::Yolo,
+                ApprovalMode::Auto,
                 [
                     Decision::Allow,
                     Decision::Allow,
@@ -734,8 +698,8 @@ permissions:
     }
 
     #[test]
-    fn auto_approve_allows_by_default_but_respects_rules() {
-        let engine = PolicyEngine::new(ApprovalMode::AutoApprove)
+    fn auto_allows_by_default_but_respects_rules() {
+        let engine = PolicyEngine::new(ApprovalMode::Auto)
             .with_workspace_root("/tmp/ws")
             .with_rules(vec![
                 rule(
@@ -782,11 +746,9 @@ permissions:
             )),
             Decision::Deny { .. }
         ));
-        assert_eq!(ApprovalMode::parse("auto"), Some(ApprovalMode::AutoApprove));
-        assert_eq!(
-            ApprovalMode::parse("auto-approve"),
-            Some(ApprovalMode::AutoApprove)
-        );
+        assert_eq!(ApprovalMode::parse("auto"), Some(ApprovalMode::Auto));
+        assert_eq!(ApprovalMode::parse(" plan "), Some(ApprovalMode::Plan));
+        assert_eq!(ApprovalMode::parse("wild"), None);
     }
 
     #[test]
@@ -1100,8 +1062,8 @@ permissions:
     }
 
     #[test]
-    fn yolo_mode_honors_explicit_deny_rules() {
-        let engine = PolicyEngine::new(ApprovalMode::Yolo).with_rules(vec![
+    fn auto_mode_honors_explicit_rules() {
+        let engine = PolicyEngine::new(ApprovalMode::Auto).with_rules(vec![
             rule(
                 ActionSelector::Action(PermissionAction::Shell),
                 "rm *",
@@ -1128,7 +1090,7 @@ permissions:
                 "git push origin main",
                 EffectClass::Execute
             )),
-            Decision::Allow
+            Decision::Ask
         );
         assert_eq!(
             engine.decide(&check(
@@ -1141,8 +1103,8 @@ permissions:
     }
 
     #[test]
-    fn yolo_mode_without_rules_allows_everything() {
-        let engine = PolicyEngine::new(ApprovalMode::Yolo);
+    fn auto_mode_without_rules_allows_everything() {
+        let engine = PolicyEngine::new(ApprovalMode::Auto);
 
         assert_eq!(
             engine.decide(&check(PermissionAction::Shell, "rm", EffectClass::Execute)),
@@ -1692,7 +1654,7 @@ read:
     }
 
     #[test]
-    fn default_sensitive_rules_deny_reads_and_edits_in_ask_and_yolo() {
+    fn default_sensitive_rules_deny_reads_and_edits_in_ask_and_auto() {
         let sensitive_paths = [
             ".env",
             "config/.env.local",
@@ -1728,11 +1690,7 @@ read:
             "credentials.toml",
         ];
 
-        for mode in [
-            ApprovalMode::Ask,
-            ApprovalMode::Yolo,
-            ApprovalMode::AutoEdit,
-        ] {
+        for mode in [ApprovalMode::Ask, ApprovalMode::Auto] {
             let engine = PolicyEngine::new(mode);
             assert!(engine.rules().is_empty());
             assert!(engine.warnings().is_empty());
@@ -1762,12 +1720,7 @@ read:
             "src/auth.rs",
         ];
 
-        for mode in [
-            ApprovalMode::Plan,
-            ApprovalMode::Ask,
-            ApprovalMode::AutoEdit,
-            ApprovalMode::Yolo,
-        ] {
+        for mode in [ApprovalMode::Plan, ApprovalMode::Ask, ApprovalMode::Auto] {
             let engine = PolicyEngine::new(mode);
             for path in allowed_reads {
                 assert_eq!(

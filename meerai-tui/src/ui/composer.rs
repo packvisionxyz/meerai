@@ -303,9 +303,14 @@ pub(super) fn render_completion_popup(
 
     let max_visible = (transcript_area.height.saturating_sub(2) as usize).clamp(1, 8);
     let height = items.len().min(max_visible) as u16 + 2;
-    let width = composer_area.width.saturating_sub(4).min(68);
-
-    let x = composer_area.x + 2;
+    let (width, x) = if app.completion.kind() == Some(CompletionKind::File) {
+        (transcript_area.width, transcript_area.x)
+    } else {
+        (
+            composer_area.width.saturating_sub(4).min(68),
+            composer_area.x + 2,
+        )
+    };
     let y = composer_area.y.saturating_sub(height);
     let popup_area = Rect::new(x, y, width, height);
 
@@ -331,19 +336,12 @@ pub(super) fn render_completion_popup(
     };
 
     let inner = dialog_frame_compact(frame, popup_area, &title);
-    let col_width = items
+    let label_width = items
         .iter()
-        .map(|item| {
-            let badge_w = item
-                .item_kind
-                .badge()
-                .map(|b| b.chars().count() + 1)
-                .unwrap_or(0);
-            item.label.chars().count() + badge_w
-        })
+        .map(|item| item.label.chars().count())
         .max()
         .unwrap_or(12)
-        .min((inner.width as usize).saturating_div(2).max(12));
+        .min(((inner.width as usize).saturating_mul(2) / 5).max(12));
 
     let selected_idx = app.completion.selected();
     let hovered_idx = app.hovered_completion;
@@ -354,43 +352,31 @@ pub(super) fn render_completion_popup(
         .map(|(idx, item)| {
             let is_selected = idx == selected_idx;
             let is_hovered = hovered_idx == Some(idx);
-            let badge_len = item
-                .item_kind
-                .badge()
-                .map(|b| b.chars().count() + 1)
-                .unwrap_or(0);
-            let full_label_len = item.label.chars().count() + badge_len;
-            let pad = col_width.saturating_sub(full_label_len) + 2;
-            let max_desc = (inner.width as usize).saturating_sub(full_label_len + pad + 2);
+            let label = truncate_single_line(&item.label, label_width);
+            let label_len = label.chars().count();
+            let pad = label_width.saturating_sub(label_len) + 2;
+            let max_desc = (inner.width as usize).saturating_sub(2 + label_len + pad + 2);
 
             let lead = if is_selected { "▸ " } else { "  " };
-            let mut spans = vec![
-                Span::styled(
-                    lead,
-                    Style::default().fg(if is_selected {
-                        theme::p().interactive
-                    } else {
-                        theme::p().faint
-                    }),
-                ),
-                Span::styled(
-                    item.label.clone(),
-                    Style::default()
-                        .fg(theme::p().text)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ];
-            if let Some(badge) = item.item_kind.badge() {
-                let color = match item.item_kind {
-                    CompletionItemKind::Agent => theme::p().accent,
-                    CompletionItemKind::Skill => theme::p().interactive,
-                    CompletionItemKind::Plain | CompletionItemKind::File => theme::p().muted,
-                };
-                spans.push(Span::styled(
-                    format!("|{badge}"),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ));
-            }
+            let mut spans = vec![Span::styled(
+                lead,
+                Style::default().fg(if is_selected {
+                    theme::p().interactive
+                } else {
+                    theme::p().faint
+                }),
+            )];
+            let label_color = match item.item_kind {
+                CompletionItemKind::Agent => theme::p().accent,
+                CompletionItemKind::Skill => theme::p().interactive,
+                CompletionItemKind::Plain | CompletionItemKind::File => theme::p().text,
+            };
+            spans.push(Span::styled(
+                label,
+                Style::default()
+                    .fg(label_color)
+                    .add_modifier(Modifier::BOLD),
+            ));
             if !item.description.is_empty() && max_desc > 0 {
                 spans.push(Span::raw(" ".repeat(pad)));
                 spans.push(Span::styled(

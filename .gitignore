@@ -4,6 +4,8 @@
 # local tooling
 .opencode/
 opencode.jsonc
+__pycache__/
+*.pyc
 
 target/
 dist/

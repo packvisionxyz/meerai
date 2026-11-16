@@ -164,6 +164,8 @@ impl MultiTurnAgent {
             .with_capture_tool_calls(true)
             .with_capture_usage(true)
             .with_capture_reasoning_content(true)
+            .with_stream_header_timeout(STREAM_HEADER_TIMEOUT)
+            .with_stream_read_timeout(STREAM_READ_TIMEOUT)
             .with_extra_headers(Headers::from([
                 ("x-opencode-session", self.session_id.as_str()),
                 ("user-agent", MEERAI_USER_AGENT),
@@ -354,15 +356,24 @@ impl MultiTurnAgent {
 
             let mut tool_calls: Vec<ToolCall> = collected.tool_calls;
             for call in end.captured_tool_calls().unwrap_or_default() {
-                if !tool_calls
-                    .iter()
-                    .any(|existing| existing.call_id == call.call_id)
+                match tool_calls
+                    .iter_mut()
+                    .find(|existing| existing.call_id == call.call_id)
                 {
-                    tool_calls.push(call.clone());
+                    Some(existing) => {
+                        if existing.thought_signatures.is_none() {
+                            existing.thought_signatures = call.thought_signatures.clone();
+                        }
+                    }
+                    None => tool_calls.push(call.clone()),
                 }
             }
             let core_calls: Vec<meerai_core::ToolCall> =
                 tool_calls.iter().map(meerai_core::ToolCall::from).collect();
+            let call_signatures: Vec<Option<Vec<String>>> = tool_calls
+                .iter()
+                .map(|call| call.thought_signatures.clone())
+                .collect();
 
             let mut content = Vec::new();
             if !final_text.is_empty() {
@@ -379,6 +390,7 @@ impl MultiTurnAgent {
                     model: self.model.clone(),
                     content,
                     tool_calls: core_calls,
+                    call_signatures,
                     usage: step_usage,
                     stream_digest: StreamDigest {
                         final_text: final_text.clone(),

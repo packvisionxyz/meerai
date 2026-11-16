@@ -1,11 +1,15 @@
 name: Release
 
-run-name: Release ${{ inputs.tag || github.ref_name }}
+run-name: ${{ (github.event_name == 'workflow_run' && 'Release from CI') || format('Release {0}', inputs.tag || github.ref_name) }}
 
 on:
   push:
     tags:
       - "v*"
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       tag:
@@ -22,7 +26,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 env:
@@ -30,50 +34,23 @@ env:
   BIN_NAME: meerai
 
 jobs:
-  verify:
-    name: Format, Clippy, and Test
+  detect:
+    name: Detect release
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      skip: ${{ steps.gate.outputs.skip }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.100.0"
-          components: rustfmt, clippy
-
-      - name: Cache Cargo artifacts
-        uses: swatinem/rust-cache@v2
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Run Clippy
-        run: cargo clippy --workspace --all-targets
-
-      - name: Run tests
-        run: cargo test --workspace
-
-  audit:
-    name: Security & Dependency Audit
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Run cargo-deny audit
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          arguments: --all-features
-
-  version:
-    name: Check tag matches workspace version
-    needs: verify
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Resolve tag and check workspace version
         id: meta
@@ -82,11 +59,27 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_PRERELEASE: ${{ inputs.prerelease }}
+          TAG_FROM_VERSION: ${{ github.event_name == 'workflow_run' && '1' || '' }}
         run: python3 .github/scripts/verify_release_version.py
+
+      - name: Skip when the version is already released
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          skip=false
+          if [ "${{ github.event_name }}" = "workflow_run" ] &&
+             gh release view "${{ steps.meta.outputs.tag }}" >/dev/null 2>&1; then
+            echo "::notice::Release ${{ steps.meta.outputs.tag }} already exists; skipping."
+            skip=true
+          fi
+          echo "skip=${skip}" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build (${{ matrix.target }})
-    needs: [verify, audit, version]
+    needs: detect
+    if: needs.detect.outputs.skip != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -116,6 +109,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -249,13 +244,16 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: build
+    needs: [detect, build]
+    if: needs.detect.outputs.skip != 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Download built artifacts
         uses: actions/download-artifact@v8
@@ -270,21 +268,13 @@ jobs:
           cat *.sha256 | sort -k2 > SHA256SUMS.txt
           ls -la
 
-      - name: Resolve tag and re-check workspace version
-        id: meta
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
-          INPUT_TAG: ${{ inputs.tag }}
-          INPUT_PRERELEASE: ${{ inputs.prerelease }}
-        run: python3 .github/scripts/verify_release_version.py
-
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          name: meerai ${{ steps.meta.outputs.tag }}
-          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          tag_name: ${{ needs.detect.outputs.tag }}
+          target_commitish: ${{ github.event.workflow_run.head_sha || github.sha }}
+          name: meerai ${{ needs.detect.outputs.tag }}
+          prerelease: ${{ needs.detect.outputs.prerelease == 'true' }}
           generate_release_notes: true
           files: |
             artifacts/meerai-*.tar.gz

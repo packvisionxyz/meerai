@@ -265,7 +265,8 @@ fn renders_command_palette_with_shortcuts() {
     assert!(rendered.contains("Commands (ctrl+p)"));
     assert!(rendered.contains(" SESSION "));
     assert!(rendered.contains("New session tab"));
-    assert!(rendered.contains("/new"));
+    assert!(rendered.contains("ctrl+n"));
+    assert!(rendered.contains("shift+tab"));
     assert!(rendered.contains("filter commands"));
     assert!(rendered.contains("Enter run"));
 }
@@ -890,7 +891,9 @@ fn renders_agent_and_skill_mention_badges() {
     app.agents = vec![AgentDefinition {
         id: "reviewer".to_string(),
         source: DefinitionSource::Agents,
-        description: Some("Reviews changes".to_string()),
+        description: Some(
+            "Reviews changes and reports the highest-risk findings first.".to_string(),
+        ),
         model: None,
         steps: None,
         mode: None,
@@ -900,7 +903,7 @@ fn renders_agent_and_skill_mention_badges() {
     app.skills = vec![SkillDefinition {
         id: "reviewer".to_string(),
         source: DefinitionSource::Claude,
-        description: Some("Review skill".to_string()),
+        description: Some("Plans a change and verifies the final result.".to_string()),
         body: String::new(),
         path: PathBuf::from(".claude/skills/reviewer/SKILL.md"),
     }];
@@ -912,10 +915,13 @@ fn renders_agent_and_skill_mention_badges() {
 
     let rendered = render_to_string(&mut app);
     assert!(rendered.contains("Mentions"));
-    assert!(rendered.contains("reviewer|agent"));
-    assert!(rendered.contains("reviewer|skill"));
-    assert!(rendered.contains(".agents — Reviews changes"));
-    assert!(rendered.contains(".claude — Review skill"));
+    assert!(rendered.contains("reviewer"));
+    assert!(!rendered.contains("agent reviewer"));
+    assert!(!rendered.contains("skill reviewer"));
+    assert!(
+        rendered.contains(".agents — Reviews changes and reports the highest-risk findings first.")
+    );
+    assert!(rendered.contains(".claude — Plans a change and verifies the final result."));
     assert!(!rendered.contains("@agent/reviewer"));
     assert!(!rendered.contains("@skill/reviewer"));
 }
@@ -1017,16 +1023,13 @@ fn composer_cursor_keeps_multiline_row_and_chip_columns() {
 #[test]
 fn statusline_renders_approval_mode_badge() {
     let mut app = test_app();
-    app.tab_mut().approval_mode = ApprovalMode::AutoEdit;
-    let edit = render_to_string(&mut app);
-    assert!(edit.contains("EDIT"));
-    assert!(edit.contains("INS"));
+    app.tab_mut().approval_mode = ApprovalMode::Ask;
+    let ask = render_to_string(&mut app);
+    assert!(ask.contains("ASK"));
+    assert!(ask.contains("INS"));
 
-    app.tab_mut().approval_mode = ApprovalMode::AutoApprove;
+    app.tab_mut().approval_mode = ApprovalMode::Auto;
     assert!(render_to_string(&mut app).contains("AUTO"));
-
-    app.tab_mut().approval_mode = ApprovalMode::Yolo;
-    assert!(render_to_string(&mut app).contains("YOLO"));
 
     app.tab_mut().approval_mode = ApprovalMode::Plan;
     assert!(render_to_string(&mut app).contains("PLAN"));

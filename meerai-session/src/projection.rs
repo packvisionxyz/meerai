@@ -74,9 +74,17 @@ pub fn derive_messages(events: &[LoggedEvent], policy: &ProjectionPolicy) -> Vec
             SessionEvent::AssistantMessage {
                 content,
                 tool_calls,
+                call_signatures,
                 ..
             } => {
-                latest_calls = tool_calls.iter().map(to_genai_tool_call).collect();
+                latest_calls = tool_calls
+                    .iter()
+                    .enumerate()
+                    .map(|(index, call)| {
+                        let signature = call_signatures.get(index).and_then(|entry| entry.as_ref());
+                        to_genai_tool_call(call, signature)
+                    })
+                    .collect();
                 if latest_calls.is_empty() {
                     let text = join_text(content, !policy.prune_reasoning);
                     if !text.is_empty() {
@@ -109,7 +117,7 @@ pub fn derive_messages(events: &[LoggedEvent], policy: &ProjectionPolicy) -> Vec
     messages
 }
 
-fn shadowed_ranges(events: &[LoggedEvent]) -> Vec<SeqRange> {
+pub(crate) fn shadowed_ranges(events: &[LoggedEvent]) -> Vec<SeqRange> {
     events
         .iter()
         .filter_map(|logged| match &logged.event {
@@ -143,13 +151,16 @@ fn render_summary(summary: &str) -> String {
     }
 }
 
-fn to_genai_tool_call(call: &meerai_core::ToolCall) -> GenaiToolCall {
+fn to_genai_tool_call(
+    call: &meerai_core::ToolCall,
+    signature: Option<&Vec<String>>,
+) -> GenaiToolCall {
     GenaiToolCall {
         call_id: call.id.clone(),
         fn_name: call.name.clone(),
         fn_arguments: serde_json::from_str(&call.args)
             .unwrap_or_else(|_| serde_json::Value::String(call.args.clone())),
-        thought_signatures: None,
+        thought_signatures: signature.cloned(),
     }
 }
 
@@ -221,6 +232,7 @@ mod tests {
             model: "test".to_string(),
             content,
             tool_calls,
+            call_signatures: Vec::new(),
             usage: Usage::default(),
             stream_digest: StreamDigest::default(),
         }
@@ -354,6 +366,33 @@ mod tests {
         };
         let messages = derive_messages(&events, &policy);
         assert_eq!(messages[0].content.first_text(), Some("answer\n\nthinking"));
+    }
+
+    #[test]
+    fn replays_call_signatures_onto_tool_calls() {
+        let events = vec![logged(
+            1,
+            SessionEvent::AssistantMessage {
+                provider: "gemini".to_string(),
+                model: "gemini-2.5-pro".to_string(),
+                content: Vec::new(),
+                tool_calls: vec![
+                    tool_call("call-1", "code-read_file", "{}"),
+                    tool_call("call-2", "code-grep", "{}"),
+                ],
+                call_signatures: vec![Some(vec!["sig-1".to_string()]), None],
+                usage: Usage::default(),
+                stream_digest: StreamDigest::default(),
+            },
+        )];
+
+        let messages = derive_messages(&events, &ProjectionPolicy::default());
+        let calls = messages[0].content.tool_calls();
+        assert_eq!(
+            calls[0].thought_signatures.as_deref(),
+            Some(&["sig-1".to_string()][..])
+        );
+        assert_eq!(calls[1].thought_signatures, None);
     }
 
     #[test]

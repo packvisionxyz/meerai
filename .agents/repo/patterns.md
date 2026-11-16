@@ -160,7 +160,7 @@ Rules for all shapes:
 
 - `MultiTurnAgent` plus `AgentHarness` is the current loop. Requests come from
   `session.derive_messages`, not `chat_history`; `chat_history` is a mirror.
-- Emit `AgentEvent` v2 items only. No `println!`/`eprintln!` in library crates.
+- Emit `AgentEvent` items only. No `println!`/`eprintln!` in library crates.
 - Provider retries: 3 attempts total, 250/500 ms backoff, only for errors without a non-transient
   marker (`api key`, `401`, `403`, `invalid model`, `not found`, `permission denied`). Context
   overflow triggers one compaction retry.
@@ -222,7 +222,7 @@ Rules for all shapes:
   OS keychain credential storage (`KeychainSecretStore` with `auth.json` fallback), best-effort
   `redact_run`/`redact_text`, heuristic prompt-injection screening (`screen_run` /
   `screen_untrusted_text`), session `0700`/`0600` permissions, opt-in retention, session/turn token
-  budgets, `deny.toml` + `cargo-deny-action` audit in CI/release, `docs/threat-model.md`, and
+  budgets, `deny.toml` + `cargo-deny-action` audit in CI, `docs/threat-model.md`, and
   conditional macOS/Windows release signing steps (unsigned until signing secrets exist).
 - **M12 definitions are prompt text:** `.agents`/`.claude` agents and skills are untrusted
   repository instructions. They grant no tool, permission, script, MCP, or sandbox capability, and
@@ -246,8 +246,8 @@ Rules for all shapes:
 - Panicking (`unwrap()` / `expect()` / `assert!`) on missing user config, missing env vars, or
   malformed model tool arguments (`ToolError::WrongArguments` should be returned instead).
 - Modifying `meerai-macros` codegen without updating `insta` snapshots.
-- Describing `plan`/`yolo` as advisory: `plan` denies non-read effects before rules; `yolo` honors
-  explicit `deny` rules.
+- Describing `plan`/`auto` as advisory: `plan` denies non-read effects before rules; `auto` honors
+  explicit `ask` and `deny` rules.
 - Treating grant resources as globs (they match literally) or removing the TUI `t` turn-grant key.
 - Loading `.env` implicitly, bypassing sensitive-file blocks (`is_sensitive_path` /
   `default_sensitive_rules`), or claiming `HostWorld` / Windows runs inside an OS sandbox.

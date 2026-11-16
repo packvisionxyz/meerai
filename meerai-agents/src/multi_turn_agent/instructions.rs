@@ -121,6 +121,7 @@ impl MultiTurnAgent {
         self.chat_history.push(ChatMessage::user(text));
         if let Some(model) = model {
             self.set_model(model);
+            self.persist_model().await;
         }
     }
 
