@@ -51,7 +51,7 @@ fn render_block<'a>(node: &'a AstNode<'a>, out: &mut Vec<MarkdownLine>, indent: 
         NodeValue::Heading(heading) => {
             let style = if heading.level <= 2 {
                 Style::default()
-                    .fg(theme::p().text)
+                    .fg(theme::p().success)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -281,7 +281,7 @@ fn walk_inline<'a>(node: &'a AstNode<'a>, style: Style, lines: &mut Vec<Vec<Span
                 walk_inline(child, style.add_modifier(Modifier::CROSSED_OUT), lines);
             }
             NodeValue::Link(..) => {
-                walk_inline(child, Style::default().fg(theme::p().accent), lines);
+                walk_inline(child, Style::default().fg(theme::p().code_function), lines);
             }
             NodeValue::Image(..) => {
                 walk_inline(child, style.add_modifier(Modifier::ITALIC), lines);
@@ -318,7 +318,7 @@ fn code_block_style() -> Style {
 
 fn inline_code_style() -> Style {
     Style::default()
-        .fg(theme::p().accent)
+        .fg(theme::p().warning)
         .bg(theme::p().surface_high)
 }
 
@@ -426,7 +426,7 @@ mod tests {
             .find(|span| span.content == "src/main.rs")
             .expect("table path");
         assert_eq!(path.style.bg, Some(theme::p().surface_high));
-        assert_eq!(path.style.fg, Some(theme::p().accent));
+        assert_eq!(path.style.fg, Some(theme::p().warning));
 
         assert!(
             lines

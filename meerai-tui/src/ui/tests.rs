@@ -4,12 +4,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use meerai_agents::events::RequestId;
 use meerai_agents::{
-    AgentEvent, ErrorCode, ItemDelta, ItemId, SessionItem, TurnEndReason, TurnId, Usage,
+    AgentEvent, ErrorCode, ItemDelta, ItemId, QuestionAnswer, QuestionPrompt, SessionItem,
+    TurnEndReason, TurnId, Usage,
 };
 use meerai_client::providers::{ProviderCatalog, RuntimeProviderState};
 use meerai_client::secrets::{MemorySecretStore, SecretStore};
 use meerai_common::settings::AppSettings;
+use meerai_policy::ApprovalMode;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use tokio::sync::mpsc;
@@ -946,11 +949,11 @@ fn renders_agent_and_skill_mention_badges() {
 }
 
 #[test]
-fn composer_renders_prompt_and_marker() {
+fn composer_renders_prompt_without_a_marker() {
     let mut app = test_app();
     let rendered = render_to_string(&mut app);
     assert!(rendered.contains("Ask meerai anything"));
-    assert!(rendered.contains("❯"));
+    assert!(!rendered.contains("❯"));
 }
 
 #[test]
@@ -1093,6 +1096,29 @@ fn markdown_keeps_single_newlines_as_line_breaks() {
     let lines = crate::markdown::render("first line\nsecond line\nthird line");
     let rows: Vec<String> = lines.iter().map(|line| span_text(&line.spans)).collect();
     assert_eq!(rows, vec!["first line", "second line", "third line"]);
+}
+
+#[test]
+fn question_entry_renders_prompt_and_selected_answer() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::Question {
+        request_id: "req-1".to_string(),
+        questions: vec![QuestionPrompt {
+            header: "Update scope".to_string(),
+            question: "Code or docs?".to_string(),
+            options: Vec::new(),
+            multiple: false,
+        }],
+        answers: Some(vec![QuestionAnswer {
+            header: "Update scope".to_string(),
+            selected: vec!["Code + docs".to_string()],
+        }]),
+        resolved: true,
+    });
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("? Update scope"));
+    assert!(rendered.contains("Code or docs?"));
+    assert!(rendered.contains("✓ Code + docs"));
 }
 
 #[test]
@@ -1432,7 +1458,7 @@ fn diff_modal_highlights_syntax_and_lists_files() {
         (0..117u16).any(|x| {
             let text: String = (0..3).map(|d| buf[(x + d, y)].symbol()).collect();
             text == "let"
-                && buf[(x, y)].fg == palette.accent
+                && buf[(x, y)].fg == palette.success
                 && buf[(x, y)].modifier.contains(Modifier::BOLD)
         })
     });
@@ -1529,7 +1555,7 @@ fn renders_session_tabs_badges_and_session_select_modal() {
 
     let tab_bar_screen = render_to_string(&mut app);
     assert!(tab_bar_screen.contains("1: First Tab"));
-    assert!(tab_bar_screen.contains("2: Second Tab •"));
+    assert!(tab_bar_screen.contains("2: Second Tab"));
     assert!(tab_bar_screen.contains(" + "));
     assert!(app.tab_hit_zones.len() >= 3);
 
@@ -2136,4 +2162,148 @@ fn hover_repaints_without_rebuilding_the_transcript_document() {
     assert_eq!(buffer[(area.x, digest_row)].fg, palette.faint);
     assert_eq!(buffer[(area.x + 2, digest_row)].fg, palette.text);
     assert_eq!(buffer[(area.x, thought_row)].fg, palette.muted);
+}
+
+#[test]
+fn question_overlay_shows_mode_and_an_other_row() {
+    use meerai_agents::{QuestionOption, QuestionPrompt, QuestionRequest};
+
+    let request = |multiple: bool, id: &str| QuestionRequest {
+        request_id: RequestId::from_raw(id),
+        turn_id: TurnId::from_raw("turn-q"),
+        questions: vec![QuestionPrompt {
+            header: "DB".to_string(),
+            question: "Which database?".to_string(),
+            options: vec![QuestionOption {
+                label: "Postgres".to_string(),
+                description: None,
+            }],
+            multiple,
+        }],
+    };
+
+    let mut app = test_app();
+    app.handle_agent_event(AgentEvent::QuestionAsked {
+        request: request(false, "q-single"),
+    });
+    let single = render_to_string(&mut app);
+    assert!(single.contains("Select one"));
+    assert!(single.contains("( )"));
+    assert!(single.contains("Other (type your own)"));
+
+    let mut app = test_app();
+    app.handle_agent_event(AgentEvent::QuestionAsked {
+        request: request(true, "q-multi"),
+    });
+    let multi = render_to_string(&mut app);
+    assert!(multi.contains("Select all that apply"));
+    assert!(multi.contains("[ ]"));
+}
+
+#[test]
+fn statusline_subagent_click_opens_overlay_and_shows_work() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = test_app();
+    app.tab_mut()
+        .transcript
+        .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
+            id: "sub-1".to_string(),
+            agent: "explore".to_string(),
+            status: ToolCallStatus::Running,
+            report: None,
+            child_session_id: None,
+            expanded: false,
+            nested: Some(Vec::new()),
+            nested_refreshed_at: None,
+            nested_loading: false,
+        }));
+    app.tab_mut().is_running = true;
+    app.tab_mut().active_tool = Some("subagent-run".to_string());
+    let _ = render_to_string(&mut app);
+
+    let hit = app.subagent_hit.expect("statusline subagent hit");
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: hit.x,
+        row: hit.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(app.subagent_overlay.is_some());
+
+    let _ = render_to_string(&mut app);
+    let zone = app.subagent_overlay_zones[0].0;
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: zone.x,
+        row: zone.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(matches!(
+        app.tab().transcript.last(),
+        Some(TranscriptEntry::Subagent(subagent)) if subagent.expanded
+    ));
+    assert!(app.subagent_overlay.is_some());
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.subagent_overlay.is_none());
+}
+
+#[test]
+fn sidebar_more_row_makes_the_file_list_scrollable() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = test_app();
+    for index in 0..14 {
+        app.file_changes.push(crate::app::FileChangeEntry {
+            status: "M".to_string(),
+            path: format!("src/file{index}.rs"),
+        });
+    }
+    let _ = render_to_string(&mut app);
+    assert!(app.is_sidebar_visible());
+    let more = app.file_change_more_hit.expect("more row");
+
+    let click = |column, row| MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+    app.handle_mouse_event(click(more.x, more.y));
+    assert!(app.file_change_scroll > 0);
+
+    let area = app.sidebar_changes_inner_area;
+    let before = app.file_change_scroll;
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: area.x,
+        row: area.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(app.file_change_scroll >= before);
+}
+
+#[test]
+fn composer_shows_mode_provider_model_and_temperature() {
+    use meerai_common::settings::{ContextSettings, Temperature};
+
+    let mut app = test_app();
+    app.settings.context = Some(ContextSettings {
+        temperature: Some(Temperature::new(0.7)),
+        ..ContextSettings::default()
+    });
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("ASK"));
+    assert!(rendered.contains("gemini-3.8-flash"));
+    assert!(rendered.contains("0.70"));
+}
+
+#[test]
+fn statusline_warns_when_the_os_sandbox_is_unavailable() {
+    let mut app = test_app();
+    app.sandbox_active = false;
+    app.sandbox_kind = "host".to_string();
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("host sandbox"));
 }

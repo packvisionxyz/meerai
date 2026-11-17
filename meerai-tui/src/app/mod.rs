@@ -4,6 +4,7 @@ mod input;
 mod modals;
 mod palette;
 mod reload;
+mod subagent_overlay;
 #[cfg(test)]
 mod tests;
 
@@ -19,7 +20,7 @@ use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use meerai_agents::events::{ApprovalRequest, QuestionRequest};
+use meerai_agents::events::{ApprovalRequest, QuestionAnswer, QuestionPrompt, QuestionRequest};
 use meerai_agents::{AgentCommand, ItemId, TurnId};
 use meerai_client::providers::{
     KeyStatus, ProviderInfo, RuntimeProviderState, canonical_provider_id, check_key_status,
@@ -107,6 +108,8 @@ pub enum ActiveModal {
     Question {
         request: QuestionRequest,
         answers: Vec<Vec<usize>>,
+        custom: Vec<String>,
+        editing_custom: bool,
         current: usize,
         focus: usize,
     },
@@ -215,6 +218,12 @@ pub struct ModalHitZone {
     pub kind: ModalHitKind,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubagentOverlay {
+    pub selected: usize,
+    pub entries: Vec<usize>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompletionHitZone {
     pub rect: Rect,
@@ -305,6 +314,12 @@ pub enum TranscriptEntry {
     },
     ToolCall(ToolCallEntry),
     Subagent(SubagentEntry),
+    Question {
+        request_id: String,
+        questions: Vec<QuestionPrompt>,
+        answers: Option<Vec<QuestionAnswer>>,
+        resolved: bool,
+    },
     System {
         text: String,
     },
@@ -529,6 +544,10 @@ enum EntryState {
         nested_entries: Option<usize>,
     },
     System,
+    Question {
+        resolved: bool,
+        answered: bool,
+    },
     Error {
         expanded: bool,
     },
@@ -579,6 +598,27 @@ impl EntryFingerprint {
                     nested_entries: nested_size(&subagent.nested),
                 },
             },
+            TranscriptEntry::Question {
+                questions,
+                answers,
+                resolved,
+                ..
+            } => Self {
+                size: questions
+                    .iter()
+                    .map(|prompt| prompt.header.len() + prompt.question.len())
+                    .sum::<usize>()
+                    + answers.as_ref().map_or(0, |answers| {
+                        answers
+                            .iter()
+                            .map(|answer| answer.selected.iter().map(String::len).sum::<usize>())
+                            .sum()
+                    }),
+                state: EntryState::Question {
+                    resolved: *resolved,
+                    answered: answers.is_some(),
+                },
+            },
             TranscriptEntry::System { text } => Self {
                 size: text.len(),
                 state: EntryState::System,
@@ -622,6 +662,9 @@ impl EntryState {
             EntryState::ToolCall { status, .. } => 2 + status_code(status),
             EntryState::Subagent { status, .. } => 9 + status_code(status),
             EntryState::System => 16,
+            EntryState::Question { resolved, answered } => {
+                18 + usize::from(resolved) * 2 + usize::from(answered)
+            }
             EntryState::Error { .. } => 17,
         }
     }
@@ -901,7 +944,15 @@ pub struct AppState {
     pub transcript_inner_area: Rect,
     pub sidebar_changes_inner_area: Rect,
     pub visible_file_change_rows: usize,
+    pub sandbox_active: bool,
+    pub sandbox_kind: String,
+    pub sandbox_warning: Option<String>,
+    pub file_change_scroll: usize,
+    pub file_change_more_hit: Option<Rect>,
     pub hovered_file_change: Option<usize>,
+    pub subagent_overlay: Option<SubagentOverlay>,
+    pub subagent_overlay_zones: Vec<(Rect, usize)>,
+    pub subagent_hit: Option<Rect>,
     pub thinking_hit_zones: Vec<ThinkingHitZone>,
     pub digest_hit_zones: Vec<ThinkingHitZone>,
     pub hover_zones: Vec<HoverZone>,
@@ -1040,6 +1091,14 @@ impl AppState {
             transcript_inner_area: Rect::default(),
             sidebar_changes_inner_area: Rect::default(),
             visible_file_change_rows: 0,
+            sandbox_active: true,
+            sandbox_kind: String::new(),
+            sandbox_warning: None,
+            file_change_scroll: 0,
+            file_change_more_hit: None,
+            subagent_overlay: None,
+            subagent_overlay_zones: Vec::new(),
+            subagent_hit: None,
             hovered_file_change: None,
             thinking_hit_zones: Vec::new(),
             digest_hit_zones: Vec::new(),
@@ -1157,6 +1216,8 @@ impl AppState {
         self.last_transcript_anchor = None;
         self.transcript_wrapped_lines.clear();
         self.transcript_cache.clear();
+        self.file_change_scroll = 0;
+        self.file_change_more_hit = None;
         self.pending_g = false;
     }
 

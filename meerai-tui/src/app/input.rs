@@ -134,6 +134,19 @@ impl AppState {
             };
         }
 
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if self
+                .subagent_hit
+                .is_some_and(|hit| rect_contains(hit, mouse.column, mouse.row))
+            {
+                self.toggle_subagent_overlay();
+                return true;
+            }
+            if self.subagent_overlay.is_some() {
+                return self.subagent_overlay_click(mouse.column, mouse.row);
+            }
+        }
+
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && let Some(hit) = self.update_hit
             && mouse.column >= hit.x
@@ -341,6 +354,16 @@ impl AppState {
         }
 
         match mouse.kind {
+            MouseEventKind::ScrollUp if self.sidebar_changes_contains(mouse.column, mouse.row) => {
+                self.scroll_file_changes(true);
+                true
+            }
+            MouseEventKind::ScrollDown
+                if self.sidebar_changes_contains(mouse.column, mouse.row) =>
+            {
+                self.scroll_file_changes(false);
+                true
+            }
             MouseEventKind::ScrollUp => {
                 self.scroll_up(3);
                 self.refresh_active_doc_selection_head();
@@ -603,8 +626,35 @@ impl AppState {
         ));
     }
 
+    fn sidebar_changes_contains(&self, column: u16, row: u16) -> bool {
+        let area = self.sidebar_changes_inner_area;
+        area.width > 0
+            && area.height > 0
+            && column >= area.x
+            && column < area.x + area.width
+            && row >= area.y
+            && row < area.y + area.height
+    }
+
+    pub(super) fn scroll_file_changes(&mut self, up: bool) -> bool {
+        let shown = self.visible_file_change_rows.max(1);
+        let max_start = self.file_changes.len().saturating_sub(shown);
+        if max_start == 0 {
+            return false;
+        }
+        self.file_change_scroll = if up {
+            self.file_change_scroll.saturating_sub(1)
+        } else {
+            (self.file_change_scroll + 1).min(max_start)
+        };
+        true
+    }
+
     pub fn hovered_file_change_at(&self, column: u16, row: u16) -> Option<usize> {
-        if !self.is_sidebar_visible() || self.modal.is_some() {
+        if !self.is_sidebar_visible()
+            || self.modal.is_some()
+            || !self.sidebar_changes_contains(column, row)
+        {
             return None;
         }
         let area = self.sidebar_changes_inner_area;
@@ -618,13 +668,32 @@ impl AppState {
             return None;
         }
         let row_idx = (row - area.y) as usize;
-        if row_idx >= self.visible_file_change_rows || row_idx >= self.file_changes.len() {
+        if row_idx >= self.visible_file_change_rows {
             return None;
         }
-        Some(row_idx)
+        let idx = self.file_change_scroll + row_idx;
+        if idx >= self.file_changes.len() {
+            return None;
+        }
+        Some(idx)
     }
 
     pub fn click_file_change_at(&mut self, column: u16, row: u16) -> bool {
+        if let Some(hit) = self.file_change_more_hit
+            && column >= hit.x
+            && column < hit.x + hit.width
+            && row >= hit.y
+            && row < hit.y + hit.height
+        {
+            let shown = self.visible_file_change_rows.max(1);
+            let max_start = self.file_changes.len().saturating_sub(shown);
+            self.file_change_scroll = if self.file_change_scroll >= max_start {
+                0
+            } else {
+                (self.file_change_scroll + shown).min(max_start)
+            };
+            return true;
+        }
         let Some(row_idx) = self.hovered_file_change_at(column, row) else {
             return false;
         };
@@ -1076,6 +1145,11 @@ impl AppState {
 
         if self.modal.is_some() {
             return self.handle_modal_key(key);
+        }
+
+        if self.subagent_overlay.is_some() && key.code == KeyCode::Esc {
+            self.close_subagent_overlay();
+            return true;
         }
 
         if key.code == KeyCode::BackTab {
@@ -1876,4 +1950,13 @@ fn display_col_to_char_index(
         index += ch.len_utf8();
     }
     line[..index].chars().count()
+}
+
+fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
+    rect.width > 0
+        && rect.height > 0
+        && column >= rect.x
+        && column < rect.x + rect.width
+        && row >= rect.y
+        && row < rect.y + rect.height
 }

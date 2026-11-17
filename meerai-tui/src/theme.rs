@@ -21,6 +21,7 @@ pub struct Palette {
     pub diff_added: Color,
     pub diff_removed: Color,
     pub diff_context: Color,
+    pub code_function: Color,
 }
 
 impl Default for Palette {
@@ -42,6 +43,7 @@ impl Default for Palette {
             diff_added: Color::Rgb(79, 214, 190),
             diff_removed: Color::Rgb(197, 59, 83),
             diff_context: Color::Rgb(125, 133, 144),
+            code_function: Color::Rgb(198, 120, 221),
         }
     }
 }
@@ -83,6 +85,7 @@ impl Palette {
             diff_added,
             diff_removed,
             diff_context,
+            code_function,
         );
         (palette, warnings)
     }

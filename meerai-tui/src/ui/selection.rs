@@ -22,18 +22,8 @@ pub(super) fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Re
             let is_active = idx == app.active_tab;
             let is_hovered = app.hovered_tab == Some(TabHitKind::Tab(idx))
                 || app.hovered_tab == Some(TabHitKind::CloseTab(idx));
-            let indicator = if !tab.pending_approvals.is_empty() {
-                " [!]".to_string()
-            } else if tab.is_running {
-                let ch = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
-                format!(" {ch}")
-            } else if tab.has_unread {
-                " •".to_string()
-            } else {
-                String::new()
-            };
             let title = truncate_single_line(&tab.display_title(), 18);
-            let label = format!(" {}: {}{} ", idx + 1, title, indicator);
+            let label = format!(" {}: {} ", idx + 1, title);
             let bg = if is_active || is_hovered {
                 theme::p().surface_high
             } else {

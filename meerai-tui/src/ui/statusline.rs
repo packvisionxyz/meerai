@@ -16,37 +16,22 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
         area,
     );
     app.update_hit = None;
+    app.subagent_hit = None;
     let mut update_hit: Option<Rect> = None;
+    let mut subagent_hit: Option<Rect> = None;
     let tab = app.tab();
-    let (badge_text, badge_color) = match app.mode {
-        InputMode::Insert => (" INS ", theme::p().accent),
-        InputMode::Normal => (" NOR ", theme::p().info),
-    };
 
-    let mut spans = vec![
-        Span::styled(" ", Style::default().bg(theme::p().surface)),
-        Span::styled(
-            badge_text,
+    let mut spans = vec![Span::styled(" ", Style::default().bg(theme::p().surface))];
+
+    if !app.sandbox_active {
+        spans.push(Span::styled(
+            " ⚠ host sandbox ",
             Style::default()
-                .fg(badge_color)
+                .fg(theme::p().warning)
                 .bg(theme::p().surface_high)
                 .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" ", Style::default().bg(theme::p().surface)),
-    ];
-
-    let mode_color = match tab.approval_mode {
-        ApprovalMode::Plan => theme::p().accent,
-        ApprovalMode::Ask => theme::p().warning,
-        ApprovalMode::Auto => theme::p().success,
-    };
-    spans.push(Span::styled(
-        format!(" {} ", approval_mode_badge(tab.approval_mode)),
-        Style::default()
-            .fg(mode_color)
-            .bg(theme::p().surface_high)
-            .add_modifier(Modifier::BOLD),
-    ));
+        ));
+    }
 
     if let Backend::Acp { preset, .. } = &tab.backend {
         spans.push(Span::styled(
@@ -55,20 +40,6 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
                 .fg(theme::p().info)
                 .bg(theme::p().surface_high)
                 .add_modifier(Modifier::BOLD),
-        ));
-    }
-
-    if !tab.is_acp() {
-        let key_status = app.active_key_status();
-        let (key_badge, key_color) = key_status_style(&key_status);
-
-        spans.push(Span::styled(
-            format!(" {} / {} ", tab.active_provider, display_model(app)),
-            Style::default().fg(theme::p().muted),
-        ));
-        spans.push(Span::styled(
-            format!("[{key_badge}]"),
-            Style::default().fg(key_color),
         ));
     }
 
@@ -112,6 +83,7 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
             .elapsed_ms()
             .map(|ms| format!(" ({})", format_compact_ms(ms)))
             .unwrap_or_default();
+        let mut subagent_activity = false;
         let activity = match &tab.active_tool {
             Some(tool) if tool == "subagent-run" => {
                 let agents: Vec<&str> = tab
@@ -136,11 +108,20 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
                 } else {
                     format!("{}, +{}", agents[..2].join(", "), agents.len() - 2)
                 };
+                subagent_activity = true;
                 format!(" · {frame_char} {label}{elapsed}")
             }
             Some(tool) => format!(" · {frame_char} {tool}{elapsed}"),
             None => format!(" · {frame_char} running{elapsed}"),
         };
+        if subagent_activity {
+            let offset: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+            let width = activity.chars().count() as u16;
+            let x = area.x.saturating_add(offset as u16);
+            if x.saturating_add(width) <= area.x.saturating_add(area.width) {
+                subagent_hit = Some(Rect::new(x, area.y, width, 1));
+            }
+        }
         spans.push(Span::styled(
             activity,
             Style::default().fg(theme::p().warning),
@@ -187,6 +168,14 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
     }
 
     app.update_hit = update_hit;
+    app.subagent_hit = subagent_hit;
+    let spans: Vec<Span<'static>> = spans
+        .into_iter()
+        .map(|span| {
+            let style = Style::default().fg(theme::p().muted);
+            Span::styled(span.content, style)
+        })
+        .collect();
     let bar = Paragraph::new(Line::from(spans));
     frame.render_widget(bar, area);
 }

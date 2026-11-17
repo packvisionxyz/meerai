@@ -91,6 +91,22 @@ fn expand_config_secret_with(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Temperature(f32);
+
+impl Temperature {
+    pub fn new(value: f32) -> Self {
+        Self(value)
+    }
+
+    pub fn value(self) -> f32 {
+        self.0
+    }
+}
+
+impl Eq for Temperature {}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -121,6 +137,8 @@ pub struct ContextSettings {
     pub summarizer_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_edit_diagnostics: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<Temperature>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +157,16 @@ pub struct HooksSettings {
     pub trust_project: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_projects: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_for_scripts: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_for_shell: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_env: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,6 +203,8 @@ pub struct ThemeSettings {
     pub diff_removed: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_function: Option<String>,
 }
 
 impl ThemeSettings {
@@ -231,6 +261,8 @@ pub struct AppSettings {
     pub sessions: Option<SessionSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<HooksSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<ThemeSettings>,
 }
@@ -400,6 +432,7 @@ pub fn merge_project_settings(
     }
 
     merged.context = merge_context(merged.context.take(), project.context);
+    merged.sandbox = merge_sandbox(merged.sandbox.take(), project.sandbox, &mut warnings);
 
     if let Some(project_theme) = project.theme {
         let mut theme = merged.theme.take().unwrap_or_default();
@@ -526,6 +559,7 @@ fn merge_context(
             max_turn_secs: merge_max_turn_secs(user.max_turn_secs, project.max_turn_secs),
             summarizer_model: project.summarizer_model.or(user.summarizer_model),
             post_edit_diagnostics: project.post_edit_diagnostics.or(user.post_edit_diagnostics),
+            temperature: project.temperature.or(user.temperature),
         }),
     }
 }
@@ -546,6 +580,64 @@ fn merge_max_turn_secs(user: Option<u64>, project: Option<u64>) -> Option<u64> {
             Some(0) | None => Some(user),
             Some(project) => Some(user.min(project)),
         },
+    }
+}
+
+fn merge_sandbox(
+    user: Option<SandboxSettings>,
+    project: Option<SandboxSettings>,
+    warnings: &mut Vec<String>,
+) -> Option<SandboxSettings> {
+    match (user, project) {
+        (user, None) => user,
+        (None, Some(project)) => {
+            let merged = SandboxSettings {
+                require_for_scripts: project.require_for_scripts.filter(|v| *v),
+                require_for_shell: project.require_for_shell.filter(|v| *v),
+                strict_env: project.strict_env.filter(|v| *v),
+            };
+            if merged == SandboxSettings::default() {
+                None
+            } else {
+                Some(merged)
+            }
+        }
+        (Some(user), Some(project)) => {
+            let require_for_scripts = match (user.require_for_scripts, project.require_for_scripts)
+            {
+                (Some(true), Some(false)) => {
+                    warnings.push(
+                        "ignoring project sandbox.require_for_scripts=false: a repository cannot weaken sandbox enforcement"
+                            .to_string(),
+                    );
+                    Some(true)
+                }
+                (u, Some(true)) => {
+                    let _ = u;
+                    Some(true)
+                }
+                (u, _) => u,
+            };
+            let require_for_shell = match (user.require_for_shell, project.require_for_shell) {
+                (Some(true), Some(false)) => {
+                    warnings.push(
+                        "ignoring project sandbox.require_for_shell=false: a repository cannot weaken sandbox enforcement"
+                            .to_string(),
+                    );
+                    Some(true)
+                }
+                (u, Some(true)) => {
+                    let _ = u;
+                    Some(true)
+                }
+                (u, _) => u,
+            };
+            Some(SandboxSettings {
+                require_for_scripts,
+                require_for_shell,
+                strict_env: user.strict_env.or(project.strict_env.filter(|v| *v)),
+            })
+        }
     }
 }
 
@@ -704,6 +796,7 @@ providers:
                 summarizer_model: Some("openrouter:small-model".to_string()),
                 recovery_model: Some("openrouter:fallback-model".to_string()),
                 post_edit_diagnostics: Some(true),
+                ..ContextSettings::default()
             }),
             ..AppSettings::default()
         };
@@ -1170,5 +1263,20 @@ providers:
         assert_eq!(theme.accent.as_deref(), Some("#ababab"));
         assert_eq!(theme.background.as_deref(), Some("#000000"));
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn project_sandbox_merge_is_tighten_only() {
+        let user = settings_from_yaml("sandbox:\n  require_for_scripts: true\n");
+        let project = settings_from_yaml(
+            "sandbox:\n  require_for_scripts: false\n  require_for_shell: true\n",
+        );
+
+        let (merged, warnings) = merge_project_settings(user, project);
+        let sandbox = merged.sandbox.expect("sandbox merged");
+        assert_eq!(sandbox.require_for_scripts, Some(true));
+        assert_eq!(sandbox.require_for_shell, Some(true));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("require_for_scripts=false"));
     }
 }

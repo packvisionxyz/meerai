@@ -461,7 +461,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                     ("↑↓", "select file"),
                     ("Enter", "open"),
                     ("f", "hide list"),
-                    ("Tab/[/]", "next/prev"),
+                    ("←→/[/]", "next/prev"),
                     ("Esc", "hide list"),
                     ("q", "close"),
                 ])
@@ -471,7 +471,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                     ("ctrl+d/u", "page"),
                     ("g/G", "top/bot"),
                     ("f", "files"),
-                    ("Tab/[/]", "next/prev file"),
+                    ("←→/[/]", "next/prev file"),
                     ("Esc/q", "close"),
                 ])
             };
@@ -884,6 +884,8 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
         ActiveModal::Question {
             request,
             answers,
+            custom,
+            editing_custom,
             current,
             focus,
         } => {
@@ -898,7 +900,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             } else {
                 format!("Question — {}", prompt.header)
             };
-            let popup = cap_width(centered_rect(area, 72, 72, 48, 12), 76);
+            let popup = cap_width(centered_rect(area, 72, 72, 48, 14), 76);
             dim_backdrop(frame, area, popup);
             let inner = dialog_frame(frame, app, popup, &title, false);
 
@@ -924,6 +926,19 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 rows[0],
             );
 
+            let mode_label = if prompt.multiple {
+                "Select all that apply · Other accepts typed text"
+            } else {
+                "Select one · Other accepts typed text"
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    mode_label,
+                    Style::default().fg(theme::p().muted),
+                )),
+                rows[1],
+            );
+
             let mut y = rows[2].y;
             let max_y = rows[2].y + rows[2].height;
             for (index, option) in prompt.options.iter().enumerate() {
@@ -933,7 +948,13 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 let is_selected = answers[current].contains(&index);
                 let is_focused = index == focus;
                 let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(index));
-                let marker = if is_selected { "[x]" } else { "[ ]" };
+                let marker = if prompt.multiple {
+                    if is_selected { "[x]" } else { "[ ]" }
+                } else if is_selected {
+                    "(•)"
+                } else {
+                    "( )"
+                };
                 let row_bg = if is_focused || is_hovered {
                     theme::p().surface_high
                 } else {
@@ -1001,11 +1022,77 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 }
             }
 
+            if y < max_y {
+                let other = prompt.options.len();
+                let text = custom[current].trim();
+                let is_selected = !text.is_empty();
+                let is_focused = focus == other;
+                let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(other));
+                let row_bg = if is_focused || is_hovered {
+                    theme::p().surface_high
+                } else {
+                    theme::p().surface
+                };
+                let prefix = if is_focused { "▸ " } else { "  " };
+                let marker = if prompt.multiple {
+                    if is_selected { "[x]" } else { "[ ]" }
+                } else if is_selected {
+                    "(•)"
+                } else {
+                    "( )"
+                };
+                let label = if is_focused && editing_custom {
+                    format!("Other: {text}▏")
+                } else if is_selected {
+                    format!("Other: {text}")
+                } else {
+                    "Other (type your own)".to_string()
+                };
+                let label_style = if is_focused {
+                    Style::default()
+                        .fg(theme::p().interactive)
+                        .bg(row_bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme::p().text).bg(row_bg)
+                };
+                let marker_style = Style::default()
+                    .fg(if is_selected {
+                        theme::p().accent
+                    } else if is_focused {
+                        theme::p().interactive
+                    } else {
+                        theme::p().muted
+                    })
+                    .bg(row_bg)
+                    .add_modifier(Modifier::BOLD);
+                let other_rect = Rect::new(rows[2].x, y, rows[2].width, 1);
+                if is_focused || is_hovered {
+                    frame.render_widget(
+                        Block::default().style(Style::default().bg(row_bg)),
+                        other_rect,
+                    );
+                }
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(prefix, label_style),
+                        Span::styled(format!("{marker} "), marker_style),
+                        Span::styled(label, label_style),
+                    ])),
+                    other_rect,
+                );
+                app.modal_hit_zones.push(ModalHitZone {
+                    rect: other_rect,
+                    kind: ModalHitKind::ListItem(other),
+                });
+            }
+
             let action_label = if prompt.multiple { "toggle" } else { "select" };
             frame.render_widget(
                 Paragraph::new(key_hints_line(&[
                     ("↑↓", "move"),
                     ("Space", action_label),
+                    ("type", "other"),
                     ("Tab", "next"),
                     ("Enter", "submit"),
                     ("Esc", "cancel"),

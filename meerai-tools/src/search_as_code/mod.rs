@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use meerai_core::{
@@ -9,7 +9,9 @@ use meerai_core::{
 };
 
 use crate::code::paths::PathIssue;
-use crate::code::{CodeTools, definition_for, failure_run, parse_args, truncate_middle};
+use crate::code::{
+    CodeTools, definition_for, failure_run, parse_args, refused_run, truncate_middle,
+};
 use crate::world::{ExecutionWorld, HostWorld, SandboxPolicy, WorldCommand, WorldExecOutcome};
 
 const TOOLSET_NAME: &str = "sac";
@@ -106,12 +108,35 @@ enum ScriptSource {
     File(PathBuf),
 }
 
+fn node_permission_flag() -> Option<&'static str> {
+    static FLAG: OnceLock<Option<&'static str>> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        let probe_dir = std::env::temp_dir();
+        let allow_arg = format!("--allow-fs-read={}", probe_dir.display());
+        for flag in ["--permission", "--experimental-permission"] {
+            let ok = std::process::Command::new("node")
+                .args([flag, &allow_arg, "-e", "process.exit(0)"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
+            if ok {
+                return Some(flag);
+            }
+        }
+        None
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct SearchAsCodeToolset {
     workspace_root: PathBuf,
     sensitive_env_vars: Vec<String>,
     execution_world: Arc<dyn ExecutionWorld>,
     runtime: Option<ScriptRuntime>,
+    require_sandbox: bool,
+    strict_env: bool,
 }
 
 impl SearchAsCodeToolset {
@@ -121,6 +146,8 @@ impl SearchAsCodeToolset {
             sensitive_env_vars: Vec::new(),
             execution_world: Arc::new(HostWorld::new()),
             runtime: None,
+            require_sandbox: false,
+            strict_env: false,
         }
     }
 
@@ -131,6 +158,24 @@ impl SearchAsCodeToolset {
 
     pub fn runtime(&self) -> Option<ScriptRuntime> {
         self.runtime
+    }
+
+    pub fn with_require_sandbox(mut self, require: bool) -> Self {
+        self.require_sandbox = require;
+        self
+    }
+
+    pub fn require_sandbox(&self) -> bool {
+        self.require_sandbox
+    }
+
+    pub fn with_strict_env(mut self, strict: bool) -> Self {
+        self.strict_env = strict;
+        self
+    }
+
+    pub fn strict_env(&self) -> bool {
+        self.strict_env
     }
 
     pub fn with_sensitive_env_vars(mut self, vars: Vec<String>) -> Self {
@@ -156,6 +201,18 @@ impl SearchAsCodeToolset {
     }
 
     async fn run_script(&self, args: RunScriptArgs) -> ToolRun {
+        if self.require_sandbox && !self.execution_world.is_sandboxed() {
+            let suffix = self
+                .execution_world
+                .warning()
+                .map(|w| format!(" ({w})"))
+                .unwrap_or_default();
+            return refused_run(format!(
+                "OS sandbox required for sac-run_script, but execution world is `{}`{suffix}",
+                self.execution_world.kind()
+            ));
+        }
+
         let cwd = CodeTools::new(&self.workspace_root)
             .canonical_workspace_root()
             .await;
@@ -220,17 +277,39 @@ impl SearchAsCodeToolset {
         let (program, argv): (&str, Vec<String>) = match (args.language, &source) {
             (ScriptLanguage::Python, ScriptSource::Inline(script)) => (
                 "python3",
-                vec!["-I".to_string(), "-c".to_string(), script.clone()],
+                vec![
+                    "-I".to_string(),
+                    "-B".to_string(),
+                    "-c".to_string(),
+                    script.clone(),
+                ],
             ),
             (ScriptLanguage::Python, ScriptSource::File(path)) => (
                 "python3",
-                vec!["-I".to_string(), path.to_string_lossy().into_owned()],
+                vec![
+                    "-I".to_string(),
+                    "-B".to_string(),
+                    path.to_string_lossy().into_owned(),
+                ],
             ),
             (ScriptLanguage::Javascript, ScriptSource::Inline(script)) => {
-                ("node", vec!["-e".to_string(), script.clone()])
+                let mut argv = Vec::new();
+                if let Some(flag) = node_permission_flag() {
+                    argv.push(flag.to_string());
+                    argv.push(format!("--allow-fs-read={}", cwd.display()));
+                }
+                argv.push("-e".to_string());
+                argv.push(script.clone());
+                ("node", argv)
             }
             (ScriptLanguage::Javascript, ScriptSource::File(path)) => {
-                ("node", vec![path.to_string_lossy().into_owned()])
+                let mut argv = Vec::new();
+                if let Some(flag) = node_permission_flag() {
+                    argv.push(flag.to_string());
+                    argv.push(format!("--allow-fs-read={}", cwd.display()));
+                }
+                argv.push(path.to_string_lossy().into_owned());
+                ("node", argv)
             }
         };
 
@@ -239,6 +318,7 @@ impl SearchAsCodeToolset {
             args: argv,
             cwd: cwd.clone(),
             removed_env_vars: self.sensitive_env_vars.clone(),
+            env_allowlist: self.strict_env().then(crate::world::strict_env_allowlist),
         };
         let policy = SandboxPolicy::ReadOnly {
             workspace_root: cwd.clone(),
@@ -680,5 +760,99 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sensitive_run.observation.status, ObservationStatus::Refused);
+    }
+
+    #[tokio::test]
+    async fn require_sandbox_refuses_host_world_and_allows_sandboxed_world() {
+        let dir = TempDir::new().unwrap();
+        let host_toolset = SearchAsCodeToolset::new(dir.path()).with_require_sandbox(true);
+        assert!(host_toolset.require_sandbox());
+
+        let refused = host_toolset
+            .invoke_structured(
+                RUN_SCRIPT_TOOL,
+                r#"{"language": "python", "script": "print('hi')"}"#,
+            )
+            .await
+            .unwrap();
+        assert_eq!(refused.observation.status, ObservationStatus::Refused);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+
+            #[derive(Debug)]
+            struct SandboxedMockWorld;
+
+            #[meerai_core::async_trait]
+            impl ExecutionWorld for SandboxedMockWorld {
+                fn kind(&self) -> &'static str {
+                    "mock-sandbox"
+                }
+
+                fn is_sandboxed(&self) -> bool {
+                    true
+                }
+
+                async fn spawn_command(
+                    &self,
+                    _command: &WorldCommand,
+                    _policy: &SandboxPolicy,
+                    _timeout: Duration,
+                ) -> std::io::Result<WorldExecOutcome> {
+                    Ok(WorldExecOutcome::Output(Output {
+                        status: std::process::ExitStatus::from_raw(0),
+                        stdout: b"sandboxed-ok".to_vec(),
+                        stderr: Vec::new(),
+                    }))
+                }
+            }
+
+            let sandboxed_toolset = SearchAsCodeToolset::new(dir.path())
+                .with_require_sandbox(true)
+                .with_execution_world(Arc::new(SandboxedMockWorld));
+            let ok_run = sandboxed_toolset
+                .invoke_structured(
+                    RUN_SCRIPT_TOOL,
+                    r#"{"language": "python", "script": "print('hi')"}"#,
+                )
+                .await
+                .unwrap();
+            assert_eq!(ok_run.observation.status, ObservationStatus::Success);
+            assert_eq!(ok_run.observation.stdout, "sandboxed-ok");
+        }
+    }
+
+    #[tokio::test]
+    async fn javascript_permission_flag_blocks_outside_workspace_reads() {
+        if !command_available("node") || node_permission_flag().is_none() {
+            return;
+        }
+        let outside = TempDir::new().unwrap();
+        let secret_file = outside.path().join("outside-secret.txt");
+        fs::write(&secret_file, "top-secret").unwrap();
+
+        let dir = TempDir::new().unwrap();
+        let toolset = SearchAsCodeToolset::new(dir.path());
+        let script = format!(
+            "const fs = require('fs'); console.log(fs.readFileSync({}, 'utf8'));",
+            serde_json::to_string(&secret_file.to_string_lossy().to_string()).unwrap()
+        );
+        let args = serde_json::json!({
+            "language": "javascript",
+            "script": script,
+        })
+        .to_string();
+        let run = toolset
+            .invoke_structured(RUN_SCRIPT_TOOL, &args)
+            .await
+            .unwrap();
+        assert_eq!(run.observation.status, ObservationStatus::Error);
+        assert!(
+            run.observation.stderr.contains("ERR_ACCESS_DENIED")
+                || run.observation.stderr.contains("AccessDenied"),
+            "unexpected stderr: {}",
+            run.observation.stderr
+        );
     }
 }

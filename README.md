@@ -93,7 +93,8 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   steering, status-classified provider retries with jitter, one bounded
   recovery turn after a retryable provider or loop failure, consecutive
   read-only tool batches, first-prompt
-  session titles, summarizer-model selection, an ordered step interceptor seam
+  session titles, summarizer-model selection, optional sampling `temperature`,
+  an ordered step interceptor seam
   (`before_step`, async `before_tool`, `after_tool`, `turn_stopping`) for
   checkpoints, and best-effort tool-output redaction before spill, logging,
   display, and model delivery.
@@ -144,7 +145,11 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   single- or multiple-choice questions through `QuestionAsked` /
   `AnswerQuestion`. The TUI shows a choice overlay with keyboard navigation;
   headless runs auto-cancel with a stderr hint and let the turn continue.
-  Questions are not approvals: they never consult policy or record grants.
+  Each question and the selected answers stay in the transcript, live and after
+  resume. The overlay marks single-choice questions (`Select one`) and
+  multi-choice questions (`Select all that apply`), and always offers an
+  `Other` row for a typed answer. Questions are not approvals: they never
+  consult policy or record grants.
 - **Coding and retrieval tools (`meerai-tools`):** `CodeTools` with the seven
   `code-*` tools (`read_file`, `write_file`, `edit_file`, `list_dir`, `grep`,
   `glob`, `shell`), workspace path guards, unified diffs, `ToolObservation`/`ToolRun`
@@ -169,7 +174,9 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   syntax-highlighted edit diffs, menu shortcuts (`ctrl+s` sessions, `ctrl+o`
   models, `ctrl+a` provider, `ctrl+e` diff), tab reordering
   (`alt+shift+arrows` or drag), a syntax-highlighted diff review with an `f`
-  file list, and a `ctrl+p` command palette
+  file list, a clickable running-subagent overlay from the statusline, a
+  paged sidebar file list, a composer footer (INS/NOR · mode · model · provider ·
+  temperature value), color-coded session tabs, and a `ctrl+p` command palette
   with sectioned actions and a right-hand shortcut column;
   on exit, the terminal shows the session title and a `meerai --resume <id>`
   continue line under the same gradient logo as the TUI header;
@@ -310,6 +317,18 @@ grant, `a` approves and records a session grant, `n` denies, `r` denies with a
 reason, and `Esc` cancels. Turn grants are cleared at turn end. Grant resources
 are literal, not glob patterns; permission rules still use globs.
 
+### Sampling temperature
+
+Set the temperature in the user `settings.yml` (or the project `.meerai/settings.yml`, which overrides it field by field):
+
+```yaml
+# ~/.config/meerai/settings.yml
+context:
+  temperature: 0.7
+```
+
+The range is `0.0..=2.0`. An out-of-range value is ignored and the provider default applies. The value is shown in the composer header (`temp 0.70`, or `temp default`). Run `/reload` in the TUI to apply a change to the running session (`reload_config` rebuilds the harness config); otherwise it applies at the next start.
+
 ### Agents and skills
 
 meerai reads markdown agent and skill definitions from the project root, which is
@@ -438,9 +457,9 @@ active session is never deleted. Automatic retention pruning is opt-in; see
 `--continue` opens the most recently active session (`updated_at_ms` moves on
 every `TurnEnded`). With `--prompt` the run is headless; without it the TUI
 starts and replays the stored transcript. Replay covers user and steering
-messages, assistant text and reasoning, tool calls and results, and compaction
-markers. An unmatched tool call shows as cancelled. System and runtime events
-are skipped. Session metadata records the workspace `cwd`, git branch and SHA,
+messages, assistant text and reasoning, tool calls and results, questions and
+their selected answers, and compaction markers. An unmatched tool call shows as
+cancelled. System and runtime events are skipped. Session metadata records the workspace `cwd`, git branch and SHA,
 title, model, approval mode, lineage, optional harness and remote session id,
 and created/updated timestamps. See [Data locations](#data-locations).
 
@@ -476,6 +495,17 @@ returns nothing.
   command-level baseline. `--reset-baseline` clears it. It auto-detects
   `cargo test` or `npm test`; pass `--command` for anything else. The hook is a
   user hook, so it needs no project trust.
+
+Sandbox hardening in `settings.yml`:
+
+```yaml
+sandbox:
+  require_for_shell: true      # fail if no OS sandbox is available
+  require_for_scripts: true    # same for sac-run_script
+  strict_env: true             # allowlisted child environment
+```
+
+`strict_env` clears the child environment and keeps only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `TMPDIR`, `PWD`, `LANG`, and `LC_*`; provider secrets are still removed first. Shell and script children also get `RLIMIT_FSIZE` = 1 GiB and `RLIMIT_CORE` = 0 on Unix. A project `.meerai/settings.yml` can enable these but cannot disable them.
 
 ### Auth and app data (`~/.local/share/meerai`)
 
@@ -538,7 +568,7 @@ context:
 - **`context`** — overrides field by field (`context_window_tokens`,
   `high_watermark_pct`, `spill_max_inline_tokens`, `verbatim_window_turns`,
   `reasoning_pruning`, `prompt_caching`, `max_steps_per_turn`, `tool_timeout_ms`,
-  `max_session_tokens`, `max_turn_secs`, `summarizer_model`). The budget caps
+  `max_session_tokens`, `max_turn_secs`, `summarizer_model`, `temperature`). The budget caps
   `max_session_tokens` and `max_turn_secs` are clamped against user values: a
   project value cannot raise a user cap, and a project cannot use `0` to disable
   the turn clock.
@@ -589,6 +619,7 @@ theme:
   diff_added: "#4fd6be"
   diff_removed: "#c53b53"
   diff_context: "#7d8590"
+  code_function: "#c678dd"
 ```
 
 Values accept `#rgb`, `#rrggbb`, or a terminal color name (`black`, `darkgray`,

@@ -41,6 +41,8 @@ pub struct CodeTools {
     allow_sensitive_files: bool,
     extra_roots: Arc<std::sync::RwLock<Vec<PathBuf>>>,
     execution_world: Arc<dyn ExecutionWorld>,
+    require_sandbox: bool,
+    strict_env: bool,
 }
 
 impl CodeTools {
@@ -54,6 +56,8 @@ impl CodeTools {
             allow_sensitive_files: false,
             extra_roots: Arc::new(std::sync::RwLock::new(Vec::new())),
             execution_world: Arc::new(HostWorld::new()),
+            require_sandbox: false,
+            strict_env: false,
         }
     }
 
@@ -89,6 +93,24 @@ impl CodeTools {
     pub fn with_execution_world(mut self, world: Arc<dyn ExecutionWorld>) -> Self {
         self.execution_world = world;
         self
+    }
+
+    pub fn with_require_sandbox(mut self, require: bool) -> Self {
+        self.require_sandbox = require;
+        self
+    }
+
+    pub fn require_sandbox(&self) -> bool {
+        self.require_sandbox
+    }
+
+    pub fn with_strict_env(mut self, strict: bool) -> Self {
+        self.strict_env = strict;
+        self
+    }
+
+    pub fn strict_env(&self) -> bool {
+        self.strict_env
     }
 
     fn is_allowed(&self, tool: &str) -> bool {

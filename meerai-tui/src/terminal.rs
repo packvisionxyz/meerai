@@ -112,14 +112,22 @@ fn notifications_disabled() -> bool {
 }
 
 /// Set the window title and, on iTerm2, the tab background color.
-pub fn set_status(status: TerminalStatus) {
+pub fn set_status(status: TerminalStatus, title: Option<&str>) {
     if notifications_disabled() {
         return;
     }
+    let name = title
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("meerai");
     let (code, title, color) = match status {
-        TerminalStatus::Idle => (0u8, "meerai ●", None),
-        TerminalStatus::Working => (1, "meerai — working ●", Some((230, 180, 80))),
-        TerminalStatus::Approval => (2, "meerai — approval needed ●", Some((224, 92, 92))),
+        TerminalStatus::Idle => (0u8, format!("M | {name} ●"), None),
+        TerminalStatus::Working => (1, format!("M | {name} · working ●"), Some((230, 180, 80))),
+        TerminalStatus::Approval => (
+            2,
+            format!("M | {name} · approval needed ●"),
+            Some((224, 92, 92)),
+        ),
     };
     if STATUS.swap(code, Ordering::Relaxed) == code {
         return;

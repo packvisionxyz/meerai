@@ -220,10 +220,21 @@ pub(super) fn render_sidebar_changes(frame: &mut Frame<'_>, app: &mut AppState, 
     } else {
         total.min(max_rows)
     };
+    let max_start = total.saturating_sub(shown_count);
+    app.file_change_scroll = app.file_change_scroll.min(max_start);
+    let start = app.file_change_scroll;
     app.visible_file_change_rows = shown_count;
+    app.file_change_more_hit = None;
 
-    for (idx, entry) in app.file_changes.iter().take(shown_count).enumerate() {
-        let row_y = rows_area.y + idx as u16;
+    for (offset, entry) in app
+        .file_changes
+        .iter()
+        .skip(start)
+        .take(shown_count)
+        .enumerate()
+    {
+        let idx = start + offset;
+        let row_y = rows_area.y + offset as u16;
         let hovered = app.hovered_file_change == Some(idx);
         let row_bg = if hovered {
             theme::p().surface_high
@@ -261,14 +272,21 @@ pub(super) fn render_sidebar_changes(frame: &mut Frame<'_>, app: &mut AppState, 
     }
 
     if overflow {
-        let remaining = total - shown_count;
+        let remaining = total.saturating_sub(start + shown_count);
+        let label = if remaining > 0 {
+            format!("… and {remaining} more")
+        } else {
+            "… back to top".to_string()
+        };
         let footer_y = rows_area.y + shown_count as u16;
+        let footer_rect = Rect::new(rows_area.x, footer_y, rows_area.width, 1);
+        app.file_change_more_hit = Some(footer_rect);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                format!("… and {remaining} more"),
+                label,
                 Style::default().fg(theme::p().faint),
             ))),
-            Rect::new(rows_area.x, footer_y, rows_area.width, 1),
+            footer_rect,
         );
     }
 }

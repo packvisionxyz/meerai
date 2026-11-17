@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use meerai_agents::events::RequestId;
 use meerai_agents::{
     AgentEvent, ErrorCode, ItemDelta, ItemId, ItemStatus, SessionItem, TurnEndReason,
 };
@@ -81,6 +82,16 @@ impl AppState {
                 }
             }
             AgentEvent::QuestionAsked { request } => {
+                self.tabs[tab_idx]
+                    .transcript
+                    .push(TranscriptEntry::Question {
+                        request_id: request.request_id.to_string(),
+                        questions: request.questions.clone(),
+                        answers: None,
+                        resolved: false,
+                    });
+                self.tabs[tab_idx].transcript_version =
+                    self.tabs[tab_idx].transcript_version.wrapping_add(1);
                 if is_active && self.modal.is_none() {
                     self.open_question(request);
                 } else {
@@ -88,6 +99,22 @@ impl AppState {
                 }
             }
             AgentEvent::QuestionResolved { request_id } => {
+                let id = request_id.to_string();
+                if let Some(TranscriptEntry::Question { resolved, .. }) = self.tabs[tab_idx]
+                    .transcript
+                    .iter_mut()
+                    .rev()
+                    .find(|entry| {
+                        matches!(
+                            entry,
+                            TranscriptEntry::Question { request_id, .. } if *request_id == id
+                        )
+                    })
+                {
+                    *resolved = true;
+                }
+                self.tabs[tab_idx].transcript_version =
+                    self.tabs[tab_idx].transcript_version.wrapping_add(1);
                 self.tabs[tab_idx]
                     .pending_questions
                     .retain(|request| request.request_id != request_id);
@@ -138,12 +165,36 @@ impl AppState {
 impl AppState {
     pub(super) fn open_question(&mut self, request: QuestionRequest) {
         let answers = vec![Vec::new(); request.questions.len()];
+        let custom = vec![String::new(); request.questions.len()];
         self.modal = Some(ActiveModal::Question {
             request,
             answers,
+            custom,
+            editing_custom: false,
             current: 0,
             focus: 0,
         });
+    }
+
+    pub(super) fn record_question_answer(
+        &mut self,
+        request_id: &RequestId,
+        answers: Option<Vec<QuestionAnswer>>,
+    ) {
+        let request_id = request_id.to_string();
+        if let Some(TranscriptEntry::Question {
+            answers: slot,
+            resolved,
+            ..
+        }) = self.tab_mut().transcript.iter_mut().rev().find(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::Question { request_id: id, .. } if *id == request_id
+            )
+        }) {
+            *slot = answers;
+            *resolved = true;
+        }
     }
 
     pub(super) fn open_pending_question(&mut self) {
@@ -435,9 +486,8 @@ impl SessionTab {
                 _ => {}
             },
             AgentEvent::ApprovalRequested { .. } | AgentEvent::ApprovalResolved { .. } => {}
-            AgentEvent::QuestionAsked { .. }
-            | AgentEvent::QuestionResolved { .. }
-            | AgentEvent::RewindCompleted { .. } => {}
+            AgentEvent::QuestionAsked { .. } | AgentEvent::QuestionResolved { .. } => {}
+            AgentEvent::RewindCompleted { .. } => {}
             AgentEvent::HookCompleted {
                 event,
                 decision,
@@ -674,6 +724,12 @@ impl From<ReplayEntry> for TranscriptEntry {
             },
             ReplayEntry::ToolCall(call) => TranscriptEntry::ToolCall(call.into()),
             ReplayEntry::Subagent(subagent) => TranscriptEntry::Subagent(subagent.into()),
+            ReplayEntry::Question(question) => TranscriptEntry::Question {
+                request_id: question.request_id,
+                questions: question.questions,
+                answers: question.answers,
+                resolved: question.resolved,
+            },
             ReplayEntry::System { text } => TranscriptEntry::System { text },
         }
     }

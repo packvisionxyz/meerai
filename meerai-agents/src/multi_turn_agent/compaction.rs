@@ -243,6 +243,9 @@ impl MultiTurnAgent {
 
                 let after = estimate_context_tokens(&self.request_messages());
                 let freed_tokens = before.saturating_sub(after);
+                if trigger == CompactionTrigger::Pressure {
+                    self.pressure_wasted = freed_tokens == 0;
+                }
                 let item_id = ItemId::new();
                 let _ = event_tx.send(AgentEvent::ItemStarted {
                     item: SessionItem::Compaction {

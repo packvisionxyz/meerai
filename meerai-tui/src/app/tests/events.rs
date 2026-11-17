@@ -997,3 +997,57 @@ fn ctrl_g_sends_queued_message_now_as_steering() {
         Some(TranscriptEntry::User { text }) if text == "urgent"
     ));
 }
+
+#[test]
+fn question_asked_and_answered_appear_in_the_transcript() {
+    let (mut app, _rx, _secrets) = test_app();
+    let request_id = RequestId::from_raw("req-q");
+    app.handle_agent_event(AgentEvent::QuestionAsked {
+        request: QuestionRequest {
+            request_id: request_id.clone(),
+            turn_id: TurnId::from_raw("turn-q"),
+            questions: vec![QuestionPrompt {
+                header: "Update scope".to_string(),
+                question: "Code or docs?".to_string(),
+                options: Vec::new(),
+                multiple: false,
+            }],
+        },
+    });
+    assert!(matches!(
+        app.tab().transcript.last(),
+        Some(TranscriptEntry::Question {
+            resolved: false,
+            answers: None,
+            ..
+        })
+    ));
+
+    app.record_question_answer(
+        &request_id,
+        Some(vec![QuestionAnswer {
+            header: "Update scope".to_string(),
+            selected: vec!["Code + docs".to_string()],
+        }]),
+    );
+    assert!(matches!(
+        app.tab().transcript.last(),
+        Some(TranscriptEntry::Question {
+            resolved: true,
+            answers: Some(_),
+            ..
+        })
+    ));
+
+    app.handle_agent_event(AgentEvent::QuestionResolved {
+        request_id: request_id.clone(),
+    });
+    assert!(matches!(
+        app.tab().transcript.last(),
+        Some(TranscriptEntry::Question {
+            resolved: true,
+            answers: Some(_),
+            ..
+        })
+    ));
+}

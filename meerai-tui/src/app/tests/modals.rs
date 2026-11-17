@@ -881,7 +881,7 @@ fn diff_modal_file_list_toggles_moves_opens_and_closes() {
         }) if diff.path == "b.rs"
     ));
 
-    app.handle_key_event(key(KeyCode::Tab));
+    app.handle_key_event(key(KeyCode::Right));
     assert!(matches!(
         app.modal,
         Some(ActiveModal::DiffView {
@@ -890,7 +890,7 @@ fn diff_modal_file_list_toggles_moves_opens_and_closes() {
             ..
         })
     ));
-    app.handle_key_event(key(KeyCode::BackTab));
+    app.handle_key_event(key(KeyCode::Left));
     assert!(matches!(
         app.modal,
         Some(ActiveModal::DiffView {
@@ -968,4 +968,106 @@ fn diff_modal_file_list_click_opens_the_clicked_file() {
     ));
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+fn question_request(id: &str, multiple: bool) -> QuestionRequest {
+    use meerai_agents::{QuestionOption, QuestionPrompt};
+    QuestionRequest {
+        request_id: RequestId::from_raw(id),
+        turn_id: TurnId::new(),
+        questions: vec![QuestionPrompt {
+            header: "DB".to_string(),
+            question: "Which database?".to_string(),
+            options: vec![
+                QuestionOption {
+                    label: "Postgres".to_string(),
+                    description: None,
+                },
+                QuestionOption {
+                    label: "SQLite".to_string(),
+                    description: None,
+                },
+            ],
+            multiple,
+        }],
+    }
+}
+
+fn type_text(app: &mut AppState, text: &str) {
+    for ch in text.chars() {
+        app.handle_key_event(key(KeyCode::Char(ch)));
+    }
+}
+
+#[test]
+fn question_overlay_custom_answer_accepts_typed_text() {
+    let (mut app, mut rx, _secrets) = test_app();
+    app.handle_agent_event(AgentEvent::QuestionAsked {
+        request: question_request("q-other", false),
+    });
+    app.handle_key_event(key(KeyCode::Down));
+    app.handle_key_event(key(KeyCode::Down));
+    type_text(&mut app, "DuckDB please");
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::AnswerQuestion {
+            request_id: RequestId::from_raw("q-other"),
+            answers: Some(vec![QuestionAnswer {
+                header: "DB".to_string(),
+                selected: vec!["DuckDB please".to_string()],
+            }]),
+        }
+    );
+}
+
+#[test]
+fn question_overlay_selecting_an_option_clears_the_custom_answer() {
+    let (mut app, mut rx, _secrets) = test_app();
+    app.handle_agent_event(AgentEvent::QuestionAsked {
+        request: question_request("q-clear", false),
+    });
+    app.handle_key_event(key(KeyCode::Down));
+    app.handle_key_event(key(KeyCode::Down));
+    type_text(&mut app, "custom");
+    app.handle_key_event(key(KeyCode::Up));
+    app.handle_key_event(key(KeyCode::Up));
+    app.handle_key_event(key(KeyCode::Char(' ')));
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::AnswerQuestion {
+            request_id: RequestId::from_raw("q-clear"),
+            answers: Some(vec![QuestionAnswer {
+                header: "DB".to_string(),
+                selected: vec!["Postgres".to_string()],
+            }]),
+        }
+    );
+}
+
+#[test]
+fn question_overlay_multiple_keeps_options_and_custom_text() {
+    let (mut app, mut rx, _secrets) = test_app();
+    app.handle_agent_event(AgentEvent::QuestionAsked {
+        request: question_request("q-multi", true),
+    });
+    app.handle_key_event(key(KeyCode::Char(' ')));
+    app.handle_key_event(key(KeyCode::Down));
+    app.handle_key_event(key(KeyCode::Down));
+    type_text(&mut app, "and DuckDB");
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::AnswerQuestion {
+            request_id: RequestId::from_raw("q-multi"),
+            answers: Some(vec![QuestionAnswer {
+                header: "DB".to_string(),
+                selected: vec!["Postgres".to_string(), "and DuckDB".to_string()],
+            }]),
+        }
+    );
 }

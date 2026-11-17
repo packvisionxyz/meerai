@@ -66,6 +66,7 @@ pub async fn run_event_loop(
     spawn_tab_forwarder(app.tab().tab_id, event_rx, loop_tx.clone());
 
     let mut last_status: Option<terminal::TerminalStatus> = None;
+    let mut last_title: Option<String> = None;
     let (git_tx, mut git_rx) = mpsc::unbounded_channel::<Vec<FileChangeEntry>>();
     let mut git_in_flight = false;
     let mut ticks_since_git = 0usize;
@@ -155,9 +156,11 @@ pub async fn run_event_loop(
         } else {
             terminal::TerminalStatus::Idle
         };
-        if last_status != Some(desired_status) {
-            terminal::set_status(desired_status);
+        let desired_title = app.tab().title.clone();
+        if last_status != Some(desired_status) || last_title != desired_title {
+            terminal::set_status(desired_status, desired_title.as_deref());
             last_status = Some(desired_status);
+            last_title = desired_title;
         }
 
         if app.pending_reload {

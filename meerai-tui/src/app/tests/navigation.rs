@@ -342,7 +342,9 @@ fn doc_selection_copies_while_scrolling_across_long_and_wrapped_content() {
         .iter()
         .position(|line| line.text.contains("Start marker"))
         .expect("start marker line");
-    let start_screen_row = inner.y + (start_idx - app.tab().scroll_offset) as u16;
+    let inner = app.transcript_inner_area;
+    let start_screen_row = (inner.y + (start_idx - app.tab().scroll_offset) as u16)
+        .min(inner.y + inner.height.saturating_sub(1));
     assert!(app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: inner.x,
@@ -366,7 +368,9 @@ fn doc_selection_copies_while_scrolling_across_long_and_wrapped_content() {
         .iter()
         .position(|line| line.text.contains("OMEGA_END"))
         .expect("end marker line");
-    let end_screen_row = inner.y + (end_idx - app.tab().scroll_offset) as u16;
+    let inner = app.transcript_inner_area;
+    let end_screen_row = (inner.y + (end_idx - app.tab().scroll_offset) as u16)
+        .min(inner.y + inner.height.saturating_sub(1));
     assert!(app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: inner.x + inner.width - 1,

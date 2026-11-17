@@ -26,12 +26,12 @@ pub fn line_spans(tokens: &[Token], base: Style) -> Vec<Span<'static>> {
 fn token_style(kind: TokenKind, base: Style) -> Style {
     match kind {
         TokenKind::Plain => base,
-        TokenKind::Keyword => base.fg(theme::p().accent).add_modifier(Modifier::BOLD),
-        TokenKind::String => base.fg(theme::p().success),
-        TokenKind::Number => base.fg(theme::p().info),
+        TokenKind::Keyword => base.fg(theme::p().success).add_modifier(Modifier::BOLD),
+        TokenKind::String => base.fg(theme::p().warning),
+        TokenKind::Number => base.fg(theme::p().warning),
         TokenKind::Comment => base.fg(theme::p().faint).add_modifier(Modifier::ITALIC),
-        TokenKind::Function => base.fg(theme::p().interactive),
-        TokenKind::Type => base.fg(theme::p().accent),
+        TokenKind::Function => base.fg(theme::p().code_function),
+        TokenKind::Type => base.fg(theme::p().code_function),
     }
 }
 
@@ -54,7 +54,7 @@ mod tests {
         let spans = line_spans(&tokens, Style::default());
         assert_eq!(spans.len(), 2);
         assert_eq!(spans[0].content, "let");
-        assert_eq!(spans[0].style.fg, Some(theme::p().accent));
+        assert_eq!(spans[0].style.fg, Some(theme::p().success));
         assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(spans[1].style.fg, None);
     }

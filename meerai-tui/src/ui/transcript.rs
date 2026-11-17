@@ -346,6 +346,9 @@ struct TurnDigest {
 
 impl TurnDigest {
     fn record_tool(&mut self, name: &str, status: &ToolCallStatus) {
+        if name == meerai_agents::QUESTION_TOOL {
+            return;
+        }
         let active = matches!(status, ToolCallStatus::Proposed | ToolCallStatus::Running);
         match name {
             "code-shell" | "sac-run_script" => {
@@ -499,6 +502,11 @@ fn build_transcript_lines(app: &AppState, memo: &mut TranscriptBuildMemo) -> Bui
     lines.push(tagged_line(Line::default(), None, 0));
     let mut current_turn: Option<usize> = None;
     for (idx, entry) in transcript.iter().enumerate() {
+        if let TranscriptEntry::ToolCall(tc) = entry
+            && tc.name == meerai_agents::QUESTION_TOOL
+        {
+            continue;
+        }
         if matches!(entry, TranscriptEntry::User { .. }) {
             current_turn = Some(idx);
         }
@@ -900,6 +908,75 @@ fn build_transcript_lines(app: &AppState, memo: &mut TranscriptBuildMemo) -> Bui
                     }
                 }
             }
+            TranscriptEntry::Question {
+                questions,
+                answers,
+                resolved,
+                ..
+            } => {
+                for (q_idx, prompt) in questions.iter().enumerate() {
+                    let header = if questions.len() > 1 {
+                        format!("? {}/{} {}", q_idx + 1, questions.len(), prompt.header)
+                    } else {
+                        format!("? {}", prompt.header)
+                    };
+                    lines.push(banded_line(
+                        Line::from(Span::styled(
+                            header,
+                            Style::default()
+                                .fg(theme::p().accent)
+                                .add_modifier(Modifier::BOLD),
+                        )),
+                        Some(idx),
+                        2,
+                    ));
+                    lines.push(tagged_line(
+                        Line::from(vec![
+                            Span::styled("  ", Style::default()),
+                            Span::styled(
+                                prompt.question.clone(),
+                                Style::default().fg(theme::p().text),
+                            ),
+                        ]),
+                        None,
+                        2,
+                    ));
+                    let selected = answers
+                        .as_ref()
+                        .and_then(|answers| answers.get(q_idx))
+                        .map(|answer| answer.selected.as_slice())
+                        .unwrap_or_default();
+                    if selected.is_empty() {
+                        let label = if *resolved {
+                            "(cancelled)"
+                        } else {
+                            "(waiting for answer)"
+                        };
+                        lines.push(tagged_line(
+                            Line::from(Span::styled(
+                                format!("  {label}"),
+                                Style::default().fg(theme::p().muted),
+                            )),
+                            None,
+                            2,
+                        ));
+                    } else {
+                        for label in selected {
+                            lines.push(tagged_line(
+                                Line::from(vec![
+                                    Span::styled("  ✓ ", Style::default().fg(theme::p().success)),
+                                    Span::styled(
+                                        label.clone(),
+                                        Style::default().fg(theme::p().text),
+                                    ),
+                                ]),
+                                None,
+                                2,
+                            ));
+                        }
+                    }
+                }
+            }
             TranscriptEntry::System { text } => {
                 for (line_idx, line) in text.split('\n').enumerate() {
                     let prefix = if line_idx == 0 {
@@ -1252,6 +1329,23 @@ fn render_nested_conversation(
                     format!("[subagent] {} [{badge}]", sub.agent),
                     false,
                 ));
+            }
+            TranscriptEntry::Question {
+                questions, answers, ..
+            } => {
+                for (q_idx, prompt) in questions.iter().enumerate() {
+                    lines.push(nested_line(
+                        parent_idx,
+                        format!("? {}", prompt.header),
+                        true,
+                    ));
+                    lines.push(nested_line(parent_idx, prompt.question.clone(), false));
+                    if let Some(answer) = answers.as_ref().and_then(|answers| answers.get(q_idx)) {
+                        for label in &answer.selected {
+                            lines.push(nested_line(parent_idx, format!("✓ {label}"), false));
+                        }
+                    }
+                }
             }
             TranscriptEntry::System { text } => {
                 lines.push(nested_line(

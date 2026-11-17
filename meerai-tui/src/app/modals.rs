@@ -495,7 +495,7 @@ impl AppState {
                     KeyCode::End | KeyCode::Char('G') => {
                         scroll = max_scroll;
                     }
-                    KeyCode::Tab | KeyCode::Char(']') if file_count > 0 => {
+                    KeyCode::Right | KeyCode::Char(']') if file_count > 0 => {
                         file_index = (file_index + 1) % file_count;
                         let entry = &self.file_changes[file_index];
                         diff = build_file_diff(&self.workspace_root, &entry.path, &entry.status);
@@ -506,7 +506,7 @@ impl AppState {
                             };
                         }
                     }
-                    KeyCode::BackTab | KeyCode::Char('[') if file_count > 0 => {
+                    KeyCode::Left | KeyCode::Char('[') if file_count > 0 => {
                         file_index = if file_index == 0 {
                             file_count - 1
                         } else {
@@ -798,13 +798,18 @@ impl AppState {
             ActiveModal::Question {
                 request,
                 mut answers,
+                mut custom,
+                mut editing_custom,
                 mut current,
                 mut focus,
             } => {
                 let prompt = &request.questions[current];
                 let last = current + 1 >= request.questions.len();
+                let other = prompt.options.len();
+                let multiple = prompt.multiple;
                 match key.code {
                     KeyCode::Esc => {
+                        self.record_question_answer(&request.request_id, None);
                         let _ = self.tab().cmd_tx.send(AgentCommand::AnswerQuestion {
                             request_id: request.request_id.clone(),
                             answers: None,
@@ -813,14 +818,24 @@ impl AppState {
                         self.open_pending_question();
                         return true;
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
+                    KeyCode::Up => {
+                        editing_custom = false;
                         focus = focus.saturating_sub(1);
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        focus = (focus + 1).min(prompt.options.len().saturating_sub(1));
+                    KeyCode::Down => {
+                        editing_custom = false;
+                        focus = (focus + 1).min(other);
                     }
-                    KeyCode::Char(' ') => {
-                        if prompt.multiple {
+                    KeyCode::Char('k') if !editing_custom => {
+                        editing_custom = false;
+                        focus = focus.saturating_sub(1);
+                    }
+                    KeyCode::Char('j') if !editing_custom => {
+                        editing_custom = false;
+                        focus = (focus + 1).min(other);
+                    }
+                    KeyCode::Char(' ') if focus < other => {
+                        if multiple {
                             if let Some(index) = answers[current].iter().position(|i| *i == focus) {
                                 answers[current].remove(index);
                             } else {
@@ -829,52 +844,73 @@ impl AppState {
                             }
                         } else {
                             answers[current] = vec![focus];
+                            custom[current].clear();
                         }
+                    }
+                    KeyCode::Char(' ') => {
+                        if editing_custom {
+                            if !multiple {
+                                answers[current].clear();
+                            }
+                            custom[current].push(' ');
+                        } else {
+                            editing_custom = true;
+                        }
+                    }
+                    KeyCode::Char(c) if focus == other => {
+                        editing_custom = true;
+                        if !multiple {
+                            answers[current].clear();
+                        }
+                        custom[current].push(c);
+                    }
+                    KeyCode::Backspace if focus == other => {
+                        editing_custom = true;
+                        custom[current].pop();
                     }
                     KeyCode::Tab | KeyCode::Right => {
                         if !last {
                             current += 1;
                             focus = 0;
+                            editing_custom = false;
                         }
                     }
                     KeyCode::Left => {
                         if current > 0 {
                             current -= 1;
                             focus = 0;
+                            editing_custom = false;
                         }
                     }
-                    KeyCode::Char(c @ '1'..='9') => {
+                    KeyCode::Char(c @ '1'..='9') if focus < other => {
                         let index = c.to_digit(10).unwrap_or(1) as usize - 1;
                         if index < prompt.options.len() {
                             focus = index;
-                            if prompt.multiple {
+                            if multiple {
                                 if !answers[current].contains(&index) {
                                     answers[current].push(index);
                                     answers[current].sort_unstable();
                                 }
                             } else {
                                 answers[current] = vec![index];
+                                custom[current].clear();
                             }
                         }
                     }
+                    KeyCode::Enter if focus == other && !editing_custom => {
+                        editing_custom = true;
+                    }
+                    KeyCode::Enter if focus == other && custom[current].trim().is_empty() => {}
                     KeyCode::Enter => {
-                        if answers[current].is_empty() {
+                        if focus < other && answers[current].is_empty() {
                             answers[current] = vec![focus];
                         }
                         if last {
-                            let collected: Vec<QuestionAnswer> = request
-                                .questions
-                                .iter()
-                                .enumerate()
-                                .map(|(index, prompt)| QuestionAnswer {
-                                    header: prompt.header.clone(),
-                                    selected: answers[index]
-                                        .iter()
-                                        .filter_map(|i| prompt.options.get(*i))
-                                        .map(|option| option.label.clone())
-                                        .collect(),
-                                })
-                                .collect();
+                            let collected = collect_question_answers(&request, &answers, &custom);
+                            self.record_question_answer(
+                                &request.request_id,
+                                Some(collected.clone()),
+                            );
                             let _ = self.tab().cmd_tx.send(AgentCommand::AnswerQuestion {
                                 request_id: request.request_id.clone(),
                                 answers: Some(collected),
@@ -885,12 +921,15 @@ impl AppState {
                         }
                         current += 1;
                         focus = 0;
+                        editing_custom = false;
                     }
                     _ => {}
                 }
                 self.modal = Some(ActiveModal::Question {
                     request,
                     answers,
+                    custom,
+                    editing_custom,
                     current,
                     focus,
                 });
@@ -1411,13 +1450,15 @@ impl AppState {
                 ActiveModal::Question {
                     request,
                     mut answers,
+                    custom,
                     current,
                     ..
                 },
                 ModalHitKind::ListItem(idx),
             ) => {
                 let prompt = &request.questions[current];
-                if idx < prompt.options.len() {
+                let other = prompt.options.len();
+                if idx < other {
                     if prompt.multiple {
                         if let Some(pos) = answers[current].iter().position(|i| *i == idx) {
                             answers[current].remove(pos);
@@ -1431,6 +1472,8 @@ impl AppState {
                     self.modal = Some(ActiveModal::Question {
                         request,
                         answers,
+                        custom,
+                        editing_custom: false,
                         current,
                         focus: idx,
                     });
@@ -1438,8 +1481,10 @@ impl AppState {
                     self.modal = Some(ActiveModal::Question {
                         request,
                         answers,
+                        custom,
+                        editing_custom: true,
                         current,
-                        focus: 0,
+                        focus: other,
                     });
                 }
             }
@@ -1735,4 +1780,31 @@ impl AppState {
             error: None,
         });
     }
+}
+
+fn collect_question_answers(
+    request: &QuestionRequest,
+    answers: &[Vec<usize>],
+    custom: &[String],
+) -> Vec<QuestionAnswer> {
+    request
+        .questions
+        .iter()
+        .enumerate()
+        .map(|(index, prompt)| {
+            let mut selected: Vec<String> = answers[index]
+                .iter()
+                .filter_map(|i| prompt.options.get(*i))
+                .map(|option| option.label.clone())
+                .collect();
+            let text = custom[index].trim();
+            if !text.is_empty() {
+                selected.push(text.to_string());
+            }
+            QuestionAnswer {
+                header: prompt.header.clone(),
+                selected,
+            }
+        })
+        .collect()
 }

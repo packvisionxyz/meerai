@@ -27,7 +27,13 @@ replace the local walker.
    result list and a preview pane.
 4. **Information-dense statusline:** Input mode, approval mode, provider/model,
    credential state, current-turn and session token usage, throughput, and
-   active tool.
+   active tool. While `subagent-run` is active it names the running agents;
+   clicking that segment opens a `SubagentOverlay` above the composer. A row
+   click expands that child session in the transcript and keeps the overlay;
+   `Esc` or a click outside closes it.
+5. **Paged sidebar changes:** the file list pages with a clickable
+   `… and N more` footer (back to top at the end) and scrolls with the mouse
+   wheel. The diff modal cycles files with `←`/`→` (or `[`/`]`).
 
 ---
 
@@ -204,13 +210,20 @@ When the policy returns `Ask` for a tool call (for example `write_file`,
 ### 5. Question Overlay (`QST`) — current
 
 The model can call `question-ask` when it needs a product or configuration
-choice. The overlay shows the header, the question, and the options:
+choice. The overlay shows the header, the question, and a mode line:
+`Select one` (radio markers `( )` / `(•)`) or `Select all that apply`
+(checkbox markers `[ ]` / `[x]`). An `Other (type your own)` row is always last:
 
-- `Up` / `Down` — move the option focus.
+- `Up` / `Down` — move the option focus, including the `Other` row.
 - `Space` — toggle an option when `multiple` is true; otherwise select it.
+- Typing on the `Other` row — enter free text; it is submitted as an extra
+  selected label. For a single-select question, a typed answer clears the
+  option selection, and selecting an option clears the typed answer.
+- `Backspace` — edit the typed answer.
+- `Enter` — submit on the last question (or advance to the next); on an empty
+  `Other` row it starts typing.
 - `Tab` / `Right` — next question when a call contains several.
 - `Left` — previous question.
-- `Enter` — submit on the last question (or advance to the next).
 - `Esc` — cancel the request; the model receives a structured refusal.
 
 Pending questions queue per tab like approvals. A question is not a permission
@@ -238,9 +251,9 @@ yet.
 
 Starting `meerai --continue` or `meerai --resume <ID>` without `--prompt` opens
 the session and starts the TUI with its transcript replayed. Replay covers user
-and steering messages, assistant text and reasoning, tool calls and results, and
-compaction markers. A tool call with no result shows as cancelled. Runtime and
-system events are skipped. Token counters seed from the last logged usage entry.
+and steering messages, assistant text and reasoning, tool calls and results,
+questions and their selected answers, and compaction markers. A tool call with
+no result shows as cancelled. Runtime and system events are skipped. Token counters seed from the last logged usage entry.
 Replay reads the session log; it has no separate retention UI. Opt-in startup
 pruning (`sessions.auto_prune_days`) always spares the session being replayed,
 so a resumed transcript cannot disappear underneath the TUI.

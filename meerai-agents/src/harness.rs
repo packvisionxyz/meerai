@@ -23,6 +23,7 @@ pub struct HarnessConfig {
     pub max_session_tokens: Option<u64>,
     pub max_turn_secs: u64,
     pub summarizer_model: Option<String>,
+    pub temperature: Option<f32>,
     pub token_pricing: Option<TokenPricing>,
 }
 
@@ -42,6 +43,7 @@ impl Default for HarnessConfig {
             max_session_tokens: None,
             max_turn_secs: 1_800,
             summarizer_model: None,
+            temperature: None,
             token_pricing: None,
         }
     }
@@ -98,6 +100,12 @@ impl HarnessConfig {
                 cfg.summarizer_model = Some(trimmed.to_string());
             }
         }
+        if let Some(temperature) = context.temperature {
+            let value = temperature.value();
+            if (0.0..=2.0).contains(&value) {
+                cfg.temperature = Some(value);
+            }
+        }
         cfg
     }
 }
@@ -125,5 +133,26 @@ impl std::fmt::Debug for AgentHarness {
             .field("policy", &self.policy)
             .field("config", &self.config)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meerai_common::settings::Temperature;
+
+    #[test]
+    fn context_temperature_flows_into_the_harness() {
+        let config = HarnessConfig::from_context_settings(Some(&ContextSettings {
+            temperature: Some(Temperature::new(0.7)),
+            ..ContextSettings::default()
+        }));
+        assert_eq!(config.temperature, Some(0.7));
+
+        let config = HarnessConfig::from_context_settings(Some(&ContextSettings {
+            temperature: Some(Temperature::new(5.0)),
+            ..ContextSettings::default()
+        }));
+        assert_eq!(config.temperature, None);
     }
 }

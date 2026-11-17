@@ -6,7 +6,7 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: R
         Block::default().style(Style::default().bg(theme::p().surface)),
         area,
     );
-    if area.height < 3 || area.width < 8 {
+    if area.height < 5 || area.width < 8 {
         return;
     }
 
@@ -35,25 +35,79 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: R
         height: area.height.saturating_sub(2),
     };
     let content = Rect {
-        x: inner.x.saturating_add(2),
-        width: inner.width.saturating_sub(2),
-        ..inner
+        x: inner.x,
+        width: inner.width,
+        y: inner.y,
+        height: inner.height.saturating_sub(2),
     };
+    let footer = Rect::new(
+        content.x,
+        inner.y + inner.height.saturating_sub(1),
+        content.width,
+        1,
+    );
     app.composer_input_area = content;
 
-    let marker_color = match app.mode {
-        InputMode::Insert => theme::p().interactive,
-        InputMode::Normal => theme::p().muted,
+    let (mode_badge, mode_color) = match app.tab().approval_mode {
+        meerai_policy::ApprovalMode::Plan => (
+            approval_mode_badge(app.tab().approval_mode),
+            theme::p().info,
+        ),
+        meerai_policy::ApprovalMode::Ask => (
+            approval_mode_badge(app.tab().approval_mode),
+            theme::p().warning,
+        ),
+        meerai_policy::ApprovalMode::Auto => (
+            approval_mode_badge(app.tab().approval_mode),
+            theme::p().success,
+        ),
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "❯",
+    let temperature = app
+        .settings
+        .context
+        .as_ref()
+        .and_then(|context| context.temperature)
+        .map(|value| format!("{:.2}", value.value()))
+        .unwrap_or_else(|| "default".to_string());
+    let model = super::statusline::display_model(app);
+    let (input_badge, input_color) = match app.mode {
+        InputMode::Insert => ("INS", theme::p().accent),
+        InputMode::Normal => ("NOR", theme::p().info),
+    };
+    let mut footer_spans = vec![
+        Span::styled(
+            input_badge,
             Style::default()
-                .fg(marker_color)
+                .fg(input_color)
                 .add_modifier(Modifier::BOLD),
-        ))),
-        Rect::new(inner.x, inner.y, 2, 1),
-    );
+        ),
+        Span::styled(" · ", Style::default().fg(theme::p().faint)),
+        Span::styled(
+            mode_badge.to_string(),
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if app.tab().is_acp() {
+        let preset = app.tab().acp_preset().unwrap_or("acp");
+        footer_spans.push(Span::styled(
+            format!(" · {preset} (acp)"),
+            Style::default().fg(theme::p().faint),
+        ));
+    } else {
+        footer_spans.push(Span::styled(
+            format!(" · {model}"),
+            Style::default().fg(theme::p().text),
+        ));
+        footer_spans.push(Span::styled(
+            format!(" · {}", app.tab().active_provider),
+            Style::default().fg(theme::p().faint),
+        ));
+    }
+    footer_spans.push(Span::styled(
+        format!(" · {temperature}"),
+        Style::default().fg(theme::p().warning),
+    ));
+    frame.render_widget(Paragraph::new(Line::from(footer_spans)), footer);
 
     if !app.tab().queued.is_empty() && area.width >= 30 {
         let badge = format!("{} queued · ctrl+g steer", app.tab().queued.len());

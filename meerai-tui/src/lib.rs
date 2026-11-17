@@ -99,6 +99,9 @@ pub struct TuiLaunchConfig {
     pub restore_sessions: Vec<SessionId>,
     pub launch_system: String,
     pub launch_definitions: String,
+    pub sandbox_active: bool,
+    pub sandbox_kind: String,
+    pub sandbox_warning: Option<String>,
     pub workspace_query: Option<Arc<dyn WorkspaceQuery>>,
 }
 
@@ -141,6 +144,9 @@ pub async fn run_tui(
     app.update_available = config.update_available;
     app.launch_system = config.launch_system;
     app.launch_definitions = config.launch_definitions;
+    app.sandbox_active = config.sandbox_active;
+    app.sandbox_kind = config.sandbox_kind;
+    app.sandbox_warning = config.sandbox_warning;
     for id in config.restore_sessions {
         app.pending_session_actions
             .push(PendingSessionAction::OpenSessionId(id));

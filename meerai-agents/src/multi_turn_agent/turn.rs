@@ -233,6 +233,13 @@ impl MultiTurnAgent {
         {
             options = options.with_cache_control(CacheControl::Ephemeral);
         }
+        if let Some(temperature) = self
+            .harness
+            .as_ref()
+            .and_then(|harness| harness.config.temperature)
+        {
+            options = options.with_temperature(temperature as f64);
+        }
 
         let harnessed = self.harness.is_some();
         let max_steps = self
@@ -325,7 +332,11 @@ impl MultiTurnAgent {
                     }
                 }
 
+                if !self.over_high_watermark() {
+                    self.pressure_wasted = false;
+                }
                 if self.over_high_watermark()
+                    && !self.pressure_wasted
                     && pressure_compactions < MAX_PRESSURE_COMPACTIONS_PER_TURN
                     && pressure_step != Some(step_index)
                 {

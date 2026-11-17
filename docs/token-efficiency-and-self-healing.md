@@ -352,27 +352,34 @@ Failure: an ambiguous normalized anchor edits the file.
    only retries when `run_compaction` returns `Ok(true)`, `sac-run_script` `path` arguments pass through
    `CodeTools::resolve_for_read`, and inline `sac-run_script` approvals carry a `<language>: <first-line>`
    resource preview.
-7. **Phase 7 — Custom-script sandboxing (`sac-run_script` & `ExecutionWorld`).** Proposed hardening for
-   model-authored scripts in `meerai-tools/src/world.rs` and `meerai-tools/src/search_as_code/mod.rs`:
-   - *Scoped host reads instead of read-all:* replace blanket `(allow file-read*)` in `SeatbeltWorld`
-     and `--ro-bind / /` in `BubblewrapWorld` for `SandboxPolicy::ReadOnly` (and optionally
-     `WorkspaceWrite`) with explicit read roots: system runtime paths (`/usr`, `/lib`, `/lib64`, `/bin`,
-     `/System`, `/Library`, dyld cache, Python/Node prefix), `workspace_root`, and `readable_roots`,
-     while explicitly denying sensitive user directories (`$HOME/.ssh`, `$HOME/.aws`, `$HOME/.gnupg`,
-     `$XDG_DATA_HOME/meerai/auth.json`, `$XDG_CONFIG_HOME/meerai`).
-   - *Sensitive-file parity inside the sandbox:* deny reads of workspace sensitive files (`.env*`, private
-     keys, `credentials*`, `secrets*` matching `CodeTools::is_sensitive_path`) at the OS sandbox layer
-     for `sac-run_script`, since `ExecutionWorld` currently bypasses `CodeTools` path filters once a
-     script starts running.
-   - *Process & resource limits:* attach `RLIMIT_AS` / `RLIMIT_CPU` / `RLIMIT_NOFILE` / `RLIMIT_NPROC`
-     (or `prlimit` / `setrlimit` in `pre_exec`) and cap captured stdout/stderr before buffering in
-     `run_command` so a runaway script cannot OOM the harness or fork-bomb.
-   - *Interpreter-level isolation:* pass `--permission --allow-fs-read=<workspace>` (on Node >= 20/22)
-     for `javascript`, and keep `python3 -I` with `PYTHONDONTWRITEBYTECODE=1` and a clean `PATH` for
-     `python`.
-   - *Non-silent fallback & fail-closed option:* surface `ExecutionWorld::warning()` in `AgentEvent` /
-     TUI statusline and add a `sandbox.require_for_scripts` (or `sac` fail-closed) option so
-     `sac-run_script` refuses to run on `HostWorld` when an OS sandbox is unavailable.
+7. **Phase 7 — Custom-script & command sandboxing (`sac-run_script`, `code-shell`, `ExecutionWorld`).**
+   *Landed v1* in `meerai-tools/src/world.rs`, `meerai-tools/src/code/shell.rs`,
+   `meerai-tools/src/search_as_code/mod.rs`, `meerai-common/src/settings.rs`, and `meerai-cli/src/main.rs`:
+   - *Sensitive-path masking inside Seatbelt & Bubblewrap:* `seatbelt_profile` and `bwrap_args`
+     deny reads (and writes in `WorkspaceWrite`) for sensitive user paths (`~/.ssh`, `~/.aws`,
+     `~/.gnupg`, `~/.kube`, `~/.docker`, `~/.netrc`, `_netrc`, `.npmrc`, `.pypirc`, `.git-credentials`,
+     `meerai` config/data dirs) and bounded workspace sensitive files (`is_sensitive_path`, depth <= 5,
+     max 256 files, including gitignored `.env*`), masking them in `bwrap` after `--bind`.
+   - *Expanded child env scrubbing & stream caps:* `scrub_command_env` strips 25 credential names
+     and 17 secret/token/password/credential suffixes; `run_command` caps captured stdout/stderr at
+     1 MiB per stream while draining pipes.
+   - *Interpreter hardening:* `sac-run_script` uses `python3 -I -B` (isolated + no `.pyc` writes)
+     and probes Node `--permission` / `--experimental-permission` with `--allow-fs-read=<cwd>` for
+     `javascript` (do not adopt `bun`, which lacks a capability sandbox of its own).
+   - *Opt-in fail-closed fallback:* `sandbox.require_for_scripts` and `sandbox.require_for_shell`
+     (`SandboxSettings`, tighten-only in `.meerai/settings.yml`) refuse `HostWorld` when an OS
+     sandbox is unavailable.
+
+   *Remaining Phase 7 backlog:*
+   - *Strict read/env allowlists & `RLIMIT_*`:* optional allowlist-only read mounts for
+     `SandboxPolicy::ReadOnly`, minimal env allowlist mode, and safe `setrlimit` CPU/core/fsize
+     bounds in `pre_exec`.
+   - *Cross-platform gaps:* in-process Linux Landlock + seccomp fallback when `bwrap` is absent,
+     Windows Job Objects / AppContainer, and surfacing `ExecutionWorld::warning()` in the TUI
+     statusline.
+   - *Capability / embedded script runtime (long-term):* an embedded WASM/WASI or QuickJS runtime
+     backed directly by `CodeTools::resolve_for_read` (or `deno` with `--allow-read=<workspace>`)
+     so `sac-run_script` needs zero host interpreter or host FS visibility.
 8. **Phase 8 — Next-wave harness efficiency & self-healing.** Proposed improvements across the loop:
    - *Incremental projection & stable prefix:* cache `derive_messages` incrementally from a tail index
      and keep `RuntimeContext` / scoped `AGENTS.md` insertions out of the cached prefix (append after
@@ -398,5 +405,5 @@ Failure: an ambiguous normalized anchor edits the file.
 | 3 | Is dropping assistant text on tool-call messages intentional? | Author intent or a regression test (`meerai-session/src/projection.rs:104-111`) | Session |
 | 4 | Is the dead `verbatim_window_turns` projection field reserved for a sliding window? | **Settled:** active in `meerai-session/src/projection.rs:210` (`clear_old_tool_results` keeps the newest N turns verbatim) | Session |
 | 5 | Is the live cancel gap a defect or documented behavior? | **Settled:** fixed by Q5 / AC-3 (`heal_dangling_tool_calls` at `TurnEnded` in `meerai-agents/src/multi_turn_agent/turn.rs`) | Agents |
-| 6 | Should `sac-run_script` fail closed when `ExecutionWorld::is_sandboxed()` is false? | Decide default vs opt-in `sandbox.require_for_scripts` in `settings.yml` | Tools / Policy |
+| 6 | Should `sac-run_script` fail closed when `ExecutionWorld::is_sandboxed()` is false? | **Settled:** warn by default; opt-in fail-closed via `sandbox.require_for_scripts` and `sandbox.require_for_shell` (`SandboxSettings`) | Tools / Policy |
 | 7 | Which system read prefixes are minimal yet sufficient for `python3`/`node` under Seatbelt & `bwrap`? | Empirical smoke matrix on macOS (`pyenv`/Homebrew/system Python, `nvm`/Homebrew Node) and Linux | Tools |

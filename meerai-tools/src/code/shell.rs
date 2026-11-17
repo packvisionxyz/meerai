@@ -4,7 +4,7 @@ use std::time::Duration;
 use meerai_core::{ObservationStatus, ToolDefinition, ToolObservation, ToolOutput, ToolRun};
 
 use crate::code::paths::canonicalize_or_keep;
-use crate::code::{CodeTools, failure_run, truncate_middle};
+use crate::code::{CodeTools, failure_run, refused_run, truncate_middle};
 use crate::world::{SandboxPolicy, WorldCommand, WorldExecOutcome};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -24,7 +24,7 @@ const SHELL_ARGS: [&str; 1] = ["/C"];
 #[cfg(windows)]
 const SHELL_DESCRIPTION: &str = "(`cmd /C`)";
 
-const SENSITIVE_ENV_NAMES: [&str; 11] = [
+const SENSITIVE_ENV_NAMES: [&str; 25] = [
     "MEERAI_API_KEY",
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
@@ -36,15 +36,40 @@ const SENSITIVE_ENV_NAMES: [&str; 11] = [
     "MISTRAL_API_KEY",
     "GROQ_API_KEY",
     "AZURE_OPENAI_API_KEY",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITLAB_TOKEN",
+    "NPM_TOKEN",
+    "PYPI_TOKEN",
+    "CARGO_REGISTRY_TOKEN",
+    "HF_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+    "VAULT_TOKEN",
+    "SLACK_TOKEN",
+    "DISCORD_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
 ];
 
-const SENSITIVE_ENV_SUFFIXES: [&str; 6] = [
+const SENSITIVE_ENV_SUFFIXES: [&str; 17] = [
     "_API_KEY",
+    "_ACCESS_KEY",
     "_API_TOKEN",
     "_ACCESS_TOKEN",
+    "_AUTH_TOKEN",
+    "_SESSION_TOKEN",
+    "_REFRESH_TOKEN",
+    "_BEARER_TOKEN",
+    "_BOT_TOKEN",
     "_SECRET",
     "_SECRET_KEY",
+    "_CLIENT_SECRET",
     "_PRIVATE_KEY",
+    "_PASSWORD",
+    "_PASSWD",
+    "_CREDENTIAL",
+    "_CREDENTIALS",
 ];
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -108,6 +133,18 @@ pub(crate) fn scrub_command_env(cmd: &mut tokio::process::Command, extra_sensiti
 
 impl CodeTools {
     pub(crate) async fn shell(&self, args: ShellArgs) -> ToolRun {
+        if self.require_sandbox() && !self.execution_world().is_sandboxed() {
+            let suffix = self
+                .execution_world()
+                .warning()
+                .map(|w| format!(" ({w})"))
+                .unwrap_or_default();
+            return refused_run(format!(
+                "OS sandbox required for code-shell, but execution world is `{}`{suffix}",
+                self.execution_world().kind()
+            ));
+        }
+
         let cwd = self.canonical_workspace_root().await;
         match tokio::fs::metadata(&cwd).await {
             Ok(metadata) if metadata.is_dir() => {}
@@ -126,6 +163,7 @@ impl CodeTools {
             args: argv,
             cwd: cwd.clone(),
             removed_env_vars: self.sensitive_env_vars().to_vec(),
+            env_allowlist: self.strict_env().then(crate::world::strict_env_allowlist),
         };
 
         let mut writable_roots = Vec::with_capacity(self.writable_roots().len() + 1);
@@ -252,11 +290,20 @@ mod tests {
     fn sensitive_env_names_match_secret_suffixes() {
         for name in [
             "CUSTOM_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_ACCESS_KEY_ID",
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
             "SERVICE_API_TOKEN",
             "GITHUB_ACCESS_TOKEN",
+            "OAUTH_AUTH_TOKEN",
             "APP_SECRET",
             "APP_SECRET_KEY",
+            "OAUTH_CLIENT_SECRET",
             "DEPLOY_PRIVATE_KEY",
+            "DB_PASSWORD",
+            "ADMIN_PASSWD",
+            "SERVICE_CREDENTIALS",
         ] {
             assert!(is_sensitive_env(name), "{name}");
         }
@@ -381,5 +428,20 @@ mod tests {
             }
             other => panic!("expected WorkspaceWrite policy, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn shell_refuses_host_world_when_require_sandbox_is_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = CodeTools::new(dir.path()).with_require_sandbox(true);
+        assert!(tools.require_sandbox());
+
+        let run = tools
+            .shell(ShellArgs {
+                command: "echo hi".to_string(),
+                timeout_ms: None,
+            })
+            .await;
+        assert_eq!(run.observation.status, ObservationStatus::Refused);
     }
 }

@@ -645,6 +645,10 @@ async fn main() -> Result<()> {
         Arc::new(HookEngine::default())
     };
 
+    let sandbox_active = execution_world.is_sandboxed();
+    let sandbox_kind = execution_world.kind().to_string();
+    let sandbox_warning = execution_world.warning().map(str::to_string);
+
     let host = Arc::new(CliSessionHost {
         workspace_root: workspace_root.clone(),
         session_config,
@@ -730,6 +734,9 @@ async fn main() -> Result<()> {
                 restore_sessions: restore_ids.iter().skip(1).cloned().collect(),
                 launch_system: cli.system,
                 launch_definitions,
+                sandbox_active,
+                sandbox_kind,
+                sandbox_warning,
                 workspace_query: None,
             },
         )
@@ -840,17 +847,40 @@ impl CliSessionHost {
             readable_roots.push(dir.to_path_buf());
         }
 
+        let require_for_shell = self
+            .settings
+            .sandbox
+            .as_ref()
+            .and_then(|sandbox| sandbox.require_for_shell)
+            .unwrap_or(false);
+        let require_for_scripts = self
+            .settings
+            .sandbox
+            .as_ref()
+            .and_then(|sandbox| sandbox.require_for_scripts)
+            .unwrap_or(false);
+        let strict_env = self
+            .settings
+            .sandbox
+            .as_ref()
+            .and_then(|sandbox| sandbox.strict_env)
+            .unwrap_or(false);
+
         let code_tools = CodeTools::new(self.workspace_root.clone())
             .with_writable_roots(vec![self.workspace_root.clone()])
             .with_readable_roots(readable_roots.clone())
             .with_sensitive_env_vars(self.sensitive_env_vars.clone())
-            .with_execution_world(self.execution_world.clone());
+            .with_execution_world(self.execution_world.clone())
+            .with_require_sandbox(require_for_shell)
+            .with_strict_env(strict_env);
         let repo_map = RepoMapToolset::new(self.workspace_root.clone())
             .with_readable_roots(readable_roots.clone());
         let lsp = LspToolset::new(self.workspace_root.clone()).with_readable_roots(readable_roots);
         let mut sac = SearchAsCodeToolset::new(self.workspace_root.clone())
             .with_sensitive_env_vars(self.sensitive_env_vars.clone())
-            .with_execution_world(self.execution_world.clone());
+            .with_execution_world(self.execution_world.clone())
+            .with_require_sandbox(require_for_scripts)
+            .with_strict_env(strict_env);
         if let Some(runtime) = self.script_runtime {
             sac = sac.with_runtime(runtime);
         }

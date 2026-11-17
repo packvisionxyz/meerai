@@ -6,7 +6,7 @@ use meerai_common::definitions::{AgentDefinition, SkillDefinition};
 use meerai_core::EffectClass;
 use meerai_core::env::now_millis;
 use meerai_core::text::truncate_single_line;
-use meerai_policy::{ApprovalMode, approval_mode_badge};
+use meerai_policy::approval_mode_badge;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -30,6 +30,7 @@ mod modals;
 mod selection;
 mod sidebar;
 mod statusline;
+mod subagent_overlay;
 mod transcript;
 
 #[cfg(test)]
@@ -79,6 +80,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
     } else {
         app.sidebar_changes_inner_area = Rect::default();
         app.visible_file_change_rows = 0;
+        app.file_change_more_hit = None;
         app.hovered_file_change = None;
         main_area
     };
@@ -87,7 +89,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
     let composer_lines =
         composer::composer_rows(&app.tab().input, composer_input_width).clamp(1, 8) as u16;
     let composer_bottom_margin: u16 = if main_area.height >= 14 { 1 } else { 0 };
-    let composer_height = composer_lines + 2 + composer_bottom_margin;
+    let composer_height = composer_lines + 4 + composer_bottom_margin;
 
     selection::render_tab_bar(frame, app, tab_area);
 
@@ -103,6 +105,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
         render_toast(frame, app, transcript_area);
     }
     composer::render_completion_popup(frame, app, transcript_area, composer_area);
+    subagent_overlay::render_subagent_overlay(frame, app, composer_area);
     modals::render_active_modal(frame, app, area);
     selection::capture_screen_lines(frame, app);
     selection::render_selection_highlight(frame, app);

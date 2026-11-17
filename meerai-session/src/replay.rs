@@ -1,8 +1,11 @@
 use meerai_core::ObservationStatus;
 
 use crate::{
-    ContentBlock, InputSource, LoggedEvent, SeqRange, SessionEvent, Usage, join_text_blocks,
+    ContentBlock, InputSource, LoggedEvent, QuestionAnswer, QuestionPrompt, SeqRange, SessionEvent,
+    Usage, join_text_blocks,
 };
+
+const QUESTION_TOOL: &str = "question-ask";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolCallStatus {
@@ -33,11 +36,20 @@ pub struct ReplaySubagent {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplayQuestion {
+    pub request_id: String,
+    pub questions: Vec<QuestionPrompt>,
+    pub answers: Option<Vec<QuestionAnswer>>,
+    pub resolved: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReplayEntry {
     User { text: String },
     Assistant { text: String, reasoning: String },
     ToolCall(ReplayToolCall),
     Subagent(ReplaySubagent),
+    Question(ReplayQuestion),
     System { text: String },
 }
 
@@ -87,6 +99,9 @@ pub fn replay_from_events(events: &[LoggedEvent]) -> Vec<ReplayEntry> {
                 name,
                 args,
             } => {
+                if name == QUESTION_TOOL {
+                    continue;
+                }
                 replay.push(ReplayEntry::ToolCall(ReplayToolCall {
                     call_id: call_id.to_string(),
                     name: name.clone(),
@@ -114,6 +129,29 @@ pub fn replay_from_events(events: &[LoggedEvent]) -> Vec<ReplayEntry> {
                 replay.push(ReplayEntry::System {
                     text: "Compacted history".to_string(),
                 });
+            }
+            SessionEvent::QuestionAsked {
+                request_id,
+                questions,
+            } => {
+                replay.push(ReplayEntry::Question(ReplayQuestion {
+                    request_id: request_id.to_string(),
+                    questions: questions.clone(),
+                    answers: None,
+                    resolved: false,
+                }));
+            }
+            SessionEvent::QuestionAnswered {
+                request_id,
+                answers,
+            } => {
+                let request_id = request_id.to_string();
+                if let Some(ReplayEntry::Question(question)) = replay.iter_mut().rev().find(
+                    |entry| matches!(entry, ReplayEntry::Question(q) if q.request_id == request_id),
+                ) {
+                    question.answers = answers.clone();
+                    question.resolved = true;
+                }
             }
             _ => {}
         }
@@ -181,7 +219,10 @@ mod tests {
     use meerai_core::ToolObservation;
 
     use super::*;
-    use crate::{CallId, CompactionId, RewindScope, Seq, StreamDigest, TurnId, TurnTrigger};
+    use crate::{
+        CallId, CompactionId, QuestionOption, RequestId, RewindScope, Seq, StreamDigest, TurnId,
+        TurnTrigger,
+    };
 
     #[test]
     fn replays_known_entries_and_skips_runtime_events() {
@@ -546,5 +587,56 @@ mod tests {
             })
         );
         assert_eq!(session_usage_from_events(&[]), None);
+    }
+
+    #[test]
+    fn replays_questions_with_answers_and_skips_the_tool_row() {
+        let request_id = RequestId::from_raw("req-1");
+        let questions = vec![QuestionPrompt {
+            header: "Update scope".to_string(),
+            question: "Code or docs?".to_string(),
+            options: vec![QuestionOption {
+                label: "Code + docs".to_string(),
+                description: None,
+            }],
+            multiple: false,
+        }];
+        let answers = vec![QuestionAnswer {
+            header: "Update scope".to_string(),
+            selected: vec!["Code + docs".to_string()],
+        }];
+        let events = vec![
+            LoggedEvent {
+                seq: Seq(1),
+                event: SessionEvent::ToolCall {
+                    call_id: CallId::from_raw("call-q"),
+                    name: "question-ask".to_string(),
+                    args: "{}".to_string(),
+                },
+            },
+            LoggedEvent {
+                seq: Seq(2),
+                event: SessionEvent::QuestionAsked {
+                    request_id: request_id.clone(),
+                    questions: questions.clone(),
+                },
+            },
+            LoggedEvent {
+                seq: Seq(3),
+                event: SessionEvent::QuestionAnswered {
+                    request_id,
+                    answers: Some(answers.clone()),
+                },
+            },
+        ];
+        assert_eq!(
+            replay_from_events(&events),
+            vec![ReplayEntry::Question(ReplayQuestion {
+                request_id: "req-1".to_string(),
+                questions,
+                answers: Some(answers),
+                resolved: true,
+            })]
+        );
     }
 }
