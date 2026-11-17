@@ -146,3 +146,18 @@ mod modals;
 mod navigation;
 mod sessions;
 mod settings;
+
+#[test]
+fn bang_command_needs_a_shell_opener() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.tab_mut().input = "!echo hi".to_string();
+    app.tab_mut().cursor = app.tab().input.len();
+    app.submit_input();
+    assert!(app.tab().input.is_empty());
+    assert!(
+        app.status_notice
+            .as_deref()
+            .unwrap_or("")
+            .contains("Shell commands are not available")
+    );
+}

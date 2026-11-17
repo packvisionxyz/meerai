@@ -74,6 +74,13 @@ meerai --agent reviewer --prompt "review this change"
 meerai --skill orchestrate
 ```
 
+Short form: `-p` is the provider and `-m` is the model. `--prompt` (or `--print`) is the headless input.
+
+```sh
+meerai -p openrouter -m google/gemini-3.8-flash --prompt "explain this repository"
+meerai -p openrouter -m google/gemini-3.8-flash --prompt "fix the test" --mode auto --json
+```
+
 Run `meerai --help` for the generated command and option list. Common commands:
 
 | Command | Action |
@@ -86,6 +93,8 @@ Run `meerai --help` for the generated command and option list. Common commands:
 | `meerai sessions list\|rm\|prune\|fork` | Manage sessions |
 | `meerai hooks trust\|untrust\|status\|verify` | Manage project hooks |
 | `meerai acp doctor` | Print the ACP handshake |
+
+In the TUI, type `!` before a command to run it in the workspace, for example `!cargo test`. The command runs through the same sandbox, env scrub, and `strict_env` policy as agent shell calls; `plan` mode refuses it. Its output opens in a scrollable Terminal dialog (`j`/`k`). `Esc` backgrounds it — the dialog closes, the statusline shows `shell <command>`, and the result lands in the transcript when it finishes; `q` closes the dialog. Long commands use the shell timeout (120 s).
 
 In the TUI: `/sessions`, `/new`, `/close`, `/connect`, `/models`, `/mode`,
 `/agent`, `/skill`, `/compact`, `/diff`, `/rewind`, `/help`.

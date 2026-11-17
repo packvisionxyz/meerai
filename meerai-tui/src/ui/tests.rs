@@ -286,7 +286,6 @@ fn renders_command_palette_with_shortcuts() {
     assert!(rendered.contains(" SESSION "));
     assert!(rendered.contains("New session tab"));
     assert!(rendered.contains("ctrl+n"));
-    assert!(rendered.contains("shift+tab"));
     assert!(rendered.contains("filter commands"));
     assert!(rendered.contains("Enter run"));
 }
@@ -1797,10 +1796,10 @@ fn modal_and_completion_hover_and_click_interactions() {
 }
 
 #[test]
-fn empty_transcript_quickstart_and_padded_code_blocks() {
+fn empty_transcript_renders_without_quickstart_and_padded_code_blocks() {
     let mut app = test_app();
     let empty_rendered = render_to_string(&mut app);
-    assert!(empty_rendered.contains("Quick start"));
+    assert!(!empty_rendered.contains("Quick start"));
     assert!(!empty_rendered.contains('┌'));
 
     app.tab_mut().transcript.push(TranscriptEntry::User {

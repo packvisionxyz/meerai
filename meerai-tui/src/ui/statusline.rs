@@ -53,6 +53,13 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
         ));
     }
 
+    if let Some(command) = &app.user_shell_running {
+        let command = truncate_single_line(command, 32);
+        spans.push(Span::styled(
+            format!(" · shell {command}"),
+            Style::default().fg(theme::p().muted),
+        ));
+    }
     let usage_str = format_usage_compact(app);
     if usage_str != "-" {
         spans.push(Span::styled(

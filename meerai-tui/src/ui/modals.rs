@@ -881,6 +881,57 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 rows[4],
             );
         }
+        ActiveModal::Terminal {
+            command,
+            output,
+            running,
+            scroll,
+        } => {
+            let popup = centered_rect(area, 80, 70, 50, 10);
+            dim_backdrop(frame, area, popup);
+            let inner = dialog_frame(frame, app, popup, "Terminal", true);
+            let rows = Layout::vertical([
+                Constraint::Length(2),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+            let status = if running {
+                "running… (shell timeout 120s)".to_string()
+            } else {
+                String::new()
+            };
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from(vec![
+                        Span::styled("$ ", Style::default().fg(theme::p().accent)),
+                        Span::styled(
+                            command.clone(),
+                            Style::default()
+                                .fg(theme::p().text)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(Span::styled(status, Style::default().fg(theme::p().muted))),
+                ]),
+                rows[0],
+            );
+            let body = output.as_deref().unwrap_or("");
+            frame.render_widget(
+                Paragraph::new(body)
+                    .wrap(Wrap { trim: false })
+                    .scroll(((scroll).min(u16::MAX as usize) as u16, 0)),
+                rows[1],
+            );
+            frame.render_widget(
+                Paragraph::new(key_hints_line(&[
+                    ("j/k", "scroll"),
+                    ("Esc", "background"),
+                    ("q", "close"),
+                ])),
+                rows[2],
+            );
+        }
         ActiveModal::Question {
             request,
             answers,

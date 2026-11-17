@@ -1058,6 +1058,34 @@ impl SessionOpener for CliSessionHost {
         self.build_opened_session(session, provider, model)
     }
 
+    async fn run_user_shell(&self, command: &str) -> Result<String> {
+        if self.approval_mode == ApprovalMode::Plan {
+            anyhow::bail!("shell commands are disabled in plan mode");
+        }
+        let sandbox = self.settings.sandbox.as_ref();
+        let tools = CodeTools::new(self.workspace_root.clone())
+            .with_writable_roots(vec![self.workspace_root.clone()])
+            .with_sensitive_env_vars(self.sensitive_env_vars.clone())
+            .with_execution_world(self.execution_world.clone())
+            .with_require_sandbox(
+                sandbox
+                    .and_then(|sandbox| sandbox.require_for_shell)
+                    .unwrap_or(false),
+            )
+            .with_strict_env(
+                sandbox
+                    .and_then(|sandbox| sandbox.strict_env)
+                    .unwrap_or(false),
+            );
+        let args = serde_json::json!({ "command": command }).to_string();
+        match tools.invoke("code-shell", &args).await {
+            Ok(meerai_core::ToolOutput::Text(text))
+            | Ok(meerai_core::ToolOutput::Fail(text))
+            | Ok(meerai_core::ToolOutput::Stop(text)) => Ok(text),
+            Err(error) => anyhow::bail!("{error}"),
+        }
+    }
+
     async fn delete_session(&self, id: &SessionId) -> Result<bool> {
         let root = self.session_config.root.clone();
         let id = id.clone();

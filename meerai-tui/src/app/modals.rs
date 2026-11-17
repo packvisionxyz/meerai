@@ -795,6 +795,57 @@ impl AppState {
                     editing_reason,
                 });
             }
+            ActiveModal::Terminal {
+                output, mut scroll, ..
+            } => {
+                let max = output
+                    .as_deref()
+                    .map(|body| body.lines().count().saturating_sub(1))
+                    .unwrap_or(0);
+                match key.code {
+                    KeyCode::Esc => {
+                        self.modal = None;
+                        self.status_notice =
+                            Some("Shell running in background; output will appear here".into());
+                        return true;
+                    }
+                    KeyCode::Char('q') => {
+                        self.modal = None;
+                        return true;
+                    }
+                    KeyCode::Char('b') if output.is_some() => {
+                        self.modal = None;
+                        return true;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        scroll = (scroll + 1).min(max);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        scroll = scroll.saturating_sub(1);
+                    }
+                    KeyCode::PageDown | KeyCode::Char('d') if key.code == KeyCode::PageDown => {
+                        scroll = (scroll + 10).min(max);
+                    }
+                    KeyCode::PageUp | KeyCode::Char('u') if key.code == KeyCode::PageUp => {
+                        scroll = scroll.saturating_sub(10);
+                    }
+                    _ => {}
+                }
+                if let Some(ActiveModal::Terminal {
+                    command,
+                    output,
+                    running,
+                    ..
+                }) = self.modal.take()
+                {
+                    self.modal = Some(ActiveModal::Terminal {
+                        command,
+                        output,
+                        running,
+                        scroll,
+                    });
+                }
+            }
             ActiveModal::Question {
                 request,
                 mut answers,
@@ -1445,6 +1496,13 @@ impl AppState {
             }
             (ActiveModal::RewindMenu { turn_id, .. }, ModalHitKind::ListItem(idx)) => {
                 self.apply_rewind_choice(turn_id, idx);
+            }
+            (ActiveModal::Terminal { running, .. }, ModalHitKind::Close) => {
+                self.modal = None;
+                if running {
+                    self.status_notice =
+                        Some("Shell running in background; output will appear here".into());
+                }
             }
             (
                 ActiveModal::Question {

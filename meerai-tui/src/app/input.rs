@@ -19,6 +19,7 @@ impl AppState {
                 if let Some(modal) = &mut self.modal {
                     let clean = text.replace(['\r', '\n'], "");
                     match modal {
+                        ActiveModal::Terminal { .. } => {}
                         ActiveModal::ProviderSelect { filter, selected } => {
                             filter.push_str(&clean);
                             *selected = 0;
@@ -388,6 +389,23 @@ impl AppState {
                 }
                 MouseEventKind::ScrollDown => {
                     *scroll = (*scroll + 3).min(max_scroll);
+                    true
+                }
+                _ => false,
+            };
+        }
+        if let Some(ActiveModal::Terminal { output, scroll, .. }) = &mut self.modal {
+            let max = output
+                .as_deref()
+                .map(|body| body.lines().count().saturating_sub(1))
+                .unwrap_or(0);
+            return match kind {
+                MouseEventKind::ScrollUp => {
+                    *scroll = scroll.saturating_sub(3);
+                    true
+                }
+                MouseEventKind::ScrollDown => {
+                    *scroll = (*scroll + 3).min(max);
                     true
                 }
                 _ => false,
@@ -1587,6 +1605,37 @@ impl AppState {
             tab.cursor = 0;
             self.completion.reset();
             self.handle_slash_command(&trimmed);
+            return;
+        }
+
+        if let Some(command) = trimmed.strip_prefix('!') {
+            let command = command.trim().to_string();
+            if command.is_empty() {
+                return;
+            }
+            {
+                let tab = self.tab_mut();
+                tab.input.clear();
+                tab.cursor = 0;
+            }
+            if self.session_opener.is_none() {
+                self.status_notice = Some("Shell commands are not available".to_string());
+                return;
+            }
+            let tab = self.tab_mut();
+            tab.auto_follow = true;
+            tab.transcript_version = tab.transcript_version.wrapping_add(1);
+            let tab_id = tab.tab_id;
+            self.modal = Some(ActiveModal::Terminal {
+                command: command.clone(),
+                output: None,
+                running: true,
+                scroll: 0,
+            });
+            self.user_shell_running = Some(command.clone());
+            self.pending_session_actions
+                .push(PendingSessionAction::RunUserShell { tab_id, command });
+            self.completion.reset();
             return;
         }
 

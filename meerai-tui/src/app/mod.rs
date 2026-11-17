@@ -113,6 +113,12 @@ pub enum ActiveModal {
         current: usize,
         focus: usize,
     },
+    Terminal {
+        command: String,
+        output: Option<String>,
+        running: bool,
+        scroll: usize,
+    },
     RewindMenu {
         turn_id: TurnId,
         selected: usize,
@@ -155,6 +161,10 @@ pub enum PendingSessionAction {
         tab_id: u64,
         item_id: String,
         session_id: SessionId,
+    },
+    RunUserShell {
+        tab_id: u64,
+        command: String,
     },
 }
 
@@ -954,6 +964,7 @@ pub struct AppState {
     pub subagent_overlay: Option<SubagentOverlay>,
     pub subagent_overlay_zones: Vec<(Rect, usize)>,
     pub subagent_hit: Option<Rect>,
+    pub user_shell_running: Option<String>,
     pub thinking_hit_zones: Vec<ThinkingHitZone>,
     pub digest_hit_zones: Vec<ThinkingHitZone>,
     pub hover_zones: Vec<HoverZone>,
@@ -1101,6 +1112,7 @@ impl AppState {
             subagent_overlay: None,
             subagent_overlay_zones: Vec::new(),
             subagent_hit: None,
+            user_shell_running: None,
             hovered_file_change: None,
             thinking_hit_zones: Vec::new(),
             digest_hit_zones: Vec::new(),

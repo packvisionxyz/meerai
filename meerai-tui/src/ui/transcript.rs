@@ -229,7 +229,7 @@ fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
         tagged_line(Line::from(spans), None, 0)
     };
 
-    let mut lines = vec![
+    let lines = vec![
         tagged_line(Line::from(identity), None, 0),
         logo_line(
             1,
@@ -257,45 +257,6 @@ fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
             ),
         ),
     ];
-
-    if app.tab().transcript.is_empty() {
-        let tip = |key: &str, desc: &str| {
-            banded_line(
-                Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(
-                        format!("{key:<14}"),
-                        Style::default()
-                            .fg(theme::p().text)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(desc.to_string(), Style::default().fg(theme::p().muted)),
-                ]),
-                None,
-                0,
-            )
-        };
-        lines.push(tagged_line(Line::default(), None, 0));
-        lines.push(banded_line(Line::default(), None, 0));
-        lines.push(banded_line(
-            Line::from(Span::styled(
-                "  Quick start",
-                Style::default()
-                    .fg(theme::p().muted)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            None,
-            0,
-        ));
-        lines.push(banded_line(Line::default(), None, 0));
-        lines.push(tip("ctrl+p", "Command palette"));
-        lines.push(tip("shift+tab", "Cycle plan / ask / auto"));
-        lines.push(tip("ctrl+f  /", "Search workspace files & content"));
-        lines.push(tip("@", "Mention agents, skills, or files"));
-        lines.push(tip("/connect", "Configure provider or API key"));
-        lines.push(tip("/help", "List all commands & shortcuts"));
-        lines.push(banded_line(Line::default(), None, 0));
-    }
 
     lines
 }

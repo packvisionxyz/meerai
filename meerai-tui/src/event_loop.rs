@@ -11,7 +11,7 @@ use meerai_session::{LoggedEvent, SessionId, SessionSummary};
 use tokio::sync::mpsc;
 use tokio::time::{self, MissedTickBehavior};
 
-use crate::app::{AppState, FileChangeEntry, PendingSessionAction, TranscriptEntry};
+use crate::app::{ActiveModal, AppState, FileChangeEntry, PendingSessionAction, TranscriptEntry};
 use crate::diff::list_git_changes;
 use crate::terminal::{self, TerminalGuard};
 use crate::{OpenedSession, SessionOpener, ui};
@@ -50,6 +50,11 @@ enum LoopMsg {
         tab_id: u64,
         item_id: String,
         result: Result<Vec<LoggedEvent>>,
+    },
+    UserShellDone {
+        tab_id: u64,
+        command: String,
+        result: Result<String>,
     },
 }
 
@@ -320,6 +325,18 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
                     });
                 });
             }
+            PendingSessionAction::RunUserShell { tab_id, command } => {
+                let opener = opener.clone();
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let result = opener.run_user_shell(&command).await;
+                    let _ = tx.send(LoopMsg::UserShellDone {
+                        tab_id,
+                        command,
+                        result,
+                    });
+                });
+            }
             PendingSessionAction::ForkSession {
                 session_id,
                 turn,
@@ -438,6 +455,49 @@ fn handle_loop_msg(
         } => {
             app.apply_child_session_read(tab_id, &item_id, result);
             false
+        }
+        LoopMsg::UserShellDone {
+            tab_id,
+            command,
+            result,
+        } => {
+            if app.user_shell_running.as_deref() == Some(command.as_str()) {
+                app.user_shell_running = None;
+            }
+            if let Some(idx) = app.tab_index_by_id(tab_id) {
+                let text = match result {
+                    Ok(output) if output.trim().is_empty() => {
+                        format!("$ {command}\n(no output)")
+                    }
+                    Ok(output) => output,
+                    Err(error) => format!("$ {command}\nfailed: {error:#}"),
+                };
+                let updated_modal = match &mut app.modal {
+                    Some(ActiveModal::Terminal {
+                        command: active,
+                        output,
+                        running,
+                        scroll,
+                    }) if *active == command => {
+                        *output = Some(text.clone());
+                        *running = false;
+                        *scroll = 0;
+                        true
+                    }
+                    _ => false,
+                };
+                if !updated_modal {
+                    app.tabs[idx]
+                        .transcript
+                        .push(TranscriptEntry::System { text });
+                    app.tabs[idx].transcript_version =
+                        app.tabs[idx].transcript_version.wrapping_add(1);
+                }
+                app.tabs[idx].auto_follow = true;
+                true
+            } else {
+                false
+            }
         }
         LoopMsg::SessionDeleted(result) => {
             match result {

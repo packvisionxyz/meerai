@@ -76,6 +76,9 @@ pub trait SessionOpener: Send + Sync {
     async fn read_session_events(&self, _id: &SessionId) -> Result<Vec<LoggedEvent>> {
         Err(anyhow::anyhow!("reading session events is not supported"))
     }
+    async fn run_user_shell(&self, _command: &str) -> Result<String> {
+        Err(anyhow::anyhow!("user shell commands are not supported"))
+    }
 }
 
 pub struct TuiLaunchConfig {
