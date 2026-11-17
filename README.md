@@ -97,7 +97,7 @@ Run `meerai --help` for the generated command and option list. Common commands:
 In the TUI, type `!` before a command to run it in the workspace, for example `!cargo test`. The command runs through the same sandbox, env scrub, and `strict_env` policy as agent shell calls; `plan` mode refuses it. Its output opens in a scrollable Terminal dialog (`j`/`k`). `Esc` backgrounds it — the dialog closes, the statusline shows `shell <command>`, and the result lands in the transcript when it finishes; `q` closes the dialog. Long commands use the shell timeout (120 s).
 
 In the TUI: `/sessions`, `/new`, `/close`, `/connect`, `/models`, `/mode`,
-`/agent`, `/skill`, `/compact`, `/diff`, `/rewind`, `/help`.
+`/agent`, `/skill`, `/compact`, `/diff`, `/rewind`, `/fork`, `/help`.
 
 Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 `AgentEvent` per line and requires `--prompt`. The default approval mode is
@@ -226,11 +226,13 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 - OS sandbox coverage on Windows hosts (Phase-1 host guards) and on hosts
   without Seatbelt or bubblewrap. `ExecutionWorld` sandboxes when available and
   warns on the fallback path.
-- `meerai export` and TUI `/fork`.
+- `meerai export`. TUI `/fork` is implemented (fork at the latest closed
+  turn); a richer fork UX remains backlog.
 - Tool or permission mapping from agent definitions, MCP servers, and skill
   supporting files. M12 reads only `SKILL.md` and custom subagent runs stay
   read-only.
-- Projection caching and frozen/shared messages.
+- Frozen/shared message representations and incremental tail projection. The
+  full-result projection cache (keyed by event count and policy) is implemented.
 - USD cost and pricing: token counts are always reported; `est_cost_usd` is
   computed only when the provider catalog carries input/output prices for the
   model. The bundled catalog ships context windows only, so cost stays `None`
@@ -560,7 +562,7 @@ sandbox:
   strict_env: true             # allowlisted child environment
 ```
 
-`strict_env` clears the child environment and keeps only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `TMPDIR`, `PWD`, `LANG`, and `LC_*`; provider secrets are still removed first. Shell and script children also get `RLIMIT_FSIZE` = 1 GiB and `RLIMIT_CORE` = 0 on Unix. A project `.meerai/settings.yml` can enable these but cannot disable them.
+`strict_env` clears the child environment and keeps only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `TMPDIR`, `PWD`, `LANG`, and `LC_*`; the provider-secret scrub also runs on the child environment. Shell and script children also get `RLIMIT_FSIZE` = 1 GiB and `RLIMIT_CORE` = 0 on Unix. A project `.meerai/settings.yml` can enable these but cannot disable them.
 
 ### Auth and app data (`~/.local/share/meerai`)
 
@@ -628,9 +630,7 @@ context:
   project value cannot raise a user cap, and a project cannot use `0` to disable
   the turn clock.
 - **`theme`** — reviewed like any other color choice and merged field by field
-  over the user theme. It changes only the palette, never a capability. A
-  `.meerai/settings.yml` in the working directory also overrides `theme` when
-  that directory is below the project root.
+  over the user theme. It changes only the palette, never a capability.
 - **Ignored fields** — `active_provider`, `active_model`, `providers`, and
   `approval_mode` are ignored with a warning, so a repository cannot change
   provider endpoints or switch the approval mode to `auto`. A project `sessions`
@@ -652,8 +652,8 @@ the model's line breaks, paragraphs get a blank row, and composer rows are
 spaced so long sessions stay readable. Active tool
 rows keep the raised band; finished rows fade to muted text and recede into the
 background so only running work stands out. Override
-any token in `settings.yml` (user), `<project-root>/.meerai/settings.yml`
-(project), or the working directory's `.meerai/settings.yml` (theme only):
+any token in `settings.yml` (user) or `<project-root>/.meerai/settings.yml`
+(project):
 
 ```yaml
 # ~/.config/meerai/settings.yml
@@ -679,7 +679,7 @@ theme:
 
 Values accept `#rgb`, `#rrggbb`, or a terminal color name (`black`, `darkgray`,
 `lightblue`, ...). An invalid value prints a warning and keeps the default.
-Project and working-directory themes override the user theme field by field.
+The project theme overrides the user theme field by field.
 
 ### Session retention
 

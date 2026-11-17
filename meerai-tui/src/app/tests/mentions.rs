@@ -58,6 +58,7 @@ fn submitting_mention_applies_agent_then_prompt() {
             name: "reviewer".to_string(),
             instructions: "Review the diff.".to_string(),
             model: Some("gemini::gemini-3.1-pro-preview".to_string()),
+            context_window_tokens: None,
         }
     );
     assert_eq!(app.tab().model, "gemini-3.1-pro-preview");
@@ -138,6 +139,7 @@ fn enter_accepts_mention_without_submitting() {
             name: "reviewer".to_string(),
             instructions: "Review.".to_string(),
             model: None,
+            context_window_tokens: None,
         }
     );
     assert!(rx.try_recv().is_err());
@@ -187,6 +189,7 @@ fn only_mentions_apply_without_starting_a_turn() {
             name: "reviewer".to_string(),
             instructions: "Review.".to_string(),
             model: None,
+            context_window_tokens: None,
         }
     );
     assert!(rx.try_recv().is_err());
@@ -276,6 +279,7 @@ fn mention_agent_model_with_provider_prefix_is_ignored() {
             name: "reviewer".to_string(),
             instructions: "Review.".to_string(),
             model: None,
+            context_window_tokens: None,
         }
     );
     assert_eq!(

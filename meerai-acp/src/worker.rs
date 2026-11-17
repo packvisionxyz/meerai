@@ -1,7 +1,5 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use meerai_agents::events::{
     ApprovalDecision, ApprovalKind, ApprovalPreview, ContentBlock, GrantScope, RequestId,
@@ -27,7 +25,6 @@ pub struct AcpWorkerConfig {
     pub preset: AcpPreset,
     pub cwd: PathBuf,
     pub start: AcpStart,
-    pub resumed: Arc<AtomicBool>,
 }
 
 pub fn spawn_acp_worker(
@@ -52,9 +49,7 @@ async fn run(
         preset,
         cwd,
         start,
-        resumed,
     } = config;
-    resumed.store(false, Ordering::Relaxed);
     let mut state = AcpTurnState::new(preset.id);
     let mut acp = match connect_with(preset, cwd, start).await {
         Ok(acp) => acp,
@@ -66,7 +61,6 @@ async fn run(
             return;
         }
     };
-    resumed.store(acp.handshake().resumed, Ordering::Relaxed);
     let _ = session
         .set_remote_session(state.harness(), acp.session_id.clone())
         .await;
@@ -127,7 +121,7 @@ async fn run(
                         break;
                     }
                     AgentCommand::Steer(_)
-                    | AgentCommand::SetModel(_)
+                    | AgentCommand::SetModel { .. }
                     | AgentCommand::SetPermissionMode(_)
                     | AgentCommand::Compact
                     | AgentCommand::ApplyAgent { .. }

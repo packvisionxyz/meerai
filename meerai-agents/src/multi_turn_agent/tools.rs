@@ -1286,7 +1286,7 @@ impl DecisionCtx<'_> {
                 AgentCommand::AnswerQuestion { .. }
                 | AgentCommand::Rewind { .. }
                 | AgentCommand::SubmitPrompt(_)
-                | AgentCommand::SetModel(_)
+                | AgentCommand::SetModel { .. }
                 | AgentCommand::Reset => {}
             }
         }
@@ -1327,7 +1327,7 @@ impl DecisionCtx<'_> {
                 AgentCommand::Approve { .. }
                 | AgentCommand::Rewind { .. }
                 | AgentCommand::SubmitPrompt(_)
-                | AgentCommand::SetModel(_)
+                | AgentCommand::SetModel { .. }
                 | AgentCommand::Reset => {}
                 AgentCommand::Steer(_)
                 | AgentCommand::SetPermissionMode(_)
@@ -1360,10 +1360,12 @@ impl DecisionCtx<'_> {
                 name,
                 instructions,
                 model,
+                context_window_tokens,
             } => {
                 self.apply_instructions(
                     format!("Agent instructions ({name}):\n\n{instructions}"),
                     model,
+                    context_window_tokens,
                     event_tx,
                 )
                 .await;
@@ -1371,6 +1373,7 @@ impl DecisionCtx<'_> {
             AgentCommand::ApplySkill { name, instructions } => {
                 self.apply_instructions(
                     format!("Skill instructions ({name}):\n\n{instructions}"),
+                    None,
                     None,
                     event_tx,
                 )
@@ -1384,7 +1387,7 @@ impl DecisionCtx<'_> {
             | AgentCommand::AnswerQuestion { .. }
             | AgentCommand::Rewind { .. }
             | AgentCommand::SubmitPrompt(_)
-            | AgentCommand::SetModel(_)
+            | AgentCommand::SetModel { .. }
             | AgentCommand::Reset
             | AgentCommand::Cancel
             | AgentCommand::Quit => {}
@@ -1395,6 +1398,7 @@ impl DecisionCtx<'_> {
         &mut self,
         text: String,
         model: Option<String>,
+        context_window_tokens: Option<u64>,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) {
         let text = crate::screen::screen_untrusted_text("definition_instructions", &text);
@@ -1414,6 +1418,11 @@ impl DecisionCtx<'_> {
                 .shared_model
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = model;
+            if let Some(tokens) = context_window_tokens
+                && let Some(harness) = self.harness.as_mut()
+            {
+                harness.config.context_window_tokens = tokens;
+            }
         }
     }
 

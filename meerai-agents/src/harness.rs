@@ -101,10 +101,7 @@ impl HarnessConfig {
             }
         }
         if let Some(temperature) = context.temperature {
-            let value = temperature.value();
-            if (0.0..=2.0).contains(&value) {
-                cfg.temperature = Some(value);
-            }
+            cfg.temperature = temperature.effective();
         }
         cfg
     }

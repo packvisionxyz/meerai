@@ -54,6 +54,18 @@ fn temp_hooks_dir(name: &str) -> PathBuf {
     ))
 }
 
+fn temp_settings_dir(name: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "meerai_tui_settings_{name}_{}_{}",
+        std::process::id(),
+        nanos
+    ))
+}
+
 #[tokio::test]
 async fn reload_sends_hook_entries_from_the_config_dir() {
     let (mut app, mut rx, _secrets) = test_app();
@@ -82,6 +94,42 @@ async fn reload_sends_hook_entries_from_the_config_dir() {
     let entries = hook_entries.expect("expected SetHooks");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].command, "start.sh");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn reload_refreshes_the_effective_temperature_from_merged_settings() {
+    let (mut app, _rx, _secrets) = test_app();
+    let dir = temp_settings_dir("temperature");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("settings.yml"), "context:\n  temperature: 0.65\n").unwrap();
+    app.config_dir = Some(dir.clone());
+    app.context_temperature = Some(1.5);
+
+    app.perform_reload().await;
+
+    assert_eq!(app.context_temperature, Some(0.65));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn reload_refreshes_the_explicit_context_window_from_merged_settings() {
+    let (mut app, _rx, _secrets) = test_app();
+    let dir = temp_settings_dir("context_window");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("settings.yml"),
+        "context:\n  context_window_tokens: 200000\n",
+    )
+    .unwrap();
+    app.config_dir = Some(dir.clone());
+    assert_eq!(app.explicit_context_window, None);
+
+    app.perform_reload().await;
+
+    assert_eq!(app.explicit_context_window, Some(200_000));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -173,17 +173,9 @@ impl CodeTools {
         for root in self.extra_roots() {
             writable_roots.push(canonicalize_or_keep(&root).await);
         }
-        let mut readable_roots = Vec::with_capacity(self.readable_roots().len() + 1);
-        for root in self.readable_roots() {
-            readable_roots.push(canonicalize_or_keep(root).await);
-        }
-        for root in self.extra_roots() {
-            readable_roots.push(canonicalize_or_keep(&root).await);
-        }
         let policy = SandboxPolicy::WorkspaceWrite {
             workspace_root: cwd,
             writable_roots,
-            readable_roots,
             allow_network: false,
         };
 

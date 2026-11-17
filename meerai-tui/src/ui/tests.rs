@@ -2285,17 +2285,23 @@ fn sidebar_more_row_makes_the_file_list_scrollable() {
 
 #[test]
 fn composer_shows_mode_provider_model_and_temperature() {
-    use meerai_common::settings::{ContextSettings, Temperature};
-
     let mut app = test_app();
-    app.settings.context = Some(ContextSettings {
-        temperature: Some(Temperature::new(0.7)),
-        ..ContextSettings::default()
-    });
+    app.context_temperature = Some(0.7);
     let rendered = render_to_string(&mut app);
     assert!(rendered.contains("ASK"));
     assert!(rendered.contains("gemini-3.8-flash"));
-    assert!(rendered.contains("0.70"));
+    assert!(rendered.contains("temp 0.70"));
+}
+
+#[test]
+fn composer_shows_default_temperature_for_out_of_range_settings() {
+    use meerai_common::settings::Temperature;
+
+    let mut app = test_app();
+    app.context_temperature = Some(Temperature::new(5.0)).and_then(Temperature::effective);
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("temp default"));
+    assert!(!rendered.contains("5.00"));
 }
 
 #[test]

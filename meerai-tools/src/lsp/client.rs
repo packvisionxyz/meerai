@@ -24,6 +24,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
 use super::uri::path_to_uri;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 const DIAG_WAIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
@@ -39,6 +40,8 @@ pub(crate) struct LspClient {
     opened_docs: AsyncMutex<HashMap<String, (i32, String)>>,
     capabilities: ServerCapabilities,
     alive: Arc<AtomicBool>,
+    request_timeout: Duration,
+    write_timeout: Duration,
     _child: AsyncMutex<Child>,
 }
 
@@ -47,6 +50,33 @@ impl LspClient {
         command: &str,
         args: &[String],
         workspace_root: &Path,
+    ) -> Result<Arc<Self>, String> {
+        Self::spawn_with_timeouts(
+            command,
+            args,
+            workspace_root,
+            REQUEST_TIMEOUT,
+            WRITE_TIMEOUT,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn spawn_with_timeouts_override(
+        command: &str,
+        args: &[String],
+        workspace_root: &Path,
+        timeout: Duration,
+    ) -> Result<Arc<Self>, String> {
+        Self::spawn_with_timeouts(command, args, workspace_root, timeout, timeout).await
+    }
+
+    async fn spawn_with_timeouts(
+        command: &str,
+        args: &[String],
+        workspace_root: &Path,
+        request_timeout: Duration,
+        write_timeout: Duration,
     ) -> Result<Arc<Self>, String> {
         let mut cmd = Command::new(command);
         cmd.args(args)
@@ -135,6 +165,8 @@ impl LspClient {
             opened_docs: AsyncMutex::new(HashMap::new()),
             capabilities: ServerCapabilities::default(),
             alive,
+            request_timeout,
+            write_timeout,
             _child: AsyncMutex::new(child),
         };
 
@@ -231,14 +263,14 @@ impl LspClient {
             guard.insert(id, tx);
         }
 
-        if let Err(err) = write_frame(&self.stdin, &payload).await {
+        if let Err(err) = self.write_message(method, &payload).await {
             if let Ok(mut guard) = self.pending.lock() {
                 guard.remove(&id);
             }
             return Err(err);
         }
 
-        let response = tokio::time::timeout(REQUEST_TIMEOUT, rx)
+        let response = tokio::time::timeout(self.request_timeout, rx)
             .await
             .map_err(|_| {
                 if let Ok(mut guard) = self.pending.lock() {
@@ -261,7 +293,31 @@ impl LspClient {
             "method": method,
             "params": params,
         });
-        write_frame(&self.stdin, &payload).await
+        self.write_message(method, &payload).await
+    }
+
+    async fn write_message(&self, method: &str, payload: &Value) -> Result<(), String> {
+        match tokio::time::timeout(self.write_timeout, write_frame(&self.stdin, payload)).await {
+            Ok(result) => result,
+            Err(_) => {
+                let message = format!(
+                    "LSP request '{method}' write timed out after {:?}",
+                    self.write_timeout
+                );
+                self.mark_dead(&message);
+                Err(message)
+            }
+        }
+    }
+
+    fn mark_dead(&self, reason: &str) {
+        self.alive.store(false, Ordering::SeqCst);
+        if let Ok(mut guard) = self.pending.lock() {
+            for (_, tx) in guard.drain() {
+                let _ = tx.send(Err(reason.to_string()));
+            }
+        }
+        self.diag_notify.notify_waiters();
     }
 
     pub(crate) async fn published_diagnostics(

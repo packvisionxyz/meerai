@@ -4,8 +4,6 @@ use meerai_acp::{AGY, AcpStart, AcpWorkerConfig, spawn_acp_worker};
 use meerai_agents::events::ApprovalDecision;
 use meerai_agents::{AgentCommand, AgentEvent, ItemDelta};
 use meerai_session::{InputSource, Session, SessionEvent, SessionId};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::time::timeout;
 
 const TURN_TIMEOUT: Duration = Duration::from_secs(120);
@@ -15,13 +13,11 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(120);
 async fn live_worker_mirrors_a_turn_into_the_session_log() {
     let cwd = std::env::current_dir().expect("working directory");
     let session = Session::memory(SessionId::new(), cwd.clone());
-    let resumed = Arc::new(AtomicBool::new(true));
     let (commands, mut events) = spawn_acp_worker(AcpWorkerConfig {
         session: session.clone(),
         preset: AGY,
         cwd,
         start: AcpStart::New,
-        resumed: Arc::clone(&resumed),
     });
 
     commands
@@ -75,7 +71,6 @@ async fn live_worker_mirrors_a_turn_into_the_session_log() {
         log.iter()
             .any(|logged| matches!(&logged.event, SessionEvent::TurnEnded { .. }))
     );
-    assert!(!resumed.load(Ordering::Relaxed));
 
     commands.send(AgentCommand::Quit).expect("quit sent");
 }

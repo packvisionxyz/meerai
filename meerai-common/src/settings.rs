@@ -103,6 +103,11 @@ impl Temperature {
     pub fn value(self) -> f32 {
         self.0
     }
+
+    pub fn effective(self) -> Option<f32> {
+        let value = self.0;
+        (0.0..=2.0).contains(&value).then_some(value)
+    }
 }
 
 impl Eq for Temperature {}
@@ -239,6 +244,7 @@ impl ThemeSettings {
             diff_added,
             diff_removed,
             diff_context,
+            code_function,
         );
     }
 }
@@ -1254,15 +1260,74 @@ providers:
     }
 
     #[test]
+    fn theme_overlay_copies_every_field() {
+        let source = ThemeSettings {
+            background: Some("#000001".to_string()),
+            surface: Some("#000002".to_string()),
+            surface_high: Some("#000003".to_string()),
+            text: Some("#000004".to_string()),
+            muted: Some("#000005".to_string()),
+            faint: Some("#000006".to_string()),
+            accent: Some("#000007".to_string()),
+            interactive: Some("#000008".to_string()),
+            border: Some("#000009".to_string()),
+            error: Some("#00000a".to_string()),
+            warning: Some("#00000b".to_string()),
+            success: Some("#00000c".to_string()),
+            info: Some("#00000d".to_string()),
+            diff_added: Some("#00000e".to_string()),
+            diff_removed: Some("#00000f".to_string()),
+            diff_context: Some("#000010".to_string()),
+            code_function: Some("#000011".to_string()),
+        };
+        let mut target = ThemeSettings::default();
+
+        target.overlay(source.clone());
+
+        assert_eq!(target.background, source.background);
+        assert_eq!(target.surface, source.surface);
+        assert_eq!(target.surface_high, source.surface_high);
+        assert_eq!(target.text, source.text);
+        assert_eq!(target.muted, source.muted);
+        assert_eq!(target.faint, source.faint);
+        assert_eq!(target.accent, source.accent);
+        assert_eq!(target.interactive, source.interactive);
+        assert_eq!(target.border, source.border);
+        assert_eq!(target.error, source.error);
+        assert_eq!(target.warning, source.warning);
+        assert_eq!(target.success, source.success);
+        assert_eq!(target.info, source.info);
+        assert_eq!(target.diff_added, source.diff_added);
+        assert_eq!(target.diff_removed, source.diff_removed);
+        assert_eq!(target.diff_context, source.diff_context);
+        assert_eq!(target.code_function, source.code_function);
+        assert_eq!(target, source);
+    }
+
+    #[test]
     fn project_theme_overlays_user_theme_field_by_field() {
-        let user = settings_from_yaml("theme:\n  accent: \"#112233\"\n  background: \"#000000\"\n");
-        let project = settings_from_yaml("theme:\n  accent: \"#ababab\"\n");
+        let user = settings_from_yaml(
+            "theme:\n  accent: \"#112233\"\n  background: \"#000000\"\n  code_function: \"#445566\"\n",
+        );
+        let project =
+            settings_from_yaml("theme:\n  accent: \"#ababab\"\n  code_function: \"#778899\"\n");
 
         let (merged, warnings) = merge_project_settings(user, project);
         let theme = merged.theme.expect("theme merged");
         assert_eq!(theme.accent.as_deref(), Some("#ababab"));
         assert_eq!(theme.background.as_deref(), Some("#000000"));
+        assert_eq!(theme.code_function.as_deref(), Some("#778899"));
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn temperature_effective_keeps_only_supported_values() {
+        assert_eq!(Temperature::new(0.7).effective(), Some(0.7));
+        assert_eq!(Temperature::new(0.0).effective(), Some(0.0));
+        assert_eq!(Temperature::new(2.0).effective(), Some(2.0));
+        assert_eq!(Temperature::new(-0.1).effective(), None);
+        assert_eq!(Temperature::new(2.1).effective(), None);
+        assert_eq!(Temperature::new(5.0).effective(), None);
     }
 
     #[test]

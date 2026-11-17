@@ -79,11 +79,13 @@ impl MultiTurnAgent {
         name: &str,
         instructions: &str,
         model: Option<String>,
+        context_window_tokens: Option<u64>,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) {
         self.apply_instructions(
             format!("Agent instructions ({name}):\n\n{instructions}"),
             model,
+            context_window_tokens,
             event_tx,
         )
         .await;
@@ -98,6 +100,7 @@ impl MultiTurnAgent {
         self.apply_instructions(
             format!("Skill instructions ({name}):\n\n{instructions}"),
             None,
+            None,
             event_tx,
         )
         .await;
@@ -107,6 +110,7 @@ impl MultiTurnAgent {
         &mut self,
         text: String,
         model: Option<String>,
+        context_window_tokens: Option<u64>,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) {
         let text = crate::screen::screen_untrusted_text("definition_instructions", &text);
@@ -121,6 +125,9 @@ impl MultiTurnAgent {
         self.chat_history.push(ChatMessage::user(text));
         if let Some(model) = model {
             self.set_model(model);
+            if let Some(tokens) = context_window_tokens {
+                self.set_context_window_tokens(tokens);
+            }
             self.persist_model().await;
         }
     }

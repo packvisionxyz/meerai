@@ -14,7 +14,6 @@ mod tests;
 
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Result, bail};
@@ -32,8 +31,9 @@ use meerai_client::secrets::auth_file_path;
 use meerai_common::definitions::{AgentDefinition, SkillDefinition, load_definitions};
 use meerai_common::hooks::{add_trusted_project, load_hooks_for_run, project_is_trusted};
 use meerai_common::settings::{
-    AppSettings, HooksSettings, default_config_dir, default_data_dir, find_project_root,
-    load_project_settings, load_settings_from, merge_project_settings, save_settings_to,
+    AppSettings, HooksSettings, Temperature, default_config_dir, default_data_dir,
+    find_project_root, load_project_settings, load_settings_from, merge_project_settings,
+    save_settings_to,
 };
 use meerai_core::{Toolset, async_trait};
 use meerai_policy::{ApprovalMode, PolicyEngine, parse_approval_mode, rules_from_yaml};
@@ -257,32 +257,6 @@ fn resolve_approval_mode(flag: Option<&str>, configured: Option<&str>) -> Result
     }
 }
 
-#[cfg(feature = "tui")]
-fn apply_local_theme(workspace_root: &Path, project_root: &Path, settings: &mut AppSettings) {
-    if workspace_root == project_root {
-        return;
-    }
-    match load_project_settings(workspace_root) {
-        Ok(Some(local)) => {
-            if let Some(local_theme) = local.theme {
-                let mut theme = settings.theme.take().unwrap_or_default();
-                theme.overlay(local_theme);
-                settings.theme = Some(theme);
-            }
-        }
-        Ok(None) => {}
-        Err(err) => {
-            eprintln!(
-                "Warning: ignoring working-directory theme ({}): {err:#}",
-                workspace_root
-                    .join(".meerai")
-                    .join("settings.yml")
-                    .display()
-            );
-        }
-    }
-}
-
 fn build_policy(
     mode: ApprovalMode,
     permissions: Option<&serde_yaml::Value>,
@@ -389,7 +363,6 @@ async fn main() -> Result<()> {
     catalog.apply_settings(&settings);
     #[cfg(feature = "tui")]
     {
-        apply_local_theme(&workspace_root, &project_root, &mut settings);
         let (palette, theme_warnings) =
             meerai_tui::theme::Palette::from_settings(&settings.theme.clone().unwrap_or_default());
         for warning in theme_warnings {
@@ -673,7 +646,6 @@ async fn main() -> Result<()> {
                 preset: AGY,
                 cwd: workspace_root.clone(),
                 start: acp_start,
-                resumed: Arc::new(AtomicBool::new(false)),
             });
             let exit_code = run_headless_channels(cmd_tx, event_rx, prompt, cli.json).await?;
             std::process::exit(exit_code);
@@ -723,6 +695,15 @@ async fn main() -> Result<()> {
                 runtime,
                 secrets,
                 settings: user_settings,
+                context_temperature: settings
+                    .context
+                    .as_ref()
+                    .and_then(|context| context.temperature)
+                    .and_then(Temperature::effective),
+                explicit_context_window: settings
+                    .context
+                    .as_ref()
+                    .and_then(|context| context.context_window_tokens),
                 config_dir,
                 approval_mode: opened.approval_mode,
                 initial_transcript: opened.transcript,
@@ -776,7 +757,6 @@ impl AcpSpawner for CliAcpSpawner {
             preset: AGY,
             cwd,
             start: AcpStart::New,
-            resumed: Arc::new(AtomicBool::new(false)),
         });
         AcpChild { cmd_tx, event_rx }
     }
@@ -999,7 +979,6 @@ impl CliSessionHost {
             preset: AGY,
             cwd: self.workspace_root.clone(),
             start,
-            resumed: Arc::new(AtomicBool::new(false)),
         });
         let approval_mode = meta
             .approval_mode

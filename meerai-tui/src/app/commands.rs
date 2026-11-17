@@ -453,10 +453,15 @@ impl AppState {
     }
 
     pub(super) fn send_agent(&mut self, agent: &AgentDefinition, model: Option<String>) {
+        let provider = self.tab().active_provider.clone();
+        let context_window_tokens = model
+            .as_ref()
+            .and_then(|model| self.model_context_window(&provider, model));
         let _ = self.tab().cmd_tx.send(AgentCommand::ApplyAgent {
             name: agent.id.clone(),
             instructions: agent.prompt.clone(),
             model,
+            context_window_tokens,
         });
     }
 

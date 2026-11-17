@@ -63,12 +63,9 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: R
         ),
     };
     let temperature = app
-        .settings
-        .context
-        .as_ref()
-        .and_then(|context| context.temperature)
-        .map(|value| format!("{:.2}", value.value()))
-        .unwrap_or_else(|| "default".to_string());
+        .context_temperature
+        .map(|value| format!("temp {value:.2}"))
+        .unwrap_or_else(|| "temp default".to_string());
     let model = super::statusline::display_model(app);
     let (input_badge, input_color) = match app.mode {
         InputMode::Insert => ("INS", theme::p().accent),

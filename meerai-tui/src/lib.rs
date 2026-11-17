@@ -91,6 +91,8 @@ pub struct TuiLaunchConfig {
     pub runtime: Arc<RwLock<RuntimeProviderState>>,
     pub secrets: Arc<dyn SecretStore>,
     pub settings: AppSettings,
+    pub context_temperature: Option<f32>,
+    pub explicit_context_window: Option<u64>,
     pub config_dir: Option<PathBuf>,
     pub approval_mode: ApprovalMode,
     pub initial_transcript: Vec<TranscriptEntry>,
@@ -130,6 +132,8 @@ pub async fn run_tui(
         config.settings,
         config.config_dir,
     );
+    app.context_temperature = config.context_temperature;
+    app.explicit_context_window = config.explicit_context_window;
     app.tab_persistence = true;
     app.git_branch = crate::diff::current_branch(&workspace_root);
     if let Some(workspace) = config.workspace_query {

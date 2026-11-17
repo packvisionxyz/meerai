@@ -1776,12 +1776,17 @@ impl AppState {
             (spec, candidate)
         };
 
+        let context_window_tokens = self.model_context_window(&canonical, &next_model);
+
         self.tab_mut().model = next_model.clone();
         self.settings.active_model = (!next_model.is_empty()).then_some(next_model);
         self.sync_completion_models();
         self.persist_settings();
         if let Some(spec) = spec {
-            let _ = self.tab().cmd_tx.send(AgentCommand::SetModel(spec));
+            let _ = self.tab().cmd_tx.send(AgentCommand::SetModel {
+                model: spec,
+                context_window_tokens,
+            });
         }
     }
 
@@ -1801,7 +1806,11 @@ impl AppState {
 
         self.sync_completion_models();
         self.persist_settings();
-        let _ = self.tab().cmd_tx.send(AgentCommand::SetModel(spec));
+        let context_window_tokens = self.model_context_window(&canonical, &clean_model);
+        let _ = self.tab().cmd_tx.send(AgentCommand::SetModel {
+            model: spec,
+            context_window_tokens,
+        });
         self.tab_mut().transcript.push(TranscriptEntry::System {
             text: format!("Active model: {canonical}/{clean_model}"),
         });

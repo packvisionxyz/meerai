@@ -182,7 +182,7 @@ Notes:
     `BubblewrapWorld` with `HostWorld` fallback warning), native OS keychain (`KeychainSecretStore` +
     `auth.json` fallback), `cargo-deny` CI audit (`deny.toml`), conditional release signing steps,
     and `docs/threat-model.md`. Caveats: signing secrets are operator-configured, and Windows uses
-    Phase-1 `HostWorld` guards (see `docs/harness-spec.md` §9.6 and `docs/threat-model.md`).
+    Phase-1 `HostWorld` guards (see `docs/threat-model.md`).
 21. **Agent/skill definitions are prompt-only and untrusted (M12):** discovery is read-only and
     starts at the project root. `.agents/agents/*.md` and `.agents/skills/*/SKILL.md` load before
     `.claude/...`; a duplicate id keeps `.agents` and the warning names both paths; the catalog is
@@ -311,19 +311,34 @@ Coverage caveats:
 
 ## 8. Documentation conventions
 
+All `docs/` documents follow the standard in `docs/_template.md`: a header
+table with a verification date, then Overview → Implemented (description,
+behavior, limits, owning module) → Planned (item, description, gate) →
+optional Reference / Invariants / Open questions. Every Implemented claim
+is verified against the code before writing; plans never use present
+tense; one owning document per fact; no stale delivery history in the
+body.
+
 - `README.md` — project overview, install, quick start, current vs. planned crates, usage, exit
   codes, security and limits, local dev commands.
 - `AGENTS.md` — working rules for AI agents: commands, contracts, loop, config, security, TUI,
   commit, and code style. It is injected into the system prompt, so keep it rules-only.
+- `docs/_template.md` — document standard, template, ownership map, and rewrite checklist.
 - `docs/harness-internals.md` — implementation reference: crate layout, tool macro conventions,
-  configuration, turn-loop internals, TUI internals, known traps, and security posture.
-- `docs/harness-spec.md` — unified harness specification: session log, item protocol, context
-  engine, permissions, hooks, checkpoints, agents/skills, subagents, the M1–M12 roadmap, and the
-  §9.6 security landed/backlog split.
-- `docs/architecture.md` — current implementation notes, target crate architecture, protocol
-  decisions, config, coding toolsets, and migration steps. Target sections are labelled.
-- `docs/tui-design.md` — modal TUI design, keybindings, pickers, diff review, and
-  async rendering architecture. Unimplemented designs are labelled as planned.
+  configuration, turn-loop internals, TUI pointers, known traps, and security posture summary.
+- `docs/harness-spec.md` — unified harness specification: design principles, session log, item
+  protocol, context engine, permissions, safety nets, agents/skills/subagents, retrieval, the
+  M1–M14 milestone table (§4.1), and recorded decisions.
+- `docs/architecture.md` — crate layout, dependency direction, build surfaces, protocol and
+  configuration summaries, planned architecture items.
+- `docs/tui-design.md` — modal TUI behavior: layout, modes, keybindings, overlays, rendering
+  invariants, dialog width caps, and planned UX.
+- `docs/acp.md` — ACP protocol reference, the implemented `agy` client and `acp-run`, trust
+  boundary, planned presets and M14.
+- `docs/threat-model.md` — assets, trust boundaries, implemented controls, planned controls,
+  residual risks.
+- `docs/token-efficiency.md` — token-cost and self-healing initiative: implemented phases with
+  evidence, decisions, planned phases.
 - `.agents/repo/` — repository profile, patterns, and infra notes for `.agents/skills/*`. Keep in
   sync when crates, commands, or invariants change.
 
@@ -372,7 +387,7 @@ Detail in [`infra.md`](infra.md). Summary:
   homepage metadata point at `packvisionxyz/meerai` and `meerai.packvision.xyz`.
 - `schemars` 1.x for `JsonSchema` derivation on tool arguments (`schemars = "1"`, locked `1.2.3`).
 - Runtime tool-call naming `"<toolset_snake>-<tool_snake>"`; built-in coding tools use `code-*`.
-- `AgentEvent` item protocol (`docs/harness-spec.md` §4): `TurnStarted`/`ItemStarted`/
+- `AgentEvent` item protocol (`docs/harness-spec.md` §2.3): `TurnStarted`/`ItemStarted`/
   `ItemDelta`/`ItemCompleted`/`TurnCompleted`, with authoritative `ItemCompleted` payloads.
 - Adjacent serde tagging (`tag = "type", content = "data"`) for enums that carry string/newtype
   variants; internally tagged enums cannot hold bare strings.
@@ -478,4 +493,4 @@ Detail in [`infra.md`](infra.md). Summary:
 | How are CLI flags parsed, sessions resumed/forked, pruned, and headless output printed? | `meerai-cli/src/{cli.rs,main.rs,sessions_cmd.rs,headless.rs}` (`parse_args`, `run_sessions`, `select_prunable`, `run_headless`, `format_token_summary`) |
 | How do `.env` opt-in and env scrubbing work? | `meerai-cli/src/main.rs` (`load_dotenv`), `meerai-tools/src/code/shell.rs` |
 | How do hooks load, trust, execute, and affect policy? | `meerai-common/src/hooks.rs` (`load_hooks`), `meerai-agents/src/hooks.rs` (`HookEngine`), `meerai-cli/src/main.rs` (trust gate), `meerai-agents/src/multi_turn_agent/{turn.rs,tools.rs,compaction.rs}`, `subagent.rs` |
-| What is the target crate & migration plan? | `docs/architecture.md`, `docs/harness-spec.md` §15 |
+| What is the target crate & migration plan? | `docs/architecture.md`, `docs/harness-spec.md` §4.1 |

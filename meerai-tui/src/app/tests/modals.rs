@@ -26,6 +26,24 @@ fn opens_provider_select_on_startup_when_key_missing() {
 }
 
 #[test]
+fn model_context_window_tracks_the_catalog_unless_pinned() {
+    let (mut app, _rx, _secrets) = test_app();
+
+    assert_eq!(
+        app.model_context_window("gemini", "gemini-2.5-pro"),
+        Some(1_048_576)
+    );
+    assert_eq!(
+        app.model_context_window("gemini", "gemini::gemini-2.5-pro"),
+        Some(1_048_576)
+    );
+    assert_eq!(app.model_context_window("gemini", "unknown-model"), None);
+
+    app.explicit_context_window = Some(200_000);
+    assert_eq!(app.model_context_window("gemini", "gemini-2.5-pro"), None);
+}
+
+#[test]
 fn connect_flow_saves_key_deletes_and_selects_model() {
     let (mut app, mut rx, secrets) = test_app();
 
@@ -64,7 +82,10 @@ fn connect_flow_saves_key_deletes_and_selects_model() {
     assert_eq!(app.tab().model, "glm-5.3");
     assert_eq!(
         rx.try_recv().unwrap(),
-        AgentCommand::SetModel("opencode_go::glm-5.3".to_string())
+        AgentCommand::SetModel {
+            model: "opencode_go::glm-5.3".to_string(),
+            context_window_tokens: None,
+        }
     );
 
     type_text(&mut app, "/provider");
@@ -89,7 +110,10 @@ fn model_input_accepts_manual_and_recent_models() {
     assert_eq!(app.tab().model, "custom-gemini-model");
     assert_eq!(
         rx.try_recv().unwrap(),
-        AgentCommand::SetModel("gemini::custom-gemini-model".to_string())
+        AgentCommand::SetModel {
+            model: "gemini::custom-gemini-model".to_string(),
+            context_window_tokens: None,
+        }
     );
 
     type_text(&mut app, "/models");

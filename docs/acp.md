@@ -1,348 +1,298 @@
-# ACP integration
+# ACP Integration
 
-**Status: M13 is landed for `agy`.** `meerai-acp` is a client bridge; the CLI
-and TUI expose `--acp`, `/acp`, `acp doctor`, an `ACP:agy` badge, an
-`agy (acp)` transcript header, and `session/load` resume. OpenCode/Claude
-presets and M14 (`meerai acp` for editors) remain backlog. The work is tracked
-as **M13** (meerai as an ACP client) and **M14** (meerai as an ACP agent) in
-[harness-spec.md](harness-spec.md) §15.1. Every protocol statement below was
-checked against the ACP specification and the Rust SDK. Sections that describe
-surfaces beyond the crate are a plan, not a description of the tree; §10.2
-records what M13 actually ships.
+This document covers the Agent Client Protocol integration: the implemented
+`agy` client (M13), the delegated `acp-run` tool, the trust boundary, and
+the planned presets and editor surface (M14).
 
-## 1. Why
+| | |
+| --- | --- |
+| **Status** | Verified against the tree on 2026-11-17 |
+| **Audience** | Users of external agents, `meerai-acp` contributors, security reviewers |
+| **Scope** | `meerai-acp`, ACP wiring in `meerai-cli` and `meerai-tui`, `meerai-agents::acp_subagent` |
+| **Related** | [harness-spec.md](harness-spec.md) (§4.1 M13/M14) · [threat-model.md](threat-model.md) · [harness-internals.md](harness-internals.md) |
 
-Two problems share one protocol.
+## 1. Overview
 
-1. **Use other harnesses from meerai.** Antigravity (`agy`), OpenCode, Claude
-   Code, Codex, and Gemini CLI already do autonomous coding. Re-implementing
-   each vendor integration is wasteful. ACP is the vendor-neutral seam.
-2. **Put meerai inside editors.** Zed, Neovim, and JetBrains speak ACP. One
-   `meerai acp` subcommand makes meerai usable there without an editor plugin.
+Two problems share one protocol. First, other harnesses (Antigravity,
+OpenCode, Claude Code, Codex, Gemini CLI) already do autonomous coding;
+ACP is the vendor-neutral seam that lets meerai drive them instead of
+re-implementing each integration. Second, editors (Zed, Neovim, JetBrains)
+speak ACP; one `meerai acp` subcommand would put meerai inside them without
+an editor plugin. The first problem is implemented for `agy`; the second
+is planned (M14).
 
-ACP is a transport and a vocabulary, not a sandbox and not a policy engine. It
-does not make an external agent safe, and it does not let meerai enforce its
-rules on one. See §8 before reading any feature claim.
+**ACP is a transport and a vocabulary, not a sandbox and not a policy
+engine.** It does not make an external agent safe, and it does not let
+meerai enforce its rules on one. Read §5 before relying on any feature
+claim.
 
-## 2. Scope
+## 2. Implemented
 
-In scope:
+### 2.1 Crate and dependency shape
 
-- Spawn and drive an external ACP agent from the TUI and from headless mode.
-- Map external tool calls, messages, thoughts, plans, and permission requests
-  into the existing `AgentEvent` vocabulary and TUI surfaces.
-- Cancel a turn.
-- Keep meerai's session log as the local record, with a replayable transcript.
-- Expose meerai as an ACP agent for editors.
+`meerai-acp` is the client bridge. Only `meerai-cli` depends on it
+directly; the TUI reaches ACP through `Backend::Acp` and
+`SessionOpener::create_acp_session`, so no SDK type appears in
+`meerai-tui`, `meerai-agents`, or `meerai-session` signatures. The crate
+depends on `meerai-agents` (for `AgentEvent`/`AgentCommand`) and owns every
+`agent_client_protocol` type; its public API uses plain strings, structs,
+and tokio channels.
 
-Out of scope:
+Public surface (`meerai-acp/src/{lib,client,events,worker}.rs`):
 
-- Proxying or rewriting an external agent's requests (the SDK `Proxy` role).
-- MCP-over-ACP.
-- Forking remote sessions.
-- USD cost accounting in either direction.
-- Any claim that meerai policy, path guards, redaction, or the approval overlay
-  govern an external process.
+- `AcpPreset { id, command, args }` with the `AGY` constant (`agy acp`) and
+  a `presets()` catalog. `agy` is the only preset.
+- `connect(preset, cwd)` / `connect_with`: spawn via `AcpAgent::from_args`,
+  drive the SDK connection future as a normal tokio task, run `initialize`
+  with `ProtocolVersion::V1`, then `session/new` (or `session/load`). The
+  handshake is bounded by a 120 s timeout; a prompt has no fixed timeout
+  and is cancelled through `cancel`. Returns `AcpSession` and an
+  `AcpHandshake` (agent name, version, capabilities, auth, modes).
+- `AcpSession`: `prompt`, `cancel`, `reply_permission`, `cancel_permission`,
+  `shutdown`, `handshake`, `stderr_tail`, and an `AcpEvent` stream:
+  `Connected`, `TextDelta`, `ThoughtDelta`, `ToolCall`, `ToolCallUpdate`,
+  `Plan`, `Usage`, `PermissionRequest`, `Finished`, `Error`.
+- `AcpWorker` (`spawn_acp_worker`): the long-lived bridge that maps
+  `AcpEvent` to `AgentEvent` and mirrors the session log (§2.3).
 
-## 3. Protocol in one page
+The SDK engine is runtime-neutral (`futures`, `async-io`/`async-process`
+transports). A spike proved the connection future runs under meerai's
+tokio runtime with no dedicated thread; the transport's own threads are
+internal to it. No `unstable_*` SDK feature is enabled.
+
+### 2.2 Adapter spawn and environment
+
+- The adapter inherits meerai's environment, **including provider
+  credentials**. The shell tool's secret scrub is deliberately not applied
+  to the spawn, or adapters cannot authenticate.
+- The SDK cannot set the child working directory: the adapter runs in
+  meerai's process CWD, and the requested workspace goes only into
+  `session/new`/`session/load`. Run meerai from the workspace.
+- `initialize` advertises **no** `fs` or `terminal` capability, so no extra
+  client surface is granted.
+- Adapter stderr goes through the SDK debug hook into a bounded 200-line
+  in-memory tail (`AcpSession::stderr_tail`), printed by `acp doctor`.
+  There is no stderr log file and no redaction of the tail today (§3).
+  Adapter stdout is protocol traffic only and is never displayed.
+- One adapter process per meerai session; the process is killed on exit.
+
+### 2.3 Worker and session record
+
+`AcpWorker` dual-writes every turn into the local session log, so transcript
+replay, titles, and pruning keep working:
+
+- `SessionMeta` carries `harness: "acp:agy"` and `remote_session_id`
+  (`Session::set_remote_session`).
+- Turn lifecycle maps to `TurnStarted`/`UserMessage`/`AssistantMessage`/
+  `TurnEnded`; tool calls and results are logged; approvals are logged as
+  `ApprovalRequested`/`ApprovalDecided`.
+- `session/load` replays remote history as text notifications **before**
+  `Connected`; the worker drains events up to `Connected` so the local
+  transcript stays the source. Pre-`Connected` updates never start a turn.
+- Commands handled: `SubmitPrompt`, `Cancel`, `Approve`, `Quit`. All other
+  `AgentCommand` variants (`Steer`, `SetModel`, `SetPermissionMode`,
+  `Compact`, `Rewind`, `ApplyAgent`/`ApplySkill`, `Reload`, `SetHooks`,
+  `AnswerQuestion`, `Reset`) are ignored on an ACP tab.
+
+### 2.4 Event mapping (ACP → meerai)
+
+The implemented mapping (`meerai-acp/src/{events,worker}.rs`):
+
+| ACP | meerai |
+| --- | --- |
+| `agent_message_chunk` | `ItemStarted`/`ItemDelta` text on an `AgentMessage` item |
+| `agent_thought_chunk` | reasoning item deltas |
+| `tool_call` | `ItemStarted { ToolCall }` |
+| `tool_call_update` | `ItemCompleted { ToolCall }` (no intermediate `StatusChanged` delta) |
+| `tool_call.content` blocks | observation text |
+| `plan` | `SessionItem::Plan` item (started + completed) |
+| `session/request_permission` | `ApprovalRequested` with `ApprovalKind::ExternalAgent` |
+| permission answer | `ApprovalResolved` |
+| `usage_update` | mapped to `AcpEvent::Usage`, then discarded by the worker (§3) |
+| `PromptResponse.stop_reason` | `TurnCompleted` |
+
+Stop reasons: `end_turn` → `Completed`; `cancelled` → `Aborted { User }`;
+`max_tokens` → `MaxTokens`; `max_turn_requests` → `Completed`; `refusal` →
+`Failed` ("agent refused").
+
+Every ACP tool call is classified `EffectClass::External` regardless of the
+agent-reported kind. The kind is display information; it does not drive
+local policy, because local policy does not apply (§5).
+
+### 2.5 Permissions
+
+`session/request_permission` becomes an approval request in the ordinary
+overlay, labeled "external agent permission". The overlay shows the
+agent-authored title and the adapter name; the user picks one of the
+**agent's** options. Decisions map by option **kind**, never by index or
+label (`worker.rs`):
+
+| Decision | Option chosen |
+| --- | --- |
+| `Accept` (`y`/Enter) | narrowest `allow_once`; fallback `allow_always` |
+| `AcceptForSession` (`a`) | `allow_always`; fallback `allow_once` |
+| `Decline` / `DeclineWithReason` (`n`/`r`) | `reject_once`; fallback `reject_always` |
+| `Cancel` (Esc) | no option (cancelled) |
+
+- The overlay appears in every approval mode; `/mode` has no effect on an
+  ACP tab because the worker ignores `SetPermissionMode`.
+- Headless runs decline external-agent permission requests; the adapter
+  receives the rejection and decides what to do with it.
+- meerai's rules and grants are **not** consulted (the crate has no
+  `meerai-policy` dependency). The external agent's request is the whole
+  decision surface; a local deny on top would be theater, because the
+  agent can ignore it. The decision is advisory in both directions.
+
+### 2.6 CLI and TUI surfaces
+
+| Surface | Behavior |
+| --- | --- |
+| `meerai --acp` | TUI bound to the `agy` adapter. Bare flag; there is no preset argument. Conflicts with `--agent`/`--skill`; `--mode` is ignored with a warning |
+| `meerai --acp --prompt "..."` | headless turn through the adapter |
+| `meerai acp doctor` | spawn, `initialize`, print preset, command, protocol, agent, `loadSession`, auth, modes, session id, and the stderr tail; exit |
+| TUI `/acp` | open a new ACP tab (argument ignored; `agy` is the only preset) |
+| Statusline | `ACP:agy` badge |
+| Transcript header | `agy (acp)` plus `external agent · policy not applied` |
+| `plan` mode | refuses to start: "ACP cannot run in plan mode; the external agent cannot be made read-only" |
+
+The default backend stays the built-in engine; ACP is opt-in per run.
+Headless ACP runs print no token summary: ACP has no prompt/completion
+token counts, and the worker does not emit `UsageUpdated`. A context-usage
+line is planned (§3).
+
+### 2.7 Resume and fork
+
+- `--continue`/`--resume <ID>` of an ACP session uses `session/load` when
+  the agent advertises `loadSession`. Otherwise meerai silently starts a
+  new remote session; the local transcript still replays, but the external
+  agent loses its history. A recap prompt is planned (§3).
+- Resuming a non-ACP session with `--acp` fails with a clear message.
+- Forking an ACP session (`--fork`, TUI fork) always starts a **new** remote
+  session (`AcpStart::New`); `Session::fork` does not copy
+  `harness`/`remote_session_id`. A single log never mixes two agents.
+
+### 2.8 Delegated `acp-run`
+
+The top-level native agent can call `acp-run` with
+`{"agent":"agy","task":"..."}` (`meerai-agents/src/acp_subagent.rs`). The
+tool:
+
+- creates a child session (`parent_session_id`, `harness: acp:agy`,
+  `remote_session_id`) that appears under the parent; the nested TUI view
+  loads from the child log;
+- sends one prompt, forwards `session/request_permission` to the parent
+  approval overlay as `ApprovalKind::ExternalAgent`, emits `SubagentRun`
+  items, and returns the report with a `child_session_id` hint;
+- enforces a wall-clock cap: default 600 s, clamped to 30..=3600. On
+  timeout it cancels, drains for 2 s, and quits the adapter;
+- performs **no** token, grant, or budget rollup (unlike `subagent-run`).
+
+Registration is top-level only: native subagents and ACP children never
+see the tool. Policy tier is `External`: `plan` denies it, `ask` asks,
+`auto` allows. The external agent still has its own tools and policy.
+
+### 2.9 Tests
+
+37 in-crate unit tests cover the preset catalog and every pure mapping
+(text, thought, tool call, tool call update, plan, usage, permission kind,
+stop reason) plus the worker. Two ignored live tests need `agy` installed
+and authenticated:
+
+```sh
+cargo test -p meerai-acp --test live_agy -- --ignored
+cargo test -p meerai-acp --test live_worker -- --ignored
+```
+
+`live_agy` connects, sends `Reply with OK`, answers a permission with
+`allow_once` if one arrives, and requires `Finished` within 60 s.
+`live_worker` asserts the session log carries the user message,
+`provider == "acp:agy"`, and `model == "agy"`. The TUI has ACP-focused tests
+for the tab command, badge, and header.
+
+## 3. Planned
+
+| Item | Description | Gate |
+| --- | --- | --- |
+| User preset catalog (`acp.yml`) | `~/.config/meerai/acp.yml` presets (`command`, `args`, `label`, `env` with `${VAR\|default}` expansion). User config only; a project `acp` block must be ignored so a repository cannot launch a process. Unknown presets fail with the known list | Config design |
+| OpenCode preset | `opencode acp` (official, ACP v1, ndjson over stdio). Proven reachable in the P0 spike | Preset catalog |
+| Gemini / Claude / Codex presets | `gemini --experimental-acp` (flag spelling to verify), `claude-agent-acp` (npm adapter), `codex-acp`; later Cursor, Copilot, Qwen, Kimi, Kiro, Goose, Augment, OpenHands | Preset catalog; one preset each, no code change |
+| Usage surfacing | Feed `usage_update.used`/`.size` to the statusline and print `usage: context=<used>/<size> (reported by <harness>)` in headless ACP runs. `usage_update.cost` stays ignored; meerai does not report USD for ACP | Worker wiring (`AcpEvent::Usage` exists and is discarded today) |
+| Resume recap | When the agent cannot `session/load`, send a short labeled recap built from the last turns instead of silently starting fresh | Prompt design |
+| Stderr log file | Move the tail to `<session-dir>/acp-stderr.log`, passed through `redact_text` before writing | Redaction seam |
+| Tool status deltas | Emit `ItemDelta::StatusChanged` on `tool_call_update` before completion, and map the agent-reported kind to an `EffectClass` for display | Wire-contract review |
+| `fs` capability | If `fs/read_text_file` is ever advertised, route it through `CodeTools` path guards and produce `FileChange` diffs. Today no `fs`/`terminal` capability is advertised, deliberately: a partial guarantee is worse than an honest none | Security review |
+| M14 — `meerai acp` | meerai as an ACP agent on stdio for editors (§3.1) | ACP compatibility kit + Zed smoke |
+
+Out of scope (non-goals): proxying or rewriting an external agent's
+requests (the SDK `Proxy` role), MCP-over-ACP, the `Conductor`, forking
+remote sessions, USD cost accounting in either direction, streaming
+terminal widgets for adapter tool calls, replaying a remote session the
+adapter cannot load, and any claim that meerai policy governs an external
+process.
+
+### 3.1 M14 design (planned)
+
+`meerai acp` would run meerai as an agent on stdio; editors launch it.
+
+| Method | Planned behavior |
+| --- | --- |
+| `initialize` | advertise `loadSession`; no image, audio, or embedded context; no MCP |
+| `session/new` | create a meerai session with the client's `cwd` as the workspace |
+| `session/load` | open the session and replay `replay_from_events` as updates |
+| `session/prompt` | run `MultiTurnAgent`; stream deltas as `session/update` |
+| `session/cancel` | cancel the turn token |
+| `session/set_mode` | map ACP modes to `ApprovalMode`; an unknown mode keeps the current mode and receives a notice |
+
+Mapping (meerai → ACP): text deltas → `agent_message_chunk`; reasoning →
+`agent_thought_chunk`; `ToolCall` items → `tool_call` with kind and
+locations; status changes and completed content → `tool_call_update`;
+`FileChange` → content `diff`; `ApprovalRequested` →
+`session/request_permission` (`AcceptForSession` → `allow_always`, a turn
+grant → `allow_once` for that call, because ACP has no turn-scoped grant);
+`UsageUpdated` → `usage_update` with context used/size, no cost;
+`TurnCompleted` → the matching stop reason; `Error` → JSON-RPC error or
+notice.
+
+## 4. Reference: protocol in one page
+
+Checked against the ACP specification and the Rust SDK
+(`agent-client-protocol` 5.3.0, Apache-2.0, MSRV 1.88; meerai pins 1.100).
 
 | Item | Value |
 | --- | --- |
 | Encoding | JSON-RPC 2.0, UTF-8 |
 | Transport | stdio: client spawns the agent; newline-delimited JSON on stdin/stdout |
-| Agent logs | stderr only; stdout must carry protocol messages only |
+| Agent logs | stderr only; stdout carries protocol messages only |
 | Paths | absolute, always |
 | Lines | 1-based |
 | Keys | `camelCase`; discriminator values `snake_case` |
 | Extensibility | `_meta` fields; methods prefixed with `_` |
 
-Client → agent:
+Client → agent: `initialize`, `session/new`, `session/load` (needs the
+agent's `loadSession` capability), `session/prompt`, `session/set_mode`,
+`session/cancel` (notification).
 
-| Method | Purpose |
-| --- | --- |
-| `initialize` | version and capability negotiation |
-| `session/new` | create a session |
-| `session/load` | resume a session (needs the agent's `loadSession` capability) |
-| `session/prompt` | send user content; returns a stop reason |
-| `session/set_mode` | switch agent operating mode |
-| `session/cancel` | notification; cancel the turn |
-
-Agent → client:
-
-| Method | Purpose |
-| --- | --- |
-| `session/update` | stream content and tool events (notification) |
-| `session/request_permission` | ask the user before a tool call |
-| `fs/read_text_file`, `fs/write_text_file` | optional client file access |
-| `terminal/*` | optional client command execution |
-| `elicitation/create` | optional structured question |
+Agent → client: `session/update` (notification),
+`session/request_permission`, optional `fs/read_text_file` /
+`fs/write_text_file`, optional `terminal/*`, optional
+`elicitation/create`.
 
 `session/update` variants relevant to meerai: `agent_message_chunk`,
 `agent_thought_chunk`, `tool_call`, `tool_call_update`, `plan`,
-`current_mode_update`, `usage_update`. The rest are either UI-only
-(`available_commands_update`, `session_info_update`, `notice`) or capability
-gated (`compaction_update`, `compaction_summary_chunk`).
+`current_mode_update`, `usage_update`. The rest are UI-only
+(`available_commands_update`, `session_info_update`, `notice`) or
+capability-gated (`compaction_update`, `compaction_summary_chunk`).
 
-Permission options carry a kind: `allow_once`, `allow_always`, `reject_once`,
-`reject_always`. The protocol states that permission requests are **advisory**:
-the agent performs its own work and is responsible for honoring the answer.
+Permission options carry a kind: `allow_once`, `allow_always`,
+`reject_once`, `reject_always`. Permission requests are **advisory**: the
+agent performs its own work and is responsible for honoring the answer.
+Prompt stop reasons: `end_turn`, `max_tokens`, `max_turn_requests`,
+`refusal`, `cancelled`.
 
-Prompt stop reasons: `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`,
-`cancelled`.
+The SDK follows semver on the stable surface; every `unstable_*` feature
+may change in a minor release. meerai does not enable `unstable_*`.
 
-## 4. Rust SDK
-
-| Item | Value |
-| --- | --- |
-| Crate | `agent-client-protocol` 5.3.0 (14 Nov 2026) |
-| License | Apache-2.0 |
-| MSRV | 1.88; meerai pins 1.100 |
-| Features used | `process` (spawn via `AcpAgent`), `stdio` (`Stdio` for M14) |
-| Roles | `Client.v1()`, `Agent.v1()`, `Proxy.v1()`, `Conductor` |
-| Test support | `agent-client-protocol-test`, plus the protocol compatibility kit |
-
-Two integration facts drive the plan:
-
-- The engine is **runtime-neutral** and built on `futures`; the native
-  `process` and `stdio` transports use `async-io` / `async-process`, not tokio.
-  The connection future is driven by the embedder. P0 proved that it runs under
-  meerai's tokio runtime with no dedicated thread (§10.1), so the crate spawns
-  the connection as a normal `tokio` task.
-- `ByteStreams` needs `futures::io::{AsyncRead, AsyncWrite}`. If we ever drive
-  our own transport, adapt tokio pipes with `tokio-util` compat types.
-
-The SDK follows semver on the stable surface, but every `unstable_*` feature may
-change in a minor release. meerai will not enable `unstable_*` in M13 or M14.
-
-## 5. Harness presets
-
-A preset is a command plus arguments. It is data, not code, so adapter churn
-does not force a meerai release.
-
-The landed crate carries exactly one preset, `agy`. The table below is the
-adoption order for later phases; the user-config catalog in this section is
-still planned.
-
-| Order | Harness | Command | Notes |
-| --- | --- | --- | --- |
-| 1 | Antigravity | `agy acp` | Official CLI; native; no Node. First target; shipped as the `AGY` preset. |
-| 2 | OpenCode | `opencode acp` | Official; ACP v1; ndjson over stdio; starts a private server |
-| 3 | Gemini CLI | `gemini --experimental-acp` (`--acp` on newer builds) | Flag spelling to verify at adoption |
-| 4 | Claude Code | `claude-agent-acp` (npm) | Adapter over the Claude Agent SDK; needs Node |
-| 5 | Codex | `codex-acp` | Official adapter |
-| later | Cursor, Copilot, Qwen, Kimi, Kiro, Goose, Augment, OpenHands | per vendor | One preset each; no code change |
-
-Proposed user configuration, `~/.config/meerai/acp.yml` (not implemented):
-
-```yaml
-presets:
-  agy:
-    command: agy
-    args: ["acp"]
-    label: Antigravity
-  opencode:
-    command: opencode
-    args: ["acp"]
-    label: OpenCode
-```
-
-Rules:
-
-- User config only. A project `acp` block is ignored with a warning. A
-  repository must not be able to launch an arbitrary process when meerai
-  starts.
-- A preset without `command` is invalid and is skipped with a warning.
-- `env` may be set per preset. The value is expanded with the existing
-  `${VAR|default}` helper.
-- Unknown presets fail with the list of known names.
-
-## 6. M13 — meerai as an ACP client
-
-### 6.1 Crate layout
-
-Crate `meerai-acp`, depended on by `meerai-tui` only in P2; today no crate
-depends on it.
-
-```text
-meerai-acp/src/
-  lib.rs        preset catalog (`agy`), public re-exports, crate docs
-  client.rs     spawn, handshake, command loop, permission bridge
-  events.rs     ACP -> `AcpEvent` mapping, typed event structs
-```
-
-The planned split into `preset.rs` (config parsing), `bridge.rs` (`AgentEvent`
-mapping), `permission.rs`, and `logger.rs` arrives with the P2 surfaces.
-
-The crate owns every `agent_client_protocol` type. No SDK type appears in
-`meerai-agents`, `meerai-session`, or `meerai-tui` signatures.
-
-### 6.2 Lifecycle
-
-P1 implements steps 1–6 below in crate form: no session log, no stderr file,
-no surface wiring. Process teardown is the SDK transport guard; the stderr log
-file is P2.
-
-1. Resolve the preset.
-2. Spawn the adapter with `AcpAgent`, with the inherited environment. The child
-   inherits meerai's process working directory; the requested workspace goes
-   only into `session/new` (see §10.2 for the limit this creates).
-3. `initialize`; request protocol v1 and advertise **no** `fs` or `terminal`
-   capability in phase 1.
-4. `session/new`, or `session/load` when the agent advertises `loadSession`.
-5. Run `session/prompt` on submit; stream updates.
-6. `session/cancel` on Esc or ctrl+c; mark unfinished tool calls cancelled.
-7. Kill the process on exit (`kill_on_drop`); flush the stderr log.
-
-One adapter process per meerai session. Adapter stderr is captured through the
-SDK debug hook into a bounded in-memory tail (`AcpSession::stderr_tail`); P1
-writes no log file and does not redact it. P2 moves the tail to
-`<session-dir>/acp-stderr.log`, passed through `redact_text` before it is
-written. Adapter stdout is protocol traffic only and is never displayed.
-
-### 6.3 Event mapping (ACP → meerai)
-
-P1 exposes `AcpEvent` (see §10.2). The `AgentEvent` mapping below is P2 and
-is not implemented.
-
-| ACP | meerai |
-| --- | --- |
-| `agent_message_chunk` | `ItemDelta` text on an `AgentMessage` item |
-| `agent_thought_chunk` | `ItemDelta` reasoning |
-| `tool_call` | `ItemStarted { ToolCall }` with the status below |
-| `tool_call_update` | `ItemDelta::StatusChanged`, then `ItemCompleted` |
-| `tool_call.content` blocks | observation text |
-| `tool_call.content` diff | `SessionItem::FileChange` |
-| `tool_call.locations` | sidebar paths (display only) |
-| `plan` | `System` transcript note in phase 1 |
-| `current_mode_update` | statusline mode badge |
-| `usage_update.used` / `.size` | context usage in the statusline |
-| `usage_update.cost` | ignored |
-| `session/request_permission` | `ApprovalRequested` |
-| permission answer | `ApprovalResolved` |
-| `PromptResponse.stop_reason` | `TurnCompleted` |
-
-Tool status mapping: `pending` → `Pending`, `in_progress` → `InProgress`,
-`completed` → `Succeeded`, `failed` → `Failed`.
-
-Tool kind mapping to `EffectClass`:
-
-| ACP `kind` | `EffectClass` |
-| --- | --- |
-| `read`, `search`, `think`, `other` | `Read` |
-| `edit`, `delete`, `move` | `Write` |
-| `execute` | `Execute` |
-| `fetch` | `External` |
-| `switch_mode` | no tool item; render a system note |
-
-Stop reason mapping:
-
-| `stop_reason` | `TurnCompleted` |
-| --- | --- |
-| `end_turn` | `Completed` |
-| `cancelled` | `Aborted` |
-| `max_tokens`, `max_turn_requests` | `Failed { Budget }` |
-| `refusal` | `Failed` |
-
-### 6.4 Permissions
-
-`session/request_permission` becomes an ordinary approval request. The overlay
-shows the agent-authored `title`, the tool `kind`, every `location`, and the
-adapter name. The user picks one of the **agent's** options.
-
-Mapping rules:
-
-- Pick by option **kind**, never by index or label.
-- `y` / Enter → the narrowest `allow_once`; fall back to `allow_always` only
-  when `allow_once` is absent.
-- `a` → `allow_always` when present; otherwise `allow_once` plus a note.
-- `n` / `r` → `reject_once`; `reject_always` only when the agent asks for it.
-- Esc, cancel, or `plan` mode → `cancelled`.
-- No matching option → `cancelled`. Never guess an allow.
-- meerai's own rules and grants are **not** consulted. The external agent's
-  request is the whole decision surface; adding a local deny on top would be
-  theater, because the agent can ignore it.
-
-In `auto` mode the same rule applies, limited to `allow_once` when the agent
-offers it. That is a deliberate, documented reduction of the local guarantee.
-
-### 6.5 Session record and resume
-
-- `SessionMeta` gains two additive fields: `harness: Option<String>` and
-  `remote_session_id: Option<String>`.
-- meerai logs the turn as `SessionEvent`s, so transcript replay, titles, usage
-  counters, and pruning keep working.
-- The remote session lives in the adapter's storage. If the agent advertises
-  `loadSession`, `--continue` reconnects to it. Otherwise meerai starts a new
-  remote session and sends a short recap built from the last turns. The recap
-  is a prompt, not a replay, and is labeled as such in the transcript.
-- Switching presets mid-session starts a new session. A single log must not mix
-  two agents.
-
-### 6.6 Usage and cost
-
-- `usage_update` gives context `used` and `size`. That feeds the statusline.
-- Prompt and completion token counts are not part of ACP. The headless
-  `tokens: prompt=… completion=…` line is therefore **not printed** for an ACP
-  backend. The line is replaced with `usage: context=<used>/<size> (reported by
-  <harness>)` when the agent reports it.
-- `usage_update.cost` exists in the protocol and is ignored. meerai does not
-  report USD.
-
-### 6.7 Surfaces
-
-| Surface | Behavior |
-| --- | --- |
-| `meerai --acp agy --prompt "..."` | headless turn through the adapter |
-| `meerai --acp agy` | TUI bound to the adapter |
-| `meerai acp doctor [--preset agy]` | spawn, `initialize`, print capabilities, exit |
-| TUI `/acp <preset>` | bind the next turn to a preset; unknown names list the presets |
-| Statusline | `ACP:agy` badge next to the approval mode |
-| `/acp` with no argument | list presets; do not switch |
-
-The default backend stays the built-in engine. ACP is opt-in per run.
-
-## 7. M14 — meerai as an ACP agent
-
-`meerai acp` runs meerai as an agent on stdio. Editors launch it.
-
-| Method | meerai behavior |
-| --- | --- |
-| `initialize` | advertise `loadSession`; no image, audio, or embedded context; no MCP |
-| `session/new` | create a meerai session with the client's `cwd` as the workspace |
-| `session/load` | open the session and replay `meerai_session::replay::replay_from_events` as updates |
-| `session/prompt` | run `MultiTurnAgent`; stream deltas as `session/update` |
-| `session/cancel` | cancel the turn token |
-| `session/set_mode` | map ACP modes to `ApprovalMode` |
-
-Mapping (meerai → ACP):
-
-| meerai | ACP |
-| --- | --- |
-| `ItemDelta` text | `agent_message_chunk` |
-| `ItemDelta` reasoning | `agent_thought_chunk` |
-| `ItemStarted { ToolCall }` | `tool_call` with `kind` and `locations` |
-| `StatusChanged` | `tool_call_update` status |
-| `ItemCompleted { ToolCall }` | `tool_call_update` with content |
-| `FileChange` | `tool_call_update` content `diff` |
-| `ApprovalRequested` | `session/request_permission` with `allow_once` / `allow_always` / `reject_once` |
-| `UsageUpdated` | `usage_update` with context `used` / `size`; no cost |
-| `TurnCompleted` | prompt response with the matching stop reason |
-| `Error` | JSON-RPC error or `notice` |
-
-Mode mapping: `plan` → ACP plan mode, `ask` → ask, `auto` → the external
-agent's auto mode. A client that sends an unknown mode keeps the current mode
-and receives a notice.
-
-Agent-side approval reasons come from `PolicyEngine`. `AcceptForSession`
-becomes `allow_always`; a turn grant becomes `allow_once` for that call only,
-because ACP has no turn-scoped grant concept.
-
-Gate for M14: an editor smoke (Zed) plus the ACP compatibility kit.
-
-## 8. Trust boundary
-
-This is the part that must appear in the README and the release notes before
-M13 ships.
+## 5. Trust boundary
 
 What ACP guarantees:
 
@@ -353,148 +303,45 @@ What ACP guarantees:
 What ACP does **not** guarantee:
 
 - That the agent obeys a denial. Permission requests are advisory.
-- That meerai's `permissions` rules, `plan` mode, path guards, or redaction
-  apply to the external process. They do not.
-- That the agent stays inside the workspace. It has its own path handling.
+- That meerai's `permissions` rules, `plan` mode, path guards, redaction,
+  or `ExecutionWorld` apply to the external process. They do not.
+- That the agent stays inside the workspace. It has its own path handling
+  and inherits meerai's working directory and credentials.
 - That the agent's tools are the ones it reports.
-- Any OS sandbox. ACP says so in its own security page.
+- Any OS sandbox. The ACP security page says so itself.
 
-Rules for M13:
+Rules the implementation follows:
 
-- The statusline and the transcript header name the external agent and say
-  `external agent: meerai policy does not apply`.
-- meerai does not advertise `fs` or `terminal` in phase 1, so no extra
-  capability is granted. When `fs` is added later, it must go through
-  `CodeTools` path guards and produce `FileChange` diffs.
-- Adapter commands come from user config only.
-- Adapter stderr is redacted before it is written.
-- Preset `env` values are not logged.
-- The adapter inherits the environment, including provider credentials. The
-  shell tool's `is_sensitive_env` scrub must **not** be applied to the spawn,
-  or adapters cannot authenticate. This is intentional and must be documented.
+- The statusline badge and transcript header name the external agent and
+  warn that meerai policy does not apply.
+- No `fs` or `terminal` capability is advertised, so no extra client
+  surface is granted.
+- `plan` mode refuses to start an ACP backend, with a message that says
+  why: the external agent cannot be made read-only.
+- The adapter inherits provider credentials by design (§2.2); this is
+  documented, not hidden.
+- `acp-run` delegates one task; it does not make the external agent
+  local-policy-bound. Treat the badge and header as an external-engine
+  warning, not a safety claim.
 
-`plan` mode with an ACP backend is not a read-only guarantee. The honest
-behavior is to refuse to start an ACP backend in `plan` mode, with a message
-that says why.
+Residual risks are owned by [threat-model.md](threat-model.md) §5.
 
-## 9. Non-goals
+## 6. Open questions
 
-- MCP-over-ACP, proxies, and the `Conductor`.
-- A full agent-to-agent runtime through ACP. M8 stays native; `acp-run` delegates
-  one external task. The ACP agent's own subagents are outside local control.
-- Streaming terminal widgets for adapter tool calls.
-- Replaying a remote session that the adapter cannot load.
-- Cost normalization across vendors.
-
-## 10. Phases
-
-| Phase | Work | Gate |
+| # | Question | What settles it |
 | --- | --- | --- |
-| M13-P0 | Throwaway spike: client against `agy acp`, one prompt, one permission, one cancel. Decide the runtime question. | **Landed.** Connection future runs under tokio without a dedicated thread (§10.1) |
-| M13-P1 | `meerai-acp`: `agy` preset, spawn, handshake, typed event bridge, permission bridge, cancel, stderr tail | **Landed.** 14 unit tests over the preset catalog and mappings; one `#[ignore = "live agy"]` test (§10.2) |
-| M13-P2 | `--acp`, `/acp`, statusline badge, transcript header, resume semantics | **Landed for `agy`.** TUI tests; live `agy` headless smoke and `session/load` resume |
-| M13-P3 | OpenCode preset, `acp doctor`, docs, M13 row | **Partial.** `acp doctor`, docs, and the M13 row are landed; the OpenCode preset remains backlog |
-| M14-P1 | `meerai acp`: initialize, session new/load, prompt, cancel, modes | Compatibility kit |
-| M14-P2 | Editor smoke, docs, M14 row | Zed manual test |
+| 1 | Should the worker surface `AcpEvent::Usage` (statusline + headless line) or drop the variant? | Product decision; the event is produced and discarded today |
+| 2 | Is the silent fresh remote session on non-`loadSession` resume acceptable, or should the recap land first? | User feedback on lost external history |
+| 3 | One adapter per session is enough today; parallel adapters would need a session-to-process map | Demand |
 
-P0 answered one question: does the SDK connection future run under tokio
-without a dedicated thread? It does, so P1 is a small bridge.
+Resolved decisions: `plan` mode fails rather than warns (§2.6); the
+external-engine warning appears once per session in the header plus the
+persistent badge; `acp doctor` prints capabilities and the negotiated
+version; no `fs` capability in the current phase. The worker's unread
+`resumed` flag was removed; `AcpHandshake.resumed` (the `session/load`
+report) stays.
 
-### M13 delegation (`acp-run`)
-
-The top-level native agent can call `acp-run` with
-`{"agent":"agy","task":"..."}`. The tool creates a child session
-(`parent_session_id`, `harness: acp:agy`, `remote_session_id`), sends one
-prompt, forwards `session/request_permission` to the parent approval overlay as
-`ApprovalKind::ExternalAgent`, emits `SubagentRun` items, and returns the
-report. The child session appears under the parent session and its nested view
-loads from the child log. The wall-clock cap defaults to 600 s
-(30..3600). There is no token or grant rollup. The tool is registered only on
-the top-level native agent, not on native subagents or ACP children. `plan`
-denies it; the external agent still has its own tools and policy.
-
-### 10.1 P0 result
-
-The `connect_with` future was driven as a `tokio::spawn` task on a multi-thread
-runtime. It is `Send + 'static`, every ACP call (`initialize`, `session/new`,
-`session/prompt`, `session/request_permission`, `session/cancel`) completed on
-that runtime, and a second `tokio::spawn` cancelled a turn through a cloned
-`ConnectionTo<Agent>`. Handshakes and prompts ran against `agy acp` 1.5.9 and
-`opencode acp` 2.3.0; one `agy` permission request was answered and one
-`opencode` turn was cancelled. No dedicated thread or foreign-runtime bridge is
-needed. The transport still starts its own `async-io` and `async-process`
-threads; those are transport internals that appear on any embedder runtime.
-
-The spike also fixed three implementation choices: `AcpAgent::from_args` instead
-of `from_str` so preset arguments are not re-split, `with_debug` for adapter
-stderr, and a wall-clock timeout around the connection.
-
-### 10.2 P1 result: typed bridge
-
-`meerai-acp` now holds a long-lived client. Public shape:
-
-- `AcpPreset { id, command, args }` with the `AGY` constant and a `presets()`
-  catalog. `AGY` is `agy acp`; there is no `opencode` and no `claude` preset.
-- `connect(preset, cwd)` builds the transport with `AcpAgent::from_args`, spawns
-  the SDK `connect_with` future as a `tokio` task, runs `initialize` with
-  `ProtocolVersion::V1`, then `session/new` for `cwd`, and returns an
-  `AcpSession` once both succeed. The handshake is bounded by a 120 s timeout;
-  a prompt has no fixed timeout and is cancelled through `cancel`.
-- `AcpSession` exposes `prompt`, `cancel`, `reply_permission`,
-  `cancel_permission`, `shutdown`, and an `AcpEvent` stream: `Connected`,
-  `TextDelta`, `ThoughtDelta`, `ToolCall`, `ToolCallUpdate`, `Plan`, `Usage`,
-  `PermissionRequest`, `Finished`, `Error`. A prompt emits `Finished` with the
-  stop reason (`end_turn`, `max_tokens`, `max_turn_requests`, `refusal`,
-  `cancelled`).
-- Permission requests are forwarded to the caller as `PermissionRequest` with
-  the agent's options mapped by kind; the reply comes back through
-  `reply_permission` / `cancel_permission`. The library never auto-approves.
-- Adapter stderr goes through the SDK debug hook into a bounded in-memory tail;
-  protocol stdout is consumed only by the transport and never displayed.
-- All `agent_client_protocol` types stay inside the crate; the public API uses
-  plain strings, structs, and `tokio` channels.
-
-Not included in P1: no CLI flag, no TUI surface, no `/acp`, no `acp.yml` or
-settings loading, no session-log or `AgentEvent` mapping, no provider login or
-configuration change, and no policy, sandbox, path-guard, or redaction claim
-over the external agent process.
-
-Two limits observed on a live `agy` run:
-
-- The spawned adapter inherits meerai's process working directory. `cwd` is
-  sent only in `session/new`, and `agy acp` 1.5.9 resolved one relative write
-  against its own process directory. P2 must set the child working directory
-  (or require the caller to run from the workspace) before the surface can
-  claim the writes land in the session workspace.
-- One write-prompt run produced no session updates for 120 s, then the same
-  prompt completed in 18 s with two permission requests answered as
-  `allow_once` and tool calls `pending` → `in_progress` → `completed`. Treat
-  adapter stalls as agent-side, and keep the caller able to cancel.
-
-Tests: unit tests cover the preset catalog and every pure mapping (text chunk,
-thought chunk, tool call, tool call update, plan, usage, permission kind, stop
-reason). `meerai-acp/tests/live_agy.rs` is a single
-`#[ignore = "live agy"]` test that connects to `agy acp`, waits for
-`Connected`, sends `Reply with OK`, answers a permission request with
-`allow_once` if one arrives, and requires `Finished` within 60 s. It compiles
-without running; `cargo test -p meerai-acp --test live_agy -- --ignored` runs it
-and needs `agy` installed and authenticated.
-
-## 11. Open questions
-
-1. Should `meerai --acp` in `plan` mode fail, or run with a warning? **Resolved:
-   fail.** The external agent cannot be made read-only.
-2. Should the transcript header repeat the policy warning on every turn, or
-   once per session? Proposal: once per session, plus the statusline badge.
-3. Advertise `fs.read_text_file` in phase 1 so reads get path guards? Proposal:
-   no. Most adapters do their own I/O; a partial guarantee is worse than an
-   honest none.
-4. Should `acp doctor` print adapter capabilities and the negotiated version?
-   Proposal: yes; it is the cheapest debugging tool.
-5. Is one adapter per meerai session enough, or do we need parallel adapters?
-   Proposal: one, until M8 exists.
-
-## 12. References
+## 7. References
 
 - ACP overview: <https://agentclientprotocol.com/protocol/v1/overview>
 - ACP prompt turn: <https://agentclientprotocol.com/protocol/v1/prompt-turn>

@@ -33,7 +33,7 @@ impl MultiTurnAgent {
                 | AgentCommand::AnswerQuestion { .. }
                 | AgentCommand::Rewind { .. }
                 | AgentCommand::SubmitPrompt(_)
-                | AgentCommand::SetModel(_)
+                | AgentCommand::SetModel { .. }
                 | AgentCommand::Reset => {}
             }
         }
@@ -75,6 +75,7 @@ pub fn spawn_worker(
                         let mut pending_quit = false;
                         let mut pending_reset = false;
                         let mut pending_model: Option<String> = None;
+                        let mut pending_model_window: Option<u64> = None;
                         let mut recovery: Option<QueuedPrompt> = None;
                         let recovery_model = agent
                             .harness
@@ -148,8 +149,12 @@ pub fn spawn_worker(
                                                 cancel.cancel();
                                                 pending_reset = true;
                                             }
-                                            Some(AgentCommand::SetModel(model)) => {
+                                            Some(AgentCommand::SetModel {
+                                                model,
+                                                context_window_tokens,
+                                            }) => {
                                                 pending_model = Some(model);
+                                                pending_model_window = context_window_tokens;
                                             }
                                             Some(AgentCommand::SubmitPrompt(prompt)) => {
                                                 queued.push_back(QueuedPrompt {
@@ -188,6 +193,9 @@ pub fn spawn_worker(
                         }
                         if let Some(model) = pending_model {
                             agent.set_model(model);
+                            if let Some(tokens) = pending_model_window {
+                                agent.set_context_window_tokens(tokens);
+                            }
                             agent.persist_model().await;
                         }
                         if pending_reset {
@@ -206,8 +214,14 @@ pub fn spawn_worker(
                         }
                     }
                 }
-                AgentCommand::SetModel(model) => {
+                AgentCommand::SetModel {
+                    model,
+                    context_window_tokens,
+                } => {
                     agent.set_model(model);
+                    if let Some(tokens) = context_window_tokens {
+                        agent.set_context_window_tokens(tokens);
+                    }
                     agent.persist_model().await;
                 }
                 AgentCommand::SetPermissionMode(mode) => {
@@ -226,9 +240,16 @@ pub fn spawn_worker(
                     name,
                     instructions,
                     model,
+                    context_window_tokens,
                 } => {
                     agent
-                        .apply_agent_instructions(&name, &instructions, model, &event_tx)
+                        .apply_agent_instructions(
+                            &name,
+                            &instructions,
+                            model,
+                            context_window_tokens,
+                            &event_tx,
+                        )
                         .await;
                 }
                 AgentCommand::ApplySkill { name, instructions } => {

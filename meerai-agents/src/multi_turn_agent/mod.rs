@@ -753,6 +753,12 @@ impl MultiTurnAgent {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.model.clone();
     }
 
+    pub fn set_context_window_tokens(&mut self, tokens: u64) {
+        if let Some(harness) = &mut self.harness {
+            harness.config.context_window_tokens = tokens;
+        }
+    }
+
     pub(super) async fn persist_model(&self) {
         if let Some(harness) = &self.harness {
             let _ = harness.session.set_model(self.model.clone()).await;
@@ -842,15 +848,21 @@ impl MultiTurnAgent {
             }
             harness.policy = policy;
             let token_pricing = harness.config.token_pricing;
+            let context_window = harness.config.context_window_tokens;
             harness.config = HarnessConfig::from_context_settings(context.as_ref());
             harness.config.token_pricing = token_pricing;
+            if context
+                .as_ref()
+                .and_then(|context| context.context_window_tokens)
+                .is_none()
+            {
+                harness.config.context_window_tokens = context_window;
+            }
         }
-        if let Some(enabled) = context
+        self.post_edit_diagnostics = context
             .as_ref()
             .and_then(|context| context.post_edit_diagnostics)
-        {
-            self.post_edit_diagnostics = enabled;
-        }
+            .unwrap_or(false);
         self.system_prompt = system_prompt;
         self.system_prompt_generation = self.system_prompt_generation.wrapping_add(1);
         self.logged_system_prompt = None;

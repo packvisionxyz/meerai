@@ -322,7 +322,6 @@ impl SearchAsCodeToolset {
         };
         let policy = SandboxPolicy::ReadOnly {
             workspace_root: cwd.clone(),
-            readable_roots: vec![cwd],
             allow_network: false,
         };
 
@@ -721,12 +720,11 @@ mod tests {
             match &recorded[0] {
                 SandboxPolicy::ReadOnly {
                     workspace_root,
-                    readable_roots,
                     allow_network,
+                    ..
                 } => {
                     let canon = dir.path().canonicalize().unwrap();
                     assert_eq!(workspace_root, &canon);
-                    assert_eq!(readable_roots, &[canon]);
                     assert!(!allow_network);
                 }
                 other => panic!("expected ReadOnly policy, got {other:?}"),

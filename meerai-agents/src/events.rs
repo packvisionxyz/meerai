@@ -220,7 +220,11 @@ pub enum AgentCommand {
         turn_id: TurnId,
         scope: RewindScope,
     },
-    SetModel(String),
+    SetModel {
+        model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window_tokens: Option<u64>,
+    },
     SetPermissionMode(ApprovalMode),
     Compact,
     ApplyAgent {
@@ -228,6 +232,8 @@ pub enum AgentCommand {
         instructions: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window_tokens: Option<u64>,
     },
     ApplySkill {
         name: String,

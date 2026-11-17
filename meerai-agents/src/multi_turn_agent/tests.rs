@@ -1827,6 +1827,7 @@ async fn idle_apply_agent_logs_instruction_and_switches_model() {
             name: "reviewer".to_string(),
             instructions: "Review every change.".to_string(),
             model: Some("gpt-5-mini".to_string()),
+            context_window_tokens: None,
         })
         .unwrap();
     cmd_tx
@@ -1885,7 +1886,10 @@ async fn idle_set_model_persists_session_meta() {
 
     let (cmd_tx, mut rx) = spawn_worker(agent);
     cmd_tx
-        .send(AgentCommand::SetModel("openai::gpt-5-mini".to_string()))
+        .send(AgentCommand::SetModel {
+            model: "openai::gpt-5-mini".to_string(),
+            context_window_tokens: None,
+        })
         .unwrap();
     cmd_tx
         .send(AgentCommand::SubmitPrompt("hello".to_string()))
@@ -1934,7 +1938,10 @@ async fn model_set_during_a_turn_persists_session_meta() {
         .unwrap();
     started.notified().await;
     cmd_tx
-        .send(AgentCommand::SetModel("openai::gpt-5-mini".to_string()))
+        .send(AgentCommand::SetModel {
+            model: "openai::gpt-5-mini".to_string(),
+            context_window_tokens: None,
+        })
         .unwrap();
     release.notify_one();
 
@@ -1947,6 +1954,110 @@ async fn model_set_during_a_turn_persists_session_meta() {
     }
 
     assert_eq!(session.meta().model.as_deref(), Some("openai::gpt-5-mini"));
+
+    let _ = cmd_tx.send(AgentCommand::Quit);
+}
+
+fn model_switch_streamer() -> Arc<FakeStreamer> {
+    let reply = "x".repeat(800);
+    let summary = "Goal: ship the test";
+    Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(text_end(&reply))],
+        vec![
+            ChatStreamEvent::Chunk(StreamChunk {
+                content: summary.to_string(),
+            }),
+            ChatStreamEvent::End(text_end(summary)),
+        ],
+        vec![ChatStreamEvent::End(text_end("second reply"))],
+    ]))
+}
+
+async fn run_two_turns(
+    cmd_tx: &mpsc::UnboundedSender<AgentCommand>,
+    rx: &mut mpsc::UnboundedReceiver<AgentEvent>,
+) {
+    for prompt in ["first", "second"] {
+        cmd_tx
+            .send(AgentCommand::SubmitPrompt(prompt.to_string()))
+            .unwrap();
+        loop {
+            match rx.recv().await {
+                Some(AgentEvent::TurnCompleted { .. }) => break,
+                Some(_) => {}
+                None => panic!("worker stopped mid-turn"),
+            }
+        }
+    }
+}
+
+fn pressure_compacted(session: &Session) -> bool {
+    session_events(session).iter().any(|event| {
+        matches!(
+            event,
+            SessionEvent::CompactionStarted {
+                trigger: CompactionTrigger::Pressure,
+                ..
+            }
+        )
+    })
+}
+
+#[tokio::test]
+async fn worker_set_model_applies_the_context_window() {
+    let session = memory_session();
+    let agent = harness_agent(
+        model_switch_streamer(),
+        vec![],
+        "system",
+        &session,
+        auto_mode(),
+        HarnessConfig {
+            verbatim_window_turns: 1,
+            ..HarnessConfig::default()
+        },
+    );
+
+    let (cmd_tx, mut rx) = spawn_worker(agent);
+    cmd_tx
+        .send(AgentCommand::SetModel {
+            model: "openai::gpt-5-mini".to_string(),
+            context_window_tokens: Some(10),
+        })
+        .unwrap();
+    run_two_turns(&cmd_tx, &mut rx).await;
+
+    assert!(pressure_compacted(&session));
+
+    let _ = cmd_tx.send(AgentCommand::Quit);
+}
+
+#[tokio::test]
+async fn worker_set_model_without_a_window_keeps_the_current_window() {
+    let session = memory_session();
+    let agent = harness_agent(
+        model_switch_streamer(),
+        vec![],
+        "system",
+        &session,
+        auto_mode(),
+        HarnessConfig {
+            context_window_tokens: 10,
+            verbatim_window_turns: 1,
+            ..HarnessConfig::default()
+        },
+    );
+
+    let (cmd_tx, mut rx) = spawn_worker(agent);
+    cmd_tx
+        .send(AgentCommand::SetModel {
+            model: "openai::gpt-5-mini".to_string(),
+            context_window_tokens: None,
+        })
+        .unwrap();
+    run_two_turns(&cmd_tx, &mut rx).await;
+
+    assert!(pressure_compacted(&session));
 
     let _ = cmd_tx.send(AgentCommand::Quit);
 }
@@ -2031,6 +2142,7 @@ async fn apply_agent_without_harness_updates_history_and_model() {
             name: "reviewer".to_string(),
             instructions: "Review every change.".to_string(),
             model: Some("gpt-5-mini".to_string()),
+            context_window_tokens: None,
         })
         .unwrap();
     cmd_tx
@@ -8073,6 +8185,135 @@ async fn reload_preserves_token_pricing() {
     let harness = agent.harness().expect("harness");
     assert_eq!(harness.config.token_pricing, Some(pricing));
     assert_eq!(harness.config.max_steps_per_turn, 7);
+}
+
+#[tokio::test]
+async fn reload_preserves_resolved_context_window_when_unset() {
+    let streamer = Arc::new(FakeStreamer::new(Vec::new()));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        Vec::new(),
+        "system",
+        &session,
+        auto_mode(),
+        HarnessConfig {
+            context_window_tokens: 200_000,
+            ..HarnessConfig::default()
+        },
+    );
+
+    agent.reload_config(None, None, "prompt".to_string());
+    assert_eq!(
+        agent
+            .harness()
+            .expect("harness")
+            .config
+            .context_window_tokens,
+        200_000
+    );
+
+    agent.reload_config(None, Some(ContextSettings::default()), "prompt".to_string());
+    assert_eq!(
+        agent
+            .harness()
+            .expect("harness")
+            .config
+            .context_window_tokens,
+        200_000
+    );
+
+    let narrow = ContextSettings {
+        context_window_tokens: Some(50_000),
+        ..ContextSettings::default()
+    };
+    agent.reload_config(None, Some(narrow), "prompt".to_string());
+    assert_eq!(
+        agent
+            .harness()
+            .expect("harness")
+            .config
+            .context_window_tokens,
+        50_000
+    );
+
+    agent.reload_config(None, None, "prompt".to_string());
+    assert_eq!(
+        agent
+            .harness()
+            .expect("harness")
+            .config
+            .context_window_tokens,
+        50_000
+    );
+}
+
+#[tokio::test]
+async fn set_context_window_tokens_updates_the_harness() {
+    let session = memory_session();
+    let mut agent = harness_agent(
+        Arc::new(FakeStreamer::new(Vec::new())),
+        Vec::new(),
+        "system",
+        &session,
+        auto_mode(),
+        HarnessConfig {
+            context_window_tokens: 128_000,
+            ..HarnessConfig::default()
+        },
+    );
+
+    agent.set_context_window_tokens(200_000);
+    assert_eq!(
+        agent
+            .harness()
+            .expect("harness")
+            .config
+            .context_window_tokens,
+        200_000
+    );
+
+    let mut bare = MultiTurnAgent::with_streamer(
+        Arc::new(FakeStreamer::new(Vec::new())),
+        "gpt-4o-mini",
+        Vec::new(),
+        "system",
+        MultiTurnAgentConfig::default(),
+    );
+    bare.set_context_window_tokens(1_000);
+    assert!(bare.harness().is_none());
+}
+
+#[tokio::test]
+async fn reload_applies_post_edit_diagnostics_reset_to_default() {
+    let streamer = Arc::new(FakeStreamer::new(Vec::new()));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        Vec::new(),
+        "system",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+    agent.set_post_edit_diagnostics(true);
+
+    agent.reload_config(None, None, "prompt".to_string());
+    assert!(!agent.post_edit_diagnostics);
+
+    let enabled = ContextSettings {
+        post_edit_diagnostics: Some(true),
+        ..ContextSettings::default()
+    };
+    agent.reload_config(None, Some(enabled), "prompt".to_string());
+    assert!(agent.post_edit_diagnostics);
+
+    let unset = ContextSettings {
+        post_edit_diagnostics: None,
+        ..ContextSettings::default()
+    };
+    agent.reload_config(None, Some(unset), "prompt".to_string());
+    assert!(!agent.post_edit_diagnostics);
 }
 
 #[tokio::test]

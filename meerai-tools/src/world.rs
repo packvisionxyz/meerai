@@ -20,12 +20,10 @@ pub enum SandboxPolicy {
     WorkspaceWrite {
         workspace_root: PathBuf,
         writable_roots: Vec<PathBuf>,
-        readable_roots: Vec<PathBuf>,
         allow_network: bool,
     },
     ReadOnly {
         workspace_root: PathBuf,
-        readable_roots: Vec<PathBuf>,
         allow_network: bool,
     },
     Unrestricted,
@@ -759,7 +757,6 @@ mod tests {
         let profile = seatbelt_profile(&SandboxPolicy::WorkspaceWrite {
             workspace_root: PathBuf::from("/tmp/my\"ws\\dir"),
             writable_roots: vec![PathBuf::from("/tmp/extra")],
-            readable_roots: Vec::new(),
             allow_network: false,
         });
 
@@ -781,7 +778,6 @@ mod tests {
     fn seatbelt_profile_readonly_allows_only_dev_null_writes() {
         let profile = seatbelt_profile(&SandboxPolicy::ReadOnly {
             workspace_root: PathBuf::from("/tmp/ws"),
-            readable_roots: Vec::new(),
             allow_network: false,
         });
 
@@ -792,7 +788,6 @@ mod tests {
 
         let net_profile = seatbelt_profile(&SandboxPolicy::ReadOnly {
             workspace_root: PathBuf::from("/tmp/ws"),
-            readable_roots: Vec::new(),
             allow_network: true,
         });
         assert!(net_profile.contains("(allow network*)"));
@@ -813,7 +808,6 @@ mod tests {
             &SandboxPolicy::WorkspaceWrite {
                 workspace_root: PathBuf::from("/workspace"),
                 writable_roots: vec![PathBuf::from("/workspace"), PathBuf::from("/cache")],
-                readable_roots: Vec::new(),
                 allow_network: false,
             },
             &cmd,
@@ -851,7 +845,6 @@ mod tests {
         let ro_args = bwrap_args_with_sensitive(
             &SandboxPolicy::ReadOnly {
                 workspace_root: PathBuf::from("/workspace"),
-                readable_roots: Vec::new(),
                 allow_network: true,
             },
             &cmd,
@@ -890,7 +883,6 @@ mod tests {
 
         let ro_policy = SandboxPolicy::ReadOnly {
             workspace_root: ws.path().to_path_buf(),
-            readable_roots: Vec::new(),
             allow_network: false,
         };
         let profile = seatbelt_profile(&ro_policy);
@@ -903,7 +895,6 @@ mod tests {
         let write_policy = SandboxPolicy::WorkspaceWrite {
             workspace_root: ws.path().to_path_buf(),
             writable_roots: Vec::new(),
-            readable_roots: Vec::new(),
             allow_network: false,
         };
         let cmd = WorldCommand {

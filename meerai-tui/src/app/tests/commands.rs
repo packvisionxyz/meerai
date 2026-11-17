@@ -49,7 +49,10 @@ fn slash_command_handling() {
     assert_eq!(app.tab().model, "gemini-3.1-pro-preview");
     assert_eq!(
         rx.try_recv().unwrap(),
-        AgentCommand::SetModel("gemini::gemini-3.1-pro-preview".to_string())
+        AgentCommand::SetModel {
+            model: "gemini::gemini-3.1-pro-preview".to_string(),
+            context_window_tokens: None,
+        }
     );
 
     type_text(&mut app, "/clear");
@@ -105,6 +108,7 @@ fn agent_command_sends_instructions_and_syncs_model() {
             name: "reviewer".to_string(),
             instructions: "Review the diff.".to_string(),
             model: Some("gemini::gemini-3.1-pro-preview".to_string()),
+            context_window_tokens: None,
         }
     );
     assert_eq!(app.tab().model, "gemini-3.1-pro-preview");
@@ -253,6 +257,7 @@ fn agent_model_with_provider_prefix_is_not_applied() {
             name: "reviewer".to_string(),
             instructions: "Review.".to_string(),
             model: None,
+            context_window_tokens: None,
         }
     );
     assert_eq!(app.tab().model, "gemini-3.8-flash");

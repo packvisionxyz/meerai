@@ -2,7 +2,8 @@ use meerai_agents::AgentCommand;
 use meerai_common::definitions::load_definitions;
 use meerai_common::hooks::load_hooks_for_run;
 use meerai_common::settings::{
-    find_project_root, load_project_settings, load_settings_from, merge_project_settings,
+    Temperature, find_project_root, load_project_settings, load_settings_from,
+    merge_project_settings,
 };
 use meerai_policy::rules_from_yaml;
 
@@ -39,6 +40,15 @@ impl AppState {
         self.agents = definitions.agents.clone();
         self.skills = definitions.skills.clone();
         self.settings = user;
+        self.context_temperature = merged
+            .context
+            .as_ref()
+            .and_then(|context| context.temperature)
+            .and_then(Temperature::effective);
+        self.explicit_context_window = merged
+            .context
+            .as_ref()
+            .and_then(|context| context.context_window_tokens);
 
         let rules = merged
             .permissions

@@ -26,9 +26,6 @@ impl SeqRange {
 #[serde(rename_all = "snake_case")]
 pub enum TurnTrigger {
     UserPrompt,
-    Steering,
-    Resume,
-    Fork,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,7 +45,6 @@ pub enum TurnEndReason {
     Failed { error: String },
     MaxTokens,
     Interrupted,
-    Forked,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -183,7 +179,6 @@ pub enum BreakerKind {
 #[serde(rename_all = "snake_case")]
 pub enum BreakerAction {
     DiagnosticInjected,
-    ContinueOnce,
     TurnFailed,
 }
 

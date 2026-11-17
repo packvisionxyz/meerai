@@ -44,6 +44,8 @@ pub struct LspToolset {
     readable_roots: Vec<PathBuf>,
     overrides: HashMap<String, ServerSpec>,
     clients: Arc<AsyncMutex<HashMap<ClientKey, Arc<LspClient>>>>,
+    #[cfg(test)]
+    timeout_override: Option<std::time::Duration>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -98,7 +100,15 @@ impl LspToolset {
             readable_roots: Vec::new(),
             overrides: HashMap::new(),
             clients: Arc::new(AsyncMutex::new(HashMap::new())),
+            #[cfg(test)]
+            timeout_override: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_timeout_override(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout_override = Some(timeout);
+        self
     }
 
     pub fn with_readable_roots(mut self, roots: Vec<PathBuf>) -> Self {
@@ -225,7 +235,22 @@ impl LspToolset {
         }
         guard.remove(&key);
 
-        let client = LspClient::spawn_and_initialize(&spec.command, &spec.args, workspace).await?;
+        #[cfg(test)]
+        let spawned = match self.timeout_override {
+            Some(timeout) => {
+                LspClient::spawn_with_timeouts_override(
+                    &spec.command,
+                    &spec.args,
+                    workspace,
+                    timeout,
+                )
+                .await
+            }
+            None => LspClient::spawn_and_initialize(&spec.command, &spec.args, workspace).await,
+        };
+        #[cfg(not(test))]
+        let spawned = LspClient::spawn_and_initialize(&spec.command, &spec.args, workspace).await;
+        let client = spawned?;
         guard.insert(key, Arc::clone(&client));
         Ok(client)
     }
@@ -534,6 +559,7 @@ mod tests {
     use super::*;
     use meerai_core::ObservationStatus;
     use std::fs;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     fn python3_available() -> bool {
@@ -749,5 +775,204 @@ while True:
             diag_out.contains("lib.rs:2:15: warning [mock-lsp]: unused return value"),
             "got: {diag_out}"
         );
+    }
+
+    #[tokio::test]
+    async fn hanging_request_times_out_without_blocking_later_calls() {
+        if !python3_available() {
+            return;
+        }
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("lib.rs"),
+            "pub fn target() {}\nfn caller() { target(); }\n",
+        )
+        .unwrap();
+
+        let mock_script = root.join("mock_hanging_lsp.py");
+        fs::write(
+            &mock_script,
+            r#"import json, sys
+
+def read_msg():
+    content_length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        s = line.decode("utf-8").strip()
+        if s == "":
+            break
+        if s.lower().startswith("content-length:"):
+            content_length = int(s.split(":", 1)[1].strip())
+    if content_length is None:
+        return None
+    body = sys.stdin.buffer.read(content_length)
+    return json.loads(body.decode("utf-8"))
+
+def send_msg(obj):
+    data = json.dumps(obj).encode("utf-8")
+    header = f"Content-Length: {len(data)}\r\n\r\n".encode("ascii")
+    sys.stdout.buffer.write(header + data)
+    sys.stdout.buffer.flush()
+
+while True:
+    msg = read_msg()
+    if msg is None:
+        break
+    method = msg.get("method")
+    msg_id = msg.get("id")
+
+    if method == "initialize":
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": {
+                "capabilities": {
+                    "definitionProvider": True,
+                    "referencesProvider": True,
+                    "textDocumentSync": 1
+                }
+            }
+        })
+    elif method == "textDocument/definition":
+        send_msg({"jsonrpc": "2.0", "id": msg_id, "result": None})
+"#,
+        )
+        .unwrap();
+
+        let toolset = LspToolset::new(root)
+            .with_server_override(
+                "rs",
+                "python3",
+                vec![mock_script.to_string_lossy().into_owned()],
+            )
+            .with_timeout_override(Duration::from_secs(1));
+
+        let started = Instant::now();
+        let refs_run = toolset
+            .invoke_structured(
+                TOOL_FIND_REFERENCES,
+                r#"{"path": "lib.rs", "line": 2, "character": 15}"#,
+            )
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(refs_run.observation.status, ObservationStatus::Error);
+        assert!(
+            refs_run
+                .observation
+                .stderr
+                .contains("textDocument/references"),
+            "got: {}",
+            refs_run.observation.stderr
+        );
+        assert!(
+            refs_run.observation.stderr.contains("timed out"),
+            "got: {}",
+            refs_run.observation.stderr
+        );
+        assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+
+        let def_run = toolset
+            .invoke_structured(
+                TOOL_GO_TO_DEFINITION,
+                r#"{"path": "lib.rs", "line": 2, "character": 15}"#,
+            )
+            .await
+            .unwrap();
+        assert_eq!(def_run.observation.status, ObservationStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn stalled_stdin_write_times_out_and_retires_the_server() {
+        if !python3_available() {
+            return;
+        }
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::write(root.join("lib.rs"), "x".repeat(4 * 1024 * 1024)).unwrap();
+
+        let mock_script = root.join("mock_stalled_stdin_lsp.py");
+        fs::write(
+            &mock_script,
+            r#"import json, sys, time
+
+def read_msg():
+    content_length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        s = line.decode("utf-8").strip()
+        if s == "":
+            break
+        if s.lower().startswith("content-length:"):
+            content_length = int(s.split(":", 1)[1].strip())
+    if content_length is None:
+        return None
+    body = sys.stdin.buffer.read(content_length)
+    return json.loads(body.decode("utf-8"))
+
+def send_msg(obj):
+    data = json.dumps(obj).encode("utf-8")
+    header = f"Content-Length: {len(data)}\r\n\r\n".encode("ascii")
+    sys.stdout.buffer.write(header + data)
+    sys.stdout.buffer.flush()
+
+msg = read_msg()
+if msg is not None:
+    send_msg({"jsonrpc": "2.0", "id": msg.get("id"), "result": {"capabilities": {}}})
+time.sleep(30)
+"#,
+        )
+        .unwrap();
+
+        let script_arg = mock_script.to_string_lossy().into_owned();
+        let toolset = LspToolset::new(root)
+            .with_server_override("rs", "python3", vec![script_arg.clone()])
+            .with_timeout_override(Duration::from_secs(1));
+
+        let started = Instant::now();
+        let diag_run = toolset
+            .invoke_structured(TOOL_GET_DIAGNOSTICS, r#"{"path": "lib.rs"}"#)
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(diag_run.observation.status, ObservationStatus::Error);
+        assert!(
+            diag_run.observation.stderr.contains("textDocument/didOpen"),
+            "got: {}",
+            diag_run.observation.stderr
+        );
+        assert!(
+            diag_run.observation.stderr.contains("write timed out"),
+            "got: {}",
+            diag_run.observation.stderr
+        );
+        assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+
+        {
+            let guard = toolset.clients.lock().await;
+            assert_eq!(guard.len(), 1, "expected one cached client");
+            assert!(
+                guard.values().all(|client| !client.is_alive()),
+                "stalled client stayed alive"
+            );
+        }
+
+        let workspace = root.canonicalize().unwrap();
+        let spec = ServerSpec {
+            command: "python3".to_string(),
+            args: vec![script_arg],
+        };
+        let respawned = toolset.client_for(&workspace, "rs", &spec).await.unwrap();
+        assert!(respawned.is_alive());
+        assert_eq!(toolset.clients.lock().await.len(), 1);
     }
 }

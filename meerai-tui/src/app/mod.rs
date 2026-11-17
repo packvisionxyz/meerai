@@ -940,6 +940,8 @@ pub struct AppState {
     pub runtime: Arc<RwLock<RuntimeProviderState>>,
     pub secrets: Arc<dyn SecretStore>,
     pub settings: AppSettings,
+    pub context_temperature: Option<f32>,
+    pub explicit_context_window: Option<u64>,
     pub config_dir: Option<PathBuf>,
     pub spinner_tick: usize,
     pub show_sidebar: bool,
@@ -1089,6 +1091,8 @@ impl AppState {
             runtime,
             secrets,
             settings,
+            context_temperature: None,
+            explicit_context_window: None,
             config_dir,
             spinner_tick: 0,
             show_sidebar: true,
@@ -1539,6 +1543,17 @@ impl AppState {
         let models = self.recent_models_for_active_provider();
         let provider = self.tab().active_provider.clone();
         self.completion.sync_models(&models, &provider);
+    }
+
+    pub(super) fn model_context_window(&self, provider: &str, model: &str) -> Option<u64> {
+        if self.explicit_context_window.is_some() {
+            return None;
+        }
+        let model = model.rsplit("::").next().unwrap_or(model);
+        let rt = self.runtime.read().unwrap();
+        rt.catalog
+            .model_info(provider, model)
+            .and_then(|info| info.context_window)
     }
 
     pub(super) fn resolve_model_target(&self, raw: &str) -> (String, String) {
