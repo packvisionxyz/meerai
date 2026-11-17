@@ -22,6 +22,16 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
     let tab = app.tab();
 
     let mut spans = vec![Span::styled(" ", Style::default().bg(theme::p().surface))];
+    spans.push(Span::styled(
+        format!(" {}", display_workspace(&app.workspace_root)),
+        Style::default().fg(theme::p().muted),
+    ));
+    if let Some(branch) = &app.git_branch {
+        spans.push(Span::styled(
+            format!(" · {branch}"),
+            Style::default().fg(theme::p().muted),
+        ));
+    }
 
     if !app.sandbox_active {
         spans.push(Span::styled(
@@ -307,4 +317,15 @@ pub fn summarize_error_line(text: &str, max_chars: usize) -> String {
 
     let single = space_re.replace_all(&extracted, " ");
     truncate_single_line(single.trim(), max_chars)
+}
+
+fn display_workspace(path: &std::path::Path) -> String {
+    let raw = path.display().to_string();
+    if let Some(home) = meerai_core::env::home_dir() {
+        let home = home.display().to_string();
+        if let Some(rest) = raw.strip_prefix(&home) {
+            return format!("~{rest}");
+        }
+    }
+    raw
 }

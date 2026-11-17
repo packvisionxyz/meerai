@@ -74,6 +74,22 @@ meerai --agent reviewer --prompt "review this change"
 meerai --skill orchestrate
 ```
 
+Run `meerai --help` for the generated command and option list. Common commands:
+
+| Command | Action |
+| --- | --- |
+| `meerai` | Open the TUI |
+| `meerai --prompt "..."` | One headless turn |
+| `meerai --continue` / `--resume <ID>` | Reopen a session (TUI or headless) |
+| `meerai --fork <ID>` | Fork and resume a session |
+| `meerai auth login <provider>` | Save an API key |
+| `meerai sessions list\|rm\|prune\|fork` | Manage sessions |
+| `meerai hooks trust\|untrust\|status\|verify` | Manage project hooks |
+| `meerai acp doctor` | Print the ACP handshake |
+
+In the TUI: `/sessions`, `/new`, `/close`, `/connect`, `/models`, `/mode`,
+`/agent`, `/skill`, `/compact`, `/diff`, `/rewind`, `/help`.
+
 Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 `AgentEvent` per line and requires `--prompt`. The default approval mode is
 `ask`.

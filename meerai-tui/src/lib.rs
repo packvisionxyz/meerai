@@ -116,6 +116,7 @@ pub async fn run_tui(
     config: TuiLaunchConfig,
 ) -> Result<TuiExit> {
     let mut terminal = TerminalGuard::enter()?;
+    let workspace_root = config.workspace_root.clone();
     let mut app = AppState::new(
         config.initial_provider,
         config.initial_model,
@@ -127,6 +128,7 @@ pub async fn run_tui(
         config.config_dir,
     );
     app.tab_persistence = true;
+    app.git_branch = crate::diff::current_branch(&workspace_root);
     if let Some(workspace) = config.workspace_query {
         app.set_workspace_query(workspace);
     }

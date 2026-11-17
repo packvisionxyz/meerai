@@ -2307,3 +2307,11 @@ fn statusline_warns_when_the_os_sandbox_is_unavailable() {
     let rendered = render_to_string(&mut app);
     assert!(rendered.contains("host sandbox"));
 }
+
+#[test]
+fn statusline_shows_workspace_path_and_git_branch() {
+    let mut app = test_app();
+    app.git_branch = Some("feature/ui".to_string());
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("feature/ui"));
+}

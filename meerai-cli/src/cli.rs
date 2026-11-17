@@ -1,11 +1,159 @@
 use anyhow::{Result, bail};
 
+struct HelpRow {
+    usage: &'static str,
+    description: &'static str,
+}
+
+const COMMANDS: &[HelpRow] = &[
+    HelpRow {
+        usage: "acp doctor",
+        description: "Connect to the agy ACP adapter, print capabilities, exit",
+    },
+    HelpRow {
+        usage: "auth list",
+        description: "Show credentials across auth.json, config, and env",
+    },
+    HelpRow {
+        usage: "auth login <provider> [key]",
+        description: "Save an API key in {auth_path}",
+    },
+    HelpRow {
+        usage: "auth logout <provider>",
+        description: "Remove a stored API key from auth.json",
+    },
+    HelpRow {
+        usage: "sessions list",
+        description: "List saved sessions: id, updated ms, bytes, title/model",
+    },
+    HelpRow {
+        usage: "sessions rm <ID>",
+        description: "Delete one session",
+    },
+    HelpRow {
+        usage: "sessions rm --all",
+        description: "Delete every saved session",
+    },
+    HelpRow {
+        usage: "sessions prune [--days N] [--keep N]",
+        description: "Delete sessions older than N days (default 30), keeping the newest N (default 0)",
+    },
+    HelpRow {
+        usage: "sessions fork <ID> [--turn <TURN_ID>]",
+        description: "Fork a session at a closed turn (default: latest closed turn)",
+    },
+    HelpRow {
+        usage: "hooks status",
+        description: "Show hook settings and project trust state",
+    },
+    HelpRow {
+        usage: "hooks trust",
+        description: "Trust project hooks for this repository",
+    },
+    HelpRow {
+        usage: "hooks untrust",
+        description: "Revoke project hook trust for this repository",
+    },
+    HelpRow {
+        usage: "hooks verify [--command CMD] [--reset-baseline]",
+        description: "Install a Stop hook with a failure baseline",
+    },
+];
+
+const TUI_COMMANDS: &[HelpRow] = &[
+    HelpRow {
+        usage: "/agent <id>",
+        description: "Apply an agent by id (or mention @agent/<id>)",
+    },
+    HelpRow {
+        usage: "/skill <id>",
+        description: "Apply a skill by id (or mention @skill/<id>)",
+    },
+];
+
+const OPTIONS: &[HelpRow] = &[
+    HelpRow {
+        usage: "-p, --provider <PROVIDER>",
+        description: "Provider id (env: MEERAI_PROVIDER)",
+    },
+    HelpRow {
+        usage: "-m, --model <MODEL>",
+        description: "Model id (env: MEERAI_MODEL)",
+    },
+    HelpRow {
+        usage: "--system <PROMPT>",
+        description: "Additional system instructions",
+    },
+    HelpRow {
+        usage: "--prompt, --print <TEXT>",
+        description: "Run one headless turn (no TUI)",
+    },
+    HelpRow {
+        usage: "--continue",
+        description: "Resume the most recent session (TUI or headless)",
+    },
+    HelpRow {
+        usage: "--resume <ID>",
+        description: "Resume a session by id (TUI or headless)",
+    },
+    HelpRow {
+        usage: "--fork <ID>",
+        description: "Fork a session from its latest closed turn and open it",
+    },
+    HelpRow {
+        usage: "--json",
+        description: "Print one NDJSON AgentEvent per line (with --prompt)",
+    },
+    HelpRow {
+        usage: "--mode <MODE>",
+        description: "Approval mode: plan, ask, auto",
+    },
+    HelpRow {
+        usage: "--acp",
+        description: "Use the external ACP agent (agy) instead of the built-in harness",
+    },
+    HelpRow {
+        usage: "--agent <ID>",
+        description: "Apply a markdown agent by id",
+    },
+    HelpRow {
+        usage: "--skill <ID>",
+        description: "Apply a markdown skill by id (repeatable)",
+    },
+    HelpRow {
+        usage: "--env-file <PATH>",
+        description: "Load variables from PATH (no implicit .env loading)",
+    },
+    HelpRow {
+        usage: "-h, --help",
+        description: "Show this help message",
+    },
+    HelpRow {
+        usage: "-V, --version",
+        description: "Print version and exit",
+    },
+];
+
+fn help_section(title: &str, rows: &[HelpRow], auth_path: &str) -> String {
+    let width = rows
+        .iter()
+        .map(|row| row.usage.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut out = format!("{title}:\n");
+    for row in rows {
+        let description = row.description.replace("{auth_path}", auth_path);
+        out.push_str(&format!("  {:<width$}  {description}\n", row.usage));
+    }
+    out
+}
+
 pub(crate) fn help_text() -> String {
     let auth_path = meerai_common::settings::default_data_dir()
         .map(|dir| meerai_client::secrets::auth_file_path(&dir))
         .map(|path| meerai_core::env::display_path(&path))
         .unwrap_or_else(|| "auth.json".to_string());
-    format!(
+    let mut text = String::from(
         "Usage:\n  \
     meerai [-p|--provider <PROVIDER>] [-m|--model <MODEL>] [--system <INSTRUCTIONS>]\n          \
     [--mode <plan|ask|auto>] [--continue | --resume <ID> | --fork <ID>] [--env-file <PATH>]\n          \
@@ -15,46 +163,14 @@ pub(crate) fn help_text() -> String {
     meerai acp doctor\n  \
     meerai auth <list|login|logout>\n  \
     meerai sessions <list|rm|prune|fork>\n  \
-    meerai hooks <trust|untrust|status|verify>\n\
-    \n\
-    Commands:\n  \
-    acp doctor                      Connect to the agy ACP adapter, print capabilities, exit\n  \
-    auth list                       Show credentials across auth.json, config, and env\n  \
-    auth login <provider> [key]     Save an API key in {auth_path}\n  \
-    auth logout <provider>          Remove a stored API key from auth.json\n  \
-    sessions list                   List saved sessions: id, updated ms, bytes, title/model\n  \
-    sessions rm <ID>                Delete one session\n  \
-    sessions rm --all               Delete every saved session\n  \
-    sessions prune [--days N] [--keep N]\n                                              \
-    Delete sessions older than N days (default 30), keeping the newest N (default 0)\n  \
-    sessions fork <ID> [--turn <TURN_ID>]\n                                              \
-    Fork a session at a closed turn (default: latest closed turn)\n  \
-    hooks status                    Show hook settings and project trust state\n  \
-    hooks trust                     Trust project hooks for this repository\n  \
-    hooks untrust                   Revoke project hook trust for this repository\n  \
-    hooks verify [--command CMD] [--reset-baseline]  Install a Stop hook with a failure baseline\n\
-    \n\
-    TUI commands:\n  \
-    /agent <id>                     Apply an agent by id (or mention @agent/<id>)\n  \
-    /skill <id>                     Apply a skill by id (or mention @skill/<id>)\n\
-    \n\
-    Options:\n  \
-    -p, --provider <PROVIDER>  Provider id (env: MEERAI_PROVIDER)\n  \
-    -m, --model <MODEL>        Model id (env: MEERAI_MODEL)\n  \
-        --system <PROMPT>      Additional system instructions\n  \
-        --prompt, --print <TEXT>  Run one headless turn (no TUI)\n  \
-        --continue             Resume the most recent session (TUI or headless)\n  \
-        --resume <ID>          Resume a session by id (TUI or headless)\n  \
-        --fork <ID>            Fork a session from its latest closed turn and open it\n  \
-        --json                 Print one NDJSON AgentEvent per line (with --prompt)\n  \
-        --mode <MODE>          Approval mode: plan, ask, auto\n  \
-        --acp                  Use the external ACP agent (agy) instead of the built-in harness\n  \
-        --agent <ID>           Apply a markdown agent by id\n  \
-        --skill <ID>           Apply a markdown skill by id (repeatable)\n  \
-        --env-file <PATH>         Load variables from PATH (no implicit .env loading)\n  \
-    -h, --help                 Show this help message\n  \
-    -V, --version              Print version and exit"
-    )
+    meerai hooks <trust|untrust|status|verify>\n\n",
+    );
+    text.push_str(&help_section("Commands", COMMANDS, &auth_path));
+    text.push('\n');
+    text.push_str(&help_section("TUI commands", TUI_COMMANDS, &auth_path));
+    text.push('\n');
+    text.push_str(&help_section("Options", OPTIONS, &auth_path));
+    text.trim_end().to_string()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -585,4 +701,35 @@ where
         show_help,
         version,
     })
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::*;
+
+    #[test]
+    fn help_text_is_generated_from_the_spec() {
+        let help = help_text();
+        for row in COMMANDS {
+            assert!(help.contains(row.usage), "missing command {}", row.usage);
+        }
+        for row in TUI_COMMANDS {
+            assert!(
+                help.contains(row.usage),
+                "missing TUI command {}",
+                row.usage
+            );
+        }
+        for row in OPTIONS {
+            assert!(help.contains(row.usage), "missing option {}", row.usage);
+        }
+    }
+
+    #[test]
+    fn spec_usages_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for row in COMMANDS.iter().chain(TUI_COMMANDS).chain(OPTIONS) {
+            assert!(seen.insert(row.usage), "duplicate usage {}", row.usage);
+        }
+    }
 }

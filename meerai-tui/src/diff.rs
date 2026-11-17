@@ -488,6 +488,12 @@ fn trim_line_end(line: &str) -> &str {
     line.trim_end_matches(&['\r', '\n'][..])
 }
 
+pub fn current_branch(root: &Path) -> Option<String> {
+    let repo = git2::Repository::discover(root).ok()?;
+    let head = repo.head().ok()?;
+    head.shorthand().ok().map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
