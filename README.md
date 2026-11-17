@@ -115,7 +115,8 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   compaction, provider prompt caching with cache-token reporting, age-based
   tool-result clearing, in-turn step-boundary compaction, token and
   wall-clock budgets, circuit breakers, cancellation,
-  steering, status-classified provider retries with jitter, one bounded
+  steering, status-classified provider retries with jitter (including empty
+  provider streams retried as transient failures), one bounded
   recovery turn after a retryable provider or loop failure, consecutive
   read-only tool batches, first-prompt
   session titles, summarizer-model selection, optional sampling `temperature`,
@@ -353,6 +354,35 @@ context:
 ```
 
 The range is `0.0..=2.0`. An out-of-range value is ignored and the provider default applies. The value is shown in the composer header (`temp 0.70`, or `temp default`). Run `/reload` in the TUI to apply a change to the running session (`reload_config` rebuilds the harness config); otherwise it applies at the next start.
+
+### Network access
+
+meerai talks to providers over plain HTTPS. There is no WebRTC or
+peer-to-peer fallback transport, so a network that blocks a provider endpoint
+must be routed around. Use one of these:
+
+- **HTTP(S) proxy** — the HTTP layer honors the standard `HTTPS_PROXY`,
+  `HTTP_PROXY`, `ALL_PROXY`, and `NO_PROXY` environment variables:
+
+  ```sh
+  HTTPS_PROXY=http://127.0.0.1:7890 meerai --continue
+  ```
+
+  To keep the setting, put it in `.env` and load it explicitly with
+  `MEERAI_LOAD_DOTENV=1` or `--env-file .env`. Nothing loads implicitly.
+- **VPN** — a system VPN changes the route for all traffic. No meerai setting
+  is needed.
+- **Same model, different route** — switch the transport, for example
+  `meerai -p openrouter -m google/gemini-4-hydrogen`, when that endpoint is
+  reachable from your network.
+- **Base URL override** — point the provider at a reachable gateway with
+  `base_url` in `providers.yml`.
+
+A firewall that silently drops the connection can end a provider stream with
+no text, no tool calls, and no usage. meerai treats that as a transient
+provider failure and retries it with the standard provider backoff (3
+attempts) before it fails the turn, so an empty answer does not silently end
+the conversation.
 
 ### Agents and skills
 
@@ -730,6 +760,7 @@ for example `OPENROUTER_API_KEY` (also `OPEN_ROUTER_API_KEY`) and
 `GEMINI_API_KEY`.
 
 - `MEERAI_PROVIDER`, `MEERAI_MODEL` — default provider and model; CLI flags win.
+- `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` — standard proxy variables honored by the HTTP layer. Use them when the network blocks a provider endpoint. See [Network access](#network-access).
 - `XDG_CONFIG_HOME`, `XDG_DATA_HOME` — move the config and data roots. See
   [Data locations](#data-locations).
 - `MEERAI_SESSION_DIR` — move only the session root.
@@ -815,10 +846,11 @@ OS sandboxing on Windows hosts.
 - [docs/harness-spec.md](docs/harness-spec.md) — unified harness specification: event-sourced session log, typed item protocol, context engine, permissions/sandboxing, hooks, checkpoints, subagents, and retrieval strategy
 - [docs/threat-model.md](docs/threat-model.md) — M11 security threat model, trust boundaries, controls, and residual risks
 - [docs/architecture.md](docs/architecture.md) — current implementation notes, target harness architecture, protocol/loop design, and migration plan
+- [docs/harness-internals.md](docs/harness-internals.md) — implementation reference: crate layout, configuration, turn-loop internals, TUI internals, and known traps
 - [docs/tui-design.md](docs/tui-design.md) — modal TUI design, keybindings, pickers, diff review, and async Rust rendering architecture
 - [docs/acp.md](docs/acp.md) — Agent Client Protocol: the landed `agy` client (M13), the planned `meerai acp` editor surface (M14), and the trust boundary
-- [docs/token-efficiency-and-self-healing.md](docs/token-efficiency-and-self-healing.md) — initiative for prompt caching, tool-result pruning, live call repair, and verified recovery
-- [AGENTS.md](AGENTS.md) — repository guide for AI coding agents (commands, macro conventions, known traps)
+- [docs/token-efficiency.md](docs/token-efficiency.md) — initiative for prompt caching, tool-result pruning, live call repair, and verified recovery
+- [AGENTS.md](AGENTS.md) — working rules for coding agents: commands, contracts, loop, config, security, TUI, commit, and code style
 
 ## License
 

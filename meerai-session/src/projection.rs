@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use genai::chat::{ChatMessage, ToolCall as GenaiToolCall, ToolResponse};
+use genai::chat::{
+    ChatMessage, ContentPart, MessageContent, ToolCall as GenaiToolCall, ToolResponse,
+};
 use meerai_core::ToolObservation;
 use serde::{Deserialize, Serialize};
 
@@ -101,13 +103,18 @@ pub fn derive_messages(events: &[LoggedEvent], policy: &ProjectionPolicy) -> Vec
                         to_genai_tool_call(call, signature)
                     })
                     .collect();
+                let text = join_text(content, !policy.prune_reasoning);
                 if latest_calls.is_empty() {
-                    let text = join_text(content, !policy.prune_reasoning);
                     if !text.is_empty() {
                         messages.push(ChatMessage::assistant(text));
                     }
-                } else {
+                } else if text.is_empty() {
                     messages.push(ChatMessage::from(latest_calls.clone()));
+                } else {
+                    let mut parts = Vec::with_capacity(latest_calls.len() + 1);
+                    parts.push(ContentPart::Text(text));
+                    parts.extend(latest_calls.iter().cloned().map(ContentPart::ToolCall));
+                    messages.push(ChatMessage::assistant(MessageContent::from_parts(parts)));
                 }
             }
             SessionEvent::ToolResult { call_id, output } => {
@@ -522,6 +529,52 @@ mod tests {
         assert_eq!(responses[0].call_id, "call-1");
         assert_eq!(responses[0].fn_name.as_deref(), Some("code-read_file"));
         assert_eq!(responses[0].content, "content");
+    }
+
+    #[test]
+    fn keeps_assistant_text_before_tool_calls() {
+        let events = vec![logged(
+            1,
+            assistant(
+                vec![ContentBlock::Text("plan: read a".to_string())],
+                vec![tool_call("call-1", "code-read_file", r#"{"path":"a"}"#)],
+            ),
+        )];
+
+        let messages = derive_messages(&events, &ProjectionPolicy::default());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, ChatRole::Assistant);
+        let parts = messages[0].content.parts();
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0], ContentPart::Text(text) if text == "plan: read a"));
+        assert!(
+            matches!(&parts[1], ContentPart::ToolCall(call) if call.call_id == "call-1"),
+            "the tool call must follow the text"
+        );
+    }
+
+    #[test]
+    fn pruned_reasoning_leaves_bare_tool_calls() {
+        let events = vec![logged(
+            1,
+            assistant(
+                vec![ContentBlock::Reasoning("think".to_string())],
+                vec![tool_call("call-1", "code-read_file", r#"{"path":"a"}"#)],
+            ),
+        )];
+        let policy = ProjectionPolicy {
+            prune_reasoning: true,
+            ..ProjectionPolicy::default()
+        };
+
+        let messages = derive_messages(&events, &policy);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, ChatRole::Assistant);
+        let parts = messages[0].content.parts();
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0], ContentPart::ToolCall(call) if call.call_id == "call-1"));
     }
 
     #[test]

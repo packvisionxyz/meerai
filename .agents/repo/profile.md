@@ -61,7 +61,8 @@
 | `.github/workflows/` | `ci.yml`, `release.yml`, `pages.yml` |
 | `site/` | Landing page plus `install.sh` / `install.ps1` served by GitHub Pages |
 | `LICENSE`, `Cargo.toml` | Apache-2.0; workspace metadata (`license`, `repository`, `homepage`, `rust-version = 1.100`, `publish = false`) |
-| `AGENTS.md` | Authoritative repo guide for coding agents (commands, macro rules, known traps) |
+| `AGENTS.md` | Working rules for coding agents (commands, contracts, loop, config, security, TUI, commit, code style); injected into the system prompt, so it stays rules-only |
+| `docs/harness-internals.md` | Implementation reference: crate layout, macro conventions, configuration, loop internals, tools/policy, ACP traps, security posture |
 
 ### ACP (see `docs/acp.md`)
 
@@ -312,7 +313,10 @@ Coverage caveats:
 
 - `README.md` — project overview, install, quick start, current vs. planned crates, usage, exit
   codes, security and limits, local dev commands.
-- `AGENTS.md` — concise operational guide for AI agents (commands, macro rules, known traps).
+- `AGENTS.md` — working rules for AI agents: commands, contracts, loop, config, security, TUI,
+  commit, and code style. It is injected into the system prompt, so keep it rules-only.
+- `docs/harness-internals.md` — implementation reference: crate layout, tool macro conventions,
+  configuration, turn-loop internals, TUI internals, known traps, and security posture.
 - `docs/harness-spec.md` — unified harness specification: session log, item protocol, context
   engine, permissions, hooks, checkpoints, agents/skills, subagents, the M1–M12 roadmap, and the
   §9.6 security landed/backlog split.

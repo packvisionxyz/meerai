@@ -16,9 +16,17 @@ enum BreakerSignal {
     FailTurn,
 }
 
+fn normalized_failure(failure: &str) -> String {
+    failure.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 impl FailureTracker {
     fn record_failure(&mut self, name: &str, args: &str, failure: &str) -> BreakerSignal {
-        let key = (name.to_string(), args.to_string(), failure.to_string());
+        let key = (
+            name.to_string(),
+            args.to_string(),
+            normalized_failure(failure),
+        );
         if self.last.as_ref() == Some(&key) {
             self.consecutive += 1;
         } else {
@@ -532,6 +540,7 @@ impl MultiTurnAgent {
         }
 
         let mut stop_reason: Option<String> = None;
+        let mut batch_notes: Vec<String> = Vec::new();
 
         for plan in plans.iter_mut() {
             let call_id = CallId::from_raw(plan.tool_call.call_id.clone());
@@ -661,16 +670,7 @@ impl MultiTurnAgent {
                 status,
                 observation: observation.clone(),
             };
-            for feedback in self.run_after_tool(&outcome) {
-                self.log_event(
-                    event_tx,
-                    SessionEvent::UserMessage {
-                        source: InputSource::RuntimeContext,
-                        content: vec![ContentBlock::Text(feedback)],
-                    },
-                )
-                .await;
-            }
+            batch_notes.extend(self.run_after_tool(&outcome));
 
             let hook_event = if matches!(status, ItemStatus::Succeeded | ItemStatus::Stopped) {
                 HookEvent::PostToolUse
@@ -692,16 +692,7 @@ impl MultiTurnAgent {
                 report.decision,
                 crate::hooks::HookDecision::Deny | crate::hooks::HookDecision::Block
             ) {
-                self.log_event(
-                    event_tx,
-                    SessionEvent::UserMessage {
-                        source: InputSource::RuntimeContext,
-                        content: vec![ContentBlock::Text(
-                            report.reason().unwrap_or("blocked by hook").to_string(),
-                        )],
-                    },
-                )
-                .await;
+                batch_notes.push(report.reason().unwrap_or("blocked by hook").to_string());
             }
 
             let repair_hint = argument_repair_hint(&self.tools, &tool_call.fn_name, &observation);
@@ -715,14 +706,7 @@ impl MultiTurnAgent {
             .await;
 
             if let Some(hint) = repair_hint {
-                self.log_event(
-                    event_tx,
-                    SessionEvent::UserMessage {
-                        source: InputSource::RuntimeContext,
-                        content: vec![ContentBlock::Text(hint)],
-                    },
-                )
-                .await;
+                batch_notes.push(hint);
             }
 
             if self.post_edit_diagnostics
@@ -738,16 +722,7 @@ impl MultiTurnAgent {
                 )
                 && let Some(text) = collect_post_edit_diagnostics(&self.tools, &path).await
             {
-                self.log_event(
-                    event_tx,
-                    SessionEvent::UserMessage {
-                        source: InputSource::RuntimeContext,
-                        content: vec![ContentBlock::Text(format!(
-                            "diagnostics for {path}:\n{text}"
-                        ))],
-                    },
-                )
-                .await;
+                batch_notes.push(format!("diagnostics for {path}:\n{text}"));
             }
 
             let response = ToolResponse::from_tool_call(&tool_call, model_text.clone())
@@ -793,8 +768,10 @@ impl MultiTurnAgent {
                 });
             }
 
-            if plan.authorized() {
-                self.inject_scoped_instructions(&args_str, event_tx).await;
+            if plan.authorized()
+                && let Some(content) = self.scoped_instructions(&args_str).await
+            {
+                batch_notes.push(content);
             }
 
             if self.harness.is_some() {
@@ -815,19 +792,12 @@ impl MultiTurnAgent {
                                     },
                                 )
                                 .await;
-                                self.log_event(
-                                    event_tx,
-                                    SessionEvent::UserMessage {
-                                        source: InputSource::RuntimeContext,
-                                        content: vec![ContentBlock::Text(format!(
-                                            "tool {} failed identically 3 times with {failure}; \
-                                             stop retrying the same call; try a different approach \
-                                             or end the turn",
-                                            tool_call.fn_name
-                                        ))],
-                                    },
-                                )
-                                .await;
+                                batch_notes.push(format!(
+                                    "tool {} failed identically 3 times with {failure}; \
+                                     stop retrying the same call; try a different approach \
+                                     or end the turn",
+                                    tool_call.fn_name
+                                ));
                             }
                             BreakerSignal::FailTurn => {
                                 self.log_event(
@@ -838,7 +808,10 @@ impl MultiTurnAgent {
                                     },
                                 )
                                 .await;
-                                return Err(TurnError::loop_detected(anyhow!(LOOP_DETECTED)));
+                                return Err(TurnError::loop_detected(anyhow!(
+                                    "{LOOP_DETECTED} ({})",
+                                    tool_call.fn_name
+                                )));
                             }
                         }
                     }
@@ -849,6 +822,17 @@ impl MultiTurnAgent {
                     }
                 }
             }
+        }
+
+        if !batch_notes.is_empty() {
+            self.log_event(
+                event_tx,
+                SessionEvent::UserMessage {
+                    source: InputSource::RuntimeContext,
+                    content: batch_notes.into_iter().map(ContentBlock::Text).collect(),
+                },
+            )
+            .await;
         }
 
         if cancel.is_cancelled() {
@@ -1653,6 +1637,34 @@ where
     result
 }
 
+fn unknown_tool_error(tools: &[Box<dyn Toolset>], name: &str) -> anyhow::Error {
+    let mut names: Vec<String> = tools
+        .iter()
+        .flat_map(|tool| tool.definition())
+        .map(|definition| definition.name)
+        .collect();
+    names.sort();
+    names.dedup();
+
+    let suffix = name.rsplit(['-', '_']).next().unwrap_or(name);
+    let closest = names.iter().find(|candidate| {
+        candidate
+            .rsplit(['-', '_'])
+            .next()
+            .is_some_and(|candidate_suffix| candidate_suffix == suffix)
+    });
+
+    let mut message = format!("Tool not found: {name}");
+    if let Some(closest) = closest {
+        message.push_str(&format!(". Did you mean {closest}?"));
+    }
+    let available: Vec<&str> = names.iter().take(24).map(String::as_str).collect();
+    if !available.is_empty() {
+        message.push_str(&format!(". Available tools: {}", available.join(", ")));
+    }
+    anyhow!(message)
+}
+
 async fn run_tool_from(
     tools: &[Box<dyn Toolset>],
     timeout_ms: Option<u64>,
@@ -1664,7 +1676,7 @@ async fn run_tool_from(
     let tool = tools
         .iter()
         .find(|tool| tool.contain(name))
-        .ok_or_else(|| anyhow!("Tool not found: {name}"))?;
+        .ok_or_else(|| unknown_tool_error(tools, name))?;
 
     let max_attempts = max_retries.max(1);
     let effective_timeout = if name.starts_with("subagent-") {
@@ -2065,5 +2077,65 @@ mod cancel_tests {
             .expect("task panicked");
         let error = result.expect_err("cancelled tool should fail");
         assert!(error.to_string().contains("cancelled"), "{error:#}");
+    }
+}
+
+#[cfg(test)]
+mod breaker_tests {
+    use meerai_core::{ToolDefinition, ToolError, ToolOutput, Toolset, async_trait};
+
+    use super::{normalized_failure, unknown_tool_error};
+
+    struct NamedTool;
+
+    #[async_trait]
+    impl Toolset for NamedTool {
+        fn name(&self) -> String {
+            "demo".to_string()
+        }
+
+        fn definition(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                r#type: "function".to_string(),
+                name: "demo-read_file".to_string(),
+                description: "reads a file".to_string(),
+                parameters: serde_json::json!({ "type": "object" }),
+            }]
+        }
+
+        fn contain(&self, fn_name: &str) -> bool {
+            fn_name == "demo-read_file"
+        }
+
+        async fn invoke(&self, _fn_name: &str, _args: &str) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::Text("ok".to_string()))
+        }
+    }
+
+    #[test]
+    fn failure_text_normalization_collapses_whitespace() {
+        assert_eq!(
+            normalized_failure("error:  missing\n field   path"),
+            "error: missing field path"
+        );
+        assert_ne!(
+            normalized_failure("first failure"),
+            normalized_failure("second failure")
+        );
+    }
+
+    #[test]
+    fn unknown_tool_error_suggests_the_closest_name() {
+        let tools: Vec<Box<dyn Toolset>> = vec![Box::new(NamedTool)];
+        let message = unknown_tool_error(&tools, "read_file").to_string();
+        assert!(message.contains("Tool not found: read_file"), "{message}");
+        assert!(
+            message.contains("Did you mean demo-read_file?"),
+            "{message}"
+        );
+        assert!(
+            message.contains("Available tools: demo-read_file"),
+            "{message}"
+        );
     }
 }

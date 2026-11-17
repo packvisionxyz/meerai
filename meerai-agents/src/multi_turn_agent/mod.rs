@@ -64,6 +64,8 @@ const LOOP_DETECTED: &str = "loop detected: repeated identical tool failures";
 const NO_APPROVAL_CHANNEL: &str = "no approval channel available; call declined";
 const USER_DECLINED: &str = "declined by user";
 const NOT_EXECUTED_STOPPED: &str = "not executed: turn stopped";
+const EMPTY_STREAM_ERROR: &str =
+    "provider returned an empty stream: no text, no tool calls, no usage";
 
 const MAX_PROVIDER_ATTEMPTS: usize = 3;
 const PROVIDER_BACKOFF_MS: u64 = 250;
@@ -839,7 +841,9 @@ impl MultiTurnAgent {
                 policy = policy.with_rules(rules);
             }
             harness.policy = policy;
+            let token_pricing = harness.config.token_pricing;
             harness.config = HarnessConfig::from_context_settings(context.as_ref());
+            harness.config.token_pricing = token_pricing;
         }
         if let Some(enabled) = context
             .as_ref()

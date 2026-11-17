@@ -42,7 +42,7 @@ and a cancelled or loop-detected turn never sends an unpaired tool call on the n
 | Definition cap (phase 2) | 16 KiB per definition, 32 KiB total, with a warning; the subagent schema lists ids only | `meerai-cli/src/main.rs`, `meerai-agents/src/subagent.rs` |
 | Verify hook (phase 3) | `meerai hooks verify [--command CMD] [--reset-baseline]` adds one user Stop hook with a per-project failure baseline; only new failure names block | `meerai-cli/src/hooks_cmd.rs`, `meerai-common/src/hooks.rs`, `meerai-agents/src/hooks.rs` |
 | Edit breaker (phase 3) | Identical `code-edit_file`/`code-write_file` batches log `RepeatedIdenticalEdit` at the third and fifth repeat | `meerai-agents/src/multi_turn_agent/turn.rs` |
-| No-progress breaker (phase 3) | 8 tool steps without a file change log `NoProgress`; 12 fail the turn; disabled in `plan` and read-only runs | `meerai-agents/src/multi_turn_agent/turn.rs` |
+| No-progress breaker (phase 3) | 8 tool steps without a file change after a write attempt log `NoProgress`; 12 fail the turn; disabled in `plan` and for read-only turns | `meerai-agents/src/multi_turn_agent/turn.rs` |
 | Recovery turn (phase 3) | The worker queues one recovery prompt after a retryable provider or `LoopDetected` failure; `RecoveryStarted` keeps headless waiting for the recovery turn | `meerai-agents/src/multi_turn_agent/worker.rs`, `meerai-cli/src/headless.rs` |
 | Turn-failed hook (phase 4) | `HookEvent::TurnFailed` fires on a failed turn with the error in the JSON payload; its decision is observational | `meerai-common/src/hooks.rs`, `meerai-agents/src/multi_turn_agent/turn.rs` |
 | Retry classification (phase 4) | Provider retries use HTTP status when available (408/409/425/429 and 5xx transient; other 4xx permanent) plus 50% jitter; the message blocklist is the fallback | `meerai-agents/src/multi_turn_agent/turn.rs` |
@@ -402,7 +402,7 @@ Failure: an ambiguous normalized anchor edits the file.
 | :--- | :--- | :--- | :--- |
 | 1 | How many tokens do the 15 default tool schemas cost? | Serialize the schemas and count; compare with provider-reported prompt tokens | Agents |
 | 2 | Do default routes cache implicitly today? | One live turn with cached-token logging enabled | CLI |
-| 3 | Is dropping assistant text on tool-call messages intentional? | Author intent or a regression test (`meerai-session/src/projection.rs:104-111`) | Session |
+| 3 | Is dropping assistant text on tool-call messages intentional? | **Settled:** no — `derive_messages` now keeps the text beside the tool calls in one assistant message (`meerai-session/src/projection.rs`) | Session |
 | 4 | Is the dead `verbatim_window_turns` projection field reserved for a sliding window? | **Settled:** active in `meerai-session/src/projection.rs:210` (`clear_old_tool_results` keeps the newest N turns verbatim) | Session |
 | 5 | Is the live cancel gap a defect or documented behavior? | **Settled:** fixed by Q5 / AC-3 (`heal_dangling_tool_calls` at `TurnEnded` in `meerai-agents/src/multi_turn_agent/turn.rs`) | Agents |
 | 6 | Should `sac-run_script` fail closed when `ExecutionWorld::is_sandboxed()` is false? | **Settled:** warn by default; opt-in fail-closed via `sandbox.require_for_scripts` and `sandbox.require_for_shell` (`SandboxSettings`) | Tools / Policy |

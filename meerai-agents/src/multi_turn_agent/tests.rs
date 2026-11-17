@@ -3026,7 +3026,7 @@ async fn repeated_failures_trigger_breaker_and_end_turn() {
     assert_eq!(
         completions[0],
         TurnEndReason::Failed {
-            error: LOOP_DETECTED.to_string()
+            error: format!("{LOOP_DETECTED} (echo-say)")
         }
     );
     assert_eq!(completions[1], TurnEndReason::Completed);
@@ -3067,7 +3067,7 @@ async fn repeated_failures_trigger_breaker_and_end_turn() {
         SessionEvent::TurnEnded {
             reason: TurnEndReason::Failed { error },
             ..
-        } if error == LOOP_DETECTED
+        } if error.starts_with(LOOP_DETECTED) && error.contains("echo-say")
     )));
 
     let reqs = streamer.requests.lock().unwrap();
@@ -3969,6 +3969,132 @@ async fn transient_provider_failure_marks_the_turn_retryable() {
             ..
         }
     )));
+}
+
+#[tokio::test]
+async fn empty_provider_stream_is_retried_and_recovers() {
+    let streamer = Arc::new(FakeStreamer::with_script(vec![
+        ScriptedStream::Events(vec![ChatStreamEvent::End(StreamEnd::default())]),
+        ScriptedStream::Events(vec![ChatStreamEvent::End(text_end("recovered"))]),
+    ]));
+
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "recovered");
+    assert_eq!(streamer.requests.lock().unwrap().len(), 2);
+
+    let attempts = session_events(&session)
+        .into_iter()
+        .filter_map(|event| match event {
+            SessionEvent::AssistantAttempt { error, .. } => Some(error),
+            _ => None,
+        })
+        .collect::<Vec<String>>();
+    assert_eq!(attempts, vec![EMPTY_STREAM_ERROR.to_string()]);
+}
+
+#[tokio::test]
+async fn empty_provider_stream_fails_as_transient_after_max_attempts() {
+    let streamer = Arc::new(FakeStreamer::with_script(vec![
+        ScriptedStream::Events(vec![ChatStreamEvent::End(StreamEnd::default())]),
+        ScriptedStream::Events(vec![ChatStreamEvent::End(StreamEnd::default())]),
+        ScriptedStream::Events(vec![ChatStreamEvent::End(StreamEnd::default())]),
+    ]));
+
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let result = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await;
+    assert!(result.is_err());
+    assert_eq!(
+        streamer.requests.lock().unwrap().len(),
+        MAX_PROVIDER_ATTEMPTS
+    );
+
+    let events = session_events(&session);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    SessionEvent::AssistantAttempt { error, .. } if error == EMPTY_STREAM_ERROR
+                )
+            })
+            .count(),
+        MAX_PROVIDER_ATTEMPTS
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::Error {
+            code: ErrorCode::Provider,
+            retryable: true,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn provider_stream_with_usage_but_no_content_is_not_retried() {
+    let end_with_usage = StreamEnd {
+        captured_usage: Some(Usage {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(5),
+            total_tokens: Some(15),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let streamer = Arc::new(FakeStreamer::with_script(vec![ScriptedStream::Events(
+        vec![ChatStreamEvent::End(end_with_usage)],
+    )]));
+
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "");
+    assert_eq!(streamer.requests.lock().unwrap().len(), 1);
+
+    assert!(
+        session_events(&session)
+            .into_iter()
+            .all(|event| !matches!(event, SessionEvent::AssistantAttempt { .. }))
+    );
 }
 
 fn path_call(call_id: &str, path: &str) -> ToolCall {
@@ -6087,10 +6213,14 @@ async fn repeated_identical_tool_batches_end_with_loop_detected() {
         },
     );
     let (tx, _rx) = mpsc::unbounded_channel();
-    agent
+    let error = agent
         .prompt_streaming("go", &tx, CancellationToken::new())
         .await
         .expect_err("loop must fail");
+    assert!(
+        format!("{error:#}").contains("(echo-say)"),
+        "loop message must name the offending call: {error:#}"
+    );
     assert!(session_events(&session).iter().any(|event| matches!(
         event,
         SessionEvent::Error {
@@ -6164,12 +6294,24 @@ async fn repeated_identical_edits_log_the_edit_breaker() {
 async fn no_progress_breaker_emits_diagnostic_and_fails() {
     let batches: Vec<Vec<ChatStreamEvent>> = (0..12)
         .map(|index| {
-            vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
-                call_id: format!("call-{index}"),
-                fn_name: "code-read_file".to_string(),
-                fn_arguments: serde_json::json!({ "path": format!("src/{index}.rs") }),
-                thought_signatures: None,
-            }]))]
+            vec![ChatStreamEvent::End(tool_end(vec![
+                ToolCall {
+                    call_id: format!("read-{index}"),
+                    fn_name: "code-read_file".to_string(),
+                    fn_arguments: serde_json::json!({ "path": format!("src/{index}.rs") }),
+                    thought_signatures: None,
+                },
+                ToolCall {
+                    call_id: format!("edit-{index}"),
+                    fn_name: "code-edit_file".to_string(),
+                    fn_arguments: serde_json::json!({
+                        "path": format!("src/{index}.rs"),
+                        "old_text": format!("old-{index}"),
+                        "new_text": format!("new-{index}")
+                    }),
+                    thought_signatures: None,
+                },
+            ]))]
         })
         .collect();
     let streamer = Arc::new(FakeStreamer::new(batches));
@@ -6218,7 +6360,7 @@ async fn no_progress_breaker_emits_diagnostic_and_fails() {
 
 #[tokio::test]
 async fn read_only_turns_do_not_trip_no_progress() {
-    let mut batches: Vec<Vec<ChatStreamEvent>> = (0..8)
+    let mut batches: Vec<Vec<ChatStreamEvent>> = (0..10)
         .map(|index| {
             vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
                 call_id: format!("call-{index}"),
@@ -6233,17 +6375,25 @@ async fn read_only_turns_do_not_trip_no_progress() {
     let session = memory_session();
     let mut agent = harness_agent(
         streamer,
-        vec![Box::new(StaticToolset::new(
-            "code",
-            "code-read_file",
-            "content",
-            EffectClass::Read,
-        ))],
+        vec![
+            Box::new(StaticToolset::new(
+                "code",
+                "code-read_file",
+                "content",
+                EffectClass::Read,
+            )),
+            Box::new(StaticToolset::new(
+                "code",
+                "code-edit_file",
+                "edited",
+                EffectClass::Write,
+            )),
+        ],
         "system",
         &session,
         auto_mode(),
         HarnessConfig {
-            max_steps_per_turn: 12,
+            max_steps_per_turn: 14,
             ..HarnessConfig::default()
         },
     );
@@ -7759,5 +7909,277 @@ async fn turn_end_heals_calls_left_unexecuted_by_a_cancel() {
             .count(),
         2,
         "repair must be idempotent"
+    );
+}
+
+fn mode_probe_tools() -> Vec<Box<dyn Toolset>> {
+    vec![
+        Box::new(StaticToolset::new(
+            "code",
+            "code-read_file",
+            "content",
+            EffectClass::Read,
+        )),
+        Box::new(StaticToolset::new(
+            "code",
+            "code-write_file",
+            "written",
+            EffectClass::Write,
+        )),
+        Box::new(StaticToolset::new(
+            "code",
+            "code-edit_file",
+            "edited",
+            EffectClass::Write,
+        )),
+        Box::new(StaticToolset::new(
+            "code",
+            "code-shell",
+            "ran",
+            EffectClass::Execute,
+        )),
+        Box::new(StaticToolset::new(
+            "sac",
+            "sac-run_script",
+            "ran",
+            EffectClass::Execute,
+        )),
+        Box::new(StaticToolset::new(
+            "subagent",
+            "subagent-run",
+            "report",
+            EffectClass::External,
+        )),
+        Box::new(StaticToolset::new(
+            "acp",
+            "acp-run",
+            "report",
+            EffectClass::External,
+        )),
+    ]
+}
+
+fn sent_tool_names(streamer: &FakeStreamer, index: usize) -> Vec<String> {
+    let requests = streamer.requests.lock().unwrap();
+    requests[index]
+        .tools
+        .as_ref()
+        .map(|tools| {
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn plan_mode_sends_only_read_effect_tools() {
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("ok"),
+    )]]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        mode_probe_tools(),
+        "system",
+        &session,
+        PolicyEngine::new(ApprovalMode::Plan),
+        HarnessConfig::default(),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let names = sent_tool_names(&streamer, 0);
+    assert_eq!(names, vec!["code-read_file".to_string()]);
+
+    let read_definition =
+        StaticToolset::new("code", "code-read_file", "content", EffectClass::Read)
+            .definition()
+            .pop()
+            .expect("definition");
+    let read_schema_tokens = estimate_tokens(&read_definition.name)
+        + estimate_tokens(&read_definition.description)
+        + estimate_tokens(&read_definition.parameters.to_string());
+    assert_eq!(agent.tool_schema_tokens, read_schema_tokens);
+}
+
+#[tokio::test]
+async fn ask_mode_still_sends_write_and_execute_tools() {
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("ok"),
+    )]]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        mode_probe_tools(),
+        "system",
+        &session,
+        PolicyEngine::new(ApprovalMode::Ask),
+        HarnessConfig::default(),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let names = sent_tool_names(&streamer, 0);
+    for expected in [
+        "code-read_file",
+        "code-write_file",
+        "code-edit_file",
+        "code-shell",
+        "sac-run_script",
+        "subagent-run",
+        "acp-run",
+    ] {
+        assert!(
+            names.iter().any(|name| name == expected),
+            "missing {expected} in {names:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn reload_preserves_token_pricing() {
+    let pricing = crate::harness::TokenPricing {
+        input_per_mtok: 1.5,
+        output_per_mtok: 3.0,
+    };
+    let streamer = Arc::new(FakeStreamer::new(Vec::new()));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        Vec::new(),
+        "system",
+        &session,
+        auto_mode(),
+        HarnessConfig {
+            token_pricing: Some(pricing),
+            ..HarnessConfig::default()
+        },
+    );
+
+    let context = ContextSettings {
+        max_steps_per_turn: Some(7),
+        ..ContextSettings::default()
+    };
+    agent.reload_config(None, Some(context), "reloaded system".to_string());
+
+    let harness = agent.harness().expect("harness");
+    assert_eq!(harness.config.token_pricing, Some(pricing));
+    assert_eq!(harness.config.max_steps_per_turn, 7);
+}
+
+#[tokio::test]
+async fn loop_detected_message_names_the_offending_calls() {
+    let names = ["tool-alpha", "tool-beta", "tool-delta", "tool-gamma"];
+    let batch = || {
+        let calls = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| ToolCall {
+                call_id: format!("call-{index}"),
+                fn_name: name.to_string(),
+                fn_arguments: serde_json::json!({ "index": index }),
+                thought_signatures: None,
+            })
+            .collect();
+        vec![ChatStreamEvent::End(tool_end(calls))]
+    };
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        batch(),
+        batch(),
+        batch(),
+        batch(),
+        batch(),
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        Vec::new(),
+        "system",
+        &session,
+        auto_mode(),
+        HarnessConfig {
+            max_steps_per_turn: 10,
+            ..HarnessConfig::default()
+        },
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .expect_err("loop must fail");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("loop detected: repeated identical tool calls (tool-alpha (+3 more))"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn batch_diagnostics_land_after_every_tool_result() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![
+            ToolCall {
+                call_id: "c1".to_string(),
+                fn_name: "invalid-run".to_string(),
+                fn_arguments: serde_json::json!({ "count": 1 }),
+                thought_signatures: None,
+            },
+            ToolCall {
+                call_id: "c2".to_string(),
+                fn_name: "invalid-run".to_string(),
+                fn_arguments: serde_json::json!({ "count": 2 }),
+                thought_signatures: None,
+            },
+        ]))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        vec![Box::new(InvalidArgsToolset)],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let events = session_events(&session);
+    let last_result = events
+        .iter()
+        .rposition(|event| matches!(event, SessionEvent::ToolResult { .. }))
+        .expect("tool results");
+    let notes: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            matches!(
+                event,
+                SessionEvent::UserMessage { source: InputSource::RuntimeContext, content }
+                    if content.iter().any(|block| matches!(
+                        block,
+                        ContentBlock::Text(text) if text.contains("Retry the same tool")
+                    ))
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+
+    assert_eq!(notes.len(), 1, "batch notes must merge into one message");
+    assert!(
+        notes[0] > last_result,
+        "runtime notes must follow every tool result: {notes:?} <= {last_result}"
     );
 }

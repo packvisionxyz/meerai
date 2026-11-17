@@ -1,4 +1,5 @@
 use super::*;
+use meerai_core::ToolDefinition;
 
 fn is_context_overflow(message: &str) -> bool {
     let lowered = message.to_lowercase();
@@ -198,16 +199,22 @@ impl MultiTurnAgent {
     ) -> Result<(String, TurnEndReason), TurnError> {
         self.chat_history.push(ChatMessage::user(prompt));
 
-        let genai_tools: Vec<Tool> = self
+        let plan_mode = self
+            .harness
+            .as_ref()
+            .is_some_and(|harness| harness.policy.mode() == ApprovalMode::Plan);
+        let definitions: Vec<ToolDefinition> = self
             .tools
             .iter()
-            .flat_map(|tool| tool.definition())
-            .map(|def| def.to_genai())
+            .flat_map(|tool| {
+                tool.definition().into_iter().filter(|definition| {
+                    !plan_mode || tool.effect_of(&definition.name) == EffectClass::Read
+                })
+            })
             .collect();
-        self.tool_schema_tokens = self
-            .tools
+        let genai_tools: Vec<Tool> = definitions.iter().map(ToolDefinition::to_genai).collect();
+        self.tool_schema_tokens = definitions
             .iter()
-            .flat_map(|tool| tool.definition())
             .map(|definition| {
                 estimate_tokens(&definition.name)
                     + estimate_tokens(&definition.description)
@@ -270,6 +277,7 @@ impl MultiTurnAgent {
             });
         let mut no_progress_steps = 0usize;
         let mut no_progress_diagnosed = false;
+        let mut write_attempted = false;
         let mut stop_hook_used = false;
         let mut last_tool_signature: Option<String> = None;
         let mut repeated_tool_batches = 0usize;
@@ -553,8 +561,20 @@ impl MultiTurnAgent {
                         )
                         .await;
                     }
+                    let mut names: Vec<&str> = tool_calls
+                        .iter()
+                        .map(|call| call.fn_name.as_str())
+                        .collect();
+                    names.sort_unstable();
+                    names.dedup();
+                    let offender = match names.len() {
+                        0 => String::new(),
+                        1 => names[0].to_string(),
+                        2..=3 => names.join(", "),
+                        count => format!("{} (+{} more)", names[0], count - 1),
+                    };
                     return Err(TurnError::loop_detected(anyhow!(
-                        "loop detected: repeated identical tool calls"
+                        "loop detected: repeated identical tool calls ({offender})"
                     )));
                 }
             }
@@ -622,7 +642,16 @@ impl MultiTurnAgent {
                 return Ok(completed(event_tx, turn_id, reason));
             }
 
-            if !tool_calls.is_empty() && progress_tracking {
+            let step_write = tool_calls.iter().any(|call| {
+                let args = call.fn_arguments.to_string();
+                self.tools.iter().any(|tool| {
+                    tool.contain(&call.fn_name)
+                        && tool.effect_of_call(&call.fn_name, &args) == EffectClass::Write
+                })
+            });
+            write_attempted |= step_write;
+
+            if !tool_calls.is_empty() && progress_tracking && write_attempted {
                 let delegated = tool_calls
                     .iter()
                     .any(|call| matches!(call.fn_name.as_str(), "subagent-run" | "acp-run"));
@@ -804,8 +833,19 @@ impl MultiTurnAgent {
             }
         }
 
+        let end = end.unwrap_or_default();
+        let end_is_empty = end.captured_usage.is_none()
+            && end.captured_tool_calls().unwrap_or_default().is_empty()
+            && end.captured_first_text().is_none_or(|text| text.is_empty());
+        if text.is_empty() && reasoning.is_empty() && tool_calls.is_empty() && end_is_empty {
+            return Err(StreamFailure::Provider {
+                error: anyhow!(EMPTY_STREAM_ERROR),
+                partial: false,
+            });
+        }
+
         Ok(CollectedStream {
-            end: end.unwrap_or_default(),
+            end,
             text,
             reasoning,
             tool_calls,

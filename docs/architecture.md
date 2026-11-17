@@ -8,7 +8,8 @@ This document mixes two views and labels them:
 The target is a **pure, provider-agnostic terminal agent harness** driven
 by a **selection-first modal terminal UI** ([docs/tui-design.md](tui-design.md))
 and a scriptable headless CLI mode. The protocol and context design live in
-[docs/harness-spec.md](harness-spec.md).
+[docs/harness-spec.md](harness-spec.md). Implementation-level invariants and
+traps live in [docs/harness-internals.md](harness-internals.md).
 
 ## Current workspace
 

@@ -125,42 +125,28 @@ impl MultiTurnAgent {
         }
     }
 
-    pub(super) async fn inject_scoped_instructions(
-        &mut self,
-        args: &str,
-        event_tx: &mpsc::UnboundedSender<AgentEvent>,
-    ) {
-        let Some(root) = self
+    pub(super) async fn scoped_instructions(&mut self, args: &str) -> Option<String> {
+        let root = self
             .harness
             .as_ref()
-            .map(|harness| harness.session.meta().cwd)
-        else {
-            return;
-        };
+            .map(|harness| harness.session.meta().cwd)?;
         if self.injected_instruction_dirs.len() >= MAX_SCOPED_INSTRUCTION_FILES {
-            return;
+            return None;
         }
 
-        let Some(raw) = serde_json::from_str::<serde_json::Value>(args)
+        let raw = serde_json::from_str::<serde_json::Value>(args)
             .ok()
-            .and_then(|value| value.get("path")?.as_str().map(str::to_string))
-        else {
-            return;
-        };
-        let Some(resolved) = resolve_lexical_subpath(&root, &raw) else {
-            return;
-        };
-        let Some(directory) = nearest_agents_dir(&root, &resolved).await else {
-            return;
-        };
+            .and_then(|value| value.get("path")?.as_str().map(str::to_string))?;
+        let resolved = resolve_lexical_subpath(&root, &raw)?;
+        let directory = nearest_agents_dir(&root, &resolved).await?;
         if self.injected_instruction_dirs.contains(&directory) {
-            return;
+            return None;
         }
-        let Ok(text) = tokio::fs::read_to_string(directory.join("AGENTS.md")).await else {
-            return;
-        };
+        let text = tokio::fs::read_to_string(directory.join("AGENTS.md"))
+            .await
+            .ok()?;
         if text.trim().is_empty() {
-            return;
+            return None;
         }
 
         let relative = directory
@@ -172,14 +158,7 @@ impl MultiTurnAgent {
         let body = crate::screen::screen_untrusted_text(&source, &capped_instructions(text));
         let content = format!("Project instructions from {source}:\n\n{body}");
         self.injected_instruction_dirs.insert(directory);
-        self.log_event(
-            event_tx,
-            SessionEvent::UserMessage {
-                source: InputSource::RuntimeContext,
-                content: vec![ContentBlock::Text(content.clone())],
-            },
-        )
-        .await;
-        self.chat_history.push(ChatMessage::user(content));
+        self.chat_history.push(ChatMessage::user(content.clone()));
+        Some(content)
     }
 }
