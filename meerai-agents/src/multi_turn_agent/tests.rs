@@ -2755,6 +2755,39 @@ async fn second_context_overflow_fails_the_turn() {
 }
 
 #[tokio::test]
+async fn context_overflow_does_not_retry_when_compaction_skips() {
+    let streamer = Arc::new(FakeStreamer::with_script(vec![ScriptedStream::Error(
+        "maximum context length exceeded".to_string(),
+    )]));
+
+    let session = memory_session();
+    let config = HarnessConfig {
+        verbatim_window_turns: 4,
+        ..HarnessConfig::default()
+    };
+    let mut agent = harness_agent(streamer.clone(), vec![], "", &session, auto_mode(), config);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let err = agent
+        .prompt_streaming("too big", &tx, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("maximum context length"));
+
+    let reqs = streamer.requests.lock().unwrap();
+    assert_eq!(reqs.len(), 1);
+
+    let events = session_events(&session);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::CompactionEnded {
+            result: CompactionResult::Skipped { .. },
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
 async fn final_step_strips_tools_and_requests_summary() {
     let streamer = Arc::new(FakeStreamer::new(vec![
         vec![ChatStreamEvent::End(tool_end(vec![tool_call("c1", "ok")]))],

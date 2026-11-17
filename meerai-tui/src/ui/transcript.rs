@@ -518,6 +518,12 @@ fn build_transcript_lines(app: &AppState, memo: &mut TranscriptBuildMemo) -> Bui
         }
         if idx > 0 {
             lines.push(tagged_line(Line::default(), None, 0));
+            if !matches!(
+                entry,
+                TranscriptEntry::ToolCall(_) | TranscriptEntry::Subagent(_)
+            ) {
+                lines.push(tagged_line(Line::default(), None, 0));
+            }
         }
         match entry {
             TranscriptEntry::User { text } => {

@@ -66,46 +66,48 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: R
         }
     }
 
-    let (cursor_row, cursor_col) = cursor_row_col(&app.tab().input, app.tab().cursor);
-    let visible_rows = content.height.max(1) as usize;
-    let scroll_y = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
-    app.composer_scroll = scroll_y;
-
     let tab = app.tab();
-    let mut cursor_display_col = cursor_col;
     let placeholder = match app.mode {
         InputMode::Insert => "Ask meerai anything...",
         InputMode::Normal => "Press i or a to insert...",
     };
-    let lines = if tab.input.is_empty() {
-        Paragraph::new(Line::from(Span::styled(
+    if tab.input.is_empty() {
+        app.composer_scroll = 0;
+        let lines = Paragraph::new(Line::from(Span::styled(
             placeholder,
             Style::default().fg(theme::p().faint),
-        )))
-    } else {
-        let lines: Vec<Line<'_>> = tab
-            .input
-            .split('\n')
-            .enumerate()
-            .map(|(index, line)| {
-                let cursor = (index == cursor_row).then_some(cursor_col);
-                let (spans, display_col) =
-                    render_composer_line(line, cursor, &app.agents, &app.skills);
-                if index == cursor_row {
-                    cursor_display_col = display_col;
-                }
-                Line::from(spans)
-            })
-            .collect();
-        Paragraph::new(lines).scroll((scroll_y.min(u16::MAX as usize) as u16, 0))
-    };
+        )));
+        frame.render_widget(lines, content);
+        return;
+    }
 
-    frame.render_widget(lines, content);
+    let wrapped = wrap_composer(
+        &tab.input,
+        tab.cursor,
+        content.width.max(1) as usize,
+        &app.agents,
+        &app.skills,
+    );
+    let visible_rows = content.height.max(1) as usize;
+    let scroll_y = wrapped
+        .cursor_row
+        .saturating_sub(visible_rows.saturating_sub(1));
+    app.composer_scroll = scroll_y;
+    let lines: Vec<Line<'_>> = wrapped
+        .rows
+        .iter()
+        .map(|row| Line::from(row.spans.clone()))
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines).scroll((scroll_y.min(u16::MAX as usize) as u16, 0)),
+        content,
+    );
+    let cursor_display_col = wrapped.cursor_col;
 
     if let Some((start, end)) = app.composer_selection.filter(|(start, end)| start < end) {
         let input = app.tab().input.clone();
-        let (start_line, start_col) = display_pos_for_byte(&input, start, &app.agents, &app.skills);
-        let (end_line, end_col) = display_pos_for_byte(&input, end, &app.agents, &app.skills);
+        let (start_line, start_col) = wrapped.position(&input, start, &app.agents, &app.skills);
+        let (end_line, end_col) = wrapped.position(&input, end, &app.agents, &app.skills);
         let highlight = theme::p().surface_high;
         let buf = frame.buffer_mut();
         for line in start_line..=end_line {
@@ -133,12 +135,169 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: R
         && content.height > 0
     {
         let max_x = content.x + content.width.saturating_sub(1);
-        let rel_row = cursor_row.saturating_sub(scroll_y);
+        let rel_row = wrapped.cursor_row.saturating_sub(scroll_y);
         let max_y = content.y + content.height.saturating_sub(1);
         let x = (content.x + cursor_display_col as u16).min(max_x);
         let y = (content.y + rel_row as u16).min(max_y);
         frame.set_cursor_position(Position::new(x, y));
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct WrappedRow {
+    logical_line: usize,
+    logical_start: usize,
+    spans: Vec<Span<'static>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct WrappedComposer {
+    rows: Vec<WrappedRow>,
+    cursor_row: usize,
+    cursor_col: usize,
+}
+
+impl WrappedComposer {
+    fn row_for(&self, logical_line: usize, display_col: usize) -> (usize, usize) {
+        let mut row = None;
+        for (idx, wrapped) in self.rows.iter().enumerate() {
+            if wrapped.logical_line != logical_line {
+                continue;
+            }
+            row = Some(idx);
+            if display_col <= wrapped.logical_start + wrapped_width(wrapped) {
+                break;
+            }
+        }
+        let row = row.unwrap_or(0);
+        let start = self.rows.get(row).map(|w| w.logical_start).unwrap_or(0);
+        (row, display_col.saturating_sub(start))
+    }
+
+    fn position(
+        &self,
+        input: &str,
+        byte: usize,
+        agents: &[AgentDefinition],
+        skills: &[SkillDefinition],
+    ) -> (usize, usize) {
+        let (logical_line, display_col) = display_pos_for_byte(input, byte, agents, skills);
+        self.row_for(logical_line, display_col)
+    }
+}
+
+fn wrapped_width(wrapped: &WrappedRow) -> usize {
+    wrapped
+        .spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum()
+}
+
+fn wrapped_chars(spans: &[Span<'static>]) -> Vec<(char, Style)> {
+    spans
+        .iter()
+        .flat_map(|span| span.content.chars().map(move |ch| (ch, span.style)))
+        .collect()
+}
+
+pub(crate) fn composer_row_start(
+    input: &str,
+    cursor: usize,
+    width: usize,
+    row: usize,
+    agents: &[AgentDefinition],
+    skills: &[SkillDefinition],
+) -> (usize, usize) {
+    let wrapped = wrap_composer(input, cursor, width.max(1), agents, skills);
+    let row = row.min(wrapped.rows.len().saturating_sub(1));
+    wrapped
+        .rows
+        .get(row)
+        .map(|target| (target.logical_line, target.logical_start))
+        .unwrap_or((0, 0))
+}
+
+fn wrap_line(
+    spans: &[Span<'static>],
+    width: usize,
+    logical_line: usize,
+    rows: &mut Vec<WrappedRow>,
+) {
+    let chars = wrapped_chars(spans);
+    if chars.is_empty() {
+        rows.push(WrappedRow {
+            logical_line,
+            logical_start: 0,
+            spans: Vec::new(),
+        });
+        return;
+    }
+    let mut start = 0usize;
+    while start < chars.len() {
+        let remaining = &chars[start..];
+        let hard_end = start + remaining.len().min(width);
+        let end = if hard_end < chars.len() && chars[hard_end].0 != ' ' {
+            remaining[..hard_end - start]
+                .iter()
+                .rposition(|(ch, _)| *ch == ' ')
+                .map(|idx| start + idx)
+                .filter(|idx| *idx > start)
+                .unwrap_or(hard_end)
+        } else {
+            hard_end
+        };
+        let spans = chars[start..end]
+            .iter()
+            .map(|(ch, style)| Span::styled(ch.to_string(), *style))
+            .collect();
+        rows.push(WrappedRow {
+            logical_line,
+            logical_start: start,
+            spans,
+        });
+        start = end;
+        if start < chars.len() && chars[start].0 == ' ' {
+            start += 1;
+        }
+    }
+}
+
+fn wrap_composer(
+    input: &str,
+    cursor: usize,
+    width: usize,
+    agents: &[AgentDefinition],
+    skills: &[SkillDefinition],
+) -> WrappedComposer {
+    let width = width.max(1);
+    let (cursor_line, cursor_col) = cursor_row_col(input, cursor);
+    let mut wrapped = WrappedComposer {
+        rows: Vec::new(),
+        cursor_row: 0,
+        cursor_col: 0,
+    };
+    for (line_index, line) in input.split('\n').enumerate() {
+        let (spans, _) = render_composer_line(line, None, agents, skills);
+        wrap_line(&spans, width, line_index, &mut wrapped.rows);
+    }
+    if wrapped.rows.is_empty() {
+        wrapped.rows.push(WrappedRow::default());
+    }
+    (wrapped.cursor_row, wrapped.cursor_col) = wrapped.row_for(cursor_line, cursor_col);
+    wrapped
+}
+
+pub(crate) fn composer_rows(input: &str, width: usize) -> usize {
+    let width = width.max(1);
+    if input.is_empty() {
+        return 1;
+    }
+    input
+        .split('\n')
+        .map(|line| line.chars().count().max(1).div_ceil(width))
+        .sum::<usize>()
+        .max(1)
 }
 
 fn display_width_of(line: &str, agents: &[AgentDefinition], skills: &[SkillDefinition]) -> usize {

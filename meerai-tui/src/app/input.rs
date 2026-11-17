@@ -999,25 +999,37 @@ impl AppState {
         }
         let input = self.tab().input.clone();
         let lines: Vec<&str> = input.split('\n').collect();
-        let line_idx = if row < area.y {
+        let visual_row = if row < area.y {
             0
         } else {
-            let relative = (row - area.y) as usize;
-            (self.composer_scroll + relative).min(lines.len().saturating_sub(1))
+            self.composer_scroll + (row - area.y) as usize
         };
         let display_col = column.saturating_sub(area.x) as usize;
-        let char_idx =
-            display_col_to_char_index(lines[line_idx], display_col, &self.agents, &self.skills);
+        let (logical_line, logical_start) = crate::ui::composer::composer_row_start(
+            &input,
+            self.tab().cursor,
+            area.width as usize,
+            visual_row,
+            &self.agents,
+            &self.skills,
+        );
+        let line = lines.get(logical_line).copied().unwrap_or_default();
+        let char_idx = display_col_to_char_index(
+            line,
+            logical_start + display_col,
+            &self.agents,
+            &self.skills,
+        );
         let line_start: usize = input
             .split('\n')
-            .take(line_idx)
+            .take(logical_line)
             .map(|line| line.len() + 1)
             .sum();
-        let byte_in_line = lines[line_idx]
+        let byte_in_line = line
             .char_indices()
             .nth(char_idx)
             .map(|(idx, _)| idx)
-            .unwrap_or(lines[line_idx].len());
+            .unwrap_or(line.len());
         Some((line_start + byte_in_line).min(input.len()))
     }
 

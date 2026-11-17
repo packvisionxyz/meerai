@@ -193,7 +193,7 @@ Notes:
     sandbox, and a `:` in an agent `model` is ignored (no provider switch). Startup `--agent` takes
     one id (repeating is an error); `--skill` is repeatable; unknown ids fail with the available ids. The TUI
     exposes `/agent`/`/skill`, `/agents`/`/skills` pickers, and a `@` Mentions popup (agents,
-    skills, files; ids colored blue for agents and gold for skills; Tab accepts, Enter accepts
+    skills, files; ids colored teal for agents and blue for skills; Tab accepts, Enter accepts
     without submitting, Esc dismisses).
 22. **ACP client (M13, agy):** `--acp` drives `agy acp`; `/acp` opens a new tab; `acp doctor`
     prints the handshake. `AcpWorker` maps `AcpEvent` to `AgentEvent` and `SessionEvent`, sets
@@ -440,7 +440,7 @@ Detail in [`infra.md`](infra.md). Summary:
   no `.meerai` definition directories and no copies. Startup `--agent` takes one id (repeating is an
   error) and repeatable `--skill` append instructions to the system prompt; TUI `/agent`/`/skill`
   send `AgentCommand::ApplyAgent`/`ApplySkill` as System instructions, and the `@` Mentions popup
-  (agents, then skills, then files; ids in blue for agents and gold for skills; Tab accepts, Enter
+  (agents, then skills, then files; ids in teal for agents and blue for skills; Tab accepts, Enter
   accepts without submitting, Esc dismisses) applies the selected definitions before the prompt. A
   known accepted mention renders as an `<id>` chip in the composer while the raw
   `@agent/<id>`/`@skill/<id>` stays in the buffer; unknown and partial tokens render as typed.

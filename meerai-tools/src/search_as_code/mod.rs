@@ -8,6 +8,7 @@ use meerai_core::{
     ToolOutput, ToolPermissionSpec, ToolRun, Toolset, async_trait,
 };
 
+use crate::code::paths::PathIssue;
 use crate::code::{CodeTools, definition_for, failure_run, parse_args, truncate_middle};
 use crate::world::{ExecutionWorld, HostWorld, SandboxPolicy, WorldCommand, WorldExecOutcome};
 
@@ -189,11 +190,16 @@ impl SearchAsCodeToolset {
         let source = match (args.script, args.path) {
             (Some(script), None) if !script.trim().is_empty() => ScriptSource::Inline(script),
             (None, Some(path)) if !path.trim().is_empty() => {
-                let raw = PathBuf::from(path.trim());
-                let candidate = if raw.is_absolute() {
-                    raw
-                } else {
-                    cwd.join(raw)
+                let trimmed = path.trim();
+                let candidate = match CodeTools::new(&self.workspace_root)
+                    .resolve_for_read(trimmed)
+                    .await
+                {
+                    Ok(resolved) => resolved,
+                    Err(PathIssue::Missing(_)) => {
+                        return failure_run(format!("script file not found: {trimmed}"));
+                    }
+                    Err(issue) => return issue.into_run(),
                 };
                 match tokio::fs::metadata(&candidate).await {
                     Ok(meta) if meta.is_file() => ScriptSource::File(candidate),
@@ -646,5 +652,33 @@ mod tests {
                 other => panic!("expected ReadOnly policy, got {other:?}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn rejects_script_path_escaping_workspace_or_sensitive() {
+        let outside = TempDir::new().unwrap();
+        let outside_script = outside.path().join("outside.py");
+        fs::write(&outside_script, "print('escape')").unwrap();
+
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+        let toolset = SearchAsCodeToolset::new(dir.path());
+
+        let escape_args = serde_json::json!({
+            "language": "python",
+            "path": outside_script.to_string_lossy(),
+        })
+        .to_string();
+        let escape_run = toolset
+            .invoke_structured(RUN_SCRIPT_TOOL, &escape_args)
+            .await
+            .unwrap();
+        assert_eq!(escape_run.observation.status, ObservationStatus::Refused);
+
+        let sensitive_run = toolset
+            .invoke_structured(RUN_SCRIPT_TOOL, r#"{"language": "python", "path": ".env"}"#)
+            .await
+            .unwrap();
+        assert_eq!(sensitive_run.observation.status, ObservationStatus::Refused);
     }
 }

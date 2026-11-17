@@ -368,14 +368,14 @@ TUI commands and mentions:
 | `@skill/<id>` | Apply a skill, then send the rest of the prompt |
 
 Typing `@` opens one **Mentions** popup. Agents are listed first, then skills,
-then files. Agent rows show the id in the blue accent color, skill rows show
-the id in the gold interactive color, and both show the source and description
+then files. Agent rows show the id in the teal accent color, skill rows show
+the id in the blue interactive color, and both show the source and description
 after the id. File rows show the path in the normal text color. The row shows the
 bare `<id>`, not the `@agent/` or `@skill/` prefix. The same id can appear once as
 an agent and once as a skill.
 
 After you accept a known `@agent/<id>` or `@skill/<id>` mention, the composer
-shows only `<id>`: a bold blue agent chip or a bold gold skill chip. The raw
+shows only `<id>`: a bold teal agent chip or a bold blue skill chip. The raw
 `@agent/<id>` or `@skill/<id>` text stays in the input buffer, and the prefix is
 hidden only in the display. Unknown ids and partial tokens such as
 `@skill/doesnotexist` or `@skill/del` render exactly as typed. Several mentions
@@ -562,7 +562,9 @@ counts toward `context.max_session_tokens`.
 
 The TUI uses the opencode dark palette by default: near-black background,
 raised surfaces for the sidebar, composer, and the user band, muted borders only
-on dialogs, a blue accent, and a warm gold interactive color. Active tool
+on dialogs, a teal accent, and a cool blue interactive color. Responses keep
+the model's line breaks, paragraphs get a blank row, and composer rows are
+spaced so long sessions stay readable. Active tool
 rows keep the raised band; finished rows fade to muted text and recede into the
 background so only running work stands out. Override
 any token in `settings.yml` (user), `<project-root>/.meerai/settings.yml`
@@ -577,8 +579,8 @@ theme:
   text: "#eeeeee"
   muted: "#808080"
   faint: "#4c4c4c"
-  accent: "#61afef"
-  interactive: "#e5c07b"
+  accent: "#2dd4bf"
+  interactive: "#7abaff"
   border: "#484848"
   error: "#e06c75"
   warning: "#ff9e64"

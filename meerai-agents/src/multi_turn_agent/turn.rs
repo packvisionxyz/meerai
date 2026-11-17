@@ -861,7 +861,7 @@ impl MultiTurnAgent {
 
                     if recoverable && !overflow_retried {
                         overflow_retried = true;
-                        if let Err(error) = self
+                        let compacted = match self
                             .run_compaction(
                                 CompactionTrigger::ContextOverflow,
                                 event_tx,
@@ -870,9 +870,12 @@ impl MultiTurnAgent {
                             )
                             .await
                         {
-                            return Err(StepFailure::Error(error));
+                            Ok(compacted) => compacted,
+                            Err(error) => return Err(StepFailure::Error(error)),
+                        };
+                        if compacted {
+                            continue;
                         }
-                        continue;
                     }
 
                     let transient = !recoverable && is_transient_provider_error(&error, &message);

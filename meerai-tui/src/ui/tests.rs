@@ -50,6 +50,23 @@ fn render_to_string_with_size(app: &mut AppState, width: u16, height: u16) -> St
         .collect()
 }
 
+fn render_rows_with_size(app: &mut AppState, width: u16, height: u16) -> Vec<String> {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, app)).unwrap();
+    let cells: Vec<String> = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol().to_string())
+        .collect();
+    cells
+        .chunks(width as usize)
+        .map(|row| row.concat())
+        .collect()
+}
+
 fn render_to_string(app: &mut AppState) -> String {
     render_to_string_with_size(app, 120, 28)
 }
@@ -1020,6 +1037,85 @@ fn composer_cursor_keeps_multiline_row_and_chip_columns() {
     let (spans, display_col) = render_composer_line(line, Some(raw_col), &agents, &skills);
     assert_eq!(span_text(&spans), "run deliver");
     assert_eq!(display_col, "run deliver".chars().count());
+}
+
+#[test]
+fn composer_rows_counts_wrapped_and_explicit_rows() {
+    assert_eq!(super::composer::composer_rows("", 10), 1);
+    assert_eq!(super::composer::composer_rows("short", 10), 1);
+    assert_eq!(super::composer::composer_rows("abcdefghijklmno", 10), 2);
+    assert_eq!(super::composer::composer_rows("a\nbbbbbbbbbbbb", 10), 3);
+    assert_eq!(super::composer::composer_rows("a\nb\nc", 10), 3);
+}
+
+#[test]
+fn composer_word_wraps_at_spaces_and_maps_rows() {
+    let agents: Vec<meerai_common::definitions::AgentDefinition> = Vec::new();
+    let skills: Vec<meerai_common::definitions::SkillDefinition> = Vec::new();
+    let input = "alpha beta gamma delta";
+    let row = |index| super::composer::composer_row_start(input, 0, 10, index, &agents, &skills);
+    assert_eq!(row(0), (0, 0));
+    assert_eq!(row(1), (0, 11));
+    assert_eq!(row(2), (0, 17));
+    assert_eq!(row(3), (0, 17));
+}
+
+#[test]
+fn composer_wraps_a_long_prompt_across_rows() {
+    let mut app = test_app();
+    app.mode = InputMode::Insert;
+    let prompt = "wrap ".repeat(40);
+    app.tab_mut().input = prompt.clone();
+    app.tab_mut().cursor = prompt.len();
+
+    let rendered = render_to_string_with_size(&mut app, 60, 24);
+    assert!(app.composer_input_area.height >= 2);
+    assert!(rendered.contains("wrap wrap wrap"));
+}
+
+#[test]
+fn markdown_separates_blocks_with_a_blank_line() {
+    let lines = crate::markdown::render("first paragraph\n\nsecond paragraph");
+    let first = lines
+        .iter()
+        .position(|line| span_text(&line.spans).contains("first paragraph"))
+        .unwrap();
+    let second = lines
+        .iter()
+        .position(|line| span_text(&line.spans).contains("second paragraph"))
+        .unwrap();
+    assert!(second > first + 1);
+    assert!(lines[first + 1].spans.is_empty());
+}
+
+#[test]
+fn markdown_keeps_single_newlines_as_line_breaks() {
+    let lines = crate::markdown::render("first line\nsecond line\nthird line");
+    let rows: Vec<String> = lines.iter().map(|line| span_text(&line.spans)).collect();
+    assert_eq!(rows, vec!["first line", "second line", "third line"]);
+}
+
+#[test]
+fn transcript_screen_has_blank_rows_between_messages_and_paragraphs() {
+    let mut app = test_app();
+    app.tab_mut().transcript = vec![
+        TranscriptEntry::User {
+            text: "first message".to_string(),
+        },
+        TranscriptEntry::Assistant {
+            text: "para one\n\npara two".to_string(),
+            reasoning: String::new(),
+            streaming: false,
+            reasoning_expanded: false,
+        },
+    ];
+    let rows = render_rows_with_size(&mut app, 70, 30);
+    let find = |needle: &str| rows.iter().position(|row| row.contains(needle)).unwrap();
+    let user = find("▌ first message");
+    let para_one = find("para one");
+    let para_two = find("para two");
+    assert_eq!(para_one, user + 3, "rows: {rows:#?}");
+    assert!(para_two > para_one + 1, "rows: {rows:#?}");
 }
 
 #[test]

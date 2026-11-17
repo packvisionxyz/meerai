@@ -114,8 +114,9 @@ no keyboard Select mode.
 ### 2. Insert Mode (`INS`) — current
 
 - A multi-line prompt buffer with cursor motions, backspace/delete, and
-  bracketed paste from crossterm.
-- `Enter` submits. `shift+enter` or `alt+enter` inserts a newline.
+  bracketed paste from crossterm. Long lines soft-wrap at the input width; the
+  composer grows to 8 rows and scrolls beyond that.
+- `Enter` submits. `shift+enter`, `alt+enter`, or `ctrl+enter` inserts a newline.
 - `@` opens file completion. `/` on an empty line opens slash-command
   completion. `/model ` opens model completion.
 - `Tab` accepts a completion; `Enter` accepts a completion or submits when the
@@ -163,7 +164,7 @@ Typing `/` opens completion. The implemented command set is:
 `/agent <id>` and `/skill <id>` send `AgentCommand::ApplyAgent`/`ApplySkill`,
 which append a System instruction at the next step boundary. Typing `@` opens the
 **Mentions** popup: agents first, then skills, then files. Agent rows show the
-id in the blue accent color, skill rows show the id in the gold interactive
+id in the teal accent color, skill rows show the id in the blue interactive
 color, and each shows the source and description; file rows show a path in the
 normal text color. Rows show the bare id, not the `@agent/` or `@skill/` prefix.
 One id can
@@ -173,7 +174,7 @@ Tab accepts; Enter accepts without submitting; Esc dismisses. Accepting inserts
 `@agent/<id> `, `@skill/<id> `, or `@path ` with one trailing space and stays in
 Insert. An exact agent or skill id keeps the popup open; an exact file path
 auto-dismisses. The composer title says `@ mentions`. A known accepted mention
-renders as an `<id>` chip (bold blue agent, bold gold skill) while the raw
+renders as an `<id>` chip (bold teal agent, bold blue skill) while the raw
 `@agent/<id>`/`@skill/<id>` stays in the input buffer and submit detection;
 unknown ids and partial tokens render as typed. Cursor columns use the chip
 display width: before a chip the column is normal, inside a chip it maps to the

@@ -25,7 +25,7 @@ use crate::diff::{DiffCell, DiffRowKind};
 use crate::search::SearchMode;
 use crate::theme;
 
-mod composer;
+pub(crate) mod composer;
 mod modals;
 mod selection;
 mod sidebar;
@@ -57,12 +57,6 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
     let main_area = outer[1];
     let status_area = outer[2];
 
-    let composer_lines = app.tab().input.split('\n').count().clamp(1, 6) as u16;
-    let composer_bottom_margin: u16 = if main_area.height >= 14 { 1 } else { 0 };
-    let composer_height = composer_lines + 2 + composer_bottom_margin;
-
-    selection::render_tab_bar(frame, app, tab_area);
-
     let chat_col = if app.is_sidebar_visible() {
         let sidebar_width = (main_area.width / 4).clamp(30, 38);
         let cols = Layout::horizontal([
@@ -88,6 +82,14 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
         app.hovered_file_change = None;
         main_area
     };
+
+    let composer_input_width = (chat_col.width.saturating_sub(8) as usize).max(1);
+    let composer_lines =
+        composer::composer_rows(&app.tab().input, composer_input_width).clamp(1, 8) as u16;
+    let composer_bottom_margin: u16 = if main_area.height >= 14 { 1 } else { 0 };
+    let composer_height = composer_lines + 2 + composer_bottom_margin;
+
+    selection::render_tab_bar(frame, app, tab_area);
 
     let chat_chunks =
         Layout::vertical([Constraint::Min(3), Constraint::Length(composer_height)]).split(chat_col);

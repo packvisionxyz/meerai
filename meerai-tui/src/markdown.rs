@@ -20,7 +20,15 @@ pub fn render(text: &str) -> Vec<MarkdownLine> {
     let arena = Arena::new();
     let root = parse_document(&arena, text, &options);
     let mut out = Vec::new();
+    let mut first = true;
     for node in root.children() {
+        if !first {
+            out.push(MarkdownLine {
+                spans: Vec::new(),
+                code: false,
+            });
+        }
+        first = false;
         render_block(node, &mut out, 0);
     }
     while out
@@ -249,9 +257,11 @@ fn push_spans(out: &mut Vec<MarkdownLine>, spans: Vec<Span<'static>>, code: bool
 fn inline_lines<'a>(node: &'a AstNode<'a>, base: Style) -> Vec<Vec<Span<'static>>> {
     let mut lines: Vec<Vec<Span<'static>>> = vec![Vec::new()];
     walk_inline(node, base, &mut lines);
-    lines.retain(|spans| !spans.is_empty());
-    if lines.is_empty() {
-        lines.push(Vec::new());
+    while lines.len() > 1 && lines.first().is_some_and(|spans| spans.is_empty()) {
+        lines.remove(0);
+    }
+    while lines.len() > 1 && lines.last().is_some_and(|spans| spans.is_empty()) {
+        lines.pop();
     }
     lines
 }
@@ -264,8 +274,7 @@ fn walk_inline<'a>(node: &'a AstNode<'a>, style: Style, lines: &mut Vec<Vec<Span
             NodeValue::Code(code) => {
                 push_span(lines, Span::styled(code.literal, inline_code_style()));
             }
-            NodeValue::SoftBreak => push_span(lines, Span::styled(" ", style)),
-            NodeValue::LineBreak => lines.push(Vec::new()),
+            NodeValue::SoftBreak | NodeValue::LineBreak => lines.push(Vec::new()),
             NodeValue::Strong => walk_inline(child, style.add_modifier(Modifier::BOLD), lines),
             NodeValue::Emph => walk_inline(child, style.add_modifier(Modifier::ITALIC), lines),
             NodeValue::Strikethrough => {

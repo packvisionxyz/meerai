@@ -2,8 +2,8 @@
 
 **Date:** 2026-11-16
 **Author:** meerai maintainers
-**Status:** In progress (phases 1–5 landed v1; phase 6 landed v1)
-**Scope:** `meerai-agents`, `meerai-session`, `meerai-common`, `meerai-cli`, `meerai-tui`, `docs/`
+**Status:** In progress (phases 1–6 landed v1 + overflow/script-guard fixes; phase 7+ proposed)
+**Scope:** `meerai-agents`, `meerai-session`, `meerai-tools`, `meerai-common`, `meerai-cli`, `meerai-tui`, `docs/`
 **Related Documents:** [harness-spec.md](harness-spec.md), [architecture.md](architecture.md), [threat-model.md](threat-model.md)
 
 ## 1. Summary
@@ -56,10 +56,12 @@ and a cancelled or loop-detected turn never sends an unpaired tool call on the n
 | Live healing (phase 1) | `run_turn` also heals after `TurnEnded` through the same idempotent helper | `meerai-agents/src/multi_turn_agent/turn.rs` |
 | Cancel gap | Cancel during planning returns with no `ToolResult` for the batch | `meerai-agents/src/multi_turn_agent/tools.rs:292-295` |
 | Provider retries | 3 attempts, message-marker classification, no status codes, no partial-stream retry | `turn.rs:10-15,696-733`, `mod.rs:85-93` |
-| Overflow recovery | May retry an unchanged oversized request when no balanced boundary exists | `turn.rs:708-722`, `compaction.rs:144-166` |
-| Loop breakers | Only identical-batch and repeated-failure are emitted; three declared kinds are dead | `turn.rs:432-449`, `tools.rs:772-805`, `meerai-session/src/event.rs:168-180` |
+| Overflow recovery | Fixed: `ContextOverflow` only retries once when `run_compaction` returns `Ok(true)`; `Ok(false)` skips the retry and fails cleanly | `meerai-agents/src/multi_turn_agent/turn.rs` |
+| Loop breakers | All three `BreakerKind` variants (`RepeatedToolFailure`, `RepeatedIdenticalEdit`, `NoProgress`) are emitted; only `BreakerAction::ContinueOnce` remains unused | `turn.rs`, `tools.rs`, `meerai-session/src/event.rs` |
+| TUI statusline (phase 1) | Shows `↻<compact>` when `session_cached_tokens > 0`; headless stderr prints `cached=<n>` | `meerai-tui/src/ui/statusline.rs`, `meerai-cli/src/headless.rs` |
+| Script sandboxing (`sac-run_script`) | Runs under `ExecutionWorld` `ReadOnly` (`allow_network: false`), validates `path` inputs via `CodeTools::resolve_for_read`, and populates inline `PermissionCheck.resource` previews; host-wide reads (`(allow file-read*)` / `--ro-bind / /`), resource limits, Node `--permission`, and silent `HostWorld` fallback remain open | `meerai-tools/src/search_as_code/mod.rs`, `meerai-tools/src/world.rs`, `meerai-agents/src/multi_turn_agent/tools.rs` |
 | Continuations | Stop hook and `turn_stopping` share one continuation per turn | `turn.rs:522-552` |
-| Hook lifecycle | No `TurnFailed` event; non-`PreToolUse`/`Stop` hook stdout is discarded | `meerai-common/src/hooks.rs:7-33`, `meerai-agents/src/hooks.rs:375-409` |
+| Hook lifecycle | `TurnFailed` fires on failed turns (observational); non-`PreToolUse`/`Stop` hook stdout is discarded | `meerai-common/src/hooks.rs`, `meerai-agents/src/hooks.rs` |
 
 ## 3. Decisions
 
@@ -154,8 +156,8 @@ Revisit if: users need hook-driven recovery for a failure class the built-in rec
 | :--- | :--- | :--- |
 | Provider request | Full history, no cache intent | Full history, cache breakpoint on the static prefix, cache intent on the request |
 | `UsageUpdated` | Prompt, completion, total | Adds `cached_tokens`, `cache_creation_tokens` |
-| Headless summary | `tokens: prompt=… completion=… total=…` | Adds `cached=…` when present |
-| TUI statusline | `session ↑… ↓… Σ…` | Adds `cache …` when cached tokens exist |
+| Headless summary | `tokens: prompt=… completion=… total=…` | Adds `cached=…` when present (landed) |
+| TUI statusline | `session ↑… ↓… Σ…` | Adds `↻…` when cached tokens exist (landed) |
 | Projection | All results inline | Old results become stubs plus blob pointer |
 | Long turn | No compaction after the 4-turn guard | Balanced-boundary compaction inside the turn |
 | Failed turn | Reusable log, unpaired calls possible | Repaired log before the next prompt |
@@ -346,7 +348,46 @@ Failure: an ambiguous normalized anchor edits the file.
    frozen messages remain.
 6. **Phase 6 — Recovery depth.** R18, R19, R20. A schema-based argument-repair hint, a configurable
    recovery model, and edit-anchor repair. Gate: repair-hint, recovery-model, and edit-repair tests.
-   A per-turn recovery budget and model escalation chains remain.
+   A per-turn recovery budget and model escalation chains remain. Plus post-Phase-6 fixes: `ContextOverflow`
+   only retries when `run_compaction` returns `Ok(true)`, `sac-run_script` `path` arguments pass through
+   `CodeTools::resolve_for_read`, and inline `sac-run_script` approvals carry a `<language>: <first-line>`
+   resource preview.
+7. **Phase 7 — Custom-script sandboxing (`sac-run_script` & `ExecutionWorld`).** Proposed hardening for
+   model-authored scripts in `meerai-tools/src/world.rs` and `meerai-tools/src/search_as_code/mod.rs`:
+   - *Scoped host reads instead of read-all:* replace blanket `(allow file-read*)` in `SeatbeltWorld`
+     and `--ro-bind / /` in `BubblewrapWorld` for `SandboxPolicy::ReadOnly` (and optionally
+     `WorkspaceWrite`) with explicit read roots: system runtime paths (`/usr`, `/lib`, `/lib64`, `/bin`,
+     `/System`, `/Library`, dyld cache, Python/Node prefix), `workspace_root`, and `readable_roots`,
+     while explicitly denying sensitive user directories (`$HOME/.ssh`, `$HOME/.aws`, `$HOME/.gnupg`,
+     `$XDG_DATA_HOME/meerai/auth.json`, `$XDG_CONFIG_HOME/meerai`).
+   - *Sensitive-file parity inside the sandbox:* deny reads of workspace sensitive files (`.env*`, private
+     keys, `credentials*`, `secrets*` matching `CodeTools::is_sensitive_path`) at the OS sandbox layer
+     for `sac-run_script`, since `ExecutionWorld` currently bypasses `CodeTools` path filters once a
+     script starts running.
+   - *Process & resource limits:* attach `RLIMIT_AS` / `RLIMIT_CPU` / `RLIMIT_NOFILE` / `RLIMIT_NPROC`
+     (or `prlimit` / `setrlimit` in `pre_exec`) and cap captured stdout/stderr before buffering in
+     `run_command` so a runaway script cannot OOM the harness or fork-bomb.
+   - *Interpreter-level isolation:* pass `--permission --allow-fs-read=<workspace>` (on Node >= 20/22)
+     for `javascript`, and keep `python3 -I` with `PYTHONDONTWRITEBYTECODE=1` and a clean `PATH` for
+     `python`.
+   - *Non-silent fallback & fail-closed option:* surface `ExecutionWorld::warning()` in `AgentEvent` /
+     TUI statusline and add a `sandbox.require_for_scripts` (or `sac` fail-closed) option so
+     `sac-run_script` refuses to run on `HostWorld` when an OS sandbox is unavailable.
+8. **Phase 8 — Next-wave harness efficiency & self-healing.** Proposed improvements across the loop:
+   - *Incremental projection & stable prefix:* cache `derive_messages` incrementally from a tail index
+     and keep `RuntimeContext` / scoped `AGENTS.md` insertions out of the cached prefix (append after
+     the stable conversation turns) so prompt-cache hit rates do not drop on `code-read_file`
+     directory switches or argument-repair hints.
+   - *Partial-stream & `ContinueOnce` wiring:* either emit `BreakerAction::ContinueOnce` when a
+     recovery continuation is injected (closing the last unused enum variant in `meerai-session`) or
+     remove the dead variant; preserve already-received stream chunks or retry safely on mid-stream
+     truncation before a tool call executes.
+   - *Per-turn recovery budget & model escalation:* replace the single boolean recovery flag with a
+     configurable `RecoveryBudget` (max retries, max recovery turns, optional ordered fallback list)
+     and wire `PostToolUseFailure` / `TurnFailed` structured context into the recovery prompt.
+   - *Subagent & ACP token/sandbox alignment:* expose `sac-run_script` sandbox posture and per-turn
+     tool-output spill thresholds consistently to child sessions, and surface cache-hit / cost-saved
+     metrics per turn in headless `--json` and TUI session metrics.
 
 ## 10. Open questions
 
@@ -354,6 +395,8 @@ Failure: an ambiguous normalized anchor edits the file.
 | :--- | :--- | :--- | :--- |
 | 1 | How many tokens do the 15 default tool schemas cost? | Serialize the schemas and count; compare with provider-reported prompt tokens | Agents |
 | 2 | Do default routes cache implicitly today? | One live turn with cached-token logging enabled | CLI |
-| 3 | Is dropping assistant text on tool-call messages intentional? | Author intent or a regression test | Session |
-| 4 | Is the dead `verbatim_window_turns` projection field reserved for a sliding window? | Compare proposal Q4 with the original design note | Session |
-| 5 | Is the live cancel gap a defect or documented behavior? | Confirm against the profile invariant and a failing test | Agents |
+| 3 | Is dropping assistant text on tool-call messages intentional? | Author intent or a regression test (`meerai-session/src/projection.rs:104-111`) | Session |
+| 4 | Is the dead `verbatim_window_turns` projection field reserved for a sliding window? | **Settled:** active in `meerai-session/src/projection.rs:210` (`clear_old_tool_results` keeps the newest N turns verbatim) | Session |
+| 5 | Is the live cancel gap a defect or documented behavior? | **Settled:** fixed by Q5 / AC-3 (`heal_dangling_tool_calls` at `TurnEnded` in `meerai-agents/src/multi_turn_agent/turn.rs`) | Agents |
+| 6 | Should `sac-run_script` fail closed when `ExecutionWorld::is_sandboxed()` is false? | Decide default vs opt-in `sandbox.require_for_scripts` in `settings.yml` | Tools / Policy |
+| 7 | Which system read prefixes are minimal yet sufficient for `python3`/`node` under Seatbelt & `bwrap`? | Empirical smoke matrix on macOS (`pyenv`/Homebrew/system Python, `nvm`/Homebrew Node) and Linux | Tools |

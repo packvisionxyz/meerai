@@ -60,7 +60,27 @@ pub(super) fn permission_check(
 
     let (action, resource) = match spec {
         Some(spec) => {
-            let resource = spec.resource_arg.map(field).unwrap_or_default();
+            let mut resource = spec.resource_arg.map(field).unwrap_or_default();
+            if resource.is_empty() && tool_name == "sac-run_script" {
+                let lang = field("language");
+                let script = field("script");
+                resource = if !script.is_empty() {
+                    let preview: String = script
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(80)
+                        .collect();
+                    if lang.is_empty() {
+                        preview
+                    } else {
+                        format!("{lang}: {preview}")
+                    }
+                } else {
+                    lang
+                };
+            }
             (spec.action, resource)
         }
         None => {
@@ -1921,6 +1941,20 @@ mod auto_approve_tests {
             None,
             ApprovalMode::Ask
         ));
+    }
+
+    #[test]
+    fn sac_inline_permission_check_populates_resource_preview() {
+        let check = super::permission_check(
+            "sac-run_script",
+            r#"{"language":"python","script":"print(1)\nprint(2)"}"#,
+            meerai_core::EffectClass::Execute,
+            Some(meerai_core::ToolPermissionSpec {
+                action: meerai_core::PermissionAction::Shell,
+                resource_arg: Some("path"),
+            }),
+        );
+        assert_eq!(check.resource, "python: print(1)");
     }
 }
 
