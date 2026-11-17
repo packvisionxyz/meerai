@@ -371,6 +371,12 @@ pub(super) enum StepFailure {
     Error(TurnError),
 }
 
+struct ProjectionCache {
+    event_count: usize,
+    policy: ProjectionPolicy,
+    messages: Vec<ChatMessage>,
+}
+
 pub struct MultiTurnAgent {
     pub(super) streamer: Arc<dyn ChatStreamer>,
     pub(super) model: String,
@@ -386,6 +392,7 @@ pub struct MultiTurnAgent {
     pub(super) logged_system_prompt: Option<String>,
     pub(super) tool_schema_tokens: u64,
     pub(super) file_changes_this_step: usize,
+    projection_cache: Option<ProjectionCache>,
     pub(super) pending_steers: VecDeque<String>,
     pub(super) pending_compact: bool,
     pub(in crate::multi_turn_agent) failure_tracker: FailureTracker,
@@ -469,6 +476,7 @@ impl MultiTurnAgent {
             logged_system_prompt: None,
             tool_schema_tokens: 0,
             file_changes_this_step: 0,
+            projection_cache: None,
             pending_steers: VecDeque::new(),
             pending_compact: false,
             failure_tracker: FailureTracker::default(),
@@ -589,6 +597,61 @@ impl MultiTurnAgent {
             }
         }
         None
+    }
+
+    async fn rollback_after_verify_failure(
+        &self,
+        turn_id: &TurnId,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) -> Option<String> {
+        let harness = self.harness.as_ref()?;
+        if !harness.config.rollback_on_verify_failure {
+            return None;
+        }
+        if harness.policy.mode() != ApprovalMode::Auto {
+            return Some(
+                "Automatic rollback is off outside auto mode; use /rewind to restore the turn."
+                    .to_string(),
+            );
+        }
+        let store = harness.session.snapshot_store()?;
+        let report = match store
+            .restore(turn_id, harness.policy.workspace_root())
+            .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                self.log_event(
+                    event_tx,
+                    SessionEvent::Error {
+                        code: ErrorCode::Internal,
+                        message: format!("rollback failed: {error:#}"),
+                        retryable: false,
+                    },
+                )
+                .await;
+                return None;
+            }
+        };
+        if report.restored.is_empty() && report.deleted.is_empty() {
+            return None;
+        }
+        let mut changed = report.restored;
+        changed.extend(report.deleted);
+        let count = changed.len();
+        self.log_event(
+            event_tx,
+            SessionEvent::RewindApplied {
+                turn_id: turn_id.clone(),
+                scope: RewindScope::Code,
+                restored: changed,
+                replaced: None,
+            },
+        )
+        .await;
+        Some(format!(
+            "Verify failed. Rolled back {count} file(s) to the turn snapshot. Retry from the clean state."
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -720,6 +783,7 @@ impl MultiTurnAgent {
             self.cumulative_usage = usage;
         }
         self.harness = Some(harness);
+        self.projection_cache = None;
     }
 
     pub fn harness(&self) -> Option<&AgentHarness> {
@@ -784,6 +848,7 @@ impl MultiTurnAgent {
         self.system_prompt = system_prompt;
         self.system_prompt_generation = self.system_prompt_generation.wrapping_add(1);
         self.logged_system_prompt = None;
+        self.projection_cache = None;
     }
 
     pub async fn rewind(&mut self, turn_id: &TurnId, scope: RewindScope) -> Result<Vec<String>> {
@@ -841,6 +906,7 @@ impl MultiTurnAgent {
         self.outside_grants.clear();
         self.question_cancels = 0;
         self.session_started = false;
+        self.projection_cache = None;
     }
 
     pub async fn prompt(&mut self, prompt: &str) -> Result<String> {
@@ -891,12 +957,34 @@ impl MultiTurnAgent {
         }
     }
 
-    pub(super) fn request_messages(&self) -> Vec<ChatMessage> {
-        let Some(harness) = &self.harness else {
+    pub(super) fn request_messages(&mut self) -> Vec<ChatMessage> {
+        if self.harness.is_none() {
             return self.chat_history.clone();
-        };
-
-        harness.session.derive_messages(&self.projection_policy())
+        }
+        let policy = self.projection_policy();
+        let event_count = self
+            .harness
+            .as_ref()
+            .map(|harness| harness.session.event_count())
+            .unwrap_or(0);
+        if let Some(cache) = &self.projection_cache
+            && cache.event_count == event_count
+            && cache.policy == policy
+        {
+            return cache.messages.clone();
+        }
+        let messages = self
+            .harness
+            .as_ref()
+            .expect("checked above")
+            .session
+            .derive_messages(&policy);
+        self.projection_cache = Some(ProjectionCache {
+            event_count,
+            policy,
+            messages: messages.clone(),
+        });
+        messages
     }
 
     async fn sync_system_message(&mut self, event_tx: &mpsc::UnboundedSender<AgentEvent>) {

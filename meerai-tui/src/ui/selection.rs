@@ -1,6 +1,8 @@
 use super::*;
 
 pub(super) fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
+    let drag = app.tab_drag.filter(|drag| drag.moved);
+    let drop_target = drag.map(|drag| (drag.from, app.tab_drop_index(drag.current_x)));
     app.tab_hit_zones.clear();
     if area.width == 0 || area.height == 0 {
         return;
@@ -37,7 +39,19 @@ pub(super) fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Re
             } else {
                 theme::p().surface
             };
-            let style = if is_active {
+            let is_drag_source = drag.is_some_and(|drag| drag.from == idx);
+            let is_drop_target = drop_target.is_some_and(|(from, to)| from != idx && to == idx);
+            let style = if is_drag_source {
+                Style::default()
+                    .fg(theme::p().faint)
+                    .bg(bg)
+                    .add_modifier(Modifier::ITALIC)
+            } else if is_drop_target {
+                Style::default()
+                    .fg(theme::p().interactive)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else if is_active {
                 Style::default()
                     .fg(theme::p().accent)
                     .bg(bg)

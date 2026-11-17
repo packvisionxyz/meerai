@@ -52,7 +52,7 @@
 | `meerai-client/` | Client-facing provider surface: `ProviderCatalog` + `providers.yml`, `ModelInfo`, `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract, `MemorySecretStore`, auth listing |
 | `meerai-providers/` | `genai` client factory + native secret stores (`auth.json`, OS keychain); re-exports the client surface |
 | `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig` (+ `TokenPricing`), `AgentEvent`, `intercept` (`Interceptor`/`StepPlan`/`ToolPlan`/`ToolContext`/`ToolOutcome`, async `before_tool`), hook engine (`hooks`: `HookEngine`/`HookContext`/`HookReport`, `HookFired` logging), `question-ask` (`QuestionAsked`/`AnswerQuestion`, not an approval), `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins + read-only custom child runs, `child_session_id` on `SubagentRun`), delegated `acp-run` (`acp_subagent`: `AcpRunToolset`/`AcpSpawner`), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
-| `meerai-tui/` | Modal TUI library (`ratatui` + `crossterm`) split into `ui/` panels and `app/` modules, transcript replay, tabs, collapsible per-turn activity digests (`+`/`-`, hover affordances), inline syntax-highlighted edit diffs (`meerai-syntax`), expandable subagent child conversations, menu shortcuts, `/agent`/`/skill`, the `@` Mentions popup, and `workspace::WorkspaceQuery` (local walker + grep; no `meerai-tools` or `meerai-providers` dependency) |
+| `meerai-tui/` | Modal TUI library (`ratatui` + `crossterm`) split into `ui/` panels and `app/` modules, transcript replay, tabs (drag + `alt+shift+arrows` reordering), collapsible per-turn activity digests (`+`/`-`, hover affordances), a cached transcript renderer, inline syntax-highlighted edit diffs and a syntax-highlighted diff modal with an `f` file list (`meerai-syntax`), expandable subagent child conversations, menu shortcuts, `/agent`/`/skill`, the `@` Mentions popup, and `workspace::WorkspaceQuery` (local walker + grep; no `meerai-tools` or `meerai-providers` dependency) |
 | `meerai-syntax/` | Tree-sitter highlighting for Rust, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML, CSS, and JSON plus a lexical fallback; `highlight_block` returns per-line `Token`s; depends only on grammar crates |
 | `meerai-cli/` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions` (`list`, `rm`, `prune`, `fork`) subcommands, and TUI launcher |
 | `.agents/agents/`, `.agents/skills/` | Default agent (`*.md`) and skill (`*/SKILL.md`) definitions, read at runtime |
@@ -193,7 +193,7 @@ Notes:
     sandbox, and a `:` in an agent `model` is ignored (no provider switch). Startup `--agent` takes
     one id (repeating is an error); `--skill` is repeatable; unknown ids fail with the available ids. The TUI
     exposes `/agent`/`/skill`, `/agents`/`/skills` pickers, and a `@` Mentions popup (agents,
-    skills, files; ids colored purple for agents and orange for skills; Tab accepts, Enter accepts
+    skills, files; ids colored blue for agents and gold for skills; Tab accepts, Enter accepts
     without submitting, Esc dismisses).
 22. **ACP client (M13, agy):** `--acp` drives `agy acp`; `/acp` opens a new tab; `acp doctor`
     prints the handshake. `AcpWorker` maps `AcpEvent` to `AgentEvent` and `SessionEvent`, sets
@@ -440,7 +440,7 @@ Detail in [`infra.md`](infra.md). Summary:
   no `.meerai` definition directories and no copies. Startup `--agent` takes one id (repeating is an
   error) and repeatable `--skill` append instructions to the system prompt; TUI `/agent`/`/skill`
   send `AgentCommand::ApplyAgent`/`ApplySkill` as System instructions, and the `@` Mentions popup
-  (agents, then skills, then files; ids in purple for agents and orange for skills; Tab accepts, Enter
+  (agents, then skills, then files; ids in blue for agents and gold for skills; Tab accepts, Enter
   accepts without submitting, Esc dismisses) applies the selected definitions before the prompt. A
   known accepted mention renders as an `<id>` chip in the composer while the raw
   `@agent/<id>`/`@skill/<id>` stays in the buffer; unknown and partial tokens render as typed.

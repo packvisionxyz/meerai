@@ -16,6 +16,7 @@ pub mod app;
 pub mod completion;
 pub mod diff;
 pub mod event_loop;
+pub mod logo;
 pub mod markdown;
 pub mod search;
 pub mod syntax;
@@ -101,11 +102,16 @@ pub struct TuiLaunchConfig {
     pub workspace_query: Option<Arc<dyn WorkspaceQuery>>,
 }
 
+pub struct TuiExit {
+    pub session_id: SessionId,
+    pub title: Option<String>,
+}
+
 pub async fn run_tui(
     cmd_tx: mpsc::UnboundedSender<AgentCommand>,
     event_rx: mpsc::UnboundedReceiver<AgentEvent>,
     config: TuiLaunchConfig,
-) -> Result<()> {
+) -> Result<TuiExit> {
     let mut terminal = TerminalGuard::enter()?;
     let mut app = AppState::new(
         config.initial_provider,
@@ -140,6 +146,10 @@ pub async fn run_tui(
             .push(PendingSessionAction::OpenSessionId(id));
     }
     let result = event_loop::run_event_loop(&mut terminal, &mut app, event_rx).await;
+    let exit = TuiExit {
+        session_id: app.tab().session_id.clone(),
+        title: app.tab().title.clone(),
+    };
     app.quit();
-    result
+    result.map(|()| exit)
 }

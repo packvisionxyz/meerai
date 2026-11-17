@@ -675,19 +675,29 @@ impl MultiTurnAgent {
                             event_tx,
                         )
                         .await;
-                    let reason = match report.decision {
-                        crate::hooks::HookDecision::Deny | crate::hooks::HookDecision::Block => {
-                            Some(report.reason().unwrap_or("blocked by hook").to_string())
-                        }
-                        _ => self.run_turn_stopping(turn_id, step_index),
+                    let blocked = matches!(
+                        report.decision,
+                        crate::hooks::HookDecision::Deny | crate::hooks::HookDecision::Block
+                    );
+                    let mut reason = if blocked {
+                        Some(report.reason().unwrap_or("blocked by hook").to_string())
+                    } else {
+                        self.run_turn_stopping(turn_id, step_index)
                     };
-                    if let Some(reason) = reason {
+                    if let Some(reason) = reason.as_mut() {
                         stop_hook_used = true;
+                        if blocked
+                            && let Some(notice) =
+                                self.rollback_after_verify_failure(turn_id, event_tx).await
+                        {
+                            reason.push_str("\n\n");
+                            reason.push_str(&notice);
+                        }
                         self.log_event(
                             event_tx,
                             SessionEvent::UserMessage {
                                 source: InputSource::RuntimeContext,
-                                content: vec![ContentBlock::Text(reason)],
+                                content: vec![ContentBlock::Text(reason.clone())],
                             },
                         )
                         .await;

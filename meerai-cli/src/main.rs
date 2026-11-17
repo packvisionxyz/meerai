@@ -705,34 +705,41 @@ async fn main() -> Result<()> {
     let update_available = meerai_tui::update::check_latest().await;
 
     #[cfg(feature = "tui")]
-    return meerai_tui::run_tui(
-        opened.cmd_tx,
-        opened.event_rx,
-        TuiLaunchConfig {
-            initial_session_id: opened.session_id,
-            initial_session_title: opened.title,
-            initial_backend: opened.backend,
-            initial_provider: opened.provider,
-            initial_model: opened.model,
-            workspace_root,
-            runtime,
-            secrets,
-            settings: user_settings,
-            config_dir,
-            approval_mode: opened.approval_mode,
-            initial_transcript: opened.transcript,
-            initial_events: opened.events,
-            agents: definitions.agents,
-            skills: definitions.skills,
-            session_opener: Some(host),
-            update_available,
-            restore_sessions: restore_ids.iter().skip(1).cloned().collect(),
-            launch_system: cli.system,
-            launch_definitions,
-            workspace_query: None,
-        },
-    )
-    .await;
+    {
+        let exit = meerai_tui::run_tui(
+            opened.cmd_tx,
+            opened.event_rx,
+            TuiLaunchConfig {
+                initial_session_id: opened.session_id,
+                initial_session_title: opened.title,
+                initial_backend: opened.backend,
+                initial_provider: opened.provider,
+                initial_model: opened.model,
+                workspace_root,
+                runtime,
+                secrets,
+                settings: user_settings,
+                config_dir,
+                approval_mode: opened.approval_mode,
+                initial_transcript: opened.transcript,
+                initial_events: opened.events,
+                agents: definitions.agents,
+                skills: definitions.skills,
+                session_opener: Some(host),
+                update_available,
+                restore_sessions: restore_ids.iter().skip(1).cloned().collect(),
+                launch_system: cli.system,
+                launch_definitions,
+                workspace_query: None,
+            },
+        )
+        .await?;
+        print!(
+            "{}",
+            exit_summary(exit.session_id.as_str(), exit.title.as_deref())
+        );
+        return Ok(());
+    }
 
     #[cfg(not(feature = "tui"))]
     {
@@ -740,6 +747,17 @@ async fn main() -> Result<()> {
         let _ = initial_system;
         Ok(())
     }
+}
+
+#[cfg(feature = "tui")]
+fn exit_summary(session_id: &str, title: Option<&str>) -> String {
+    let session = title.filter(|t| !t.trim().is_empty()).unwrap_or(session_id);
+    let logo = meerai_tui::logo::ansi()
+        .lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("\n{logo}\n\n  Session   {session}\n  Continue  meerai --resume {session_id}\n")
 }
 
 struct CliAcpSpawner;

@@ -32,16 +32,16 @@ impl Default for Palette {
             text: Color::Rgb(238, 238, 238),
             muted: Color::Rgb(128, 128, 128),
             faint: Color::Rgb(76, 76, 76),
-            accent: Color::Rgb(157, 124, 216),
-            interactive: Color::Rgb(250, 178, 131),
+            accent: Color::Rgb(97, 175, 239),
+            interactive: Color::Rgb(229, 192, 123),
             border: Color::Rgb(72, 72, 72),
             error: Color::Rgb(224, 108, 117),
-            warning: Color::Rgb(245, 167, 66),
+            warning: Color::Rgb(255, 158, 100),
             success: Color::Rgb(127, 216, 143),
             info: Color::Rgb(86, 182, 194),
             diff_added: Color::Rgb(79, 214, 190),
             diff_removed: Color::Rgb(197, 59, 83),
-            diff_context: Color::Rgb(130, 139, 184),
+            diff_context: Color::Rgb(125, 133, 144),
         }
     }
 }
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn parses_hex_and_named_colors() {
-        assert_eq!(parse_color("#fab283"), Some(Color::Rgb(250, 178, 131)));
+        assert_eq!(parse_color("#e5c07b"), Some(Color::Rgb(229, 192, 123)));
         assert_eq!(parse_color("#f83"), Some(Color::Rgb(255, 136, 51)));
         assert_eq!(parse_color(" dark-gray "), Some(Color::DarkGray));
         assert_eq!(parse_color("#zzzzzz"), None);

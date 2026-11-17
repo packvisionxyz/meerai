@@ -16,6 +16,11 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
         false,
     ),
     ("/new", "Open a new session tab", false),
+    (
+        "/fork",
+        "Fork the session at the latest closed turn into a new tab",
+        false,
+    ),
     ("/acp", "Start an ACP session (agy)", false),
     ("/close", "Close the current session tab", false),
     ("/auth", "Show active credential sources", false),

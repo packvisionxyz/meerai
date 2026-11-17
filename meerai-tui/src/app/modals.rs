@@ -22,6 +22,7 @@ impl AppState {
             file_index,
             diff,
             scroll: 0,
+            list: DiffListState::Closed,
         });
     }
 
@@ -419,106 +420,115 @@ impl AppState {
                 mut file_index,
                 mut diff,
                 mut scroll,
+                mut list,
             } => {
                 let max_scroll = diff.rows.len().saturating_sub(1);
+                let file_count = self.file_changes.len();
+                let list_selected = match list {
+                    DiffListState::Open { selected } => {
+                        Some(selected.min(file_count.saturating_sub(1)))
+                    }
+                    DiffListState::Closed => None,
+                };
                 match key.code {
+                    KeyCode::Char('f') if !has_ctrl && !has_alt => {
+                        list = if list_selected.is_some() {
+                            DiffListState::Closed
+                        } else {
+                            DiffListState::Open {
+                                selected: file_index,
+                            }
+                        };
+                    }
+                    KeyCode::Esc if list_selected.is_some() => {
+                        list = DiffListState::Closed;
+                    }
                     KeyCode::Esc | KeyCode::Char('q') => {
                         self.modal = None;
+                        return true;
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        scroll = (scroll + 1).min(max_scroll);
-                        self.modal = Some(ActiveModal::DiffView {
-                            file_index,
-                            diff,
-                            scroll,
-                        });
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        scroll = scroll.saturating_sub(1);
-                        self.modal = Some(ActiveModal::DiffView {
-                            file_index,
-                            diff,
-                            scroll,
-                        });
+                    KeyCode::Down | KeyCode::Char('j') => match list_selected {
+                        Some(selected) => {
+                            list = DiffListState::Open {
+                                selected: (selected + 1).min(file_count.saturating_sub(1)),
+                            };
+                        }
+                        None => {
+                            scroll = (scroll + 1).min(max_scroll);
+                        }
+                    },
+                    KeyCode::Up | KeyCode::Char('k') => match list_selected {
+                        Some(selected) => {
+                            list = DiffListState::Open {
+                                selected: selected.saturating_sub(1),
+                            };
+                        }
+                        None => {
+                            scroll = scroll.saturating_sub(1);
+                        }
+                    },
+                    KeyCode::Enter => {
+                        if let Some(selected) = list_selected
+                            && let Some(entry) = self.file_changes.get(selected)
+                        {
+                            file_index = selected;
+                            diff =
+                                build_file_diff(&self.workspace_root, &entry.path, &entry.status);
+                            scroll = 0;
+                        }
                     }
                     KeyCode::PageDown | KeyCode::Char('d')
                         if key.code == KeyCode::PageDown || has_ctrl =>
                     {
                         let step = (self.tab().viewport_height / 2).max(5);
                         scroll = (scroll + step).min(max_scroll);
-                        self.modal = Some(ActiveModal::DiffView {
-                            file_index,
-                            diff,
-                            scroll,
-                        });
                     }
                     KeyCode::PageUp | KeyCode::Char('u')
                         if key.code == KeyCode::PageUp || has_ctrl =>
                     {
                         let step = (self.tab().viewport_height / 2).max(5);
                         scroll = scroll.saturating_sub(step);
-                        self.modal = Some(ActiveModal::DiffView {
-                            file_index,
-                            diff,
-                            scroll,
-                        });
                     }
                     KeyCode::Home | KeyCode::Char('g') => {
                         scroll = 0;
-                        self.modal = Some(ActiveModal::DiffView {
-                            file_index,
-                            diff,
-                            scroll,
-                        });
                     }
                     KeyCode::End | KeyCode::Char('G') => {
                         scroll = max_scroll;
-                        self.modal = Some(ActiveModal::DiffView {
-                            file_index,
-                            diff,
-                            scroll,
-                        });
                     }
-                    KeyCode::Tab | KeyCode::Char(']') => {
-                        if !self.file_changes.is_empty() {
-                            file_index = (file_index + 1) % self.file_changes.len();
-                            let entry = &self.file_changes[file_index];
-                            diff =
-                                build_file_diff(&self.workspace_root, &entry.path, &entry.status);
-                            scroll = 0;
-                        }
-                        self.modal = Some(ActiveModal::DiffView {
-                            file_index,
-                            diff,
-                            scroll,
-                        });
-                    }
-                    KeyCode::BackTab | KeyCode::Char('[') => {
-                        if !self.file_changes.is_empty() {
-                            file_index = if file_index == 0 {
-                                self.file_changes.len() - 1
-                            } else {
-                                file_index - 1
+                    KeyCode::Tab | KeyCode::Char(']') if file_count > 0 => {
+                        file_index = (file_index + 1) % file_count;
+                        let entry = &self.file_changes[file_index];
+                        diff = build_file_diff(&self.workspace_root, &entry.path, &entry.status);
+                        scroll = 0;
+                        if list_selected.is_some() {
+                            list = DiffListState::Open {
+                                selected: file_index,
                             };
-                            let entry = &self.file_changes[file_index];
-                            diff =
-                                build_file_diff(&self.workspace_root, &entry.path, &entry.status);
-                            scroll = 0;
                         }
-                        self.modal = Some(ActiveModal::DiffView {
-                            file_index,
-                            diff,
-                            scroll,
-                        });
                     }
-                    _ => {
-                        self.modal = Some(ActiveModal::DiffView {
-                            file_index,
-                            diff,
-                            scroll,
-                        });
+                    KeyCode::BackTab | KeyCode::Char('[') if file_count > 0 => {
+                        file_index = if file_index == 0 {
+                            file_count - 1
+                        } else {
+                            file_index - 1
+                        };
+                        let entry = &self.file_changes[file_index];
+                        diff = build_file_diff(&self.workspace_root, &entry.path, &entry.status);
+                        scroll = 0;
+                        if list_selected.is_some() {
+                            list = DiffListState::Open {
+                                selected: file_index,
+                            };
+                        }
                     }
+                    _ => {}
                 }
+                self.modal = Some(ActiveModal::DiffView {
+                    file_index,
+                    diff,
+                    scroll,
+                    list,
+                });
             }
             ActiveModal::Search {
                 mut query,
@@ -1229,6 +1239,34 @@ impl AppState {
             (ActiveModal::DiffView { .. }, ModalHitKind::Close) => {
                 self.modal = None;
             }
+            (
+                ActiveModal::DiffView {
+                    file_index,
+                    diff,
+                    scroll,
+                    list,
+                },
+                ModalHitKind::ListItem(idx),
+            ) => {
+                let opened = self
+                    .file_changes
+                    .get(idx)
+                    .map(|entry| build_file_diff(&self.workspace_root, &entry.path, &entry.status));
+                self.modal = Some(match opened {
+                    Some(diff) => ActiveModal::DiffView {
+                        file_index: idx,
+                        diff,
+                        scroll: 0,
+                        list: DiffListState::Open { selected: idx },
+                    },
+                    None => ActiveModal::DiffView {
+                        file_index,
+                        diff,
+                        scroll,
+                        list,
+                    },
+                });
+            }
             (ActiveModal::Search { .. }, ModalHitKind::Close) => {
                 self.modal = None;
             }
@@ -1522,21 +1560,27 @@ impl AppState {
             0 => RewindScope::Both,
             _ => RewindScope::Code,
         };
-        {
-            let index = self
+        if scope == RewindScope::Both
+            && let Some(index) = self
                 .tab()
                 .user_turns
                 .iter()
-                .find_map(|(index, turn)| (turn == &turn_id).then_some(*index));
-            if let Some(index) = index {
-                let tab = self.tab_mut();
-                tab.transcript.truncate(index);
-                tab.user_turns.retain(|idx, _| *idx < index);
-                tab.turn_activity.retain(|idx, _| *idx < index);
-                tab.is_running = false;
-                tab.turn_id = None;
-                tab.queued.clear();
-                tab.auto_follow = true;
+                .find_map(|(index, turn)| (turn == &turn_id).then_some(*index))
+        {
+            let message = match self.tab().transcript.get(index) {
+                Some(TranscriptEntry::User { text, .. }) => Some(text.clone()),
+                _ => None,
+            };
+            let tab = self.tab_mut();
+            tab.transcript.truncate(index);
+            tab.user_turns.retain(|idx, _| *idx < index);
+            tab.turn_activity.retain(|idx, _| *idx < index);
+            tab.is_running = false;
+            tab.turn_id = None;
+            tab.queued.clear();
+            tab.auto_follow = true;
+            if let Some(message) = message {
+                self.restore_composer_message(message);
             }
         }
         let _ = self
@@ -1544,7 +1588,12 @@ impl AppState {
             .cmd_tx
             .send(AgentCommand::Rewind { turn_id, scope });
         self.modal = None;
-        self.status_notice = Some("Rewinding...".to_string());
+        self.status_notice = Some(match scope {
+            RewindScope::Both => {
+                "Rewinding code and conversation; message restored to the composer".to_string()
+            }
+            _ => "Rewinding code; conversation kept".to_string(),
+        });
     }
 
     pub(super) fn open_command_palette(&mut self) {
@@ -1569,6 +1618,18 @@ impl AppState {
             }
             PaletteAction::PreviousTab => {
                 self.prev_tab();
+            }
+            PaletteAction::MoveTabLeft => {
+                let active = self.active_tab;
+                if active > 0 {
+                    self.move_tab(active, active - 1);
+                }
+            }
+            PaletteAction::MoveTabRight => {
+                let active = self.active_tab;
+                if active + 1 < self.tabs.len() {
+                    self.move_tab(active, active + 1);
+                }
             }
             PaletteAction::CycleApproval => {
                 self.cycle_approval_mode();

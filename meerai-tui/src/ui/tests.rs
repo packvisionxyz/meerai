@@ -1250,6 +1250,7 @@ fn renders_provider_apikey_masked_and_model_modals() {
             }],
         },
         scroll: 0,
+        list: crate::app::DiffListState::Closed,
     });
     let diff_screen = render_to_string(&mut app);
     assert!(diff_screen.contains("Original (a/src/lib.rs)"));
@@ -1277,6 +1278,99 @@ fn renders_provider_apikey_masked_and_model_modals() {
     let search_screen = render_to_string(&mut app);
     assert!(search_screen.contains("Search [Files] (1 matches) (/search)"));
     assert!(search_screen.contains("Preview: src/lib.rs:10"));
+}
+
+fn rust_diff_modal(list: crate::app::DiffListState) -> ActiveModal {
+    ActiveModal::DiffView {
+        file_index: 0,
+        diff: crate::diff::FileDiffView {
+            path: "src/first.rs".to_string(),
+            status: "M".to_string(),
+            additions: 1,
+            deletions: 1,
+            rows: vec![crate::diff::DiffRow {
+                kind: DiffRowKind::Modified,
+                left: Some(DiffCell {
+                    line_no: Some(7),
+                    text: "let count = 1;".to_string(),
+                }),
+                right: Some(DiffCell {
+                    line_no: Some(7),
+                    text: "let count = 2;".to_string(),
+                }),
+            }],
+        },
+        scroll: 0,
+        list,
+    }
+}
+
+fn row_symbols(buf: &ratatui::buffer::Buffer, width: u16, y: u16) -> Vec<char> {
+    (0..width)
+        .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+        .collect()
+}
+
+#[test]
+fn diff_modal_highlights_syntax_and_lists_files() {
+    let mut app = test_app();
+    app.file_changes = vec![
+        crate::app::FileChangeEntry {
+            status: "M".to_string(),
+            path: "src/first.rs".to_string(),
+        },
+        crate::app::FileChangeEntry {
+            status: "A".to_string(),
+            path: "src/second.rs".to_string(),
+        },
+    ];
+    app.modal = Some(rust_diff_modal(crate::app::DiffListState::Closed));
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("draw diff");
+    let palette = crate::theme::p();
+    let buf = terminal.backend().buffer();
+    let keyword = (0..28u16).any(|y| {
+        (0..117u16).any(|x| {
+            let text: String = (0..3).map(|d| buf[(x + d, y)].symbol()).collect();
+            text == "let"
+                && buf[(x, y)].fg == palette.accent
+                && buf[(x, y)].modifier.contains(Modifier::BOLD)
+        })
+    });
+    assert!(
+        keyword,
+        "expected a keyword-colored `let` in the diff panes"
+    );
+
+    let screen = render_to_string(&mut app);
+    assert!(!screen.contains("Files (2)"));
+
+    app.modal = Some(rust_diff_modal(crate::app::DiffListState::Open {
+        selected: 1,
+    }));
+    let list_screen = render_to_string(&mut app);
+    assert!(list_screen.contains("Files (2)"));
+    assert!(list_screen.contains("src/second.rs"));
+    assert!(list_screen.contains("Working Tree (b/src/first.rs)"));
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("draw diff list");
+    let buf = terminal.backend().buffer();
+    let needle: Vec<char> = "src/second.rs".chars().collect();
+    let (x, y) = (0..28u16)
+        .find_map(|y| {
+            row_symbols(buf, 120, y)
+                .windows(needle.len())
+                .position(|window| window == needle.as_slice())
+                .map(|x| (x as u16, y))
+        })
+        .expect("file list row for the selected file");
+    assert_eq!(buf[(x, y)].bg, palette.surface_high);
+    assert_eq!(buf[(x, y)].fg, palette.accent);
 }
 #[test]
 fn renders_collapsible_single_line_error_and_expands_on_click() {
@@ -1636,6 +1730,14 @@ fn renders_logo_header_and_composer_outer_margins() {
     assert!(full.contains("██  ██  ██"));
     assert!(full.contains("Workspace:"));
 
+    let area = app.transcript_inner_area;
+    assert_eq!(buf[(area.x, area.y)].fg, palette.info);
+    assert_eq!(buf[(area.x + 9, area.y + 3)].fg, palette.interactive);
+    let middle = buf[(area.x + 5, area.y + 2)].fg;
+    assert!(matches!(middle, Color::Rgb(..)));
+    assert_ne!(middle, palette.info);
+    assert_ne!(middle, palette.interactive);
+
     let block = app.composer_block_area;
     assert_eq!(block.x, 2);
     assert_eq!(buf[(0, block.y)].bg, palette.background);
@@ -1646,4 +1748,296 @@ fn renders_logo_header_and_composer_outer_margins() {
         buf[(block.x, block.y + block.height)].bg,
         palette.background
     );
+}
+
+fn transcript_sample(app: &mut AppState) {
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "go".to_string(),
+    });
+    app.tab_mut()
+        .transcript
+        .push(TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
+            call_id: "call-cache".to_string(),
+            name: "code-shell".to_string(),
+            args: "{\"command\":\"cargo test\"}".to_string(),
+            status: ToolCallStatus::Succeeded,
+            output: Some("ok".to_string()),
+            expanded: false,
+        }));
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: "done".to_string(),
+        reasoning: "plan".to_string(),
+        streaming: false,
+        reasoning_expanded: false,
+    });
+    app.tab_mut().turn_activity.insert(0, true);
+}
+
+fn screen_row(app: &AppState, needle: &str) -> u16 {
+    (0..28)
+        .find(|row| {
+            app.screen_lines
+                .get(*row as usize)
+                .is_some_and(|line| line.join("").contains(needle))
+        })
+        .unwrap_or_else(|| panic!("row for {needle}"))
+}
+
+#[test]
+fn transcript_document_is_reused_between_unchanged_frames() {
+    let mut app = test_app();
+    transcript_sample(&mut app);
+
+    let first = render_to_string(&mut app);
+    let builds = app.transcript_builds();
+    assert!(builds >= 1);
+    assert!(first.contains("Thought (1 line)"));
+
+    let second = render_to_string(&mut app);
+    assert_eq!(
+        app.transcript_builds(),
+        builds,
+        "an unchanged frame must reuse the built document"
+    );
+    assert_eq!(first, second);
+}
+
+#[test]
+fn transcript_document_rebuilds_when_streaming_text_grows() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "go".to_string(),
+    });
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: "first".to_string(),
+        reasoning: String::new(),
+        streaming: true,
+        reasoning_expanded: false,
+    });
+
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("first"));
+    let builds = app.transcript_builds();
+
+    if let Some(TranscriptEntry::Assistant { text, .. }) = app.tab_mut().transcript.get_mut(1) {
+        text.push_str(" second");
+    }
+    let grown = render_to_string(&mut app);
+    assert!(app.transcript_builds() > builds);
+    assert!(grown.contains("first second"));
+}
+
+#[test]
+fn transcript_document_rebuilds_when_a_row_expands() {
+    let mut app = test_app();
+    transcript_sample(&mut app);
+
+    let collapsed = render_to_string(&mut app);
+    assert!(collapsed.contains("+ Ran cargo test [ok]"));
+    let builds = app.transcript_builds();
+
+    let row = screen_row(&app, "Ran cargo test");
+    let col = app.transcript_inner_area.x + 2;
+    assert!(app.toggle_entry_at(col, row));
+
+    let expanded = render_to_string(&mut app);
+    assert!(app.transcript_builds() > builds);
+    assert!(expanded.contains("- Ran cargo test [ok]"));
+    assert!(expanded.contains("│ ok"));
+}
+
+#[test]
+fn transcript_document_rebuilds_when_the_width_changes() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "y".repeat(200),
+    });
+
+    let wide = render_to_string_with_size(&mut app, 120, 28);
+    let wide_lines = app.tab().total_lines;
+    let builds = app.transcript_builds();
+
+    let narrow = render_to_string_with_size(&mut app, 70, 28);
+    assert!(app.transcript_builds() > builds);
+    assert!(app.tab().total_lines > wide_lines);
+    assert!(wide.contains("yyyy"));
+    assert!(narrow.contains("yyyy"));
+}
+
+#[test]
+fn transcript_document_rebuilds_when_nested_subagent_content_arrives() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "go".to_string(),
+    });
+    app.tab_mut()
+        .transcript
+        .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
+            id: "sub-cache".to_string(),
+            agent: "explore".to_string(),
+            status: ToolCallStatus::Running,
+            report: None,
+            child_session_id: Some("ses-child-cache".to_string()),
+            expanded: true,
+            nested: None,
+            nested_refreshed_at: None,
+            nested_loading: true,
+        }));
+    app.tab_mut().turn_activity.insert(0, true);
+
+    let loading = render_to_string(&mut app);
+    assert!(loading.contains("loading conversation…"));
+    let builds = app.transcript_builds();
+
+    if let Some(TranscriptEntry::Subagent(entry)) = app.tab_mut().transcript.get_mut(1) {
+        entry.nested_loading = false;
+        entry.nested = Some(vec![TranscriptEntry::User {
+            text: "child request".to_string(),
+        }]);
+    };
+    let loaded = render_to_string(&mut app);
+    assert!(app.transcript_builds() > builds);
+    assert!(loaded.contains("you: child request"));
+    assert!(!loaded.contains("loading conversation…"));
+}
+
+#[test]
+fn transcript_document_ignores_the_spinner_without_an_active_tool() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "go".to_string(),
+    });
+
+    let _ = render_to_string(&mut app);
+    let builds = app.transcript_builds();
+    app.spinner_tick += 1;
+    let _ = render_to_string(&mut app);
+    assert_eq!(
+        app.transcript_builds(),
+        builds,
+        "an idle transcript does not depend on the spinner frame"
+    );
+
+    app.tab_mut()
+        .transcript
+        .push(TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
+            call_id: "call-spinner".to_string(),
+            name: "code-grep".to_string(),
+            args: "{}".to_string(),
+            status: ToolCallStatus::Running,
+            output: None,
+            expanded: false,
+        }));
+    app.tab_mut().turn_activity.insert(0, true);
+    let _ = render_to_string(&mut app);
+    let builds = app.transcript_builds();
+
+    app.spinner_tick += 1;
+    let _ = render_to_string(&mut app);
+    assert!(
+        app.transcript_builds() > builds,
+        "a running tool paints the spinner frame from the document"
+    );
+}
+
+#[test]
+fn transcript_document_rebuilds_when_an_item_completes_with_same_size_text() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "go".to_string(),
+    });
+    app.tab_mut().turn_activity.insert(0, true);
+    let reasoning_id = ItemId::from_raw("item-cache-reasoning");
+    app.handle_agent_event(AgentEvent::TurnStarted {
+        turn_id: TurnId::from_raw("turn-cache-reasoning"),
+        model: "gemini::gemini-3.8-flash".to_string(),
+    });
+    app.handle_agent_event(AgentEvent::ItemStarted {
+        item: SessionItem::Reasoning {
+            id: reasoning_id.clone(),
+            summary: String::new(),
+        },
+    });
+    app.handle_agent_event(AgentEvent::ItemDelta {
+        item_id: reasoning_id.clone(),
+        delta: ItemDelta::ReasoningSummary("abcd".to_string()),
+    });
+    if let Some(TranscriptEntry::Assistant {
+        reasoning_expanded, ..
+    }) = app.tab_mut().transcript.get_mut(1)
+    {
+        *reasoning_expanded = true;
+    }
+
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("abcd"));
+    let builds = app.transcript_builds();
+
+    app.handle_agent_event(AgentEvent::ItemCompleted {
+        item: SessionItem::Reasoning {
+            id: reasoning_id,
+            summary: "wxyz".to_string(),
+        },
+    });
+    let replaced = render_to_string(&mut app);
+    assert!(
+        app.transcript_builds() > builds,
+        "the mutation version guards equal-size replacements"
+    );
+    assert!(replaced.contains("wxyz"));
+    assert!(!replaced.contains("abcd"));
+}
+
+#[test]
+fn hover_repaints_without_rebuilding_the_transcript_document() {
+    let mut app = test_app();
+    transcript_sample(&mut app);
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("initial draw");
+    let builds = app.transcript_builds();
+    let palette = crate::theme::Palette::default();
+    let area = app.transcript_inner_area;
+
+    let thought_row = screen_row(&app, "Thought (1 line)");
+    let digest_row = screen_row(&app, "- 1 command");
+    assert_eq!(
+        terminal.backend().buffer()[(area.x, thought_row)].fg,
+        palette.muted
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(area.x + 2, digest_row)].fg,
+        palette.faint
+    );
+
+    assert!(app.handle_mouse_event(mouse(
+        crossterm::event::MouseEventKind::Moved,
+        area.x + 2,
+        thought_row
+    )));
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("hover thought");
+    assert_eq!(app.transcript_builds(), builds, "hover must not rebuild");
+    assert_eq!(app.hovered_entry, Some(2));
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(area.x, thought_row)].fg, palette.text);
+    assert_eq!(buffer[(area.x, digest_row)].fg, palette.faint);
+
+    assert!(app.handle_mouse_event(mouse(
+        crossterm::event::MouseEventKind::Moved,
+        area.x + 4,
+        digest_row
+    )));
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("hover digest");
+    assert_eq!(app.transcript_builds(), builds, "hover must not rebuild");
+    assert_eq!(app.hovered_digest, Some(0));
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(area.x, digest_row)].fg, palette.faint);
+    assert_eq!(buffer[(area.x + 2, digest_row)].fg, palette.text);
+    assert_eq!(buffer[(area.x, thought_row)].fg, palette.muted);
 }

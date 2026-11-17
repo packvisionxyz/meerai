@@ -16,6 +16,8 @@ pub struct HarnessConfig {
     pub verbatim_window_turns: usize,
     pub reasoning_pruning: bool,
     pub prompt_caching: bool,
+    pub rollback_on_verify_failure: bool,
+    pub recovery_model: Option<String>,
     pub max_steps_per_turn: usize,
     pub tool_timeout_ms: u64,
     pub max_session_tokens: Option<u64>,
@@ -33,6 +35,8 @@ impl Default for HarnessConfig {
             verbatim_window_turns: 4,
             reasoning_pruning: true,
             prompt_caching: true,
+            rollback_on_verify_failure: false,
+            recovery_model: None,
             max_steps_per_turn: 32,
             tool_timeout_ms: 120_000,
             max_session_tokens: None,
@@ -66,6 +70,15 @@ impl HarnessConfig {
         }
         if let Some(value) = context.prompt_caching {
             cfg.prompt_caching = value;
+        }
+        if let Some(value) = context.rollback_on_verify_failure {
+            cfg.rollback_on_verify_failure = value;
+        }
+        if let Some(value) = &context.recovery_model {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                cfg.recovery_model = Some(trimmed.to_string());
+            }
         }
         if let Some(value) = context.max_steps_per_turn {
             cfg.max_steps_per_turn = value;

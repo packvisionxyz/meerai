@@ -15,6 +15,7 @@ pub(crate) use palette::{PaletteAction, filtered_commands};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -31,11 +32,15 @@ use meerai_policy::ApprovalMode;
 pub use meerai_policy::{approval_mode_badge, approval_mode_label, parse_approval_mode};
 use meerai_session::{LoggedEvent, SessionId, SessionSummary};
 use ratatui::layout::Rect;
+use ratatui::widgets::Paragraph;
 use tokio::sync::mpsc;
 
 use crate::completion::CompletionEngine;
-use crate::diff::FileDiffView;
+use crate::diff::{FileDiffView, UnifiedLine};
+use crate::markdown::MarkdownLine;
 use crate::search::{SearchMatch, SearchMode, SearchPreview};
+use crate::syntax::{Language, Token};
+use crate::theme::{self, Palette};
 use crate::workspace::{WorkspaceQuery, local_workspace};
 use crate::{Backend, OpenedSession, SessionOpener};
 
@@ -52,6 +57,12 @@ pub const MIN_SIDEBAR_WIDTH: u16 = 110;
 pub enum InputMode {
     Insert,
     Normal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffListState {
+    Closed,
+    Open { selected: usize },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -78,6 +89,7 @@ pub enum ActiveModal {
         file_index: usize,
         diff: FileDiffView,
         scroll: usize,
+        list: DiffListState,
     },
     Search {
         query: String,
@@ -148,6 +160,14 @@ pub enum TabHitKind {
     Tab(usize),
     CloseTab(usize),
     NewTab,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TabDrag {
+    pub from: usize,
+    pub start_x: u16,
+    pub current_x: u16,
+    pub moved: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -357,6 +377,7 @@ pub struct SessionTab {
     pub input: String,
     pub cursor: usize,
     pub transcript: Vec<TranscriptEntry>,
+    pub transcript_version: u64,
     pub usage: UsageStats,
     pub metrics: TurnMetrics,
     pub is_running: bool,
@@ -401,6 +422,7 @@ impl SessionTab {
             input: String::new(),
             cursor: 0,
             transcript: Vec::new(),
+            transcript_version: 0,
             usage: UsageStats::default(),
             metrics: TurnMetrics::default(),
             is_running: false,
@@ -488,6 +510,372 @@ pub(super) fn normalize_tab_title(raw: String) -> Option<String> {
     Some(truncate_single_line(&line, 80))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntryState {
+    User,
+    Assistant {
+        streaming: bool,
+        reasoning: bool,
+        reasoning_expanded: bool,
+    },
+    ToolCall {
+        status: ToolCallStatus,
+        expanded: bool,
+    },
+    Subagent {
+        status: ToolCallStatus,
+        expanded: bool,
+        loading: bool,
+        nested_entries: Option<usize>,
+    },
+    System,
+    Error {
+        expanded: bool,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct EntryFingerprint {
+    size: usize,
+    state: EntryState,
+}
+
+impl EntryFingerprint {
+    fn of(entry: &TranscriptEntry) -> Self {
+        match entry {
+            TranscriptEntry::User { text } => Self {
+                size: text.len(),
+                state: EntryState::User,
+            },
+            TranscriptEntry::Assistant {
+                text,
+                reasoning,
+                streaming,
+                reasoning_expanded,
+            } => Self {
+                size: text.len() + reasoning.len(),
+                state: EntryState::Assistant {
+                    streaming: *streaming,
+                    reasoning: !reasoning.is_empty(),
+                    reasoning_expanded: *reasoning_expanded,
+                },
+            },
+            TranscriptEntry::ToolCall(call) => Self {
+                size: call.name.len()
+                    + call.args.len()
+                    + call.output.as_ref().map_or(0, |output| output.len()),
+                state: EntryState::ToolCall {
+                    status: call.status,
+                    expanded: call.expanded,
+                },
+            },
+            TranscriptEntry::Subagent(subagent) => Self {
+                size: subagent.agent.len()
+                    + subagent.report.as_ref().map_or(0, |report| report.len()),
+                state: EntryState::Subagent {
+                    status: subagent.status,
+                    expanded: subagent.expanded,
+                    loading: subagent.nested_loading,
+                    nested_entries: nested_size(&subagent.nested),
+                },
+            },
+            TranscriptEntry::System { text } => Self {
+                size: text.len(),
+                state: EntryState::System,
+            },
+            TranscriptEntry::Error { text, expanded } => Self {
+                size: text.len(),
+                state: EntryState::Error {
+                    expanded: *expanded,
+                },
+            },
+        }
+    }
+
+    fn shows_spinner(&self) -> bool {
+        matches!(
+            self.state,
+            EntryState::ToolCall {
+                status: ToolCallStatus::Proposed | ToolCallStatus::Running,
+                ..
+            }
+        )
+    }
+}
+
+fn nested_size(nested: &Option<Vec<TranscriptEntry>>) -> Option<usize> {
+    nested.as_ref().map(|entries| {
+        entries.iter().fold(entries.len(), |acc, entry| {
+            let fingerprint = EntryFingerprint::of(entry);
+            acc.wrapping_mul(31)
+                .wrapping_add(fingerprint.size)
+                .wrapping_add(fingerprint.state.size_code())
+        })
+    })
+}
+
+impl EntryState {
+    fn size_code(self) -> usize {
+        match self {
+            EntryState::User => 0,
+            EntryState::Assistant { .. } => 1,
+            EntryState::ToolCall { status, .. } => 2 + status_code(status),
+            EntryState::Subagent { status, .. } => 9 + status_code(status),
+            EntryState::System => 16,
+            EntryState::Error { .. } => 17,
+        }
+    }
+}
+
+fn status_code(status: ToolCallStatus) -> usize {
+    match status {
+        ToolCallStatus::Proposed => 0,
+        ToolCallStatus::Running => 1,
+        ToolCallStatus::Succeeded => 2,
+        ToolCallStatus::Failed => 3,
+        ToolCallStatus::Stopped => 4,
+        ToolCallStatus::Cancelled => 5,
+    }
+}
+
+pub(crate) struct TranscriptRenderKey {
+    tab_id: u64,
+    width: u16,
+    version: u64,
+    palette: Palette,
+    provider: String,
+    model: String,
+    workspace: PathBuf,
+    acp_preset: Option<String>,
+    key_status: KeyStatus,
+    spinner_tick: Option<usize>,
+    entries: Vec<EntryFingerprint>,
+    turn_activity: Vec<(usize, bool)>,
+}
+
+impl TranscriptRenderKey {
+    pub(crate) fn capture(app: &AppState, width: u16) -> Self {
+        let tab = app.tab();
+        let entries: Vec<EntryFingerprint> =
+            tab.transcript.iter().map(EntryFingerprint::of).collect();
+        let spinner_tick = entries
+            .iter()
+            .any(EntryFingerprint::shows_spinner)
+            .then_some(app.spinner_tick);
+        let mut turn_activity: Vec<(usize, bool)> = tab
+            .turn_activity
+            .iter()
+            .map(|(index, expanded)| (*index, *expanded))
+            .collect();
+        turn_activity.sort_unstable_by_key(|(index, _)| *index);
+        Self {
+            tab_id: tab.tab_id,
+            width,
+            version: tab.transcript_version,
+            palette: theme::p(),
+            provider: tab.active_provider.clone(),
+            model: tab.model.clone(),
+            workspace: app.workspace_root.clone(),
+            acp_preset: tab.acp_preset().map(str::to_string),
+            key_status: app.active_key_status(),
+            spinner_tick,
+            entries,
+            turn_activity,
+        }
+    }
+
+    fn matches(&self, app: &AppState, width: u16) -> bool {
+        if self.width != width {
+            return false;
+        }
+        let tab = app.tab();
+        self.tab_id == tab.tab_id
+            && self.version == tab.transcript_version
+            && self.palette == theme::p()
+            && self.provider == tab.active_provider
+            && self.model == tab.model
+            && self.workspace == app.workspace_root
+            && self.acp_preset.as_deref() == tab.acp_preset()
+            && self.key_status == app.active_key_status()
+            && self.spinner_tick
+                == self
+                    .entries
+                    .iter()
+                    .any(EntryFingerprint::shows_spinner)
+                    .then_some(app.spinner_tick)
+            && self.entries.len() == tab.transcript.len()
+            && self
+                .entries
+                .iter()
+                .zip(tab.transcript.iter())
+                .all(|(cached, entry)| *cached == EntryFingerprint::of(entry))
+            && self.turn_activity.len() == tab.turn_activity.len()
+            && self
+                .turn_activity
+                .iter()
+                .all(|(index, expanded)| tab.turn_activity.get(index) == Some(expanded))
+    }
+}
+
+struct MemoSlot<T> {
+    key: u64,
+    value: Rc<T>,
+}
+
+struct MemoTable<T> {
+    slots: Vec<Option<MemoSlot<T>>>,
+}
+
+impl<T> Default for MemoTable<T> {
+    fn default() -> Self {
+        Self { slots: Vec::new() }
+    }
+}
+
+impl<T> MemoTable<T> {
+    fn begin(&mut self, len: usize) {
+        self.slots.resize_with(len, || None);
+        self.slots.truncate(len);
+    }
+
+    fn get(&mut self, index: usize, key: u64, compute: impl FnOnce() -> T) -> Rc<T> {
+        if let Some(slot) = self.slots.get(index).and_then(Option::as_ref)
+            && slot.key == key
+        {
+            return slot.value.clone();
+        }
+        let value = Rc::new(compute());
+        if let Some(slot) = self.slots.get_mut(index) {
+            *slot = Some(MemoSlot {
+                key,
+                value: value.clone(),
+            });
+        }
+        value
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct TranscriptBuildMemo {
+    tab_id: Option<u64>,
+    palette: Palette,
+    markdown: MemoTable<Vec<MarkdownLine>>,
+    edit_diff: MemoTable<Option<Vec<UnifiedLine>>>,
+    tokens: MemoTable<Vec<Vec<Token>>>,
+}
+
+impl TranscriptBuildMemo {
+    pub(crate) fn begin(&mut self, tab_id: u64, palette: Palette, len: usize) {
+        if self.tab_id != Some(tab_id) || self.palette != palette {
+            self.tab_id = Some(tab_id);
+            self.palette = palette;
+            self.markdown = MemoTable::default();
+            self.edit_diff = MemoTable::default();
+            self.tokens = MemoTable::default();
+        }
+        self.markdown.begin(len);
+        self.edit_diff.begin(len);
+        self.tokens.begin(len);
+    }
+
+    pub(crate) fn markdown(&mut self, index: usize, text: &str) -> Rc<Vec<MarkdownLine>> {
+        self.markdown.get(index, memo_hash(None, &[text]), || {
+            crate::markdown::render(text)
+        })
+    }
+
+    pub(crate) fn edit_diff(
+        &mut self,
+        index: usize,
+        call: &ToolCallEntry,
+        compute: impl FnOnce() -> Option<Vec<UnifiedLine>>,
+    ) -> Rc<Option<Vec<UnifiedLine>>> {
+        let key = memo_hash(
+            None,
+            &[
+                &call.name,
+                &call.args,
+                call.output.as_deref().unwrap_or_default(),
+            ],
+        );
+        self.edit_diff.get(index, key, compute)
+    }
+
+    pub(crate) fn tokens(
+        &mut self,
+        index: usize,
+        language: Option<Language>,
+        source: &str,
+        compute: impl FnOnce() -> Vec<Vec<Token>>,
+    ) -> Rc<Vec<Vec<Token>>> {
+        self.tokens
+            .get(index, memo_hash(language, &[source]), compute)
+    }
+}
+
+fn memo_hash(language: Option<Language>, parts: &[&str]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let seed = language.map_or(0, |language| language as u64 + 1);
+    hash = hash.rotate_left(5) ^ seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    for part in parts {
+        for byte in part.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x1_0000_01b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x1_0000_01b3);
+    }
+    hash
+}
+
+#[derive(Default)]
+pub(crate) struct TranscriptDocument {
+    pub(crate) paragraph: Paragraph<'static>,
+    pub(crate) line_count: usize,
+    pub(crate) bands: Vec<(usize, usize)>,
+    pub(crate) code_bands: Vec<(usize, usize)>,
+    pub(crate) hover_text_zones: Vec<HoverZone>,
+}
+
+#[derive(Default)]
+pub(crate) struct TranscriptRenderCache {
+    key: Option<TranscriptRenderKey>,
+    pub(crate) document: TranscriptDocument,
+    memo: TranscriptBuildMemo,
+    builds: u64,
+}
+
+impl TranscriptRenderCache {
+    pub(crate) fn matches(&self, app: &AppState, width: u16) -> bool {
+        self.key.as_ref().is_some_and(|key| key.matches(app, width))
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.key = None;
+        self.document = TranscriptDocument::default();
+    }
+
+    pub(crate) fn take_memo(&mut self) -> TranscriptBuildMemo {
+        std::mem::take(&mut self.memo)
+    }
+
+    pub(crate) fn store(
+        &mut self,
+        key: TranscriptRenderKey,
+        memo: TranscriptBuildMemo,
+        document: TranscriptDocument,
+    ) {
+        self.key = Some(key);
+        self.memo = memo;
+        self.document = document;
+        self.builds += 1;
+    }
+
+    pub(crate) fn builds(&self) -> u64 {
+        self.builds
+    }
+}
+
 pub struct AppState {
     pub mode: InputMode,
     pub workspace_root: PathBuf,
@@ -535,6 +923,7 @@ pub struct AppState {
     pub composer_scroll: usize,
     pub composer_selection: Option<(usize, usize)>,
     pub(super) composer_drag_anchor: Option<usize>,
+    pub(super) tab_drag: Option<TabDrag>,
     pub(super) pending_toggle: Option<usize>,
     pub(super) pending_digest: Option<usize>,
     pub selection: Option<TextSelection>,
@@ -542,6 +931,7 @@ pub struct AppState {
     pub last_transcript_anchor: Option<DocPos>,
     pub last_mouse_pos: Option<ScreenPos>,
     pub transcript_wrapped_lines: Vec<TranscriptWrappedLine>,
+    pub(crate) transcript_cache: TranscriptRenderCache,
     pub screen_lines: Vec<Vec<String>>,
     pub last_copied_text: Option<String>,
     key_status_cache: RefCell<HashMap<String, KeyStatus>>,
@@ -672,6 +1062,7 @@ impl AppState {
             composer_scroll: 0,
             composer_selection: None,
             composer_drag_anchor: None,
+            tab_drag: None,
             pending_toggle: None,
             pending_digest: None,
             selection: None,
@@ -679,6 +1070,7 @@ impl AppState {
             last_transcript_anchor: None,
             last_mouse_pos: None,
             transcript_wrapped_lines: Vec::new(),
+            transcript_cache: TranscriptRenderCache::default(),
             screen_lines: Vec::new(),
             last_copied_text: None,
             key_status_cache: RefCell::new(HashMap::new()),
@@ -710,6 +1102,10 @@ impl AppState {
         self.active_tab
     }
 
+    pub fn transcript_builds(&self) -> u64 {
+        self.transcript_cache.builds()
+    }
+
     pub fn tab_index_for_session(&self, id: &SessionId) -> Option<usize> {
         self.tabs.iter().position(|tab| &tab.session_id == id)
     }
@@ -737,6 +1133,7 @@ impl AppState {
         tab.backend = backend;
         tab.approval_mode = approval_mode;
         tab.transcript = transcript;
+        tab.transcript_version = tab.transcript_version.wrapping_add(1);
         tab.user_turns = user_turn_map(&tab.transcript, events);
         tab.turn_activity.clear();
         tab.seed_usage_from_events(events);
@@ -759,6 +1156,7 @@ impl AppState {
         self.doc_selection = None;
         self.last_transcript_anchor = None;
         self.transcript_wrapped_lines.clear();
+        self.transcript_cache.clear();
         self.pending_g = false;
     }
 
@@ -827,6 +1225,25 @@ impl AppState {
             self.active_tab - 1
         };
         self.switch_to_tab(prev)
+    }
+
+    pub fn move_tab(&mut self, from: usize, to: usize) -> bool {
+        if from >= self.tabs.len() || to >= self.tabs.len() || from == to {
+            return false;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active_tab = if self.active_tab == from {
+            to
+        } else if from < self.active_tab && to >= self.active_tab {
+            self.active_tab - 1
+        } else if from > self.active_tab && to <= self.active_tab {
+            self.active_tab + 1
+        } else {
+            self.active_tab
+        };
+        self.persist_tabs();
+        true
     }
 
     pub fn close_active_tab(&mut self) -> bool {

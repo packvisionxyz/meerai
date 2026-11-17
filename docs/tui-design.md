@@ -73,6 +73,7 @@ opencode dark theme and is overridable through the `theme` block in
 | `ctrl+n` | New session tab |
 | `ctrl+s` | Session picker |
 | `ctrl+w` | Close tab |
+| `alt+shift+left` / `alt+shift+right` | Move the active tab left / right |
 | `ctrl+o` | Model picker |
 | `ctrl+a` | Provider connect |
 | `ctrl+f` | Search files |
@@ -84,6 +85,10 @@ opencode dark theme and is overridable through the `theme` block in
 | `ctrl+q` | Quit |
 | `f1` | Help |
 | `ctrl+c` | Cancel the running turn; press twice to exit |
+
+Tabs also reorder by mouse: press a tab to switch to it, drag more than two
+columns, and release over the target tab to drop it there. The reorder persists
+with the tab order in `open-tabs.json`.
 
 ### 1. Normal Mode (`NOR`) — current
 
@@ -158,7 +163,7 @@ Typing `/` opens completion. The implemented command set is:
 `/agent <id>` and `/skill <id>` send `AgentCommand::ApplyAgent`/`ApplySkill`,
 which append a System instruction at the next step boundary. Typing `@` opens the
 **Mentions** popup: agents first, then skills, then files. Agent rows show the
-id in the purple accent color, skill rows show the id in the orange interactive
+id in the blue accent color, skill rows show the id in the gold interactive
 color, and each shows the source and description; file rows show a path in the
 normal text color. Rows show the bare id, not the `@agent/` or `@skill/` prefix.
 One id can
@@ -168,7 +173,7 @@ Tab accepts; Enter accepts without submitting; Esc dismisses. Accepting inserts
 `@agent/<id> `, `@skill/<id> `, or `@path ` with one trailing space and stays in
 Insert. An exact agent or skill id keeps the popup open; an exact file path
 auto-dismisses. The composer title says `@ mentions`. A known accepted mention
-renders as an `<id>` chip (bold purple agent, bold orange skill) while the raw
+renders as an `<id>` chip (bold blue agent, bold gold skill) while the raw
 `@agent/<id>`/`@skill/<id>` stays in the input buffer and submit detection;
 unknown ids and partial tokens render as typed. Cursor columns use the chip
 display width: before a chip the column is normal, inside a chip it maps to the
@@ -221,9 +226,12 @@ still works. Headless runs auto-cancel the question and print a hint on stderr.
 - **Rewind code only** — restore files and keep the conversation.
 
 `Up` / `Down` moves, `Enter` applies, `Esc` cancels. Rewinding the conversation
-truncates the visible transcript before the turn. The menu refuses to open while
-a turn is running. Shell-only edits and files over 2 MiB are not restored; there
-is no `Summarize from here` option yet.
+truncates the visible transcript before the turn and restores the rewound user
+message to the composer (cursor at end, Insert mode), ready to amend; any typed
+draft is overwritten. Rewinding code only leaves the transcript and composer
+untouched. The menu refuses to open while a turn is running. Shell-only edits
+and files over 2 MiB are not restored; there is no `Summarize from here` option
+yet.
 
 ### 7. Session replay — current
 
@@ -297,7 +305,10 @@ locally by `LocalWorkspace` and injectable through `TuiLaunchConfig`.
   `pulldown-cmark`; grammar dependencies stay out of the TUI crate.
 - **Clipboard:** OSC 52 plus native helpers (no `arboard`).
 - **Search/diff:** `grep-searcher`/`grep-regex`/`ignore` for workspace search;
-  `similar` diffs arrive in `FileChange` items and render in the diff modal.
+  the diff modal builds side-by-side working-tree diffs with `git2`, highlights
+  them through `meerai-syntax`, cycles files with `Tab`/`[`/`]`, and toggles a
+  navigable file list with `f` (`Up`/`Down`/`j`/`k` select, `Enter` opens, `Esc`
+  closes the list first). `similar` powers the transcript's inline edit diffs.
 
 ### Async Event Loop
 

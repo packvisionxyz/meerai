@@ -505,11 +505,13 @@ fn harness_config_uses_defaults_and_context_overrides() {
         verbatim_window_turns: Some(6),
         reasoning_pruning: Some(false),
         prompt_caching: Some(false),
+        rollback_on_verify_failure: Some(true),
         max_steps_per_turn: Some(48),
         tool_timeout_ms: Some(60_000),
         max_session_tokens: Some(2_000_000),
         max_turn_secs: Some(600),
         summarizer_model: Some("openrouter:small-model".to_string()),
+        recovery_model: Some("openrouter:fallback-model".to_string()),
         post_edit_diagnostics: None,
     };
     let config = HarnessConfig::from_context_settings(Some(&context));
@@ -519,6 +521,11 @@ fn harness_config_uses_defaults_and_context_overrides() {
     assert_eq!(config.verbatim_window_turns, 6);
     assert!(!config.reasoning_pruning);
     assert!(!config.prompt_caching);
+    assert!(config.rollback_on_verify_failure);
+    assert_eq!(
+        config.recovery_model.as_deref(),
+        Some("openrouter:fallback-model")
+    );
     assert_eq!(config.max_steps_per_turn, 48);
     assert_eq!(config.tool_timeout_ms, 60_000);
     assert_eq!(config.max_session_tokens, Some(2_000_000));
@@ -1876,4 +1883,37 @@ async fn run_headless_channels_completes_on_turn_end() {
         .unwrap();
     assert_eq!(code, 0);
     driver.await.unwrap();
+}
+
+#[cfg(feature = "tui")]
+#[test]
+fn exit_summary_shows_logo_title_and_resume_command() {
+    let summary = exit_summary("ses_abc123", Some("Readiness review check"));
+    assert!(summary.contains("\x1b[1m"));
+    assert!(summary.contains("\x1b[0m"));
+    let mut plain = String::new();
+    let mut rest = summary.as_str();
+    while let Some(idx) = rest.find("\x1b[") {
+        plain.push_str(&rest[..idx]);
+        let after = &rest[idx + 2..];
+        match after.find('m') {
+            Some(end) => rest = &after[end + 1..],
+            None => break,
+        }
+    }
+    plain.push_str(rest);
+    assert!(plain.contains("  ██      ██\n"));
+    assert!(plain.contains("  ████  ████\n"));
+    assert!(plain.contains("Session   Readiness review check"));
+    assert!(plain.contains("Continue  meerai --resume ses_abc123"));
+}
+
+#[cfg(feature = "tui")]
+#[test]
+fn exit_summary_falls_back_to_the_session_id_without_a_title() {
+    for title in [None, Some("   ")] {
+        let summary = exit_summary("ses_abc123", title);
+        assert!(summary.contains("Session   ses_abc123"));
+        assert!(summary.contains("Continue  meerai --resume ses_abc123"));
+    }
 }

@@ -341,7 +341,7 @@ fn clicking_a_user_message_opens_actions_and_copies_or_forks() {
 }
 
 #[test]
-fn user_message_rewind_truncates_and_sends_the_agent_command() {
+fn user_message_rewind_restores_the_message_to_the_composer() {
     let (mut app, mut rx, _secrets) = test_app();
     app.tab_mut().transcript.push(TranscriptEntry::User {
         text: "first".to_string(),
@@ -355,6 +355,10 @@ fn user_message_rewind_truncates_and_sends_the_agent_command() {
     app.tab_mut()
         .user_turns
         .insert(0, TurnId::from_raw("turn-1"));
+    app.tab_mut().turn_activity.insert(0, true);
+    app.tab_mut().input = "draft text".to_string();
+    app.tab_mut().cursor = "draft text".len();
+    app.mode = InputMode::Normal;
     app.transcript_inner_area = Rect::new(1, 1, 60, 10);
     app.thinking_hit_zones = vec![ThinkingHitZone {
         entry_idx: 0,
@@ -374,6 +378,11 @@ fn user_message_rewind_truncates_and_sends_the_agent_command() {
     }
     app.handle_key_event(key(KeyCode::Char('w')));
     assert!(app.tab().transcript.is_empty());
+    assert!(app.tab().user_turns.is_empty());
+    assert!(app.tab().turn_activity.is_empty());
+    assert_eq!(app.tab().input, "first");
+    assert_eq!(app.tab().cursor, "first".len());
+    assert_eq!(app.mode, InputMode::Insert);
     assert_eq!(
         rx.try_recv().unwrap(),
         AgentCommand::Rewind {
@@ -381,6 +390,23 @@ fn user_message_rewind_truncates_and_sends_the_agent_command() {
             scope: meerai_agents::RewindScope::Both,
         }
     );
+}
+
+#[test]
+fn user_message_rewind_restores_an_empty_message_verbatim() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: String::new(),
+    });
+    app.tab_mut().user_turns.insert(0, TurnId::new());
+    app.tab_mut().input = "draft".to_string();
+    app.tab_mut().cursor = "draft".len();
+
+    assert!(app.run_user_action(0, UserAction::Rewind));
+    assert!(app.tab().transcript.is_empty());
+    assert_eq!(app.tab().input, "");
+    assert_eq!(app.tab().cursor, 0);
+    assert_eq!(app.mode, InputMode::Insert);
 }
 
 #[test]
@@ -645,7 +671,7 @@ fn question_overlay_esc_cancels_and_multiple_questions_advance() {
 }
 
 #[test]
-fn rewind_command_opens_menu_and_sends_scope() {
+fn rewind_menu_code_choice_keeps_the_transcript_and_composer() {
     use meerai_agents::RewindScope;
 
     let (mut app, mut rx, _secrets) = test_app();
@@ -654,10 +680,13 @@ fn rewind_command_opens_menu_and_sends_scope() {
         text: "hello".to_string(),
     });
     app.tab_mut().user_turns.insert(0, turn_id.clone());
+    app.tab_mut().turn_activity.insert(0, true);
 
     type_text(&mut app, "/rewind");
     app.handle_key_event(key(KeyCode::Enter));
     assert!(matches!(app.modal, Some(ActiveModal::RewindMenu { .. })));
+    app.tab_mut().input = "draft".to_string();
+    app.tab_mut().cursor = "draft".len();
 
     app.handle_key_event(key(KeyCode::Down));
     app.handle_key_event(key(KeyCode::Enter));
@@ -668,6 +697,275 @@ fn rewind_command_opens_menu_and_sends_scope() {
             scope: RewindScope::Code,
         }
     );
+    assert!(matches!(
+        app.tab().transcript.as_slice(),
+        [TranscriptEntry::User { text }] if text == "hello"
+    ));
+    assert_eq!(app.tab().user_turns.len(), 1);
+    assert_eq!(app.tab().turn_activity.get(&0), Some(&true));
+    assert_eq!(app.tab().input, "draft");
+    assert_eq!(app.tab().cursor, "draft".len());
+}
+
+#[test]
+fn rewind_menu_both_choice_restores_the_message_to_the_composer() {
+    use meerai_agents::RewindScope;
+
+    let (mut app, mut rx, _secrets) = test_app();
+    let turn_id = TurnId::new();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "hello".to_string(),
+    });
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: "answer".to_string(),
+        reasoning: String::new(),
+        streaming: false,
+        reasoning_expanded: false,
+    });
+    app.tab_mut().user_turns.insert(0, turn_id.clone());
+    app.tab_mut().turn_activity.insert(0, true);
+
+    type_text(&mut app, "/rewind");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(app.modal, Some(ActiveModal::RewindMenu { .. })));
+    app.tab_mut().input = "draft".to_string();
+    app.tab_mut().cursor = "draft".len();
+    app.mode = InputMode::Normal;
+
+    app.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::Rewind {
+            turn_id,
+            scope: RewindScope::Both,
+        }
+    );
     assert!(app.tab().transcript.is_empty());
     assert!(app.tab().user_turns.is_empty());
+    assert!(app.tab().turn_activity.is_empty());
+    assert_eq!(app.tab().input, "hello");
+    assert_eq!(app.tab().cursor, "hello".len());
+    assert_eq!(app.mode, InputMode::Insert);
+}
+
+fn diff_list_app(label: &str) -> (AppState, std::path::PathBuf) {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "meerai_app_diff_list_{label}_{}_{}",
+        std::process::id(),
+        nanos
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let secrets = Arc::new(MemorySecretStore::new());
+    secrets.set_key("gemini", "test-key").unwrap();
+    let settings = AppSettings::default();
+    let runtime = Arc::new(RwLock::new(RuntimeProviderState::from_settings(
+        &settings,
+        ProviderCatalog::new(),
+    )));
+    let mut app = AppState::new(
+        "gemini",
+        "gemini-3.8-flash",
+        root.clone(),
+        tx,
+        runtime,
+        secrets,
+        settings,
+        None,
+    );
+    app.handle_terminal_event(Event::Resize(120, 30));
+    app.file_changes = vec![
+        FileChangeEntry {
+            status: "??".to_string(),
+            path: "a.rs".to_string(),
+        },
+        FileChangeEntry {
+            status: "??".to_string(),
+            path: "b.rs".to_string(),
+        },
+    ];
+    (app, root)
+}
+
+#[test]
+fn diff_modal_file_list_toggles_moves_opens_and_closes() {
+    let (mut app, root) = diff_list_app("keys");
+    app.open_diff_modal(0);
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::DiffView {
+            file_index: 0,
+            scroll: 0,
+            list: DiffListState::Closed,
+            ..
+        })
+    ));
+
+    app.handle_key_event(key(KeyCode::Char('f')));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::DiffView {
+            file_index: 0,
+            list: DiffListState::Open { selected: 0 },
+            ..
+        })
+    ));
+
+    app.handle_key_event(key(KeyCode::Char('f')));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::DiffView {
+            list: DiffListState::Closed,
+            ..
+        })
+    ));
+
+    app.handle_key_event(key(KeyCode::Char('f')));
+    app.handle_key_event(key(KeyCode::Char('j')));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::DiffView {
+            list: DiffListState::Open { selected: 1 },
+            ..
+        })
+    ));
+    app.handle_key_event(key(KeyCode::Char('j')));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::DiffView {
+            list: DiffListState::Open { selected: 1 },
+            ..
+        })
+    ));
+    app.handle_key_event(key(KeyCode::Char('k')));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::DiffView {
+            list: DiffListState::Open { selected: 0 },
+            ..
+        })
+    ));
+    app.handle_key_event(key(KeyCode::Up));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::DiffView {
+            list: DiffListState::Open { selected: 0 },
+            ..
+        })
+    ));
+    app.handle_key_event(key(KeyCode::Down));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::DiffView {
+            list: DiffListState::Open { selected: 1 },
+            ..
+        })
+    ));
+
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::DiffView {
+            file_index: 1,
+            scroll: 0,
+            list: DiffListState::Open { selected: 1 },
+            ref diff,
+            ..
+        }) if diff.path == "b.rs"
+    ));
+
+    app.handle_key_event(key(KeyCode::Tab));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::DiffView {
+            file_index: 0,
+            list: DiffListState::Open { selected: 0 },
+            ..
+        })
+    ));
+    app.handle_key_event(key(KeyCode::BackTab));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::DiffView {
+            file_index: 1,
+            list: DiffListState::Open { selected: 1 },
+            ..
+        })
+    ));
+
+    app.handle_key_event(key(KeyCode::Esc));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::DiffView {
+            file_index: 1,
+            list: DiffListState::Closed,
+            ..
+        })
+    ));
+    app.handle_key_event(key(KeyCode::Char('f')));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::DiffView {
+            file_index: 1,
+            list: DiffListState::Open { selected: 1 },
+            ..
+        })
+    ));
+    app.handle_key_event(key(KeyCode::Esc));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::DiffView {
+            list: DiffListState::Closed,
+            ..
+        })
+    ));
+    app.handle_key_event(key(KeyCode::Esc));
+    assert!(app.modal.is_none());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn diff_modal_file_list_click_opens_the_clicked_file() {
+    let (mut app, root) = diff_list_app("click");
+    app.open_diff_modal(0);
+    app.handle_key_event(key(KeyCode::Char('f')));
+
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).expect("terminal");
+    terminal
+        .draw(|frame| crate::ui::render(frame, &mut app))
+        .expect("draw diff list");
+    let zone = app
+        .modal_hit_zones
+        .iter()
+        .find(|zone| zone.kind == ModalHitKind::ListItem(1))
+        .copied()
+        .expect("file list row zone");
+
+    assert!(app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: zone.rect.x,
+        row: zone.rect.y,
+        modifiers: KeyModifiers::NONE,
+    }));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::DiffView {
+            file_index: 1,
+            scroll: 0,
+            list: DiffListState::Open { selected: 1 },
+            ref diff,
+            ..
+        }) if diff.path == "b.rs"
+    ));
+
+    let _ = std::fs::remove_dir_all(&root);
 }

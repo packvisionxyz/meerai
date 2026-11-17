@@ -176,6 +176,9 @@ pub enum AgentEvent {
         restored: Vec<String>,
         error: Option<String>,
     },
+    RecoveryStarted {
+        attempt: usize,
+    },
     UsageUpdated {
         usage: Usage,
         cumulative: Usage,

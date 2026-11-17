@@ -417,3 +417,44 @@ fn dragging_in_the_composer_selects_without_copying() {
     assert_eq!(app.tab().input, "world");
     assert_eq!(app.tab().cursor, 0);
 }
+
+#[test]
+fn alt_shift_left_right_moves_the_active_tab() {
+    let (mut app, _rx, _secrets) = test_app();
+    let first = app.tab().session_id.as_str().to_string();
+    for id in ["sess-b", "sess-c"] {
+        let (opened, _cmd_rx) = super::sessions::make_opened_session(id, Some(id), Vec::new());
+        let _ = app.apply_opened_session(opened, false);
+    }
+    let order = |app: &AppState| -> Vec<String> {
+        app.tabs()
+            .iter()
+            .map(|tab| tab.session_id.as_str().to_string())
+            .collect()
+    };
+    assert_eq!(order(&app), [first.as_str(), "sess-b", "sess-c"]);
+    assert_eq!(app.active_tab_index(), 2);
+
+    let alt_shift = KeyModifiers::ALT | KeyModifiers::SHIFT;
+    app.handle_key_event(key_mod(KeyCode::Left, alt_shift));
+    assert_eq!(app.active_tab_index(), 1);
+    assert_eq!(app.tab().session_id.as_str(), "sess-c");
+    assert_eq!(order(&app), [first.as_str(), "sess-c", "sess-b"]);
+
+    app.handle_key_event(key_mod(KeyCode::Right, alt_shift));
+    assert_eq!(app.active_tab_index(), 2);
+    assert_eq!(order(&app), [first.as_str(), "sess-b", "sess-c"]);
+
+    app.handle_key_event(key_mod(KeyCode::Right, alt_shift));
+    assert_eq!(app.active_tab_index(), 2);
+    assert_eq!(order(&app), [first.as_str(), "sess-b", "sess-c"]);
+
+    assert!(app.switch_to_tab(0));
+    app.handle_key_event(key_mod(KeyCode::Left, alt_shift));
+    assert_eq!(app.active_tab_index(), 0);
+    assert_eq!(order(&app), [first.as_str(), "sess-b", "sess-c"]);
+
+    app.handle_key_event(key_mod(KeyCode::Left, KeyModifiers::ALT));
+    assert_eq!(app.active_tab_index(), 2);
+    assert_eq!(order(&app), [first.as_str(), "sess-b", "sess-c"]);
+}

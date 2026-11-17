@@ -234,6 +234,109 @@ impl Toolset for LargeSchemaToolset {
     }
 }
 
+struct NoteWriteToolset {
+    root: PathBuf,
+}
+
+#[async_trait]
+impl Toolset for NoteWriteToolset {
+    fn name(&self) -> String {
+        "note".to_string()
+    }
+
+    fn definition(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            r#type: "function".to_string(),
+            name: "note-write".to_string(),
+            description: "Writes the note file".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } }
+            }),
+        }]
+    }
+
+    fn contain(&self, fn_name: &str) -> bool {
+        fn_name == "note-write"
+    }
+
+    fn effect_of(&self, _fn_name: &str) -> EffectClass {
+        EffectClass::Write
+    }
+
+    async fn invoke(&self, _fn_name: &str, args: &str) -> Result<ToolOutput, ToolError> {
+        let args: serde_json::Value = serde_json::from_str(args)?;
+        let path = args["path"].as_str().unwrap_or("note.txt");
+        std::fs::write(self.root.join(path), "changed")
+            .map_err(|error| ToolError::Unknown(anyhow::Error::from(error)))?;
+        Ok(ToolOutput::Text("written".to_string()))
+    }
+}
+
+struct CoerceToolset {
+    seen: Arc<Mutex<serde_json::Value>>,
+}
+
+#[async_trait]
+impl Toolset for CoerceToolset {
+    fn name(&self) -> String {
+        "coerce".to_string()
+    }
+
+    fn definition(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            r#type: "function".to_string(),
+            name: "coerce-run".to_string(),
+            description: "Records its arguments".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "count": { "type": "integer" } }
+            }),
+        }]
+    }
+
+    fn contain(&self, fn_name: &str) -> bool {
+        fn_name == "coerce-run"
+    }
+
+    async fn invoke(&self, _fn_name: &str, args: &str) -> Result<ToolOutput, ToolError> {
+        let value: serde_json::Value = serde_json::from_str(args)?;
+        *self.seen.lock().unwrap() = value;
+        Ok(ToolOutput::Text("ok".to_string()))
+    }
+}
+
+struct InvalidArgsToolset;
+
+#[async_trait]
+impl Toolset for InvalidArgsToolset {
+    fn name(&self) -> String {
+        "invalid".to_string()
+    }
+
+    fn definition(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            r#type: "function".to_string(),
+            name: "invalid-run".to_string(),
+            description: "Always rejects its arguments".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "count": { "type": "integer" } }
+            }),
+        }]
+    }
+
+    fn contain(&self, fn_name: &str) -> bool {
+        fn_name == "invalid-run"
+    }
+
+    async fn invoke(&self, _fn_name: &str, _args: &str) -> Result<ToolOutput, ToolError> {
+        Err(ToolError::WrongArguments(
+            serde_json::from_str::<serde_json::Value>("{").unwrap_err(),
+        ))
+    }
+}
+
 fn tool_end_counting(calls: Vec<ToolCall>, total_tokens: i32) -> StreamEnd {
     StreamEnd {
         captured_content: Some(MessageContent::from_tool_calls(calls)),
@@ -932,6 +1035,52 @@ async fn worker_recovers_once_after_a_provider_failure() {
 }
 
 #[tokio::test]
+async fn worker_uses_the_recovery_model_for_the_recovery_turn() {
+    let streamer = Arc::new(FakeStreamer::with_script(vec![
+        ScriptedStream::Error("temporary provider failure".to_string()),
+        ScriptedStream::Error("temporary provider failure".to_string()),
+        ScriptedStream::Error("temporary provider failure".to_string()),
+        ScriptedStream::Events(vec![ChatStreamEvent::End(text_end("recovered"))]),
+    ]));
+    let session = memory_session();
+    let agent = harness_agent(
+        streamer.clone(),
+        Vec::new(),
+        "system",
+        &session,
+        auto_mode(),
+        HarnessConfig {
+            recovery_model: Some("fallback-model".to_string()),
+            ..HarnessConfig::default()
+        },
+    );
+    let (cmd_tx, mut rx) = spawn_worker(agent);
+    cmd_tx
+        .send(AgentCommand::SubmitPrompt("go".to_string()))
+        .unwrap();
+
+    while let Some(event) = rx.recv().await {
+        if matches!(
+            event,
+            AgentEvent::TurnCompleted {
+                reason: TurnEndReason::Completed,
+                ..
+            }
+        ) {
+            break;
+        }
+    }
+
+    let models = streamer.models.lock().unwrap();
+    assert_eq!(models[0], "gpt-4o-mini");
+    assert_eq!(models[1], "gpt-4o-mini");
+    assert_eq!(models[2], "gpt-4o-mini");
+    assert_eq!(models[3], "fallback-model");
+
+    let _ = cmd_tx.send(AgentCommand::Quit);
+}
+
+#[tokio::test]
 async fn queues_steering_as_next_prompt() {
     let streamer = Arc::new(FakeStreamer::new(vec![
         vec![
@@ -1268,6 +1417,39 @@ async fn harness_builds_requests_from_projection() {
         )
     });
     assert!(reasoning_logged);
+}
+
+#[tokio::test]
+async fn projection_cache_reflects_new_events() {
+    let streamer = Arc::new(FakeStreamer::new(Vec::new()));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        Vec::new(),
+        "system",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+
+    let first = agent.request_messages();
+    let second = agent.request_messages();
+    assert_eq!(format!("{first:?}"), format!("{second:?}"));
+
+    session
+        .append(SessionEvent::UserMessage {
+            source: InputSource::User,
+            content: vec![ContentBlock::Text("next".to_string())],
+        })
+        .await
+        .unwrap();
+    let third = agent.request_messages();
+    assert!(third.iter().any(|message| {
+        message
+            .content
+            .first_text()
+            .is_some_and(|text| text == "next")
+    }));
 }
 
 #[tokio::test]
@@ -6048,6 +6230,75 @@ async fn read_only_turns_do_not_trip_no_progress() {
 }
 
 #[tokio::test]
+async fn tool_dispatch_coerces_arguments_to_the_schema() {
+    let seen = Arc::new(Mutex::new(serde_json::json!({})));
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+            call_id: "c1".to_string(),
+            fn_name: "coerce-run".to_string(),
+            fn_arguments: serde_json::json!({ "count": "3" }),
+            thought_signatures: None,
+        }]))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        vec![Box::new(CoerceToolset { seen: seen.clone() })],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(*seen.lock().unwrap(), serde_json::json!({ "count": 3 }));
+}
+
+#[tokio::test]
+async fn wrong_arguments_add_a_schema_repair_hint() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+            call_id: "c1".to_string(),
+            fn_name: "invalid-run".to_string(),
+            fn_arguments: serde_json::json!({ "count": 3 }),
+            thought_signatures: None,
+        }]))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        vec![Box::new(InvalidArgsToolset)],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let hint = session_events(&session).iter().any(|event| {
+        matches!(
+            event,
+            SessionEvent::UserMessage { source: InputSource::RuntimeContext, content }
+                if content.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::Text(text)
+                        if text.contains("Retry the same tool") && text.contains("\"count\"")
+                ))
+        )
+    });
+    assert!(hint, "argument repair hint must include the schema");
+}
+
+#[tokio::test]
 async fn tool_call_chunks_execute_when_capture_is_empty() {
     let streamer = Arc::new(FakeStreamer::new(vec![
         vec![
@@ -6822,6 +7073,72 @@ async fn turn_failed_hook_receives_the_error() {
     )));
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn verify_failure_rolls_back_the_turn_snapshot_in_auto_mode() {
+    let root = std::env::temp_dir().join(format!("meerai-rollback-{}", SessionId::new()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("note.txt"), "original").unwrap();
+    let session = persistent_session(&root).await;
+
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+            call_id: "c1".to_string(),
+            fn_name: "note-write".to_string(),
+            fn_arguments: serde_json::json!({ "path": "note.txt" }),
+            thought_signatures: None,
+        }]))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+    let config = HarnessConfig {
+        rollback_on_verify_failure: true,
+        ..HarnessConfig::default()
+    };
+    let policy = auto_mode().with_workspace_root(&root);
+    let mut agent = harness_agent(
+        streamer,
+        vec![Box::new(NoteWriteToolset { root: root.clone() })],
+        "",
+        &session,
+        policy,
+        config,
+    );
+    agent.set_hooks(Arc::new(crate::hooks::HookEngine::new(vec![hook_entry(
+        HookEvent::Stop,
+        "printf 'verify failed' >&2; exit 2",
+    )])));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "done");
+    assert_eq!(
+        std::fs::read_to_string(root.join("note.txt")).unwrap(),
+        "original"
+    );
+
+    let events = session_events(&session);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::RewindApplied {
+            scope: RewindScope::Code,
+            replaced: None,
+            restored,
+            ..
+        } if restored.iter().any(|path| path.ends_with("note.txt"))
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::UserMessage { source: InputSource::RuntimeContext, content }
+            if content.iter().any(|block| matches!(block, ContentBlock::Text(text) if text.contains("Rolled back")))
+    )));
+
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[cfg(unix)]

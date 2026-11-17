@@ -361,6 +361,30 @@ fn acp_command_requires_a_session_opener() {
 }
 
 #[test]
+fn fork_command_requests_a_fork_at_the_latest_turn() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.session_opener = Some(Arc::new(DummySessionOpener));
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "hello".to_string(),
+    });
+    let turn = TurnId::new();
+    app.tab_mut().user_turns.insert(0, turn.clone());
+    let session_id = app.tab().session_id.clone();
+
+    submit(&mut app, "/fork");
+
+    assert_eq!(
+        app.take_pending_session_actions(),
+        vec![PendingSessionAction::ForkSession {
+            session_id,
+            turn: Some(turn),
+            draft: String::new(),
+        }]
+    );
+    assert_eq!(app.status_notice.as_deref(), Some("Forking session..."));
+}
+
+#[test]
 fn ctrl_p_opens_the_command_palette_and_esc_closes_it() {
     let (mut app, _rx, _secrets) = test_app();
     app.handle_key_event(key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL));

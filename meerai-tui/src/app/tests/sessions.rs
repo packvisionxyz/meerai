@@ -1,6 +1,6 @@
 use super::*;
 
-fn make_opened_session(
+pub(super) fn make_opened_session(
     id: &str,
     title: Option<&str>,
     transcript: Vec<TranscriptEntry>,
@@ -388,4 +388,234 @@ async fn default_acp_session_creation_reports_unsupported() {
         Err(err) => err,
     };
     assert!(err.to_string().contains("not supported"));
+}
+
+fn tab_ids(app: &AppState) -> Vec<String> {
+    app.tabs()
+        .iter()
+        .map(|tab| tab.session_id.as_str().to_string())
+        .collect()
+}
+
+fn app_with_two_more_tabs() -> (AppState, String) {
+    let (mut app, _rx, _secrets) = test_app();
+    let first = app.tab().session_id.as_str().to_string();
+    for id in ["sess-b", "sess-c"] {
+        let (opened, _cmd_rx) = make_opened_session(id, Some(id), Vec::new());
+        let _ = app.apply_opened_session(opened, false);
+    }
+    (app, first)
+}
+
+fn draw_tab_bar(app: &mut AppState) {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let backend = TestBackend::new(120, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::ui::render(frame, app))
+        .unwrap();
+}
+
+fn tab_zone(app: &AppState, index: usize) -> TabHitZone {
+    *app.tab_hit_zones
+        .iter()
+        .find(|zone| zone.kind == TabHitKind::Tab(index))
+        .expect("tab hit zone")
+}
+
+fn tab_mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+#[test]
+fn move_tab_reorders_and_keeps_the_dragged_tab_active() {
+    let (mut app, first) = app_with_two_more_tabs();
+    assert_eq!(tab_ids(&app), [first.as_str(), "sess-b", "sess-c"]);
+    assert_eq!(app.active_tab_index(), 2);
+
+    assert!(app.move_tab(2, 0));
+    assert_eq!(tab_ids(&app), ["sess-c", first.as_str(), "sess-b"]);
+    assert_eq!(app.active_tab_index(), 0);
+    assert_eq!(app.tab().session_id.as_str(), "sess-c");
+
+    assert!(!app.move_tab(0, 0));
+    assert!(!app.move_tab(0, 3));
+}
+
+#[test]
+fn moving_a_non_active_tab_across_the_active_one_shifts_the_active_index() {
+    let (mut app, first) = app_with_two_more_tabs();
+    assert!(app.switch_to_tab(0));
+    assert_eq!(app.tab().session_id.as_str(), first);
+
+    assert!(app.move_tab(2, 0));
+    assert_eq!(tab_ids(&app), ["sess-c", first.as_str(), "sess-b"]);
+    assert_eq!(app.active_tab_index(), 1);
+    assert_eq!(app.tab().session_id.as_str(), first);
+}
+
+#[test]
+fn dragging_a_tab_onto_another_reorders_on_mouse_up() {
+    let (mut app, first) = app_with_two_more_tabs();
+    draw_tab_bar(&mut app);
+    let from = tab_zone(&app, 0);
+    let to = tab_zone(&app, 2);
+
+    assert!(app.handle_mouse_event(tab_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        from.rect.x,
+        from.rect.y
+    )));
+    assert_eq!(app.active_tab_index(), 0);
+    assert_eq!(
+        app.tab_drag,
+        Some(TabDrag {
+            from: 0,
+            start_x: from.rect.x,
+            current_x: from.rect.x,
+            moved: false,
+        })
+    );
+
+    assert!(app.handle_mouse_event(tab_mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        to.rect.x,
+        to.rect.y
+    )));
+    assert_eq!(app.active_tab_index(), 0);
+    assert_eq!(tab_ids(&app), [first.as_str(), "sess-b", "sess-c"]);
+    assert_eq!(
+        app.tab_drag,
+        Some(TabDrag {
+            from: 0,
+            start_x: from.rect.x,
+            current_x: to.rect.x,
+            moved: true,
+        })
+    );
+
+    draw_tab_bar(&mut app);
+    assert_eq!(tab_zone(&app, 0), from);
+    assert_eq!(tab_zone(&app, 2), to);
+
+    assert!(app.handle_mouse_event(tab_mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        to.rect.x,
+        to.rect.y
+    )));
+    assert!(app.tab_drag.is_none());
+    assert_eq!(tab_ids(&app), ["sess-b", "sess-c", first.as_str()]);
+    assert_eq!(app.active_tab_index(), 2);
+}
+
+#[test]
+fn clicking_a_tab_without_dragging_switches_without_reordering() {
+    let (mut app, first) = app_with_two_more_tabs();
+    draw_tab_bar(&mut app);
+    let target = tab_zone(&app, 0);
+
+    assert!(app.handle_mouse_event(tab_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        target.rect.x,
+        target.rect.y
+    )));
+    assert!(app.handle_mouse_event(tab_mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        target.rect.x,
+        target.rect.y
+    )));
+
+    assert!(app.tab_drag.is_none());
+    assert_eq!(app.active_tab_index(), 0);
+    assert_eq!(tab_ids(&app), [first.as_str(), "sess-b", "sess-c"]);
+}
+
+#[test]
+fn pressing_the_tab_close_zone_does_not_arm_a_drag() {
+    let (mut app, _first) = app_with_two_more_tabs();
+    draw_tab_bar(&mut app);
+    let close = *app
+        .tab_hit_zones
+        .iter()
+        .find(|zone| zone.kind == TabHitKind::CloseTab(0))
+        .expect("close zone");
+
+    assert!(app.handle_mouse_event(tab_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        close.rect.x,
+        close.rect.y
+    )));
+    assert!(app.tab_drag.is_none());
+    assert_eq!(tab_ids(&app), ["sess-b", "sess-c"]);
+}
+
+#[test]
+fn dragging_a_tab_does_not_start_a_transcript_or_composer_selection() {
+    let (mut app, _first) = app_with_two_more_tabs();
+    draw_tab_bar(&mut app);
+    app.transcript_inner_area = Rect::new(1, 1, 60, 10);
+    app.transcript_wrapped_lines = (0..12)
+        .map(|idx| TranscriptWrappedLine {
+            text: format!("line {idx}"),
+            gutter_len: 0,
+            soft_wrapped_next: false,
+        })
+        .collect();
+    app.composer_block_area = Rect::new(0, 18, 60, 5);
+    app.composer_input_area = Rect::new(2, 19, 50, 2);
+    let source = tab_zone(&app, 2);
+
+    assert!(app.handle_mouse_event(tab_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        source.rect.x,
+        source.rect.y
+    )));
+    assert_eq!(app.active_tab_index(), 2);
+    assert!(app.tab_drag.is_some_and(|drag| !drag.moved));
+
+    assert!(app.handle_mouse_event(tab_mouse(MouseEventKind::Drag(MouseButton::Left), 5, 3)));
+    assert!(app.handle_mouse_event(tab_mouse(MouseEventKind::Drag(MouseButton::Left), 8, 20)));
+    assert!(app.doc_selection.is_none());
+    assert!(app.selection.is_none());
+    assert!(app.composer_selection.is_none());
+    assert!(app.composer_drag_anchor.is_none());
+
+    assert!(app.handle_mouse_event(tab_mouse(MouseEventKind::Up(MouseButton::Left), 8, 20)));
+    assert!(app.tab_drag.is_none());
+    assert!(app.doc_selection.is_none());
+    assert!(app.selection.is_none());
+    assert!(app.composer_selection.is_none());
+    assert!(app.last_copied_text.is_none());
+}
+
+#[test]
+fn a_modal_opening_mid_drag_cancels_the_drag() {
+    let (mut app, _first) = app_with_two_more_tabs();
+    draw_tab_bar(&mut app);
+    let source = tab_zone(&app, 0);
+
+    assert!(app.handle_mouse_event(tab_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        source.rect.x,
+        source.rect.y
+    )));
+    assert!(app.tab_drag.is_some());
+
+    app.modal = Some(ActiveModal::RewindMenu {
+        turn_id: TurnId::from_raw("turn-1"),
+        selected: 0,
+    });
+    app.handle_mouse_event(tab_mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        source.rect.x + 20,
+        source.rect.y,
+    ));
+    assert!(app.tab_drag.is_none());
 }

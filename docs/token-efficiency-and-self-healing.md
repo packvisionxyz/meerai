@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-16
 **Author:** meerai maintainers
-**Status:** In progress (phases 1–3 landed; phase 4 partial: R12 and R13 landed)
+**Status:** In progress (phases 1–5 landed v1; phase 6 landed v1)
 **Scope:** `meerai-agents`, `meerai-session`, `meerai-common`, `meerai-cli`, `meerai-tui`, `docs/`
 **Related Documents:** [harness-spec.md](harness-spec.md), [architecture.md](architecture.md), [threat-model.md](threat-model.md)
 
@@ -43,9 +43,15 @@ and a cancelled or loop-detected turn never sends an unpaired tool call on the n
 | Verify hook (phase 3) | `meerai hooks verify [--command CMD] [--reset-baseline]` adds one user Stop hook with a per-project failure baseline; only new failure names block | `meerai-cli/src/hooks_cmd.rs`, `meerai-common/src/hooks.rs`, `meerai-agents/src/hooks.rs` |
 | Edit breaker (phase 3) | Identical `code-edit_file`/`code-write_file` batches log `RepeatedIdenticalEdit` at the third and fifth repeat | `meerai-agents/src/multi_turn_agent/turn.rs` |
 | No-progress breaker (phase 3) | 8 tool steps without a file change log `NoProgress`; 12 fail the turn; disabled in `plan` and read-only runs | `meerai-agents/src/multi_turn_agent/turn.rs` |
-| Recovery turn (phase 3) | The worker queues one recovery prompt after a retryable provider or `LoopDetected` failure | `meerai-agents/src/multi_turn_agent/worker.rs` |
+| Recovery turn (phase 3) | The worker queues one recovery prompt after a retryable provider or `LoopDetected` failure; `RecoveryStarted` keeps headless waiting for the recovery turn | `meerai-agents/src/multi_turn_agent/worker.rs`, `meerai-cli/src/headless.rs` |
 | Turn-failed hook (phase 4) | `HookEvent::TurnFailed` fires on a failed turn with the error in the JSON payload; its decision is observational | `meerai-common/src/hooks.rs`, `meerai-agents/src/multi_turn_agent/turn.rs` |
 | Retry classification (phase 4) | Provider retries use HTTP status when available (408/409/425/429 and 5xx transient; other 4xx permanent) plus 50% jitter; the message blocklist is the fallback | `meerai-agents/src/multi_turn_agent/turn.rs` |
+| Rollback (phase 4) | `context.rollback_on_verify_failure` restores the turn snapshot on a Stop-hook verify block in `auto` mode and logs `RewindApplied { scope: Code }` | `meerai-agents/src/multi_turn_agent/mod.rs` |
+| Argument coercion (phase 5) | Tool arguments are coerced to the tool schema before dispatch (string numbers/booleans, scalar arrays, null removal); the lenient parser repairs malformed JSON first | `meerai-core/src/lenient.rs`, `meerai-agents/src/multi_turn_agent/tools.rs` |
+| Projection cache (phase 5) | `request_messages` caches the projection by event count and policy; new events or a policy change recompute it | `meerai-agents/src/multi_turn_agent/mod.rs` |
+| Argument repair hint (phase 6) | A rejected tool call logs a RuntimeContext message with the tool schema and asks for corrected arguments | `meerai-agents/src/multi_turn_agent/tools.rs` |
+| Recovery model (phase 6) | `context.recovery_model` selects the model for the recovery turn; the session model is restored afterward | `meerai-common/src/settings.rs`, `meerai-agents/src/multi_turn_agent/worker.rs` |
+| Edit-anchor repair (phase 6) | A missing `old_string` is normalized (whitespace and `read_file` line prefixes); a unique match applies once, ambiguous matches report line numbers, missing anchors suggest closest lines | `meerai-tools/src/code/edit_file.rs` |
 | Live healing | Healing runs in `Session::open_inner` only | `meerai-session/src/session.rs:327-329,609-638` |
 | Live healing (phase 1) | `run_turn` also heals after `TurnEnded` through the same idempotent helper | `meerai-agents/src/multi_turn_agent/turn.rs` |
 | Cancel gap | Cancel during planning returns with no `ToolResult` for the batch | `meerai-agents/src/multi_turn_agent/tools.rs:292-295` |
@@ -114,10 +120,13 @@ Revisit if: an eval shows self-critique helps for a specific failure class.
 
 **Q7 — Is automatic rollback on by default?**
 
-Chosen: no. It is opt-in per session, approval-gated, and logged as `RewindApplied`.
-Why: capture excludes shell edits, so rollback is partial. A silent partial rollback would hide work.
+Chosen: no. It is opt-in via `context.rollback_on_verify_failure`, runs only in `auto` mode, and
+logs `RewindApplied { scope: Code }`. In `ask`/`plan`, the turn continues with a notice to use
+`/rewind`.
+Why: capture excludes shell edits, so rollback is partial. A silent partial rollback would hide work,
+and v1 does not add a new approval kind.
 Rejected: always roll back on verify failure — can discard valid partial progress.
-Revisit if: shell-edit capture lands.
+Revisit if: shell-edit capture lands or a dedicated rollback approval is added.
 
 **Q8 — Where does the built-in verify gate live?**
 
@@ -167,11 +176,16 @@ Revisit if: users need hook-driven recovery for a failure class the built-in rec
 | R8 | One bounded recovery turn after a retryable provider or loop failure (deeper actions follow) | WANT | 3 |
 | R9 | An opt-in verify hook blocks completion on new failures only, relative to a per-project baseline | WANT | 3 |
 | R10 | `NoProgress` and `RepeatedIdenticalEdit` breakers emit real events | WANT | 3 |
-| R11 | Opt-in rollback restores the turn snapshot on verify failure | WANT | 4 |
+| R11 | Opt-in rollback restores the turn snapshot on verify failure in `auto` mode | WANT | 4 |
 | R12 | `TurnFailed` hook event fires on a failed turn with the error payload (observational) | WANT | 4 |
 | R13 | Provider retry classifies by HTTP status and adds jitter | WANT | 4 |
 | R14 | Definition text is capped and the subagent catalog is compact | WANT | 2 |
 | R15 | Cache-safe compaction reuses the parent prefix | WANT | 2 |
+| R16 | Tool arguments are coerced to the tool schema before dispatch | WANT | 5 |
+| R17 | The request projection is cached by event count and policy | WANT | 5 |
+| R18 | A rejected tool call adds a schema-based argument-repair hint | WANT | 6 |
+| R19 | `context.recovery_model` selects the recovery model and restores the session model | WANT | 6 |
+| R20 | A missing `old_string` is repaired from a unique whitespace/line-prefix match, or returns candidates | WANT | 6 |
 
 ## 6. Acceptance criteria
 
@@ -223,7 +237,8 @@ Failure: the first failing run blocks before a baseline exists.
 **AC-10 — One recovery turn after a retryable failure**
 Given a turn fails with a retryable provider error or `LoopDetected`, when the worker handles the
 failure, then it queues one recovery prompt before the next queued prompt and starts a new turn; a
-second consecutive failure does not recover.
+second consecutive failure does not recover. A headless run consumes the `RecoveryStarted` event and
+exits `0` when the recovery turn completes.
 Failure: a budget, config, tool, or non-retryable provider failure queues no recovery.
 
 **AC-11 — TurnFailed hook payload**
@@ -243,6 +258,42 @@ When the command passes later, the baseline is removed; `--reset-baseline` remov
 changing the hook.
 Failure: a removed failure stays in the baseline.
 
+**AC-14 — Auto-mode rollback on verify failure**
+Given `context.rollback_on_verify_failure` is true and the mode is `auto`, when the Stop hook blocks
+with a verify failure after a write, then the turn's files are restored and
+`RewindApplied { scope: Code, replaced: None }` is logged; the turn continues once.
+Failure: in `ask`/`plan`, files are not restored and a notice points to `/rewind`.
+
+**AC-15 — Arguments are coerced to the schema**
+Given a tool parameter expects an integer and the model sends `"3"`, when the call is dispatched,
+then the tool receives `3`; a scalar for an array parameter is wrapped; a null optional property is
+removed.
+Failure: a valid value is rewritten.
+
+**AC-16 — Projection is reused**
+Given the session event count and projection policy are unchanged, when the request projection is
+built twice, then both calls return the same messages without re-deriving them. New events or a
+policy change recompute it.
+Failure: a stale projection omits a newly logged message.
+
+**AC-17 — Rejected arguments get a repair hint**
+Given a tool rejects its arguments, when the result is logged, then a RuntimeContext message names the
+tool, includes its parameter schema, and asks for corrected JSON.
+Failure: a successful call adds the hint.
+
+**AC-18 — Recovery uses the recovery model**
+Given `context.recovery_model` is set, when a retryable failure starts a recovery turn, then that turn
+uses the recovery model and the session model is restored afterward. A project `recovery_model` with
+`:` is ignored so it cannot redirect the provider.
+Failure: a successful normal turn uses the recovery model.
+
+**AC-19 — Edit anchor repair**
+Given `old_string` is not found exactly but matches one place after trimming whitespace or
+`read_file` line prefixes, when the edit runs, then it applies once and reports “Anchor repaired”.
+Given multiple normalized matches, no file changes and the line numbers are reported. Given no match,
+up to three closest lines are reported.
+Failure: an ambiguous normalized anchor edits the file.
+
 ## 7. Impact
 
 - Tenancy and authorization: none.
@@ -250,18 +301,24 @@ Failure: a removed failure stays in the baseline.
 - Offline and local-first: cache control is a request field; offline behavior is unchanged.
 - Data lifecycle: no new durable data; stubs point at existing blobs.
 - Contracts: `Usage` gains `cache_creation_tokens`; `ProjectionPolicy` gains `clear_old_tool_results`;
-  `run_compaction` returns `Result<bool, TurnError>`. `UsageUpdated` already carries `Usage`, so the
-  event shape changes additively and must update the TUI fold, headless NDJSON, and replay together.
-- Surfaces: `meerai-agents`, `meerai-session`, `meerai-common`, `meerai-cli`, `meerai-tui`.
+  `run_compaction` returns `Result<bool, TurnError>`; `meerai_core::lenient::coerce_to_schema` is a new
+  public helper; `ContextSettings` gains `recovery_model`; `Session::event_count` exposes the cache
+  key. `UsageUpdated` already carries `Usage`, so the event shape changes additively and must update
+  the TUI fold, headless NDJSON, and replay together.
+- Surfaces: `meerai-core`, `meerai-agents`, `meerai-session`, `meerai-common`, `meerai-cli`,
+  `meerai-tui`.
 - Localization: none.
 - Failure states: a provider that rejects cache control must fail open to an uncached request.
 - Observability: `UsageUpdated` and the headless summary expose cache hits.
-- Rollout: `prompt_caching` defaults on; a false value restores current behavior.
+- Rollout: `prompt_caching` defaults on; a false value restores current behavior. Argument coercion is
+  always on and leaves valid values unchanged; the projection cache is internal. `recovery_model` is
+  unset by default; a project value with `:` is ignored so it cannot redirect the provider.
 - Support: cache fields are self-describing in the summary and the TUI.
 
 ## 8. Non-goals
 
-- Projection caching, frozen messages, and incremental projection.
+- Frozen/shared message representations and incremental tail projection. The full-result
+  projection cache is landed; the next step is incremental projection from a replacement point.
 - Progressive tool disclosure and tool-search meta-tools.
 - A persistent memory tool and cross-session notes.
 - Cache-aware USD pricing.
@@ -279,10 +336,17 @@ Failure: a removed failure stays in the baseline.
 3. **Phase 3 — Verified recovery.** R8, R9, R10. Interceptor and hook changes. Gate: loop and breaker
    tests with a real verifier command. Landed: the `meerai hooks verify` Stop-hook preset with a
    per-project failure baseline (R9), the `RepeatedIdenticalEdit` and `NoProgress` breakers (R10), and
-   one bounded recovery turn (R8 v1). Deeper recovery actions remain.
+   one bounded recovery turn (R8 v1) in the worker and headless. Deeper recovery actions remain.
 4. **Phase 4 — Deeper resilience.** R11, R12, R13. Rollback, `TurnFailed`, and provider
-   classification. Gate: recovery tests plus a hook round-trip. Partial: `TurnFailed` and
-   status-classified retries landed; opt-in rollback remains.
+   classification. Gate: recovery tests plus a hook round-trip. Landed v1: `TurnFailed`,
+   status-classified retries, and auto-mode rollback. A dedicated rollback approval and shell-edit
+   capture remain.
+5. **Phase 5 — Dispatch and projection efficiency.** R16, R17. Schema-aware argument coercion and the
+   full-result projection cache. Gate: coercion and cache tests. Incremental tail projection and
+   frozen messages remain.
+6. **Phase 6 — Recovery depth.** R18, R19, R20. A schema-based argument-repair hint, a configurable
+   recovery model, and edit-anchor repair. Gate: repair-hint, recovery-model, and edit-repair tests.
+   A per-turn recovery budget and model escalation chains remain.
 
 ## 10. Open questions
 

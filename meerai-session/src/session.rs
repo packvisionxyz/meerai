@@ -367,6 +367,10 @@ impl Session {
         read_lock(&self.inner.events).clone()
     }
 
+    pub fn event_count(&self) -> usize {
+        read_lock(&self.inner.events).len()
+    }
+
     pub fn id(&self) -> &SessionId {
         &self.inner.id
     }

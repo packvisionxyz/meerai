@@ -139,6 +139,13 @@ impl HeadlessExit {
             }
         }
     }
+
+    pub(crate) fn reset_after_recovery(&mut self) {
+        self.failed = false;
+        if !self.approval_cancelled {
+            self.code = 1;
+        }
+    }
 }
 
 pub(crate) struct PlainEventPrinter {
@@ -294,6 +301,7 @@ pub(crate) async fn run_headless_channels(
     let mut printer = PlainEventPrinter::new();
     let mut exit = HeadlessExit::new();
     let mut last_usage: Option<meerai_agents::Usage> = None;
+    let mut recovery_pending = false;
 
     while let Some(event) = event_rx.recv().await {
         if json {
@@ -345,11 +353,27 @@ pub(crate) async fn run_headless_channels(
         exit.observe(headless_outcome(&event));
 
         match &event {
+            AgentEvent::RecoveryStarted { attempt } => {
+                recovery_pending = true;
+                if !json {
+                    eprintln!("recovering after a failed turn (attempt {attempt})");
+                }
+            }
+            AgentEvent::TurnStarted { .. } if recovery_pending => {
+                recovery_pending = false;
+                exit.reset_after_recovery();
+            }
             AgentEvent::TurnCompleted { .. } => {
+                if recovery_pending {
+                    continue;
+                }
                 shutdown_worker(&cmd_tx, &mut event_rx).await;
                 break;
             }
             AgentEvent::Error { message, .. } => {
+                if recovery_pending {
+                    continue;
+                }
                 if json {
                     eprintln!("error: {message}");
                 }
@@ -369,4 +393,44 @@ pub(crate) async fn run_headless_channels(
     }
 
     Ok(exit.code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meerai_agents::events::ErrorCode;
+    use meerai_agents::{TurnEndReason, TurnId};
+
+    #[tokio::test]
+    async fn headless_waits_for_a_recovery_turn_and_exits_zero() {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let turn = TurnId::from_raw("turn-1");
+        tokio::spawn(async move {
+            let _ = event_tx.send(AgentEvent::RecoveryStarted { attempt: 1 });
+            let _ = event_tx.send(AgentEvent::Error {
+                code: ErrorCode::Provider,
+                message: "boom".to_string(),
+            });
+            let _ = event_tx.send(AgentEvent::TurnCompleted {
+                turn_id: turn.clone(),
+                reason: TurnEndReason::Failed {
+                    error: "boom".to_string(),
+                },
+            });
+            let _ = event_tx.send(AgentEvent::TurnStarted {
+                turn_id: turn.clone(),
+                model: "test".to_string(),
+            });
+            let _ = event_tx.send(AgentEvent::TurnCompleted {
+                turn_id: turn,
+                reason: TurnEndReason::Completed,
+            });
+        });
+
+        let code = run_headless_channels(cmd_tx, event_rx, "go".to_string(), false)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+    }
 }

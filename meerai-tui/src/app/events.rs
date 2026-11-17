@@ -160,6 +160,7 @@ impl AppState {
 
 impl SessionTab {
     pub(super) fn apply_agent_event(&mut self, event: AgentEvent) {
+        self.transcript_version = self.transcript_version.wrapping_add(1);
         match event {
             AgentEvent::TurnStarted { turn_id, model } => {
                 if let Some(idx) = self
@@ -185,6 +186,11 @@ impl SessionTab {
                 self.assistant_items.clear();
                 self.tool_items.clear();
                 self.subagent_items.clear();
+            }
+            AgentEvent::RecoveryStarted { attempt } => {
+                self.transcript.push(TranscriptEntry::System {
+                    text: format!("Recovery attempt {attempt} after a failed turn."),
+                });
             }
             AgentEvent::ItemStarted { item } => match item {
                 SessionItem::AgentMessage { id, .. } => {
@@ -697,6 +703,7 @@ impl AppState {
                 return;
             };
             entry.nested_loading = true;
+            tab.transcript_version = tab.transcript_version.wrapping_add(1);
             PendingSessionAction::ReadChildSession {
                 tab_id: tab.tab_id,
                 item_id: item_id.to_string(),
@@ -754,9 +761,19 @@ impl AppState {
         entry.nested_loading = false;
         entry.nested_refreshed_at = Some(Instant::now());
         if let Ok(events) = result {
-            entry.nested = Some(transcript_from_events(&events));
+            entry.nested = Some(newest_nested(transcript_from_events(&events)));
         }
+        tab.transcript_version = tab.transcript_version.wrapping_add(1);
     }
+}
+
+const MAX_NESTED_ENTRIES: usize = 60;
+
+fn newest_nested(mut entries: Vec<TranscriptEntry>) -> Vec<TranscriptEntry> {
+    if entries.len() > MAX_NESTED_ENTRIES {
+        entries.drain(..entries.len() - MAX_NESTED_ENTRIES);
+    }
+    entries
 }
 
 fn error_code_label(code: ErrorCode) -> &'static str {

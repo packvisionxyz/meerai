@@ -1,6 +1,7 @@
 use super::statusline::key_status_style;
 use super::*;
-use crate::app::ApprovalClickAction;
+use crate::app::{ApprovalClickAction, DiffListState};
+use crate::diff::DiffRow;
 
 fn auth_file_display() -> String {
     meerai_common::settings::default_data_dir()
@@ -393,6 +394,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             file_index,
             diff,
             scroll,
+            list,
         } => {
             let popup = centered_rect(area, 92, 86, 60, 12);
             dim_backdrop(frame, area, popup);
@@ -413,52 +415,67 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 Constraint::Length(1),
             ])
             .split(inner);
+
+            let panes_area = match list {
+                DiffListState::Open { selected } => {
+                    let split = Layout::horizontal([
+                        Constraint::Length(32),
+                        Constraint::Length(1),
+                        Constraint::Min(24),
+                    ])
+                    .split(rows[0]);
+                    render_diff_file_list(frame, app, split[0], selected, file_index);
+                    split[2]
+                }
+                DiffListState::Closed => rows[0],
+            };
             let panes = Layout::horizontal([
                 Constraint::Percentage(50),
                 Constraint::Length(1),
                 Constraint::Percentage(50),
             ])
-            .split(rows[0]);
+            .split(panes_area);
 
             let left_body = pane_header(frame, panes[0], &format!("Original (a/{})", diff.path));
             let right_body =
                 pane_header(frame, panes[2], &format!("Working Tree (b/{})", diff.path));
 
-            let left_inner_w = left_body.width as usize;
-            let right_inner_w = right_body.width as usize;
             let view_h = left_body.height.max(1) as usize;
             let max_scroll = diff.rows.len().saturating_sub(view_h);
             let effective_scroll = scroll.min(max_scroll);
+            let visible: Vec<&DiffRow> = diff
+                .rows
+                .iter()
+                .skip(effective_scroll)
+                .take(view_h)
+                .collect();
+            let language = crate::syntax::language_for_path(diff_new_path(&diff.path));
 
-            let mut left_lines = Vec::with_capacity(view_h);
-            let mut right_lines = Vec::with_capacity(view_h);
-            for row in diff.rows.iter().skip(effective_scroll).take(view_h) {
-                left_lines.push(format_diff_pane_line(
-                    row.left.as_ref(),
-                    &row.kind,
-                    true,
-                    left_inner_w,
-                ));
-                right_lines.push(format_diff_pane_line(
-                    row.right.as_ref(),
-                    &row.kind,
-                    false,
-                    right_inner_w,
-                ));
-            }
+            let left_lines = diff_pane_lines(&visible, true, left_body.width as usize, language);
+            let right_lines = diff_pane_lines(&visible, false, right_body.width as usize, language);
 
             frame.render_widget(Paragraph::new(left_lines), left_body);
             frame.render_widget(Paragraph::new(right_lines), right_body);
-            frame.render_widget(
-                Paragraph::new(key_hints_line(&[
+            let hints = if matches!(list, DiffListState::Open { .. }) {
+                key_hints_line(&[
+                    ("↑↓", "select file"),
+                    ("Enter", "open"),
+                    ("f", "hide list"),
+                    ("Tab/[/]", "next/prev"),
+                    ("Esc", "hide list"),
+                    ("q", "close"),
+                ])
+            } else {
+                key_hints_line(&[
                     ("j/k", "scroll"),
                     ("ctrl+d/u", "page"),
                     ("g/G", "top/bot"),
+                    ("f", "files"),
                     ("Tab/[/]", "next/prev file"),
                     ("Esc/q", "close"),
-                ])),
-                rows[2],
-            );
+                ])
+            };
+            frame.render_widget(Paragraph::new(hints), rows[2]);
         }
         ActiveModal::Search {
             query,
@@ -1407,43 +1424,127 @@ fn format_relative_age(now_ms: u64, updated_ms: u64) -> String {
     }
 }
 
-fn format_diff_pane_line(
-    cell: Option<&DiffCell>,
-    kind: &DiffRowKind,
+fn diff_new_path(path: &str) -> &str {
+    path.split_once(" -> ").map(|(_, new)| new).unwrap_or(path)
+}
+
+enum DiffPaneRow {
+    Plain(Line<'static>),
+    Cell {
+        gutter: String,
+        body: String,
+        style: Style,
+    },
+}
+
+fn diff_pane_lines(
+    rows: &[&DiffRow],
     is_left: bool,
     pane_width: usize,
-) -> Line<'static> {
-    if let DiffRowKind::HunkHeader(header) = kind {
-        return Line::from(Span::styled(
-            truncate_single_line(header, pane_width),
-            Style::default()
-                .fg(theme::p().accent)
-                .add_modifier(Modifier::BOLD),
-        ));
+    language: Option<crate::syntax::Language>,
+) -> Vec<Line<'static>> {
+    let mut pane = Vec::with_capacity(rows.len());
+    let mut source = String::new();
+    for (idx, row) in rows.iter().enumerate() {
+        if idx > 0 {
+            source.push('\n');
+        }
+        let entry = if let DiffRowKind::HunkHeader(header) = &row.kind {
+            DiffPaneRow::Plain(Line::from(Span::styled(
+                truncate_single_line(header, pane_width),
+                Style::default()
+                    .fg(theme::p().accent)
+                    .add_modifier(Modifier::BOLD),
+            )))
+        } else {
+            match diff_cell(row, is_left) {
+                None => DiffPaneRow::Plain(Line::from(Span::styled(
+                    "     · ",
+                    Style::default().fg(theme::p().faint),
+                ))),
+                Some(cell) => {
+                    let gutter = diff_gutter(cell.line_no, &row.kind, is_left);
+                    let body = truncate_single_line(
+                        &cell.text,
+                        pane_width.saturating_sub(gutter.chars().count()),
+                    );
+                    source.push_str(&body);
+                    DiffPaneRow::Cell {
+                        gutter,
+                        body,
+                        style: diff_base_style(&row.kind, is_left),
+                    }
+                }
+            }
+        };
+        pane.push(entry);
     }
 
-    let Some(cell) = cell else {
-        return Line::from(Span::styled(
-            "     · ",
-            Style::default().fg(theme::p().faint),
-        ));
+    let Some(language) = language else {
+        return pane
+            .into_iter()
+            .map(|row| match row {
+                DiffPaneRow::Plain(line) => line,
+                DiffPaneRow::Cell {
+                    gutter,
+                    body,
+                    style,
+                } => pane_line(gutter, vec![Span::styled(body, style)]),
+            })
+            .collect();
     };
 
+    let tokens = crate::syntax::token_lines(Some(language), &source);
+    pane.into_iter()
+        .enumerate()
+        .map(|(idx, row)| match row {
+            DiffPaneRow::Plain(line) => line,
+            DiffPaneRow::Cell {
+                gutter,
+                body,
+                style,
+            } => {
+                let line_tokens = tokens.get(idx).map(Vec::as_slice).unwrap_or(&[]);
+                let body_spans = if line_tokens.is_empty() {
+                    vec![Span::styled(body, style)]
+                } else {
+                    crate::syntax::line_spans(line_tokens, style)
+                };
+                pane_line(gutter, body_spans)
+            }
+        })
+        .collect()
+}
+
+fn diff_cell(row: &DiffRow, is_left: bool) -> Option<&DiffCell> {
+    if is_left {
+        row.left.as_ref()
+    } else {
+        row.right.as_ref()
+    }
+}
+
+fn pane_line(gutter: String, body: Vec<Span<'static>>) -> Line<'static> {
+    let mut spans = Vec::with_capacity(body.len() + 1);
+    spans.push(Span::styled(gutter, Style::default().fg(theme::p().faint)));
+    spans.extend(body);
+    Line::from(spans)
+}
+
+fn diff_gutter(line_no: Option<usize>, kind: &DiffRowKind, is_left: bool) -> String {
     let prefix = match (kind, is_left) {
         (DiffRowKind::Removed, true) | (DiffRowKind::Modified, true) => "-",
         (DiffRowKind::Added, false) | (DiffRowKind::Modified, false) => "+",
         _ => " ",
     };
-    let line_num = match cell.line_no {
+    match line_no {
         Some(n) => format!("{n:>4} {prefix} "),
         None => format!("     {prefix} "),
-    };
-    let body = truncate_single_line(
-        &cell.text,
-        pane_width.saturating_sub(line_num.chars().count()),
-    );
+    }
+}
 
-    let style = match (kind, is_left) {
+fn diff_base_style(kind: &DiffRowKind, is_left: bool) -> Style {
+    match (kind, is_left) {
         (DiffRowKind::Removed, true) | (DiffRowKind::Modified, true) => {
             Style::default().fg(theme::p().diff_removed)
         }
@@ -1451,10 +1552,72 @@ fn format_diff_pane_line(
             Style::default().fg(theme::p().diff_added)
         }
         _ => Style::default().fg(theme::p().diff_context),
-    };
+    }
+}
 
-    Line::from(vec![
-        Span::styled(line_num, Style::default().fg(theme::p().faint)),
-        Span::styled(body, style),
-    ])
+fn render_diff_file_list(
+    frame: &mut Frame<'_>,
+    app: &mut AppState,
+    area: Rect,
+    selected: usize,
+    file_index: usize,
+) {
+    let inner = pane_header(frame, area, &format!("Files ({})", app.file_changes.len()));
+    if app.file_changes.is_empty() || inner.height == 0 {
+        return;
+    }
+    let width = inner.width as usize;
+    let selected_idx = selected.min(app.file_changes.len() - 1);
+    let items: Vec<ListItem<'_>> = app
+        .file_changes
+        .iter()
+        .enumerate()
+        .map(|(idx, entry)| {
+            let is_current = idx == file_index;
+            let is_selected = idx == selected_idx;
+            let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(idx));
+            let marker = if is_current { "● " } else { "  " };
+            let prefix_width = 1 + marker.chars().count() + entry.status.chars().count() + 1;
+            let path_style = if is_selected {
+                Style::default()
+                    .fg(theme::p().accent)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_current {
+                Style::default()
+                    .fg(theme::p().text)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::p().text)
+            };
+            let row = ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!(" {marker}"),
+                    Style::default().fg(if is_current {
+                        theme::p().accent
+                    } else {
+                        theme::p().faint
+                    }),
+                ),
+                Span::styled(
+                    format!("{} ", entry.status),
+                    Style::default().fg(theme::p().muted),
+                ),
+                Span::styled(
+                    truncate_single_line(&entry.path, width.saturating_sub(prefix_width)),
+                    path_style,
+                ),
+            ]));
+            if is_hovered && !is_selected {
+                row.style(hover_row_style())
+            } else {
+                row
+            }
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    state.select(Some(selected_idx));
+    let list = List::new(items).highlight_style(Style::default().bg(theme::p().surface_high));
+    frame.render_stateful_widget(list, inner, &mut state);
+    register_list_hit_zones(app, inner, state.offset(), app.file_changes.len());
 }

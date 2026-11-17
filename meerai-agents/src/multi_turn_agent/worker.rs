@@ -1,5 +1,10 @@
 use super::*;
 
+struct QueuedPrompt {
+    text: String,
+    model: Option<String>,
+}
+
 impl MultiTurnAgent {
     pub(super) async fn drain_inbox(
         &mut self,
@@ -47,23 +52,38 @@ pub fn spawn_worker(
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 
     tokio::spawn(async move {
-        let mut queued: VecDeque<String> = VecDeque::new();
+        let mut queued: VecDeque<QueuedPrompt> = VecDeque::new();
 
         agent.start_session(&event_tx).await;
 
         'worker: while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
                 AgentCommand::SubmitPrompt(prompt) | AgentCommand::Steer(prompt) => {
-                    queued.push_back(prompt);
+                    queued.push_back(QueuedPrompt {
+                        text: prompt,
+                        model: None,
+                    });
                     let mut recovery_attempts = 0usize;
 
-                    while let Some(prompt) = queued.pop_front() {
+                    while let Some(QueuedPrompt {
+                        text: prompt,
+                        model: turn_model,
+                    }) = queued.pop_front()
+                    {
                         let harnessed = agent.harness.is_some();
                         let cancel = CancellationToken::new();
                         let mut pending_quit = false;
                         let mut pending_reset = false;
                         let mut pending_model: Option<String> = None;
-                        let mut recovery: Option<String> = None;
+                        let mut recovery: Option<QueuedPrompt> = None;
+                        let recovery_model = agent
+                            .harness
+                            .as_ref()
+                            .and_then(|harness| harness.config.recovery_model.clone());
+                        let previous_model = turn_model.as_ref().map(|_| agent.model().to_string());
+                        if let Some(model) = &turn_model {
+                            agent.set_model(model.clone());
+                        }
                         let (inbox_tx, mut inbox_rx) = mpsc::unbounded_channel();
 
                         {
@@ -82,6 +102,22 @@ pub fn spawn_worker(
                                             Ok(_) => recovery_attempts = 0,
                                             Err(err) => {
                                                 let message = err.message();
+                                                let recoverable = match err.code {
+                                                    ErrorCode::Provider => err.retryable,
+                                                    ErrorCode::LoopDetected => true,
+                                                    _ => false,
+                                                };
+                                                let will_recover = recoverable
+                                                    && recovery_attempts < MAX_RECOVERY_ATTEMPTS
+                                                    && !pending_quit
+                                                    && !pending_reset;
+                                                if will_recover {
+                                                    let _ = event_tx.send(
+                                                        AgentEvent::RecoveryStarted {
+                                                            attempt: recovery_attempts + 1,
+                                                        },
+                                                    );
+                                                }
                                                 let _ = event_tx.send(AgentEvent::Error {
                                                     code: err.code,
                                                     message: message.clone(),
@@ -90,18 +126,12 @@ pub fn spawn_worker(
                                                     turn_id,
                                                     reason: TurnEndReason::Failed { error: message.clone() },
                                                 });
-                                                let recoverable = match err.code {
-                                                    ErrorCode::Provider => err.retryable,
-                                                    ErrorCode::LoopDetected => true,
-                                                    _ => false,
-                                                };
-                                                if recoverable
-                                                    && recovery_attempts < MAX_RECOVERY_ATTEMPTS
-                                                    && !pending_quit
-                                                    && !pending_reset
-                                                {
+                                                if will_recover {
                                                     recovery_attempts += 1;
-                                                    recovery = Some(recovery_prompt(&message));
+                                                    recovery = Some(QueuedPrompt {
+                                                        text: recovery_prompt(&message),
+                                                        model: recovery_model.clone(),
+                                                    });
                                                 }
                                             }
                                         }
@@ -122,10 +152,16 @@ pub fn spawn_worker(
                                                 pending_model = Some(model);
                                             }
                                             Some(AgentCommand::SubmitPrompt(prompt)) => {
-                                                queued.push_back(prompt);
+                                                queued.push_back(QueuedPrompt {
+                                                    text: prompt,
+                                                    model: None,
+                                                });
                                             }
                                             Some(AgentCommand::Steer(text)) if !harnessed => {
-                                                queued.push_back(text);
+                                                queued.push_back(QueuedPrompt {
+                                                    text,
+                                                    model: None,
+                                                });
                                             }
                                             Some(
                                                 command @ (AgentCommand::Steer(_)
@@ -147,6 +183,9 @@ pub fn spawn_worker(
                             }
                         }
 
+                        if let Some(previous) = previous_model {
+                            agent.set_model(previous);
+                        }
                         if let Some(model) = pending_model {
                             agent.set_model(model);
                             agent.persist_model().await;

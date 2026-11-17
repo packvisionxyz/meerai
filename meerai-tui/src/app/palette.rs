@@ -4,6 +4,8 @@ pub(crate) enum PaletteAction {
     CopyReply,
     NextTab,
     PreviousTab,
+    MoveTabLeft,
+    MoveTabRight,
     CycleApproval,
 }
 
@@ -57,6 +59,20 @@ pub(crate) const PALETTE_COMMANDS: &[PaletteCommand] = &[
         hint: "alt+left / [",
         keywords: "switch tab previous",
         action: PaletteAction::PreviousTab,
+    },
+    PaletteCommand {
+        section: "Session",
+        label: "Move tab left",
+        hint: "alt+shift+left",
+        keywords: "move tab reorder left",
+        action: PaletteAction::MoveTabLeft,
+    },
+    PaletteCommand {
+        section: "Session",
+        label: "Move tab right",
+        hint: "alt+shift+right",
+        keywords: "move tab reorder right",
+        action: PaletteAction::MoveTabRight,
     },
     PaletteCommand {
         section: "Model",

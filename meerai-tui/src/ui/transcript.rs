@@ -1,6 +1,6 @@
 use super::statusline::{display_model, key_status_style, summarize_error_line};
 use super::*;
-use crate::app::ToolCallEntry;
+use crate::app::{ToolCallEntry, TranscriptBuildMemo, TranscriptDocument, TranscriptRenderKey};
 
 pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     let inner = Rect {
@@ -11,29 +11,21 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area:
     };
     app.transcript_inner_area = inner;
 
-    let raw_lines = build_transcript_lines(app);
-    let mut wrapped = if inner.width > 0 {
-        wrap_tagged_lines(raw_lines, inner.width as usize)
-    } else {
-        WrappedTranscript {
-            lines: Vec::new(),
-            hit_zones: Vec::new(),
-            digest_hit_zones: Vec::new(),
-            doc_lines: Vec::new(),
-            bands: Vec::new(),
-            code_bands: Vec::new(),
-            hover_zones: Vec::new(),
-        }
-    };
+    if inner.width == 0 {
+        app.transcript_cache.clear();
+        app.thinking_hit_zones.clear();
+        app.digest_hit_zones.clear();
+        app.transcript_wrapped_lines.clear();
+        app.hover_zones.clear();
+    } else if !app.transcript_cache.matches(app, inner.width) {
+        rebuild_transcript_document(app, inner.width);
+    }
 
-    app.thinking_hit_zones = std::mem::take(&mut wrapped.hit_zones);
-    app.digest_hit_zones = std::mem::take(&mut wrapped.digest_hit_zones);
-    app.transcript_wrapped_lines = std::mem::take(&mut wrapped.doc_lines);
-
+    let line_count = app.transcript_cache.document.line_count;
     let scroll_y = {
         let tab = app.tab_mut();
         tab.viewport_height = inner.height as usize;
-        tab.total_lines = wrapped.lines.len();
+        tab.total_lines = line_count;
         let max_scroll = tab.max_scroll();
         if tab.auto_follow {
             tab.scroll_offset = max_scroll;
@@ -54,17 +46,17 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area:
                 | Some(TranscriptEntry::Error { .. })
         )
     });
-    let hover_zones = std::mem::take(&mut wrapped.hover_zones);
     let hover_range = hovered.and_then(|idx| {
-        hover_zones
+        app.hover_zones
             .iter()
             .find(|zone| zone.entry_idx == idx)
             .map(|zone| (zone.start_line, zone.end_line))
     });
-    app.hover_zones = hover_zones;
 
-    let paragraph = Paragraph::new(wrapped.lines).scroll((scroll_y, 0));
-    frame.render_widget(paragraph, inner);
+    let scrolled =
+        std::mem::take(&mut app.transcript_cache.document.paragraph).scroll((scroll_y, 0));
+    frame.render_widget(&scrolled, inner);
+    app.transcript_cache.document.paragraph = scrolled;
 
     if inner.width == 0 || inner.height == 0 {
         return;
@@ -92,24 +84,109 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area:
         }
     };
 
-    paint(frame, &wrapped.code_bands, 2, theme::p().surface_high);
-    paint(frame, &wrapped.bands, 0, theme::p().surface);
+    let rows = VisibleRows {
+        inner,
+        first: first_visible,
+        last: last_visible,
+    };
+
+    let document = &app.transcript_cache.document;
+    paint(frame, &document.code_bands, 2, theme::p().surface_high);
+    paint(frame, &document.bands, 0, theme::p().surface);
     if let Some(range) = hover_range
         && paint_hover
     {
         paint(frame, &[range], 0, theme::p().surface_high);
     }
+
+    if let Some(idx) = app.hovered_digest
+        && let Some(zone) = app
+            .digest_hit_zones
+            .iter()
+            .find(|zone| zone.entry_idx == idx)
+    {
+        paint_text(
+            frame,
+            rows,
+            zone.start_line,
+            zone.end_line,
+            2,
+            theme::p().text,
+        );
+    }
+    if let Some(idx) = app.hovered_entry
+        && let Some(zone) = document
+            .hover_text_zones
+            .iter()
+            .find(|zone| zone.entry_idx == idx)
+    {
+        paint_text(
+            frame,
+            rows,
+            zone.start_line,
+            zone.end_line,
+            0,
+            theme::p().text,
+        );
+    }
 }
 
-const LOGO_M_ROWS: [&str; 4] = ["██      ██", "████  ████", "██  ██  ██", "██      ██"];
+fn rebuild_transcript_document(app: &mut AppState, width: u16) {
+    let key = TranscriptRenderKey::capture(app, width);
+    let mut memo = app.transcript_cache.take_memo();
+    let built = build_transcript_lines(app, &mut memo);
+    let wrapped = wrap_tagged_lines(built, width as usize);
+    let line_count = wrapped.lines.len();
+    app.thinking_hit_zones = wrapped.hit_zones;
+    app.digest_hit_zones = wrapped.digest_hit_zones;
+    app.transcript_wrapped_lines = wrapped.doc_lines;
+    app.hover_zones = wrapped.hover_zones;
+    app.transcript_cache.store(
+        key,
+        memo,
+        TranscriptDocument {
+            paragraph: Paragraph::new(wrapped.lines),
+            line_count,
+            bands: wrapped.bands,
+            code_bands: wrapped.code_bands,
+            hover_text_zones: wrapped.hover_text_zones,
+        },
+    );
+}
+
+#[derive(Clone, Copy)]
+struct VisibleRows {
+    inner: Rect,
+    first: usize,
+    last: usize,
+}
+
+fn paint_text(
+    frame: &mut Frame<'_>,
+    rows: VisibleRows,
+    start_line: usize,
+    end_line: usize,
+    first_row_offset: u16,
+    color: Color,
+) {
+    for row in start_line.max(rows.first)..end_line.min(rows.last) {
+        let offset = if row == start_line {
+            first_row_offset
+        } else {
+            0
+        };
+        let y = rows.inner.y + (row - rows.first) as u16;
+        for col in rows.inner.x.saturating_add(offset)..rows.inner.x + rows.inner.width {
+            if let Some(cell) = frame.buffer_mut().cell_mut((col, y)) {
+                cell.set_fg(color);
+            }
+        }
+    }
+}
 
 fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
-    let logo_style = Style::default()
-        .fg(theme::p().accent)
-        .add_modifier(Modifier::BOLD);
-
-    let mut identity = vec![
-        Span::styled(LOGO_M_ROWS[0], logo_style),
+    let mut identity = crate::logo::m_spans(0);
+    identity.extend([
         Span::raw("  "),
         Span::styled(
             "meerai",
@@ -118,7 +195,7 @@ fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-    ];
+    ]);
     match app.tab().acp_preset() {
         Some(preset) => {
             identity.push(Span::styled(
@@ -146,44 +223,38 @@ fn build_header_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
         }
     }
 
+    let logo_line = |row: usize, suffix: Span<'static>| {
+        let mut spans = crate::logo::m_spans(row);
+        spans.push(suffix);
+        tagged_line(Line::from(spans), None, 0)
+    };
+
     let mut lines = vec![
         tagged_line(Line::from(identity), None, 0),
-        tagged_line(
-            Line::from(vec![
-                Span::styled(LOGO_M_ROWS[1], logo_style),
-                Span::styled(
-                    "  Commands: /sessions, /new, /connect, /models, /help, @ (files).",
-                    Style::default().fg(theme::p().muted),
-                ),
-            ]),
-            None,
-            0,
+        logo_line(
+            1,
+            Span::styled(
+                "  Commands: /sessions, /new, /connect, /models, /help, @ (files).",
+                Style::default().fg(theme::p().muted),
+            ),
         ),
-        tagged_line(
-            Line::from(vec![
-                Span::styled(LOGO_M_ROWS[2], logo_style),
-                Span::styled(
-                    format!(
-                        "  Shortcuts: {} newline, {} commands, drag/shift+click copy.",
-                        crate::app::ctrl_label('j'),
-                        crate::app::ctrl_label('p')
-                    ),
-                    Style::default().fg(theme::p().muted),
+        logo_line(
+            2,
+            Span::styled(
+                format!(
+                    "  Shortcuts: {} newline, {} commands, drag/shift+click copy.",
+                    crate::app::ctrl_label('j'),
+                    crate::app::ctrl_label('p')
                 ),
-            ]),
-            None,
-            0,
+                Style::default().fg(theme::p().muted),
+            ),
         ),
-        tagged_line(
-            Line::from(vec![
-                Span::styled(LOGO_M_ROWS[3], logo_style),
-                Span::styled(
-                    format!("  Workspace: {}", app.workspace_root.display()),
-                    Style::default().fg(theme::p().faint),
-                ),
-            ]),
-            None,
-            0,
+        logo_line(
+            3,
+            Span::styled(
+                format!("  Workspace: {}", app.workspace_root.display()),
+                Style::default().fg(theme::p().faint),
+            ),
         ),
     ];
 
@@ -392,30 +463,35 @@ fn turn_digests(transcript: &[TranscriptEntry]) -> Vec<Option<TurnDigest>> {
     digests
 }
 
-fn digest_line(digest: &TurnDigest, expanded: bool, hovered: bool) -> Option<Line<'static>> {
+fn digest_line(digest: &TurnDigest, expanded: bool) -> Option<Line<'static>> {
     if digest.is_empty() {
         return None;
     }
-    let text_style = if hovered {
-        Style::default().fg(theme::p().text)
-    } else {
-        Style::default().fg(theme::p().faint)
-    };
     Some(Line::from(vec![
         Span::styled(
             if expanded { "- " } else { "+ " },
             Style::default().fg(theme::p().faint),
         ),
-        Span::styled(digest.summary(), text_style),
+        Span::styled(digest.summary(), Style::default().fg(theme::p().faint)),
     ]))
 }
 
-fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
+struct BuiltTranscript {
+    lines: Vec<TaggedTranscriptLine>,
+    hover_text_lines: Vec<(usize, usize)>,
+}
+
+fn build_transcript_lines(app: &AppState, memo: &mut TranscriptBuildMemo) -> BuiltTranscript {
     let mut lines = build_header_lines(app);
+    let mut hover_text_lines: Vec<(usize, usize)> = Vec::new();
     let tab = app.tab();
     let transcript = &tab.transcript;
+    memo.begin(tab.tab_id, theme::p(), transcript.len());
     if transcript.is_empty() {
-        return lines;
+        return BuiltTranscript {
+            lines,
+            hover_text_lines,
+        };
     }
 
     let digests = turn_digests(transcript);
@@ -457,8 +533,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                 }
                 if let Some(digest) = digests.get(idx).and_then(|d| d.as_ref()) {
                     let expanded = tab.turn_activity.get(&idx).copied().unwrap_or(false);
-                    let hovered = app.hovered_digest == Some(idx);
-                    if let Some(line) = digest_line(digest, expanded, hovered) {
+                    if let Some(line) = digest_line(digest, expanded) {
                         lines.push(with_digest(tagged_line(line, None, 2), idx));
                     }
                 }
@@ -477,16 +552,11 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     } else {
                         format!("{line_count} lines")
                     };
-                    let header_style = if app.hovered_entry == Some(idx) {
-                        Style::default()
-                            .fg(theme::p().text)
-                            .add_modifier(Modifier::ITALIC)
-                    } else {
-                        Style::default()
-                            .fg(theme::p().muted)
-                            .add_modifier(Modifier::ITALIC)
-                    };
+                    let header_style = Style::default()
+                        .fg(theme::p().muted)
+                        .add_modifier(Modifier::ITALIC);
                     if *reasoning_expanded {
+                        hover_text_lines.push((lines.len(), idx));
                         lines.push(with_hover(
                             tagged_line(
                                 Line::from(Span::styled(
@@ -517,6 +587,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                             ));
                         }
                     } else {
+                        hover_text_lines.push((lines.len(), idx));
                         lines.push(with_hover(
                             tagged_line(
                                 Line::from(Span::styled(
@@ -532,7 +603,8 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                 }
                 if !text.is_empty() {
                     let mut in_code_block = false;
-                    for line in crate::markdown::render(text) {
+                    let rendered = memo.markdown(idx, text);
+                    for line in rendered.iter() {
                         if line.code && !in_code_block {
                             lines.push(code_line(tagged_line(Line::default(), None, 4)));
                             in_code_block = true;
@@ -543,7 +615,7 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                         let prefix = if line.code { "    " } else { "  " };
                         let gutter = if line.code { 4 } else { 2 };
                         let mut spans = vec![Span::styled(prefix, Style::default())];
-                        spans.extend(line.spans);
+                        spans.extend(line.spans.iter().cloned());
                         let tagged = tagged_line(Line::from(spans), None, gutter);
                         lines.push(if line.code { code_line(tagged) } else { tagged });
                     }
@@ -559,11 +631,9 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                     tc.status,
                     ToolCallStatus::Proposed | ToolCallStatus::Running
                 );
-                let diff = edit_diff(tc);
-                let (added, removed) = diff
-                    .as_deref()
-                    .map(crate::diff::diff_counts)
-                    .unwrap_or((0, 0));
+                let diff = memo.edit_diff(idx, tc, || edit_diff(tc));
+                let diff = diff.as_ref().as_ref().map(Vec::as_slice);
+                let (added, removed) = diff.map(crate::diff::diff_counts).unwrap_or((0, 0));
                 let (gerund, past) = activity_verbs(&tc.name);
                 let verb = if active { gerund } else { past };
                 let target = tool_target(&tc.name, &tc.args, &script);
@@ -629,12 +699,12 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
                 ));
 
                 if tc.expanded
-                    && let Some(diff) = &diff
+                    && let Some(diff) = diff
                 {
                     let language = tool_path(tc)
                         .as_deref()
                         .and_then(crate::syntax::language_for_path);
-                    render_edit_diff(&mut lines, diff, language, idx);
+                    render_edit_diff(&mut lines, diff, language, idx, memo);
                 }
 
                 if tc.expanded && diff.is_none() && !full_args.is_empty() {
@@ -897,7 +967,10 @@ fn build_transcript_lines(app: &AppState) -> Vec<TaggedTranscriptLine> {
         }
     }
 
-    lines
+    BuiltTranscript {
+        lines,
+        hover_text_lines,
+    }
 }
 
 fn activity_verbs(name: &str) -> (&'static str, &'static str) {
@@ -998,6 +1071,7 @@ fn render_edit_diff(
     diff: &[crate::diff::UnifiedLine],
     language: Option<crate::syntax::Language>,
     idx: usize,
+    memo: &mut TranscriptBuildMemo,
 ) {
     use crate::diff::UnifiedLineKind;
     const MAX_DIFF_LINES: usize = 200;
@@ -1018,7 +1092,9 @@ fn render_edit_diff(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let tokens = crate::syntax::token_lines(language, &source);
+    let tokens = memo.tokens(idx, language, &source, || {
+        crate::syntax::token_lines(language, &source)
+    });
 
     for (position, line) in body.iter().take(visible).enumerate() {
         let line_tokens = tokens.get(position).map(Vec::as_slice).unwrap_or(&[]);
@@ -1197,9 +1273,14 @@ struct WrappedTranscript {
     bands: Vec<(usize, usize)>,
     code_bands: Vec<(usize, usize)>,
     hover_zones: Vec<HoverZone>,
+    hover_text_zones: Vec<HoverZone>,
 }
 
-fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedTranscript {
+fn wrap_tagged_lines(built: BuiltTranscript, width: usize) -> WrappedTranscript {
+    let BuiltTranscript {
+        lines,
+        hover_text_lines,
+    } = built;
     if width == 0 {
         return WrappedTranscript {
             lines: Vec::new(),
@@ -1209,6 +1290,7 @@ fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedT
             bands: Vec::new(),
             code_bands: Vec::new(),
             hover_zones: Vec::new(),
+            hover_text_zones: Vec::new(),
         };
     }
 
@@ -1219,11 +1301,13 @@ fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedT
     let mut bands: Vec<(usize, usize)> = Vec::new();
     let mut code_bands: Vec<(usize, usize)> = Vec::new();
     let mut hover_zones: Vec<HoverZone> = Vec::new();
+    let mut hover_text_zones: Vec<HoverZone> = Vec::new();
     let mut hover_active: Option<(usize, usize)> = None;
     let mut active_zone: Option<(usize, usize)> = None;
     let mut active_digest: Option<(usize, usize)> = None;
+    let mut hover_text_marker = 0;
 
-    for tagged in lines {
+    for (tag_idx, tagged) in lines.into_iter().enumerate() {
         let TaggedTranscriptLine {
             line,
             entry_tag,
@@ -1357,6 +1441,16 @@ fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedT
             }
             (None, None) => {}
         }
+        if let Some((marker_idx, entry_idx)) = hover_text_lines.get(hover_text_marker)
+            && *marker_idx == tag_idx
+        {
+            hover_text_zones.push(HoverZone {
+                entry_idx: *entry_idx,
+                start_line: line_start,
+                end_line: out.len(),
+            });
+            hover_text_marker += 1;
+        }
     }
 
     if let Some((cur_idx, start)) = active_zone {
@@ -1391,5 +1485,6 @@ fn wrap_tagged_lines(lines: Vec<TaggedTranscriptLine>, width: usize) -> WrappedT
         bands,
         code_bands,
         hover_zones,
+        hover_text_zones,
     }
 }

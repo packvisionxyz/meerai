@@ -402,18 +402,20 @@ impl MultiTurnAgent {
         .await;
     }
 
-    pub(super) fn over_high_watermark(&self) -> bool {
-        let Some(harness) = &self.harness else {
+    pub(super) fn over_high_watermark(&mut self) -> bool {
+        let Some(threshold) = self.harness.as_ref().map(|harness| {
+            harness
+                .config
+                .context_window_tokens
+                .saturating_mul(u64::from(harness.config.high_watermark_pct))
+                / 100
+        }) else {
             return false;
         };
-        let threshold = harness
-            .config
-            .context_window_tokens
-            .saturating_mul(u64::from(harness.config.high_watermark_pct))
-            / 100;
-        let estimated = estimate_context_tokens(&self.request_messages())
-            + estimate_tokens(&self.effective_system_prompt())
-            + self.tool_schema_tokens;
+        let system_tokens = estimate_tokens(&self.effective_system_prompt());
+        let messages = self.request_messages();
+        let estimated =
+            estimate_context_tokens(&messages) + system_tokens + self.tool_schema_tokens;
         estimated > threshold
     }
 

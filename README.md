@@ -137,7 +137,8 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   runs; the statusline names the running agents.
 - **Checkpoints and rewind (M6 v1):** write-class tools capture the original
   file before a change. `/rewind` restores code, conversation, or both for the
-  latest turn. Shell-only edits, external edits, and files over 2 MiB are not
+  latest turn; a conversation rewind puts the message back in the composer for
+  editing. Shell-only edits, external edits, and files over 2 MiB are not
   tracked.
 - **User questions (`question-ask`):** the model can ask one to four
   single- or multiple-choice questions through `QuestionAsked` /
@@ -166,8 +167,12 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   `/agent`/`/skill`, a `@` Mentions popup for agents, skills, and files,
   collapsible per-turn activity summaries (`+`/`-`) with inline
   syntax-highlighted edit diffs, menu shortcuts (`ctrl+s` sessions, `ctrl+o`
-  models, `ctrl+a` provider, `ctrl+e` diff), and a `ctrl+p` command palette
+  models, `ctrl+a` provider, `ctrl+e` diff), tab reordering
+  (`alt+shift+arrows` or drag), a syntax-highlighted diff review with an `f`
+  file list, and a `ctrl+p` command palette
   with sectioned actions and a right-hand shortcut column;
+  on exit, the terminal shows the session title and a `meerai --resume <id>`
+  continue line under the same gradient logo as the TUI header;
   one-shot headless turns with a token summary on stderr, NDJSON event stream,
   `sessions list|rm|prune|fork` management, `--fork <ID>`, startup cleanup of
   unused sessions, and opt-in startup retention (`sessions.auto_prune_days`).
@@ -363,14 +368,14 @@ TUI commands and mentions:
 | `@skill/<id>` | Apply a skill, then send the rest of the prompt |
 
 Typing `@` opens one **Mentions** popup. Agents are listed first, then skills,
-then files. Agent rows show the id in the purple accent color, skill rows show
-the id in the orange interactive color, and both show the source and description
+then files. Agent rows show the id in the blue accent color, skill rows show
+the id in the gold interactive color, and both show the source and description
 after the id. File rows show the path in the normal text color. The row shows the
 bare `<id>`, not the `@agent/` or `@skill/` prefix. The same id can appear once as
 an agent and once as a skill.
 
 After you accept a known `@agent/<id>` or `@skill/<id>` mention, the composer
-shows only `<id>`: a bold purple agent chip or a bold orange skill chip. The raw
+shows only `<id>`: a bold blue agent chip or a bold gold skill chip. The raw
 `@agent/<id>` or `@skill/<id>` text stays in the input buffer, and the prefix is
 hidden only in the display. Unknown ids and partial tokens such as
 `@skill/doesnotexist` or `@skill/del` render exactly as typed. Several mentions
@@ -557,7 +562,7 @@ counts toward `context.max_session_tokens`.
 
 The TUI uses the opencode dark palette by default: near-black background,
 raised surfaces for the sidebar, composer, and the user band, muted borders only
-on dialogs, a purple accent, and a warm orange interactive color. Active tool
+on dialogs, a blue accent, and a warm gold interactive color. Active tool
 rows keep the raised band; finished rows fade to muted text and recede into the
 background so only running work stands out. Override
 any token in `settings.yml` (user), `<project-root>/.meerai/settings.yml`
@@ -572,16 +577,16 @@ theme:
   text: "#eeeeee"
   muted: "#808080"
   faint: "#4c4c4c"
-  accent: "#9d7cd8"
-  interactive: "#fab283"
+  accent: "#61afef"
+  interactive: "#e5c07b"
   border: "#484848"
   error: "#e06c75"
-  warning: "#f5a742"
+  warning: "#ff9e64"
   success: "#7fd88f"
   info: "#56b6c2"
   diff_added: "#4fd6be"
   diff_removed: "#c53b53"
-  diff_context: "#828bb8"
+  diff_context: "#7d8590"
 ```
 
 Values accept `#rgb`, `#rrggbb`, or a terminal color name (`black`, `darkgray`,

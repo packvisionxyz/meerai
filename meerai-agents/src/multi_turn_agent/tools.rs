@@ -295,7 +295,8 @@ impl MultiTurnAgent {
                 return Ok(None);
             }
 
-            let args_str = normalized_tool_args(&tc.fn_arguments);
+            let normalized_args = normalized_tool_args(&tc.fn_arguments);
+            let args_str = coerce_tool_args(&self.tools, &tc.fn_name, &normalized_args);
             let effect = self
                 .tools
                 .iter()
@@ -683,6 +684,7 @@ impl MultiTurnAgent {
                 .await;
             }
 
+            let repair_hint = argument_repair_hint(&self.tools, &tool_call.fn_name, &observation);
             self.log_event(
                 event_tx,
                 SessionEvent::ToolResult {
@@ -691,6 +693,17 @@ impl MultiTurnAgent {
                 },
             )
             .await;
+
+            if let Some(hint) = repair_hint {
+                self.log_event(
+                    event_tx,
+                    SessionEvent::UserMessage {
+                        source: InputSource::RuntimeContext,
+                        content: vec![ContentBlock::Text(hint)],
+                    },
+                )
+                .await;
+            }
 
             if self.post_edit_diagnostics
                 && matches!(status, ItemStatus::Succeeded)
@@ -1913,6 +1926,62 @@ mod auto_approve_tests {
 
 fn normalized_tool_args(value: &serde_json::Value) -> String {
     meerai_core::lenient::normalize_tool_arguments(value).to_string()
+}
+
+fn coerce_tool_args(tools: &[Box<dyn Toolset>], fn_name: &str, args: &str) -> String {
+    let Some(tool) = tools.iter().find(|tool| tool.contain(fn_name)) else {
+        return args.to_string();
+    };
+    let Some(definition) = tool
+        .definition()
+        .into_iter()
+        .find(|definition| definition.name == fn_name)
+    else {
+        return args.to_string();
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(args) else {
+        return args.to_string();
+    };
+    if meerai_core::lenient::coerce_to_schema(&mut value, &definition.parameters) {
+        value.to_string()
+    } else {
+        args.to_string()
+    }
+}
+
+fn argument_repair_hint(
+    tools: &[Box<dyn Toolset>],
+    fn_name: &str,
+    observation: &ToolObservation,
+) -> Option<String> {
+    if observation.status != ObservationStatus::Error {
+        return None;
+    }
+    let message = if observation.stderr.is_empty() {
+        observation.stdout.as_str()
+    } else {
+        observation.stderr.as_str()
+    };
+    let looks_like_arguments = message.contains("arguments for tool failed to parse")
+        || message.contains("invalid type")
+        || message.contains("missing field")
+        || message.contains("unknown field");
+    if !looks_like_arguments {
+        return None;
+    }
+    let schema = tools
+        .iter()
+        .find(|tool| tool.contain(fn_name))?
+        .definition()
+        .into_iter()
+        .find(|definition| definition.name == fn_name)?
+        .parameters
+        .to_string();
+    let schema = &schema[..floor_char_boundary(&schema, 4_096)];
+    let error = &message[..floor_char_boundary(message, 2_048)];
+    Some(format!(
+        "Tool '{fn_name}' rejected its arguments. Retry the same tool with corrected JSON. Use this parameter schema (truncated to 4 KiB):\n{schema}\nError: {error}"
+    ))
 }
 
 #[cfg(test)]

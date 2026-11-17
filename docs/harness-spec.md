@@ -728,7 +728,9 @@ context:
 - The TUI `/rewind` menu targets the latest user turn and offers **Rewind code +
   conversation | Rewind code only**. The message menu's **Rewind** action sends
   `RewindScope::Both` for the selected turn. Conversation restore truncates the
-  visible transcript before the turn. `Summarize from here` is not implemented.
+  visible transcript before the turn and restores the rewound user message to
+  the composer for amendment; code-only restore keeps the transcript and
+  composer untouched. `Summarize from here` is not implemented.
 - Documented limits: shell-only changes, external edits, gitignored files, files
   over 2 MiB, and symlinks are not tracked. Checkpoints are session recovery,
   not version control. Retention keeps the newest 100 turn directories,
@@ -945,8 +947,8 @@ Review the current changes. List findings by severity with file:line references.
 - `--skill <ID>` is repeatable and appends skill text before the agent text at
   startup. `/skill <id>` applies the body as a System message at the next step
   boundary. In the TUI, typing `@` opens the Mentions popup: agents first, then
-  skills, then files. An agent row shows the id in the purple accent color, a
-  skill row shows the id in the orange interactive color, each followed by its
+  skills, then files. An agent row shows the id in the blue accent color, a
+  skill row shows the id in the gold interactive color, each followed by its
   source and description; a file row shows its path in the normal text color.
   The row shows the bare id, not the `@agent/`/`@skill/` prefix. One id can
   appear as both an agent and a skill.
@@ -955,7 +957,7 @@ Review the current changes. List findings by severity with file:line references.
   submitting; Esc dismisses. Accepting inserts `@agent/<id> `, `@skill/<id> `,
   or `@path ` with one trailing space and stays in Insert. An exact agent or
   skill id keeps the popup open; an exact file path auto-dismisses. A known
-  accepted mention renders as an `<id>` chip (bold purple for agent, bold orange
+  accepted mention renders as an `<id>` chip (bold blue for agent, bold gold
   for skill) while the raw `@agent/<id>`/`@skill/<id>` stays in the input buffer;
   unknown ids and partial tokens render as typed. On submit,
   skills apply before the agent, mentions are stripped, repeats apply once, and
@@ -1535,14 +1537,14 @@ the Post-M5 R5 note).
   default; a colon model is ignored with a warning; `steps`/`mode` print a note
   and are not applied. TUI `/agent <id>` and `/skill <id>` send
   `AgentCommand::ApplyAgent`/`ApplySkill`; typing `@` opens the Mentions popup
-  (agents, then skills, then files; ids in purple for agents and orange for
+  (agents, then skills, then files; ids in blue for agents and gold for
   skills, files in the normal text color). Up/Down or ctrl+p/ctrl+n move, Tab
   accepts, Enter accepts
   without submitting, Esc dismisses; an exact agent/skill id keeps the popup
   open. On submit, skills apply before the agent, mentions are stripped, repeats
   apply once, and an unknown mention stays as text; a mention-only prompt applies
   definitions without a turn. A known accepted mention renders as an `<id>` chip
-  (bold purple agent, bold orange skill) while the raw `@agent/<id>`/`@skill/<id>`
+  (bold blue agent, bold gold skill) while the raw `@agent/<id>`/`@skill/<id>`
   stays in the input buffer; unknown and partial tokens render as typed. The
   composer title says `@ mentions`. `/agents` and `/skills` open the Mentions
   popup filtered to that kind.

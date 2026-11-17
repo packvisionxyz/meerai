@@ -429,6 +429,102 @@ async fn edit_file_requires_unique_match_unless_replace_all() {
 }
 
 #[tokio::test]
+async fn edit_file_repairs_indentation_mismatch() {
+    let workspace = Workspace::new();
+    workspace.write("src/lib.rs", "fn main() {\n    let x = 1;\n}\n");
+    let tools = workspace.tools();
+
+    let run = call(
+        &tools,
+        "edit_file",
+        json!({
+            "path": "src/lib.rs",
+            "old_string": "fn main() {\n  let x = 1;\n}",
+            "new_string": "fn main() {\n    let x = 2;\n}"
+        }),
+    )
+    .await;
+
+    assert!(text(&run).contains("Anchor repaired"));
+    assert_eq!(
+        workspace.read("src/lib.rs"),
+        "fn main() {\n    let x = 2;\n}\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_file_repairs_read_file_line_prefixes() {
+    let workspace = Workspace::new();
+    workspace.write("src/lib.rs", "a\nb\nc\n");
+    let tools = workspace.tools();
+
+    let run = call(
+        &tools,
+        "edit_file",
+        json!({
+            "path": "src/lib.rs",
+            "old_string": "  2: b",
+            "new_string": "B"
+        }),
+    )
+    .await;
+
+    assert!(text(&run).contains("Anchor repaired"));
+    assert_eq!(workspace.read("src/lib.rs"), "a\nB\nc\n");
+}
+
+#[tokio::test]
+async fn edit_file_reports_ambiguous_normalized_matches() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "src/lib.rs",
+        "first\n    second\nend\nfirst\n        second\n",
+    );
+    let tools = workspace.tools();
+
+    let run = call(
+        &tools,
+        "edit_file",
+        json!({
+            "path": "src/lib.rs",
+            "old_string": "first\n  second",
+            "new_string": "x"
+        }),
+    )
+    .await;
+
+    let message = failure_text(&run);
+    assert!(message.contains("matches 2 places"), "{message}");
+    assert!(message.contains("lines 1, 4"), "{message}");
+    assert_eq!(
+        workspace.read("src/lib.rs"),
+        "first\n    second\nend\nfirst\n        second\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_file_suggests_closest_lines_when_missing() {
+    let workspace = Workspace::new();
+    workspace.write("src/lib.rs", "alpha\nbeta\n");
+    let tools = workspace.tools();
+
+    let run = call(
+        &tools,
+        "edit_file",
+        json!({
+            "path": "src/lib.rs",
+            "old_string": "alpha extra",
+            "new_string": "x"
+        }),
+    )
+    .await;
+
+    let message = failure_text(&run);
+    assert!(message.contains("Closest lines:"), "{message}");
+    assert!(message.contains("1: alpha"), "{message}");
+}
+
+#[tokio::test]
 async fn list_dir_sorts_entries_with_markers() {
     let workspace = Workspace::new();
     workspace.write("beta.txt", "12345");

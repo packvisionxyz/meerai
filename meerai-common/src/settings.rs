@@ -106,6 +106,10 @@ pub struct ContextSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_caching: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_on_verify_failure: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps_per_turn: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_timeout_ms: Option<u64>,
@@ -506,6 +510,13 @@ fn merge_context(
             verbatim_window_turns: project.verbatim_window_turns.or(user.verbatim_window_turns),
             reasoning_pruning: project.reasoning_pruning.or(user.reasoning_pruning),
             prompt_caching: project.prompt_caching.or(user.prompt_caching),
+            rollback_on_verify_failure: project
+                .rollback_on_verify_failure
+                .or(user.rollback_on_verify_failure),
+            recovery_model: project
+                .recovery_model
+                .filter(|model| !model.contains(':'))
+                .or(user.recovery_model),
             max_steps_per_turn: project.max_steps_per_turn.or(user.max_steps_per_turn),
             tool_timeout_ms: project.tool_timeout_ms.or(user.tool_timeout_ms),
             max_session_tokens: merge_max_session_tokens(
@@ -685,11 +696,13 @@ providers:
                 verbatim_window_turns: Some(6),
                 reasoning_pruning: Some(false),
                 prompt_caching: Some(true),
+                rollback_on_verify_failure: Some(false),
                 max_steps_per_turn: Some(48),
                 tool_timeout_ms: Some(60_000),
                 max_session_tokens: Some(1_500_000),
                 max_turn_secs: Some(900),
                 summarizer_model: Some("openrouter:small-model".to_string()),
+                recovery_model: Some("openrouter:fallback-model".to_string()),
                 post_edit_diagnostics: Some(true),
             }),
             ..AppSettings::default()

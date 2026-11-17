@@ -255,6 +255,24 @@ impl AppState {
                     self.status_notice = Some("No closed turn to rewind".to_string());
                 }
             }
+            "/fork" => {
+                if self.tab().is_running {
+                    self.status_notice = Some("Cancel the running turn before forking".to_string());
+                } else if self.session_opener.is_none() {
+                    self.status_notice = Some("Fork needs an open session".to_string());
+                } else if let Some(turn_id) = self.latest_user_turn() {
+                    let session_id = self.tab().session_id.clone();
+                    self.pending_session_actions
+                        .push(PendingSessionAction::ForkSession {
+                            session_id,
+                            turn: Some(turn_id),
+                            draft: String::new(),
+                        });
+                    self.status_notice = Some("Forking session...".to_string());
+                } else {
+                    self.status_notice = Some("No closed turn to fork".to_string());
+                }
+            }
             "/reload" => {
                 self.pending_reload = true;
                 self.status_notice = Some("Reloading configuration...".to_string());
@@ -491,7 +509,7 @@ fn format_help_text() -> String {
         .join(", ");
     format!(
         "Commands: {commands}\n\
-         Tabs: alt+1..9 / alt+left/right / ctrl+pageup/down / click tab, ctrl+w close tab, click [+] new tab\n\
+         Tabs: alt+1..9 / alt+left/right / ctrl+pageup/down / click tab, alt+shift+left/right move tab, ctrl+w close tab, click [+] new tab\n\
          Shortcuts: ctrl+p command palette, shift+tab approval mode, ctrl+f search, ctrl+b toggle sidebar, drag+scroll or click then shift+click to copy, click a thought block to expand it\n\
          Insert: Enter send (queues while a turn runs), ctrl+g send queued now, shift/alt/ctrl+enter or ctrl+j or \\+Enter newline, @ file, / command, Esc Normal\n\
          Normal: j/k/Up/Down scroll, gt/gT/[ / ] switch tab, / search, t toggle thinking, y copy reply, ctrl+d/ctrl+u half-page, gg/G top/bottom, i/a Insert, q quit"

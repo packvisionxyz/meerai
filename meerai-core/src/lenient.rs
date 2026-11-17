@@ -184,6 +184,187 @@ where
     }
 }
 
+pub fn coerce_to_schema(value: &mut Value, schema: &Value) -> bool {
+    coerce(value, schema, 0)
+}
+
+fn coerce(value: &mut Value, schema: &Value, depth: usize) -> bool {
+    if depth > 16 {
+        return false;
+    }
+    let Some(object) = schema.as_object() else {
+        return false;
+    };
+    let mut changed = false;
+
+    if let Some(types) = object.get("type") {
+        let types: Vec<&str> = match types {
+            Value::String(text) => vec![text.as_str()],
+            Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        if !types.is_empty()
+            && !type_matches(value, &types)
+            && let Some(next) = coerce_scalar(value, &types)
+        {
+            *value = next;
+            changed = true;
+        }
+    }
+
+    for key in ["anyOf", "oneOf"] {
+        if let Some(Value::Array(options)) = object.get(key) {
+            for option in options {
+                let mut candidate = value.clone();
+                if coerce(&mut candidate, option, depth + 1)
+                    && schema_type_matches(&candidate, option)
+                {
+                    *value = candidate;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(Value::Array(all)) = object.get("allOf") {
+        for option in all {
+            changed |= coerce(value, option, depth + 1);
+        }
+    }
+
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Object(properties)) = object.get("properties") {
+                for (key, property_schema) in properties {
+                    let Some(child) = map.get_mut(key) else {
+                        continue;
+                    };
+                    if child.is_null() && !schema_allows_null(property_schema) {
+                        map.remove(key);
+                        changed = true;
+                        continue;
+                    }
+                    changed |= coerce(child, property_schema, depth + 1);
+                }
+            }
+            if let Some(additional) = object.get("additionalProperties")
+                && additional.is_object()
+            {
+                for child in map.values_mut() {
+                    changed |= coerce(child, additional, depth + 1);
+                }
+            }
+        }
+        Value::Array(items) => {
+            if let Some(item_schema) = object.get("items") {
+                for child in items {
+                    changed |= coerce(child, item_schema, depth + 1);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    changed
+}
+
+fn type_matches(value: &Value, types: &[&str]) -> bool {
+    types.iter().any(|kind| match *kind {
+        "string" => value.is_string(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        "null" => value.is_null(),
+        _ => true,
+    })
+}
+
+fn coerce_scalar(value: &Value, types: &[&str]) -> Option<Value> {
+    let wants = |kind: &str| types.contains(&kind);
+    if wants("string") {
+        return match value {
+            Value::Number(number) => Some(Value::String(number.to_string())),
+            Value::Bool(boolean) => Some(Value::String(boolean.to_string())),
+            _ => None,
+        };
+    }
+    if wants("integer") {
+        if let Value::String(text) = value {
+            let trimmed = text.trim();
+            return trimmed
+                .parse::<i64>()
+                .map(Value::from)
+                .ok()
+                .or_else(|| trimmed.parse::<u64>().map(Value::from).ok());
+        }
+        return None;
+    }
+    if wants("number") {
+        if let Value::String(text) = value {
+            return text
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map(Value::Number);
+        }
+        return None;
+    }
+    if wants("boolean") {
+        return match value {
+            Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+                "true" | "yes" | "1" => Some(Value::Bool(true)),
+                "false" | "no" | "0" => Some(Value::Bool(false)),
+                _ => None,
+            },
+            Value::Number(number) if number.as_i64() == Some(1) => Some(Value::Bool(true)),
+            Value::Number(number) if number.as_i64() == Some(0) => Some(Value::Bool(false)),
+            _ => None,
+        };
+    }
+    if wants("array") && !value.is_null() {
+        return Some(Value::Array(vec![value.clone()]));
+    }
+    None
+}
+
+fn schema_allows_null(schema: &Value) -> bool {
+    match schema.get("type") {
+        Some(Value::String(kind)) => kind == "null",
+        Some(Value::Array(types)) => types.iter().any(|kind| kind == "null"),
+        _ => ["anyOf", "oneOf"].iter().any(|key| {
+            schema
+                .get(*key)
+                .and_then(Value::as_array)
+                .is_some_and(|options| options.iter().any(schema_allows_null))
+        }),
+    }
+}
+
+fn schema_type_matches(value: &Value, schema: &Value) -> bool {
+    match schema.get("type") {
+        Some(Value::String(kind)) => type_matches(value, &[kind.as_str()]),
+        Some(Value::Array(types)) => {
+            let types: Vec<&str> = types.iter().filter_map(Value::as_str).collect();
+            type_matches(value, &types)
+        }
+        _ => {
+            ["anyOf", "oneOf"].iter().any(|key| {
+                schema
+                    .get(*key)
+                    .and_then(Value::as_array)
+                    .is_some_and(|options| {
+                        options
+                            .iter()
+                            .any(|option| schema_type_matches(value, option))
+                    })
+            }) || schema.get("type").is_none()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;
@@ -213,6 +394,66 @@ mod tests {
 
         let args: Args = serde_json::from_str(r#"{"line": 1}"#).unwrap();
         assert_eq!(args.offset, None);
+    }
+
+    #[test]
+    fn coerces_argument_types_to_the_schema() {
+        use serde_json::json;
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "limit": { "type": "integer" },
+                "ratio": { "type": "number" },
+                "flag": { "type": "boolean" },
+                "name": { "type": "string" },
+                "paths": { "type": "array", "items": { "type": "string" } }
+            }
+        });
+        let mut value = json!({
+            "limit": "20",
+            "ratio": "1.5",
+            "flag": "true",
+            "name": 42,
+            "paths": "a"
+        });
+        assert!(super::coerce_to_schema(&mut value, &schema));
+        assert_eq!(
+            value,
+            json!({
+                "limit": 20,
+                "ratio": 1.5,
+                "flag": true,
+                "name": "42",
+                "paths": ["a"]
+            })
+        );
+    }
+
+    #[test]
+    fn coercion_removes_null_optional_properties() {
+        use serde_json::json;
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "required": { "type": "integer" },
+                "optional": { "type": ["integer", "null"] }
+            }
+        });
+        let mut value = json!({ "required": null, "optional": null });
+        assert!(super::coerce_to_schema(&mut value, &schema));
+        assert_eq!(value, json!({ "optional": null }));
+    }
+
+    #[test]
+    fn coercion_leaves_valid_values_unchanged() {
+        use serde_json::json;
+        let schema = json!({
+            "type": "object",
+            "properties": { "count": { "type": "integer" } }
+        });
+        let mut value = json!({ "count": 1 });
+        assert!(!super::coerce_to_schema(&mut value, &schema));
+        assert_eq!(value, json!({ "count": 1 }));
     }
 
     #[test]

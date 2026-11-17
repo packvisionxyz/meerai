@@ -121,6 +121,7 @@ impl AppState {
         }
 
         if self.modal.is_some() {
+            self.tab_drag = None;
             return match mouse.kind {
                 MouseEventKind::Moved => self.handle_modal_mouse_move(mouse.column, mouse.row),
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -142,6 +143,33 @@ impl AppState {
         {
             self.handle_slash_command("/update");
             return true;
+        }
+
+        if let Some(drag) = self.tab_drag {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved => {
+                    self.tab_drag = Some(TabDrag {
+                        current_x: mouse.column,
+                        moved: drag.moved || drag.start_x.abs_diff(mouse.column) > 2,
+                        ..drag
+                    });
+                    return true;
+                }
+                MouseEventKind::Up(button) => {
+                    self.tab_drag = None;
+                    if drag.moved {
+                        let drop = self.tab_drop_index(mouse.column);
+                        self.selection = None;
+                        self.doc_selection = None;
+                        self.move_tab(drag.from, drop);
+                        return true;
+                    }
+                    if button != MouseButton::Left {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
         }
 
         if mouse.kind == MouseEventKind::Moved {
@@ -646,6 +674,32 @@ impl AppState {
         true
     }
 
+    pub(crate) fn tab_drop_index(&self, column: u16) -> usize {
+        let last = self.tabs.len().saturating_sub(1);
+        let over_zone = self
+            .tab_hit_zones
+            .iter()
+            .find(|zone| {
+                let r = zone.rect;
+                r.width > 0 && column >= r.x && column < r.x + r.width
+            })
+            .map(|zone| zone.kind);
+        if let Some(kind) = over_zone {
+            return match kind {
+                TabHitKind::Tab(index) | TabHitKind::CloseTab(index) => index.min(last),
+                TabHitKind::NewTab => last,
+            };
+        }
+        self.tab_hit_zones
+            .iter()
+            .filter_map(|zone| match zone.kind {
+                TabHitKind::Tab(index) if zone.rect.x > column => Some((zone.rect.x, index)),
+                _ => None,
+            })
+            .min_by_key(|(x, _)| *x)
+            .map_or(last, |(_, index)| index.min(last))
+    }
+
     pub fn click_tab_at(&mut self, column: u16, row: u16) -> bool {
         let Some(kind) = self.tab_hit_at(column, row) else {
             return false;
@@ -654,6 +708,14 @@ impl AppState {
         match kind {
             TabHitKind::Tab(index) => {
                 let _ = self.switch_to_tab(index);
+                if self.modal.is_none() {
+                    self.tab_drag = Some(TabDrag {
+                        from: index,
+                        start_x: column,
+                        current_x: column,
+                        moved: false,
+                    });
+                }
                 true
             }
             TabHitKind::CloseTab(index) => self.close_tab(index),
@@ -842,12 +904,12 @@ impl AppState {
                 self.status_notice = Some("Copied message".to_string());
                 true
             }
-            UserAction::Rewind => self.rewind_to_entry(entry_idx),
+            UserAction::Rewind => self.rewind_to_entry(entry_idx, text),
             UserAction::Fork => self.fork_from_entry(entry_idx, text),
         }
     }
 
-    fn rewind_to_entry(&mut self, entry_idx: usize) -> bool {
+    fn rewind_to_entry(&mut self, entry_idx: usize, message: String) -> bool {
         if self.tab().is_running {
             self.status_notice = Some("Cancel the running turn before rewinding".to_string());
             return true;
@@ -858,7 +920,7 @@ impl AppState {
             return true;
         };
         let _ = self.tab().cmd_tx.send(AgentCommand::Rewind {
-            turn_id: turn_id.clone(),
+            turn_id,
             scope: meerai_agents::RewindScope::Both,
         });
         let tab = self.tab_mut();
@@ -866,9 +928,19 @@ impl AppState {
         tab.user_turns.retain(|idx, _| *idx < entry_idx);
         tab.turn_activity.retain(|idx, _| *idx < entry_idx);
         tab.auto_follow = true;
+        self.restore_composer_message(message);
         self.status_notice =
-            Some("Rewound code and conversation to before this message".to_string());
+            Some("Rewound code and conversation; message restored to the composer".to_string());
         true
+    }
+
+    pub(super) fn restore_composer_message(&mut self, message: String) {
+        self.mode = InputMode::Insert;
+        self.composer_selection = None;
+        self.composer_drag_anchor = None;
+        let tab = self.tab_mut();
+        tab.cursor = message.len();
+        tab.input = message;
     }
 
     fn fork_from_entry(&mut self, entry_idx: usize, draft: String) -> bool {
@@ -1071,7 +1143,22 @@ impl AppState {
         }
 
         if key.modifiers.contains(KeyModifiers::ALT) {
+            let shift = key.modifiers.contains(KeyModifiers::SHIFT);
             match key.code {
+                KeyCode::Left if shift => {
+                    if self.active_tab > 0 {
+                        let active = self.active_tab;
+                        self.move_tab(active, active - 1);
+                    }
+                    return true;
+                }
+                KeyCode::Right if shift => {
+                    let active = self.active_tab;
+                    if active + 1 < self.tabs.len() {
+                        self.move_tab(active, active + 1);
+                    }
+                    return true;
+                }
                 KeyCode::Left => {
                     self.prev_tab();
                     return true;

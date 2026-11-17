@@ -238,11 +238,11 @@ Application is prompt-only:
 - TUI `/agent <id>` and `/skill <id>` send
   `AgentCommand::ApplyAgent`/`ApplySkill`, which the loop records as a System
   message at the next step boundary. Typing `@` opens the Mentions popup
-  (agents, then skills, then files; ids in purple for agents and orange for
+  (agents, then skills, then files; ids in blue for agents and gold for
   skills, files in the normal text color). Up/Down or ctrl+p/ctrl+n move, Tab accepts, Enter accepts
   without submitting, Esc dismisses; an exact agent/skill id keeps the popup
-  open. A known accepted mention renders as an `<id>` chip (bold purple agent,
-  bold orange skill) while the raw token stays in the input buffer; unknown and
+  open. A known accepted mention renders as an `<id>` chip (bold blue agent,
+  bold gold skill) while the raw token stays in the input buffer; unknown and
   partial tokens render as typed. On submit, skills apply first, mentions are
   stripped, repeats apply once, and an unknown mention stays as text. `/agents`
   and `/skills` open the Mentions popup filtered to that kind.
