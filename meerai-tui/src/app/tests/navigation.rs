@@ -428,7 +428,7 @@ fn alt_shift_left_right_moves_the_active_tab() {
     let first = app.tab().session_id.as_str().to_string();
     for id in ["sess-b", "sess-c"] {
         let (opened, _cmd_rx) = super::sessions::make_opened_session(id, Some(id), Vec::new());
-        let _ = app.apply_opened_session(opened, false);
+        let _ = app.apply_opened_session(opened, SessionOpenMode::NewTab);
     }
     let order = |app: &AppState| -> Vec<String> {
         app.tabs()

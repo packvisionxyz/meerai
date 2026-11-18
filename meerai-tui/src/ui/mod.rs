@@ -25,6 +25,7 @@ use crate::diff::{DiffCell, DiffRowKind};
 use crate::search::SearchMode;
 use crate::theme;
 
+mod anchors;
 pub(crate) mod composer;
 mod modals;
 mod selection;
@@ -58,15 +59,22 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
     let main_area = outer[1];
     let status_area = outer[2];
 
+    let rail_width = if app.anchor_rail_visible() {
+        app.anchor_rail_number_width()
+    } else {
+        0
+    };
+    let rail_slot = if rail_width > 0 { rail_width + 2 } else { 0 };
     let chat_col = if app.is_sidebar_visible() {
         let sidebar_width = (main_area.width / 4).clamp(30, 38);
         let cols = Layout::horizontal([
             Constraint::Min(50),
+            Constraint::Length(rail_slot),
             Constraint::Length(1),
             Constraint::Length(sidebar_width),
         ])
         .split(main_area);
-        let sidebar = cols[2];
+        let sidebar = cols[3];
         let gap = 1u16.min(sidebar.height);
         let body = sidebar.height.saturating_sub(gap);
         let top = (body as u32 * 55 / 100) as u16;
@@ -82,7 +90,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
         app.visible_file_change_rows = 0;
         app.file_change_more_hit = None;
         app.hovered_file_change = None;
-        main_area
+        let cols = Layout::horizontal([Constraint::Min(20), Constraint::Length(rail_slot)])
+            .split(main_area);
+        cols[0]
     };
 
     let composer_input_width = (chat_col.width.saturating_sub(8) as usize).max(1);
@@ -97,7 +107,23 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
         Layout::vertical([Constraint::Min(3), Constraint::Length(composer_height)]).split(chat_col);
     let transcript_area = chat_chunks[0];
     let composer_area = composer_box_rect(chat_chunks[1], composer_bottom_margin);
+    let rail_area = if rail_width > 0 {
+        Rect::new(
+            chat_col.right() + 1,
+            transcript_area.y,
+            rail_width,
+            transcript_area.height,
+        )
+    } else {
+        Rect::default()
+    };
+    app.anchor_rail_area = rail_area;
     transcript::render_transcript(frame, app, transcript_area);
+    if rail_area.width > 0 {
+        anchors::render_anchor_rail(frame, app, rail_area);
+    } else {
+        app.anchor_rail_hover = None;
+    }
     composer::render_composer(frame, app, composer_area);
 
     statusline::render_statusline(frame, app, status_area);
@@ -549,16 +575,4 @@ fn key_hints_line(hints: &[(&str, &str)]) -> Line<'static> {
         }
     }
     Line::from(spans)
-}
-
-fn cursor_row_col(input: &str, cursor: usize) -> (usize, usize) {
-    let clamped = cursor.min(input.len());
-    let before = &input[..clamped];
-    let row = before.matches('\n').count();
-    let col = before
-        .rsplit('\n')
-        .next()
-        .map(|line| line.chars().count())
-        .unwrap_or(0);
-    (row, col)
 }

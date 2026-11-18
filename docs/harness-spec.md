@@ -738,7 +738,11 @@ permission set, and tool subset, exposed as one `subagent-run` tool.
 - Stream requests carry a 30 s header timeout and a 120 s per-chunk read
   timeout (heartbeats reset the read timer). A silent stall or a fully
   empty stream is a transient failure and retries; a stream with usage
-  but no content is a normal end.
+  but no content is a normal end. An empty stream reports a diagnostic
+  block with the provider, model, stop reason, event count, elapsed time,
+  and a hint. A stop reason of `content_filter`, `max_tokens`, or
+  `stop_sequence` is a non-retryable provider error, and captured
+  reasoning counts as content.
 - Context overflow routes to compaction and retries once, only when
   compaction applied.
 - The worker queues one recovery turn after a retryable provider or
@@ -806,7 +810,8 @@ process, and `plan` refuses ACP. Full specification and trust boundary:
 | Definition mapping | Map definition `tools`/`permissions`, load supporting skill files, MCP servers | Security review |
 | M14 — `meerai acp` | meerai as an ACP agent for editors | [acp.md](acp.md) §3.1 |
 | ACP presets | User-config preset catalog (`acp.yml`), OpenCode/Gemini/Claude/Codex adapters | [acp.md](acp.md) §3 |
-| `meerai serve` | JSON-RPC/stdio or OpenAPI+SSE wrapper over the item protocol | Optional milestone |
+| M15 — OpenAI plan usage | In-TUI sign-in modal, multi-account switching, live provider spike | [openai-chatgpt-plan-usage.md](openai-chatgpt-plan-usage.md) |
+| Browser client polish | Delta coalescing, definition chips, ACP badge, browser automation, and an accessibility audit; the host, protocol, server, and Leptos client are implemented | [Browser UI](browser-ui.md) §3 |
 | Incremental projection | Tail-incremental `derive_messages`, frozen/shared messages, stable multi-section prefix | Projection purity |
 | Recovery depth | Per-turn recovery budget, model escalation, verifier-gated retry ladder | [token-efficiency.md](token-efficiency.md) §3 |
 | Dual-agent verification gate | Automatic read-only reviewer pass before completion on high-risk deliverables | Eval evidence |
@@ -821,7 +826,7 @@ process, and `plan` refuses ACP. Full specification and trust boundary:
 - Dynamic hot-swappable plugin runtimes: Rust composition at startup,
   hooks, and markdown definitions cover the extensibility need.
 - Vector databases / embedding indexes (§2.10 rationale).
-- Web/desktop GUIs, actor frameworks, bot integrations.
+- Desktop GUIs, remote or multi-user browser hosting, actor frameworks, and bot integrations. The loopback browser companion is scoped in [browser-ui.md](browser-ui.md).
 - Destructive history rewrites: rewind and compaction shadow, never
   delete.
 
@@ -851,6 +856,7 @@ policies, or tools on the same spine.
 | M12 | Agents & skills discovery | Read-only `.agents`/`.claude` discovery, prompt-only application, mentions | Implemented (tool/permission mapping planned) |
 | M13 | ACP client | `meerai-acp` bridge, `AcpWorker`, `--acp`/`/acp`/`acp doctor`, `session/load` resume, `acp-run` | Implemented for `agy` (other presets planned) |
 | M14 | ACP agent | `meerai acp` on stdio for editors | Planned (compatibility kit + editor smoke) |
+| M15 | OpenAI plan usage | Sign in with ChatGPT (`chatgpt.tokens.use.direct`), plan request profile, account model catalog | Implemented (live provider spike and multi-account planned) |
 
 ### 4.2 Recorded decisions
 

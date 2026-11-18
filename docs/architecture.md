@@ -6,17 +6,17 @@ planned.
 
 | | |
 | --- | --- |
-| **Status** | Verified against the tree on 2026-11-17 |
+| **Status** | Verified against the tree on 2026-11-18 |
 | **Audience** | Contributors navigating the workspace; embedders choosing a build surface |
-| **Scope** | All thirteen crates, dependency direction, build surfaces, protocol and configuration summary |
-| **Related** | [harness-spec.md](harness-spec.md) (behavior and milestones) · [harness-internals.md](harness-internals.md) (implementation invariants) · [tui-design.md](tui-design.md) · [acp.md](acp.md) |
+| **Scope** | All seventeen workspace crates, dependency direction, build surfaces, protocol and configuration summary |
+| **Related** | [harness-spec.md](harness-spec.md) (behavior and milestones) · [harness-internals.md](harness-internals.md) (implementation invariants) · [tui-design.md](tui-design.md) · [browser-ui.md](browser-ui.md) · [acp.md](acp.md) |
 
 ## 1. Overview
 
 meerai is a pure, provider-agnostic terminal agent harness: a Rust
-workspace with twelve library crates plus the `meerai` binary (built by
-`meerai-cli`). It offers a selection-first modal TUI and a scriptable
-headless CLI over one agent loop. The loop is driven by an append-only
+workspace with sixteen library crates plus the `meerai` binary (built by
+`meerai-cli`). It offers a selection-first modal TUI, a scriptable
+headless CLI, and an opt-in local browser baseline (`meerai serve`) over one agent loop. The loop is driven by an append-only
 session log and a typed item protocol; every client consumes the same
 events. Depth lives in the owning documents: product behavior in
 [harness-spec.md](harness-spec.md), implementation traps in
@@ -32,15 +32,19 @@ events. Depth lives in the owning documents: product behavior in
 | `meerai-macros` | Proc-macros `#[tool]` and `#[derive(Toolset)]`; insta snapshot tests |
 | `meerai-common` | `AppSettings` (`settings.yml`), project-root discovery and tighten-only project merge, markdown agent/skill discovery (`definitions`), hook configuration (`hooks`) |
 | `meerai-client` | Client-facing provider surface: `ProviderCatalog` + bundled `providers.yml`, per-model metadata (`ModelInfo`), `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract, `MemorySecretStore`, auth listing |
-| `meerai-providers` | `genai` client factory plus native secret stores (OS keychain, `auth.json` fallback); re-exports the client surface |
+| `meerai-providers` | `genai` client factory plus native secret stores (OS keychain for API keys, `auth.json` for keys and ChatGPT plan OAuth, `meerai-providers/src/oauth/`); re-exports the client surface |
 | `meerai-session` | Append-only `SessionEvent` log (JSONL generations sealed to zstd), `meta.json`, crash recovery and idempotent healing, `derive_messages` projection, replay, fork/rewind, snapshot store, blob store, spill and compaction primitives, listing/deletion/pruning |
 | `meerai-policy` | `PolicyEngine`: ordered rules (default sensitive → user → agent, last match wins), `ApprovalMode` presets, literal turn/session grants, YAML parsing |
 | `meerai-tools` | `code` (`CodeTools`, seven `code-*` tools, path guards, unified diffs, observations, shell safety inputs, env scrub), `repo_map` (`retrieval-repo_map`, tree-sitter + PageRank), `lsp` (`lsp-*` over stdio JSON-RPC), `search_as_code` (`sac-run_script`), `ExecutionWorld` sandbox seam |
 | `meerai-agents` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig`, `AgentEvent`/`AgentCommand`, interceptor seam, hook engine, `question-ask`, prompt composition, `spawn_worker`, subagent runtime, delegated `acp-run`, redaction and injection screening, shell-safety allowlist |
 | `meerai-syntax` | Tree-sitter highlighting (Rust, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML, CSS, JSON) plus a lexical fallback; per-line tokens, no UI dependency |
-| `meerai-tui` | Modal TUI library (`ratatui` + `crossterm`): transcript replay and cached rendering, tabs, approvals, questions, rewind/fork menus, diff/search modals, mentions, palette, theme, `WorkspaceQuery` seam |
+| `meerai-host` | UI-neutral host seams (`SessionOpener`, `OpenedSession`, `WorkspaceQuery`/`LocalWorkspace`) and `SessionRegistry` live event pump/ring |
+| `meerai-web-protocol` | Serde-only Wasm-safe wire DTOs (`SnapshotResponse`, `ViewEvent`, `SubmitPromptRequest`, `ApiError`) with adjacent serde tagging |
+| `meerai-web` | Loopback HTTP/SSE server (`hyper` + `subtle` Basic auth, `Host`/`Origin`/JSON checks, embedded Wasm bundle serving) |
+| `meerai-web-client` | Leptos 0.8 CSR browser client crate (`scripts/build-web.py`), DOM transcript, modals, and theme ([browser-ui.md](browser-ui.md)) |
+| `meerai-tui` | Modal TUI library (`ratatui` + `crossterm`): transcript replay and cached rendering, tabs, approvals, questions, rewind/fork menus, diff/search modals, mentions, palette, theme, re-exporting `meerai-host` seams |
 | `meerai-acp` | ACP client bridge: `agy` preset, handshake, typed `AcpEvent` stream, `AcpWorker` (event mapping + session log), permission replies, cancel, `session/load` |
-| `meerai-cli` | Binary crate (`meerai`): CLI flags, headless runner, `auth`/`sessions`/`hooks`/`acp doctor` subcommands, TUI launcher, host wiring (world detection, toolset registration, session opener) |
+| `meerai-cli` | Binary crate (`meerai`): CLI flags, headless runner, `auth`/`sessions`/`hooks`/`acp doctor`/`serve` (feature `web`) subcommands, TUI launcher, host wiring |
 
 ### 2.2 Dependency direction
 
@@ -144,7 +148,7 @@ Field-level detail: [harness-internals.md](harness-internals.md).
 
 | Item | Description | Gate |
 | --- | --- | --- |
-| `meerai serve` | JSON-RPC over stdio or OpenAPI+SSE wrapper over the same `AgentEvent` enum; the protocol is designed to serialize to either | Optional milestone |
+| Browser client polish | Delta coalescing, definition chips, ACP badge, browser automation, and an accessibility audit; the host, protocol, server, and Leptos client are implemented | [Browser UI](browser-ui.md) §3 |
 | Provider trait | A `ChatCompletion`-style abstraction in `meerai-providers`; today the abstraction is the genai client plus the catalog | Demand for a non-genai backend |
 | Incremental projection | Tail-incremental `derive_messages` and frozen/shared message representations; the full-result cache is implemented | Projection purity |
 | Progressive tool disclosure | Compact tool index plus a `load_tool_schema` meta-tool when admitted schemas grow (MCP, skills) | Tool count growth |
@@ -171,8 +175,7 @@ implemented. M14 and the items in §3 are planned.
 
 ### 4.2 Non-goals
 
-- Web/desktop GUIs, actor frameworks, or bot integrations unrelated to
-  terminal coding workflows.
+- Desktop GUIs, remote or multi-user browser hosting, actor frameworks, and bot integrations. See [browser-ui.md](browser-ui.md) for the local browser proposal.
 - Embedding-based retrieval for live code (lexical + structural only).
 - Destructive history rewrites: rewind and compaction shadow, never
   delete.

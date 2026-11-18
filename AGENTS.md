@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rust workspace for Pack Vision's terminal agent harness: twelve library crates plus the `meerai`
+Rust workspace for Pack Vision's terminal agent harness: sixteen library crates plus the `meerai`
 binary (built by `meerai-cli`). This file holds working rules only.
 
 It is injected into the system prompt with a 32 KiB cap. Keep it rules-only and short. Put
@@ -14,6 +14,7 @@ implementation detail in `docs/`, not here.
 | Product behavior, milestones, backlog | [docs/harness-spec.md](docs/harness-spec.md) |
 | Target architecture and migration | [docs/architecture.md](docs/architecture.md) |
 | TUI behavior and keybindings | [docs/tui-design.md](docs/tui-design.md) |
+| Planned local browser UI | [docs/browser-ui.md](docs/browser-ui.md) |
 | Security controls and residual risk | [docs/threat-model.md](docs/threat-model.md) |
 | ACP client and trust boundary | [docs/acp.md](docs/acp.md) |
 
@@ -41,11 +42,11 @@ make verify                                    # fmt --check + clippy + test (al
 ### Contracts
 
 - `AgentEvent`, `SessionItem`, `ItemDelta`, and the `SessionEvent` vocabulary are wire contracts.
-  Change them and the TUI fold, headless NDJSON, and session replay in the same change.
+  Change them and the TUI fold, host registry/web mapper, headless NDJSON, and session replay in the same change.
 - Use adjacent serde tagging (`tag = "type", content = "data"`) for enums with string-carrying
   variants. Internally tagged enums cannot hold them.
-- `meerai-tui` must not depend on `meerai-tools` or `meerai-providers`. Use `workspace::WorkspaceQuery`,
-  `meerai-client`, and `meerai-syntax` instead.
+- `meerai-tui` must not depend on `meerai-tools`, `meerai-providers`, or `meerai-web`. Use
+  `meerai_host::WorkspaceQuery`, `meerai-client`, and `meerai-syntax` instead.
 - Provider model metadata belongs in `ProviderCatalog`, not `HarnessConfig`.
 - Keep one `impl Toolset` per toolset. Macro-generated code needs `meerai_core`, `schemars`, and
   `serde_json` as direct dependencies of the consuming crate.
@@ -86,6 +87,8 @@ make verify                                    # fmt --check + clippy + test (al
 
 - Rebuild the transcript only when its fingerprint changes. Hover is an overlay, never a rebuild.
   Bump `transcript_version` at every transcript mutation.
+- The turn-anchor rail projects the wrapped transcript: draw it after the transcript, and never
+  rebuild for rail hover.
 - Open modals block all mouse input except scroll.
 - Keep new dialogs narrow; use the width caps in `docs/tui-design.md`.
 - The TUI never spawns a process. `!` commands go through `SessionOpener::run_user_shell`.

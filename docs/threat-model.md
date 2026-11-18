@@ -6,7 +6,7 @@ controls, and explicit residual risks.
 
 | | |
 | --- | --- |
-| **Status** | Verified against the tree on 2026-11-17 |
+| **Status** | Verified against the tree on 2026-11-19 |
 | **Audience** | Security reviewers, operators, contributors |
 | **Scope** | All crates; CI and release packaging (`.github/workflows/`, `deny.toml`) |
 | **Related** | [harness-spec.md](harness-spec.md) · [acp.md](acp.md) · [token-efficiency.md](token-efficiency.md) · [harness-internals.md](harness-internals.md) |
@@ -136,10 +136,13 @@ a `WorkspaceWrite` policy and `sac-run_script` with `ReadOnly`; both pass
   `KeychainSecretStore` uses the macOS Keychain (`security`) or Linux
   Secret Service (`secret-tool`) under service `meerai`, deleting stale
   `auth.json` entries. Fallback is `FileSecretStore` (`auth.json`, `0600`
-  on Unix, dir `0700`), also forced by `MEERAI_DISABLE_KEYCHAIN`. Key
-  resolution order: stored secret → configured `api_key` → provider env
-  vars from the bundled catalog. Config secrets support `${VAR|default}`
-  and `{env:VAR}` expansion.
+  on Unix, dir `0700`), also forced by `MEERAI_DISABLE_KEYCHAIN`. ChatGPT plan
+  OAuth credentials (`type:"oauth"`: access token, rotating refresh token,
+  issued client id, scopes) always live in `auth.json`, never in the keychain;
+  every rewrite takes `auth.json.lock`, and `list_providers`/`auth list` never
+  print a token. Key resolution order: stored credential (API key or OAuth
+  access token) → configured `api_key` → provider env vars from the bundled
+  catalog. Config secrets support `${VAR|default}` and `{env:VAR}` expansion.
 
 ### 2.5 Injection screening
 
@@ -281,10 +284,36 @@ open (including legacy files and blobs). `meta.json` records cwd, git
 branch/SHA, title, model, approval mode, lineage, and timestamps.
 Retention is user-controlled only: manual `sessions prune`, opt-in
 `sessions.auto_prune_days`/`keep` (active session always spared), and
-startup cleanup of empty sessions. A project file cannot control
-retention. Windows has no mode enforcement (§5.4).
+startup cleanup of empty sessions older than six hours that are not open.
+A project file cannot control retention. Windows has no mode enforcement (§5.4). Cross-process `SessionLock`
+(`session.lock`, `0600` on Unix) uses `std::fs::File::try_lock` so two
+processes cannot write or delete the same live session concurrently;
+`Session::fork_stored` reads events without taking the write lock.
 
-### 2.12 Supply chain
+### 2.12 Browser companion server (`meerai-web`, `web` feature)
+
+- **Loopback only:** `meerai serve` and TUI `/serve` bind strictly to
+  `127.0.0.1` (random OS port by default).
+- **Mandatory launch Basic auth:** Launch surfaces require Basic auth
+  (`ServeAuth::Basic`, constant-time secret compare via `subtle`), generating
+  a random secret when none is supplied and printing it once at launch (never
+  to session logs or browser storage). Server instances configured with
+  `ServeAuth::None` fail closed (`401`) on privileged parity endpoints; the
+  snapshot, SSE stream, session creation, and prompt routes stay open. Both
+  launch surfaces always use `ServeAuth::Basic`.
+- **CSRF / cross-origin guards:** Mutating `POST`/`DELETE` `/api/*` requests
+  verify loopback `Host` (`127.0.0.1:<port>` or `localhost:<port>`), a same-origin
+  `Origin`, and an `application/json` content type.
+- **No secret exposure in HTTP or Wasm:** API keys and OAuth tokens are never
+  returned by `/api/providers` or `/api/snapshot` (`configured` + status badge
+  only) and never persisted in browser storage.
+- **DOM output hardening:** The Leptos client renders model, tool, file, diff,
+  title, and repository text as text nodes. It does not use `inner_html` for
+  untrusted content. Markdown HTML stays text, links are scheme-checked, images
+  render as links, and theme values are validated before they become CSS custom
+  properties. The CSP restricts scripts and network origins.
+
+### 2.13 Supply chain
 
 - **CI audit:** `deny.toml` + `EmbarkStudios/cargo-deny-action@v2` run
   `--all-features check advisories licenses bans sources` on every
@@ -319,6 +348,7 @@ retention. Windows has no mode enforcement (§5.4).
 | Workspace code & files | Workspace root + `writable_roots` | Destructive modification, malicious injection, exfiltration |
 | Host filesystem & network | Paths outside the workspace, local services, external endpoints | Arbitrary read/write via `shell`, exfiltration, SSRF |
 | Provider API keys | OS keychain, `auth.json` (`0600`), process env | Leakage via child processes, tool output, logs, model context |
+| ChatGPT plan OAuth tokens | `auth.json` (`0600`), process memory | Refresh-token theft, token in an error body or log, shared-machine access |
 | Repository & user secrets | `.env*`, SSH keys, `.aws/credentials`, `.kube/config`, `.docker/config.json`, `*.pem`/`*.key` | Disclosure into prompts/transcripts or exfiltration |
 | Session transcripts & blobs | `$XDG_DATA_HOME/meerai/sessions/<id>/` (`0700`/`0600` on Unix) | Local multi-user disclosure, secret persistence |
 | Supply chain & artifacts | `Cargo.lock`, workspace crates, release binaries | Vulnerable/yanked/unlicensed deps, tampered binaries |
@@ -400,3 +430,11 @@ emission, or model consumption: environment scrub at spawn (§2.4) →
     example `/reload` adds a `deny`), an existing Session grant still
     allows the same literal resource until it is cleared. Grants never
     widen to globs and cannot loosen `plan`.
+11. **Browser credentials and DOM output.** Basic auth over loopback HTTP is
+    not encrypted; a local root user or a process with packet-capture
+    privileges can read the credential or the traffic. The browser caches the
+    credential until it closes, and there is no logout; restarting the server
+    with a new secret revokes it. The Leptos client renders a DOM path. Leptos
+    escaping, the HTML-as-text rule, link scheme checks, and the CSP reduce the
+    injection risk, but a bug in a custom renderer or a missed raw-HTML path
+    could still inject markup.

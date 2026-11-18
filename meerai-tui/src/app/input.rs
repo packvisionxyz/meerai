@@ -47,7 +47,13 @@ impl AppState {
                             *selected_recent = None;
                             *error = None;
                         }
+                        ActiveModal::ChatGptLogin { input, error, .. } => {
+                            input.push_str(&clean);
+                            *error = None;
+                        }
                         ActiveModal::DiffView { .. }
+                        | ActiveModal::AuthMethodSelect { .. }
+                        | ActiveModal::ProviderConnection { .. }
                         | ActiveModal::Question { .. }
                         | ActiveModal::RewindMenu { .. } => {}
                         ActiveModal::Approval {
@@ -90,6 +96,22 @@ impl AppState {
                             *selected = 0;
                         }
                         ActiveModal::UserMessageActions { .. } => {}
+                        ActiveModal::ServeDialog {
+                            port_input,
+                            secret_input,
+                            editing_secret,
+                            error,
+                            busy,
+                        } => {
+                            if !*busy {
+                                if *editing_secret {
+                                    secret_input.push_str(&clean);
+                                } else {
+                                    port_input.extend(clean.chars().filter(char::is_ascii_digit));
+                                }
+                                *error = None;
+                            }
+                        }
                     }
                     return true;
                 }
@@ -159,6 +181,41 @@ impl AppState {
             return true;
         }
 
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some(hit) = self.web_server_hit
+            && mouse.column >= hit.x
+            && mouse.column < hit.x + hit.width
+            && mouse.row >= hit.y
+            && mouse.row < hit.y + hit.height
+            && let Some(server) = self.web_server.clone()
+        {
+            self.copy_text_to_clipboard(&server.url);
+            self.status_notice = Some(format!("Copied {}", server.url));
+            return true;
+        }
+
+        if self.anchor_rail_drag
+            || (mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                && rect_contains(self.anchor_rail_area, mouse.column, mouse.row))
+        {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.anchor_rail_drag = true;
+                    self.jump_from_anchor_rail(mouse.row, true);
+                    return true;
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.jump_from_anchor_rail(mouse.row, false);
+                    return true;
+                }
+                MouseEventKind::Up(_) => {
+                    self.anchor_rail_drag = false;
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
         if let Some(drag) = self.tab_drag {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved => {
@@ -195,14 +252,17 @@ impl AppState {
             let hovered_tab = self.tab_hit_at(mouse.column, mouse.row);
             let hovered_file = self.hovered_file_change_at(mouse.column, mouse.row);
             let hovered_completion = self.completion_hit_at(mouse.column, mouse.row);
+            let hovered_rail = self.anchor_rail_hover_row(mouse.column, mouse.row);
             let changed = hovered_entry != self.hovered_entry
                 || hovered_tab != self.hovered_tab
                 || hovered_file != self.hovered_file_change
-                || hovered_completion != self.hovered_completion;
+                || hovered_completion != self.hovered_completion
+                || hovered_rail != self.anchor_rail_hover;
             self.hovered_entry = hovered_entry;
             self.hovered_tab = hovered_tab;
             self.hovered_file_change = hovered_file;
             self.hovered_completion = hovered_completion;
+            self.anchor_rail_hover = hovered_rail;
             return changed;
         }
 
@@ -807,14 +867,7 @@ impl AppState {
             }
             TabHitKind::CloseTab(index) => self.close_tab(index),
             TabHitKind::NewTab => {
-                if self.session_opener.is_some() {
-                    self.status_notice = Some("Opening new session tab...".to_string());
-                    self.pending_session_actions
-                        .push(PendingSessionAction::CreateNewTab);
-                } else {
-                    self.status_notice =
-                        Some("Session switching is not available in this context".to_string());
-                }
+                self.request_new_tab();
                 true
             }
         }
@@ -1294,9 +1347,15 @@ impl AppState {
             ApprovalMode::Ask => ApprovalMode::Auto,
             ApprovalMode::Auto => ApprovalMode::Plan,
         };
-        let tab = self.tab_mut();
-        tab.approval_mode = next;
-        let _ = tab.cmd_tx.send(AgentCommand::SetPermissionMode(next));
+        let session_id = {
+            let tab = self.tab_mut();
+            tab.approval_mode = next;
+            let _ = tab.cmd_tx.send(AgentCommand::SetPermissionMode(next));
+            tab.session_id.clone()
+        };
+        if let Some(reg) = &self.registry {
+            reg.note_tui_mode(&session_id, next);
+        }
         self.status_notice = Some(format!("Approval mode: {}", approval_mode_label(next)));
     }
 
@@ -1622,6 +1681,15 @@ impl AppState {
                 self.status_notice = Some("Shell commands are not available".to_string());
                 return;
             }
+            if self.tab().approval_mode == ApprovalMode::Plan {
+                self.status_notice = Some("Shell commands are disabled in plan mode".to_string());
+                self.tab_mut().transcript.push(TranscriptEntry::Error {
+                    text: "Shell commands are disabled in plan mode".to_string(),
+                    expanded: false,
+                });
+                self.completion.reset();
+                return;
+            }
             let tab = self.tab_mut();
             tab.auto_follow = true;
             tab.transcript_version = tab.transcript_version.wrapping_add(1);
@@ -1676,7 +1744,7 @@ impl AppState {
             return;
         }
 
-        {
+        let session_id = {
             let tab = self.tab_mut();
             if tab.title.is_none() {
                 tab.title = normalize_tab_title(remaining.clone());
@@ -1688,7 +1756,15 @@ impl AppState {
             tab.transcript.push(TranscriptEntry::User {
                 text: remaining.clone(),
             });
-            let _ = tab.cmd_tx.send(AgentCommand::SubmitPrompt(remaining));
+            let _ = tab
+                .cmd_tx
+                .send(AgentCommand::SubmitPrompt(remaining.clone()));
+            tab.session_id.clone()
+        };
+        if let Some(reg) = &self.registry {
+            self.tui_prompt_echoes
+                .push_back((session_id.clone(), remaining.clone()));
+            reg.note_tui_user_prompt(&session_id, &remaining, false);
         }
         self.completion.reset();
     }
@@ -1713,11 +1789,17 @@ impl AppState {
                 typed
             }
         };
-        {
+        let session_id = {
             let tab = self.tab_mut();
             tab.transcript
                 .push(TranscriptEntry::User { text: text.clone() });
-            let _ = tab.cmd_tx.send(AgentCommand::Steer(text));
+            let _ = tab.cmd_tx.send(AgentCommand::Steer(text.clone()));
+            tab.session_id.clone()
+        };
+        if let Some(reg) = &self.registry {
+            self.tui_prompt_echoes
+                .push_back((session_id.clone(), text.clone()));
+            reg.note_tui_user_prompt(&session_id, &text, true);
         }
         self.status_notice = Some("Sent now".to_string());
         self.completion.reset();

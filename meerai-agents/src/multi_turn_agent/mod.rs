@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use futures::{Stream, StreamExt};
 use genai::chat::{
-    CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatStreamEvent, StreamEnd,
-    Tool, ToolCall, ToolResponse,
+    CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatStreamEvent, StopReason,
+    StreamEnd, Tool, ToolCall, ToolResponse,
 };
 use genai::{Client, Headers};
 use meerai_common::hooks::HookEvent;
@@ -100,6 +100,16 @@ const NON_TRANSIENT_ERROR_MARKERS: [&str; 7] = [
     "permission denied",
 ];
 
+const PLAN_USAGE_TERMINAL_CODES: [&str; 7] = [
+    "subscription_sharing_usage_limit_exceeded",
+    "subscription_sharing_user_not_eligible",
+    "subscription_sharing_unsupported_capability",
+    "subscription_sharing_route_not_supported",
+    "subscription_sharing_invalid_user",
+    "chatpass_v2_scope_not_authorized",
+    "chatpass_v2_invalid_authorization_context",
+];
+
 mod compaction;
 mod instructions;
 mod tools;
@@ -157,6 +167,7 @@ pub(super) struct CollectedStream {
 pub(super) enum StreamFailure {
     Cancelled,
     Provider { error: anyhow::Error, partial: bool },
+    EmptyStream { detail: String, retryable: bool },
 }
 
 pub(super) enum BudgetOutcome {
@@ -759,9 +770,20 @@ impl MultiTurnAgent {
         }
     }
 
+    pub fn set_plan_usage(&mut self, plan_usage: bool) {
+        if let Some(harness) = &mut self.harness {
+            harness.config.plan_usage = plan_usage;
+        }
+    }
+
     pub(super) async fn persist_model(&self) {
         if let Some(harness) = &self.harness {
-            let _ = harness.session.set_model(self.model.clone()).await;
+            let model = self
+                .model
+                .rsplit_once("::")
+                .map(|(_, bare)| bare)
+                .unwrap_or(self.model.as_str());
+            let _ = harness.session.set_model(model.to_string()).await;
         }
     }
 
@@ -848,9 +870,11 @@ impl MultiTurnAgent {
             }
             harness.policy = policy;
             let token_pricing = harness.config.token_pricing;
+            let plan_usage = harness.config.plan_usage;
             let context_window = harness.config.context_window_tokens;
             harness.config = HarnessConfig::from_context_settings(context.as_ref());
             harness.config.token_pricing = token_pricing;
+            harness.config.plan_usage = plan_usage;
             if context
                 .as_ref()
                 .and_then(|context| context.context_window_tokens)

@@ -16,6 +16,7 @@ pub struct HarnessConfig {
     pub verbatim_window_turns: usize,
     pub reasoning_pruning: bool,
     pub prompt_caching: bool,
+    pub plan_usage: bool,
     pub rollback_on_verify_failure: bool,
     pub recovery_model: Option<String>,
     pub max_steps_per_turn: usize,
@@ -36,6 +37,7 @@ impl Default for HarnessConfig {
             verbatim_window_turns: 4,
             reasoning_pruning: true,
             prompt_caching: true,
+            plan_usage: false,
             rollback_on_verify_failure: false,
             recovery_model: None,
             max_steps_per_turn: 32,
@@ -151,5 +153,11 @@ mod tests {
             ..ContextSettings::default()
         }));
         assert_eq!(config.temperature, None);
+    }
+
+    #[test]
+    fn plan_usage_defaults_off() {
+        assert!(!HarnessConfig::default().plan_usage);
+        assert!(!HarnessConfig::from_context_settings(None).plan_usage);
     }
 }

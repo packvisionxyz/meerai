@@ -1,0 +1,43 @@
+[package]
+name = "meerai-web"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+meerai-agents = { path = "../meerai-agents/" }
+meerai-common = { path = "../meerai-common/" }
+meerai-core = { path = "../meerai-core/" }
+meerai-host = { path = "../meerai-host/" }
+meerai-policy = { path = "../meerai-policy/" }
+meerai-session = { path = "../meerai-session/" }
+meerai-web-protocol = { path = "../meerai-web-protocol/" }
+
+anyhow = { workspace = true }
+base64 = { workspace = true }
+bytes = "1"
+futures = { workspace = true }
+getrandom = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+mime_guess = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+meerai-agents = { path = "../meerai-agents/" }
+meerai-policy = { path = "../meerai-policy/" }
+meerai-session = { path = "../meerai-session/" }

@@ -62,10 +62,16 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: R
             theme::p().success,
         ),
     };
-    let temperature = app
-        .context_temperature
-        .map(|value| format!("temp {value:.2}"))
-        .unwrap_or_else(|| "temp default".to_string());
+    let temperature = if matches!(
+        app.active_key_status(),
+        meerai_client::providers::KeyStatus::OAuth { .. }
+    ) {
+        "temp plan".to_string()
+    } else {
+        app.context_temperature
+            .map(|value| format!("temp {value:.2}"))
+            .unwrap_or_else(|| "temp default".to_string())
+    };
     let model = super::statusline::display_model(app);
     let (input_badge, input_color) = match app.mode {
         InputMode::Insert => ("INS", theme::p().accent),
@@ -322,7 +328,7 @@ fn wrap_composer(
     skills: &[SkillDefinition],
 ) -> WrappedComposer {
     let width = width.max(1);
-    let (cursor_line, cursor_col) = cursor_row_col(input, cursor);
+    let (cursor_line, cursor_col) = display_pos_for_byte(input, cursor, agents, skills);
     let mut wrapped = WrappedComposer {
         rows: Vec::new(),
         cursor_row: 0,

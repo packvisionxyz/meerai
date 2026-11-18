@@ -10,6 +10,8 @@ use meerai_session::{
 
 use crate::cli::{SessionTarget, SessionsCommand};
 
+pub(crate) const EMPTY_SESSION_MAX_AGE_MS: u64 = 6 * 60 * 60 * 1_000;
+
 pub(crate) fn session_label(summary: &SessionSummary) -> &str {
     summary
         .title
@@ -34,7 +36,7 @@ pub(crate) fn select_prunable(
     now_ms: u64,
     days: u64,
     keep: usize,
-    exclude: Option<&SessionId>,
+    exclude: &[SessionId],
 ) -> Vec<SessionId> {
     let cutoff = now_ms.saturating_sub(days.saturating_mul(86_400_000));
     let mut ordered: Vec<&SessionSummary> = sessions.iter().collect();
@@ -42,7 +44,7 @@ pub(crate) fn select_prunable(
     ordered
         .into_iter()
         .skip(keep)
-        .filter(|summary| Some(&summary.id) != exclude)
+        .filter(|summary| !exclude.contains(&summary.id))
         .filter(|summary| summary.updated_at_ms < cutoff)
         .map(|summary| summary.id.clone())
         .collect()
@@ -67,11 +69,11 @@ pub(crate) async fn prune_old_sessions(
     root: std::path::PathBuf,
     days: u64,
     keep: usize,
-    exclude: &SessionId,
+    exclude: &[SessionId],
 ) -> Result<usize> {
     let list_root = root.clone();
     let sessions = run_blocking(move || list_sessions(&list_root)).await?;
-    let ids = select_prunable(&sessions, now_millis(), days, keep, Some(exclude));
+    let ids = select_prunable(&sessions, now_millis(), days, keep, exclude);
     let count = ids.len();
     if count == 0 {
         return Ok(0);
@@ -90,37 +92,75 @@ pub(crate) fn format_prune_message(count: usize, days: u64) -> String {
     format!("Pruned {count} sessions (older than {days} days)")
 }
 
-pub(crate) async fn auto_prune_sessions(settings: &AppSettings, exclude: &SessionId) {
+pub(crate) async fn auto_prune_sessions(
+    settings: &AppSettings,
+    active: &SessionId,
+    open: &[SessionId],
+) {
     let Some((days, keep)) = auto_prune_config(settings) else {
         return;
     };
-    match prune_old_sessions(default_sessions_root(), days, keep, exclude).await {
+    let mut exclude = Vec::with_capacity(open.len() + 1);
+    exclude.push(active.clone());
+    exclude.extend_from_slice(open);
+    match prune_old_sessions(default_sessions_root(), days, keep, &exclude).await {
         Ok(0) => {}
         Ok(count) => eprintln!("{}", format_prune_message(count, days)),
         Err(err) => eprintln!("Warning: automatic session prune failed: {err:#}"),
     }
 }
 
-pub(crate) async fn prune_empty_sessions(exclude: &SessionId) {
-    match remove_empty_sessions(&default_sessions_root(), exclude).await {
+pub(crate) async fn prune_empty_sessions(active: &SessionId, open: &[SessionId]) {
+    let mut exclude = Vec::with_capacity(open.len() + 1);
+    exclude.push(active.clone());
+    exclude.extend_from_slice(open);
+    match remove_empty_sessions(&default_sessions_root(), EMPTY_SESSION_MAX_AGE_MS, &exclude).await
+    {
         Ok(0) => {}
         Ok(count) => eprintln!("Removed {count} empty sessions"),
         Err(err) => eprintln!("Warning: empty session cleanup failed: {err:#}"),
     }
 }
 
-pub(crate) async fn remove_empty_sessions(root: &Path, exclude: &SessionId) -> Result<usize> {
+pub(crate) async fn empty_session_ids(root: &Path, candidates: &[SessionId]) -> Vec<SessionId> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let list_root = root.to_path_buf();
+    let Ok(sessions) = run_blocking(move || list_sessions(&list_root)).await else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for id in candidates {
+        let Some(summary) = sessions.iter().find(|summary| &summary.id == id) else {
+            continue;
+        };
+        if summary.parent_session_id.is_some() || has_title(summary) {
+            continue;
+        }
+        if matches!(session_has_user_input(&summary.dir).await, Ok(false)) {
+            ids.push(id.clone());
+        }
+    }
+    ids
+}
+
+pub(crate) async fn remove_empty_sessions(
+    root: &Path,
+    max_age_ms: u64,
+    exclude: &[SessionId],
+) -> Result<usize> {
+    let now = now_millis();
     let sessions = list_sessions(root)?;
     let mut removed = 0usize;
     for summary in sessions {
-        if &summary.id == exclude || summary.parent_session_id.is_some() {
+        if exclude.iter().any(|id| id == &summary.id) || summary.parent_session_id.is_some() {
             continue;
         }
-        if summary
-            .title
-            .as_deref()
-            .is_some_and(|t| !t.trim().is_empty())
-        {
+        if has_title(&summary) {
+            continue;
+        }
+        if now.saturating_sub(summary.updated_at_ms) < max_age_ms {
             continue;
         }
         match session_has_user_input(&summary.dir).await {
@@ -133,6 +173,13 @@ pub(crate) async fn remove_empty_sessions(root: &Path, exclude: &SessionId) -> R
         }
     }
     Ok(removed)
+}
+
+fn has_title(summary: &SessionSummary) -> bool {
+    summary
+        .title
+        .as_deref()
+        .is_some_and(|title| !title.trim().is_empty())
 }
 
 pub(crate) async fn run_sessions(command: &SessionsCommand) -> Result<()> {
@@ -178,7 +225,7 @@ pub(crate) async fn run_sessions(command: &SessionsCommand) -> Result<()> {
         SessionsCommand::Prune { days, keep } => {
             let list_root = root.clone();
             let sessions = run_blocking(move || list_sessions(&list_root)).await?;
-            let ids = select_prunable(&sessions, now_millis(), *days, *keep, None);
+            let ids = select_prunable(&sessions, now_millis(), *days, *keep, &[]);
             let count = ids.len();
             let delete_root = root.clone();
             run_blocking(move || {
@@ -210,14 +257,8 @@ pub(crate) async fn fork_session(
         root: root.to_path_buf(),
         workspace: workspace.to_path_buf(),
     };
-    let source = Session::open(&config, source_id, workspace.to_path_buf()).await?;
-    match turn_raw {
-        Some(raw) => {
-            let turn_id = TurnId::from_raw(raw);
-            Session::fork(&config, &source, &turn_id).await
-        }
-        None => Session::fork_latest(&config, &source).await,
-    }
+    let boundary = turn_raw.map(TurnId::from_raw);
+    Session::fork_stored(&config, &source_id, boundary.as_ref()).await
 }
 
 pub(crate) async fn continue_session_id(root: &Path) -> Result<SessionId> {

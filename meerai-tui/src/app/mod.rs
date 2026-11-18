@@ -14,7 +14,7 @@ pub use input::{clamp_pos_to_bounds, normalize_selection_in_bounds};
 pub(crate) use palette::{PaletteAction, filtered_commands};
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
@@ -23,12 +23,14 @@ use std::time::{Duration, Instant};
 use meerai_agents::events::{ApprovalRequest, QuestionAnswer, QuestionPrompt, QuestionRequest};
 use meerai_agents::{AgentCommand, ItemId, TurnId};
 use meerai_client::providers::{
-    KeyStatus, ProviderInfo, RuntimeProviderState, canonical_provider_id, check_key_status,
+    KeyStatus, ProviderAuthKind, ProviderInfo, RuntimeProviderState, canonical_provider_id,
+    check_key_status,
 };
 use meerai_client::secrets::SecretStore;
 use meerai_common::definitions::{AgentDefinition, SkillDefinition};
 use meerai_common::settings::AppSettings;
 use meerai_core::text::truncate_single_line;
+use meerai_host::{SessionRegistry, WebServerHandle, WebServerLauncher};
 use meerai_policy::ApprovalMode;
 pub use meerai_policy::{approval_mode_badge, approval_mode_label, parse_approval_mode};
 use meerai_session::{LoggedEvent, SessionId, SessionSummary};
@@ -71,6 +73,25 @@ pub enum ActiveModal {
     ProviderSelect {
         filter: String,
         selected: usize,
+    },
+    AuthMethodSelect {
+        provider_id: String,
+        provider_name: String,
+        selected: usize,
+    },
+    ProviderConnection {
+        provider_id: String,
+        provider_name: String,
+        status: KeyStatus,
+        selected: usize,
+    },
+    ChatGptLogin {
+        provider_id: String,
+        provider_name: String,
+        url: Option<String>,
+        input: String,
+        error: Option<String>,
+        busy: bool,
     },
     ApiKeyInput {
         provider_id: String,
@@ -138,12 +159,45 @@ pub enum ActiveModal {
         entry_idx: usize,
         selected: usize,
     },
+    ServeDialog {
+        port_input: String,
+        secret_input: String,
+        editing_secret: bool,
+        error: Option<String>,
+        busy: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderConnectionAction {
+    Next,
+    Update,
+    Remove,
+}
+
+impl ProviderConnectionAction {
+    pub fn options(status: &KeyStatus) -> Vec<Self> {
+        let mut options = vec![Self::Next, Self::Update];
+        if matches!(status, KeyStatus::Stored | KeyStatus::OAuth { .. }) {
+            options.push(Self::Remove);
+        }
+        options
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Next => "Continue to model select",
+            Self::Update => "Update credential",
+            Self::Remove => "Remove saved credential",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PendingSessionAction {
     RefreshSessions,
     OpenSessionId(SessionId),
+    RestoreSessionId(SessionId),
     OpenSessionQuery(String),
     ForkSession {
         session_id: SessionId,
@@ -166,6 +220,21 @@ pub enum PendingSessionAction {
         tab_id: u64,
         command: String,
     },
+    StartWebServer {
+        port: Option<u16>,
+        secret: Option<String>,
+    },
+    StopWebServer,
+    CloseSession {
+        session_id: SessionId,
+    },
+}
+
+#[derive(Clone)]
+pub struct RunningWebServer {
+    pub port: u16,
+    pub url: String,
+    pub handle: Arc<dyn WebServerHandle>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,6 +242,13 @@ pub enum TabHitKind {
     Tab(usize),
     CloseTab(usize),
     NewTab,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionOpenMode {
+    ReplaceEmpty,
+    NewTab,
+    Background,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,6 +274,30 @@ pub struct HoverZone {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TranscriptAnchor {
+    pub entry_idx: usize,
+    pub line: usize,
+    pub number: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnchorRailMark {
+    pub row: u16,
+    pub line: usize,
+    pub entry_idx: usize,
+    pub number: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AnchorRailLayout {
+    pub marks: Vec<AnchorRailMark>,
+    pub top_gap: bool,
+    pub bottom_gap: bool,
+    pub top_line: Option<usize>,
+    pub bottom_line: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TabHitZone {
     pub rect: Rect,
     pub kind: TabHitKind,
@@ -217,6 +317,7 @@ pub enum ApprovalClickAction {
 pub enum ModalHitKind {
     ListItem(usize),
     ApiKeyField(bool),
+    ServeField(bool),
     ApprovalAction(ApprovalClickAction),
     SearchModeToggle,
     Close,
@@ -265,11 +366,7 @@ pub struct SubagentEntry {
     pub nested_loading: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FileChangeEntry {
-    pub status: String,
-    pub path: String,
-}
+pub use meerai_host::diff::FileChangeEntry;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScreenPos {
@@ -511,6 +608,14 @@ impl SessionTab {
 
     pub fn has_conversation(&self) -> bool {
         !self.transcript.is_empty() || self.is_running || !self.input.is_empty()
+    }
+
+    pub fn is_empty_session(&self) -> bool {
+        !self.is_running
+            && !self
+                .transcript
+                .iter()
+                .any(|entry| matches!(entry, TranscriptEntry::User { .. }))
     }
 
     pub fn max_scroll(&self) -> usize {
@@ -943,6 +1048,9 @@ pub struct AppState {
     pub context_temperature: Option<f32>,
     pub explicit_context_window: Option<u64>,
     pub config_dir: Option<PathBuf>,
+    pub pending_login_request: Option<String>,
+    pub login_input: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    pub login_cancel: Option<tokio::sync::oneshot::Sender<()>>,
     pub spinner_tick: usize,
     pub show_sidebar: bool,
     pub terminal_width: u16,
@@ -972,6 +1080,10 @@ pub struct AppState {
     pub hover_zones: Vec<HoverZone>,
     pub hovered_entry: Option<usize>,
     pub hovered_digest: Option<usize>,
+    pub transcript_anchors: Vec<TranscriptAnchor>,
+    pub anchor_rail_area: Rect,
+    pub anchor_rail_hover: Option<u16>,
+    pub(super) anchor_rail_drag: bool,
     pub modal_hit_zones: Vec<ModalHitZone>,
     pub hovered_modal_hit: Option<ModalHitKind>,
     pub completion_hit_zones: Vec<CompletionHitZone>,
@@ -983,6 +1095,11 @@ pub struct AppState {
     pub(super) session_delete_confirm: Option<SessionId>,
     pub(crate) tab_persistence: bool,
     pub update_hit: Option<Rect>,
+    pub web_server: Option<RunningWebServer>,
+    pub web_server_hit: Option<Rect>,
+    pub registry: Option<Arc<SessionRegistry>>,
+    pub web_launcher: Option<Arc<dyn WebServerLauncher>>,
+    pub(crate) tui_prompt_echoes: VecDeque<(SessionId, String)>,
     pub composer_block_area: Rect,
     pub composer_input_area: Rect,
     pub composer_scroll: usize,
@@ -1006,6 +1123,7 @@ pub struct AppState {
     notice_set_at: Option<Instant>,
     pub session_opener: Option<Arc<dyn SessionOpener>>,
     pub(super) pending_session_actions: Vec<PendingSessionAction>,
+    closed_empty_session: Option<SessionId>,
     next_tab_id: u64,
     pending_g: bool,
     last_ctrl_c: Option<Instant>,
@@ -1044,7 +1162,8 @@ impl AppState {
             completion.sync_models(&completion_models, &active_provider);
             let provider_info = rt.active_provider_info();
             let status = check_key_status(&provider_info, secrets.as_ref());
-            if matches!(status, KeyStatus::Missing) {
+            rt.plan_usage = matches!(&status, KeyStatus::OAuth { .. });
+            if !status.is_configured() {
                 rt.catalog
                     .providers()
                     .iter()
@@ -1094,6 +1213,9 @@ impl AppState {
             context_temperature: None,
             explicit_context_window: None,
             config_dir,
+            pending_login_request: None,
+            login_input: None,
+            login_cancel: None,
             spinner_tick: 0,
             show_sidebar: true,
             terminal_width: 120,
@@ -1123,6 +1245,10 @@ impl AppState {
             hover_zones: Vec::new(),
             hovered_entry: None,
             hovered_digest: None,
+            transcript_anchors: Vec::new(),
+            anchor_rail_area: Rect::default(),
+            anchor_rail_hover: None,
+            anchor_rail_drag: false,
             modal_hit_zones: Vec::new(),
             hovered_modal_hit: None,
             completion_hit_zones: Vec::new(),
@@ -1134,6 +1260,11 @@ impl AppState {
             session_delete_confirm: None,
             tab_persistence: false,
             update_hit: None,
+            web_server: None,
+            web_server_hit: None,
+            registry: None,
+            web_launcher: None,
+            tui_prompt_echoes: VecDeque::new(),
             composer_block_area: Rect::default(),
             composer_input_area: Rect::default(),
             composer_scroll: 0,
@@ -1157,6 +1288,7 @@ impl AppState {
             notice_set_at: None,
             session_opener: None,
             pending_session_actions: Vec::new(),
+            closed_empty_session: None,
             next_tab_id: 2,
             pending_g: false,
             last_ctrl_c: None,
@@ -1191,6 +1323,30 @@ impl AppState {
         self.tabs.iter().position(|tab| tab.tab_id == tab_id)
     }
 
+    fn empty_tab_index(&self) -> Option<usize> {
+        self.tabs.iter().position(SessionTab::is_empty_session)
+    }
+
+    pub(super) fn request_new_tab(&mut self) {
+        if self.session_opener.is_none() {
+            self.status_notice =
+                Some("Session switching is not available in this context".to_string());
+            return;
+        }
+        if let Some(index) = self.empty_tab_index() {
+            if index == self.active_tab {
+                self.status_notice = Some("This tab is already empty".to_string());
+            } else {
+                self.switch_to_tab(index);
+                self.status_notice = Some(format!("Switched to empty tab {}", index + 1));
+            }
+            return;
+        }
+        self.status_notice = Some("Opening new session tab...".to_string());
+        self.pending_session_actions
+            .push(PendingSessionAction::CreateNewTab);
+    }
+
     pub fn take_pending_session_actions(&mut self) -> Vec<PendingSessionAction> {
         std::mem::take(&mut self.pending_session_actions)
     }
@@ -1222,13 +1378,29 @@ impl AppState {
             return;
         }
         let ids: Vec<SessionId> = self.tabs.iter().map(|tab| tab.session_id.clone()).collect();
-        crate::tabs::save(&ids, self.active_tab, &self.workspace_root);
+        crate::tabs::save(
+            &ids,
+            self.active_tab,
+            &self.workspace_root,
+            self.persistable_empty_session().as_ref(),
+        );
+    }
+
+    fn persistable_empty_session(&self) -> Option<SessionId> {
+        self.tabs
+            .iter()
+            .find(|tab| tab.is_empty_session())
+            .map(|tab| tab.session_id.clone())
+            .or_else(|| self.closed_empty_session.clone())
     }
 
     fn reset_ephemeral_ui_state(&mut self) {
         self.completion.reset();
         self.thinking_hit_zones.clear();
         self.digest_hit_zones.clear();
+        self.transcript_anchors.clear();
+        self.anchor_rail_hover = None;
+        self.anchor_rail_drag = false;
         self.selection = None;
         self.doc_selection = None;
         self.last_transcript_anchor = None;
@@ -1342,7 +1514,17 @@ impl AppState {
         }
 
         let removed = self.tabs.remove(index);
-        let _ = removed.cmd_tx.send(AgentCommand::Quit);
+        if removed.is_empty_session() {
+            self.closed_empty_session = Some(removed.session_id.clone());
+        }
+        if self.registry.is_some() {
+            self.pending_session_actions
+                .push(PendingSessionAction::CloseSession {
+                    session_id: removed.session_id,
+                });
+        } else {
+            let _ = removed.cmd_tx.send(AgentCommand::Quit);
+        }
 
         if index < self.active_tab {
             self.active_tab -= 1;
@@ -1373,13 +1555,16 @@ impl AppState {
     pub fn apply_opened_session(
         &mut self,
         opened: OpenedSession,
-        replace_empty_tab: bool,
+        mode: SessionOpenMode,
     ) -> Option<(u64, mpsc::UnboundedReceiver<meerai_agents::AgentEvent>)> {
         if let Some(existing_idx) = self.tab_index_for_session(&opened.session_id) {
             let _ = opened.cmd_tx.send(AgentCommand::Quit);
             self.switch_to_tab(existing_idx);
             self.status_notice = Some(format!("Switched to open tab {}", existing_idx + 1));
             return None;
+        }
+        if self.closed_empty_session.as_ref() == Some(&opened.session_id) {
+            self.closed_empty_session = None;
         }
 
         let tab_id = self.next_tab_id;
@@ -1395,21 +1580,34 @@ impl AppState {
             opened.cmd_tx,
         );
         tab.backend = opened.backend;
-        tab.transcript = opened.transcript;
+        tab.transcript = transcript_from_events(&opened.events);
         tab.user_turns = user_turn_map(&tab.transcript, &opened.events);
         tab.seed_usage_from_events(&opened.events);
 
-        if replace_empty_tab && self.should_replace_active_tab() {
+        if mode == SessionOpenMode::ReplaceEmpty && self.should_replace_active_tab() {
             if matches!(self.modal, Some(ActiveModal::Approval { .. })) {
                 self.modal = None;
             }
             let old = std::mem::replace(&mut self.tabs[0], tab);
-            let _ = old.cmd_tx.send(AgentCommand::Quit);
+            if old.is_empty_session() {
+                self.closed_empty_session = Some(old.session_id.clone());
+            }
+            if self.registry.is_some() {
+                self.pending_session_actions
+                    .push(PendingSessionAction::CloseSession {
+                        session_id: old.session_id,
+                    });
+            } else {
+                let _ = old.cmd_tx.send(AgentCommand::Quit);
+            }
             self.active_tab = 0;
             self.reset_ephemeral_ui_state();
             self.sync_active_provider_runtime();
             self.sync_completion_models();
             self.open_pending_question();
+            self.persist_tabs();
+        } else if mode == SessionOpenMode::Background {
+            self.tabs.push(tab);
             self.persist_tabs();
         } else {
             self.tabs.push(tab);
@@ -1417,7 +1615,9 @@ impl AppState {
             self.switch_to_tab(new_idx);
         }
 
-        self.status_notice = Some(format!("Session {}", self.tab().session_id));
+        if mode != SessionOpenMode::Background {
+            self.status_notice = Some(format!("Session {}", self.tab().session_id));
+        }
         Some((tab_id, opened.event_rx))
     }
 
@@ -1660,6 +1860,120 @@ impl AppState {
         tab.scroll_offset = max;
         tab.auto_follow = true;
     }
+
+    pub fn anchor_rail_visible(&self) -> bool {
+        let tab = self.tab();
+        self.transcript_anchors.len() >= 2 && tab.total_lines > tab.viewport_height
+    }
+
+    pub fn anchor_rail_number_width(&self) -> u16 {
+        self.transcript_anchors.len().to_string().len().max(1) as u16
+    }
+
+    pub fn anchor_rail_layout(&self, area: Rect) -> AnchorRailLayout {
+        let mut layout = AnchorRailLayout::default();
+        let turns = self.transcript_anchors.len();
+        if area.width == 0 || area.height == 0 || turns == 0 {
+            return layout;
+        }
+        let rows = area.height as usize;
+        let current = self.anchor_rail_current_index();
+        let (first, last, top_gap, bottom_gap) = numbered_window(turns, current, rows);
+        layout.top_gap = top_gap;
+        layout.bottom_gap = bottom_gap;
+        if top_gap {
+            layout.top_line = self.transcript_anchors.first().map(|anchor| anchor.line);
+        }
+        if bottom_gap {
+            layout.bottom_line = self.transcript_anchors.last().map(|anchor| anchor.line);
+        }
+        let mut row = area.y.saturating_add(u16::from(top_gap));
+        for anchor in &self.transcript_anchors[first..last] {
+            layout.marks.push(AnchorRailMark {
+                row,
+                line: anchor.line,
+                entry_idx: anchor.entry_idx,
+                number: anchor.number,
+            });
+            row = row.saturating_add(1);
+        }
+        layout
+    }
+
+    fn anchor_rail_current_index(&self) -> usize {
+        let top = self.effective_scroll();
+        self.transcript_anchors
+            .iter()
+            .rposition(|anchor| anchor.line <= top)
+            .unwrap_or(0)
+    }
+
+    pub fn anchor_rail_current_number(&self) -> Option<usize> {
+        self.transcript_anchors
+            .get(self.anchor_rail_current_index())
+            .map(|anchor| anchor.number)
+    }
+
+    pub fn anchor_rail_hover_row(&self, column: u16, row: u16) -> Option<u16> {
+        let area = self.anchor_rail_area;
+        if area.width == 0 || row < area.y || row >= area.y + area.height {
+            return None;
+        }
+        (column >= area.x && column < area.x + area.width).then_some(row)
+    }
+
+    pub(super) fn jump_from_anchor_rail(&mut self, row: u16, allow_gaps: bool) {
+        let area = self.anchor_rail_area;
+        let layout = self.anchor_rail_layout(area);
+        let line = layout
+            .marks
+            .iter()
+            .find(|mark| mark.row == row)
+            .map(|mark| mark.line)
+            .or_else(|| {
+                if !allow_gaps {
+                    return None;
+                }
+                if layout.top_gap && row == area.y {
+                    layout.top_line
+                } else if layout.bottom_gap && row == area.y + area.height.saturating_sub(1) {
+                    layout.bottom_line
+                } else {
+                    None
+                }
+            });
+        let Some(line) = line else {
+            return;
+        };
+        let target = line.min(self.max_scroll());
+        let follow = target >= self.max_scroll();
+        let tab = self.tab_mut();
+        tab.scroll_offset = target;
+        tab.auto_follow = follow;
+    }
+}
+
+fn numbered_window(turns: usize, current: usize, rows: usize) -> (usize, usize, bool, bool) {
+    if rows == 0 || turns == 0 {
+        return (0, 0, false, false);
+    }
+    if turns <= rows {
+        return (0, turns, false, false);
+    }
+    if rows <= 2 {
+        let current = current.min(turns - 1);
+        return (current, current + 1, false, false);
+    }
+    let mut first = current.saturating_sub(rows / 2);
+    let mut last = (first + rows).min(turns);
+    first = last.saturating_sub(rows);
+    for _ in 0..2 {
+        let slots = rows - usize::from(first > 0) - usize::from(last < turns);
+        first = current.saturating_sub(slots / 2);
+        last = (first + slots).min(turns);
+        first = last.saturating_sub(slots);
+    }
+    (first, last, first > 0, last < turns)
 }
 
 pub(super) fn filter_session_summaries<'a>(

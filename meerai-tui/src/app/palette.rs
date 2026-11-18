@@ -173,6 +173,20 @@ pub(crate) const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: PaletteAction::CopyReply,
     },
     PaletteCommand {
+        section: "Web",
+        label: "Start local browser UI",
+        hint: "/serve",
+        keywords: "web browser serve http ui",
+        action: PaletteAction::Slash("/serve"),
+    },
+    PaletteCommand {
+        section: "Web",
+        label: "Stop local browser UI",
+        hint: "/serve stop",
+        keywords: "web browser stop serve",
+        action: PaletteAction::Slash("/serve stop"),
+    },
+    PaletteCommand {
         section: "App",
         label: "Show help",
         hint: "f1",

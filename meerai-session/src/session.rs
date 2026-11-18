@@ -1,4 +1,4 @@
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -22,6 +22,7 @@ use crate::projection::{ProjectionPolicy, derive_messages, shadowed_ranges};
 use crate::{perms, storage};
 
 const META_FILE: &str = "meta.json";
+const LOCK_FILE: &str = "session.lock";
 const TOOL_INTERRUPTED: &str = "tool execution interrupted before completion";
 
 pub const DEFAULT_ROTATION_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
@@ -210,6 +211,63 @@ struct SessionInner {
     active_size: AtomicU64,
     rotation_threshold: AtomicU64,
     write_guard: tokio::sync::Mutex<()>,
+    _lock: Option<SessionLock>,
+}
+
+struct SessionLock {
+    _file: std::fs::File,
+}
+
+impl SessionLock {
+    fn acquire(dir: &Path, id: &SessionId) -> Result<Self> {
+        let lock_path = dir.join(LOCK_FILE);
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open lock file {}", lock_path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                &lock_path,
+                std::fs::Permissions::from_mode(meerai_core::fs_perms::FILE_MODE),
+            );
+        }
+        match file.try_lock() {
+            Ok(()) => {
+                let _ = file.set_len(0);
+                let _ = file.seek(SeekFrom::Start(0));
+                let _ = writeln!(file, "pid={}", std::process::id());
+                let _ = file.flush();
+                Ok(Self { _file: file })
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let holder = read_lock_holder(&lock_path);
+                anyhow::bail!("session {id} is already open ({holder})")
+            }
+            Err(std::fs::TryLockError::Error(err)) => {
+                Err(anyhow::Error::from(err)
+                    .context(format!("failed to lock {}", lock_path.display())))
+            }
+        }
+    }
+}
+
+fn read_lock_holder(lock_path: &Path) -> String {
+    match std::fs::read_to_string(lock_path) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                "held by another session owner".to_string()
+            } else {
+                format!("held by {trimmed}")
+            }
+        }
+        Err(_) => "held by another session owner".to_string(),
+    }
 }
 
 impl Session {
@@ -226,6 +284,7 @@ impl Session {
                 active_size: AtomicU64::new(0),
                 rotation_threshold: AtomicU64::new(DEFAULT_ROTATION_THRESHOLD_BYTES),
                 write_guard: tokio::sync::Mutex::new(()),
+                _lock: None,
             }),
         }
     }
@@ -265,6 +324,7 @@ impl Session {
         } else {
             anyhow::bail!("session not found: {id}");
         }
+        let lock = SessionLock::acquire(&dir, &id)?;
         tighten_existing_files(&dir).await;
 
         let meta_path = dir.join(META_FILE);
@@ -322,6 +382,7 @@ impl Session {
                 active_size: AtomicU64::new(log.active_size),
                 rotation_threshold: AtomicU64::new(DEFAULT_ROTATION_THRESHOLD_BYTES),
                 write_guard: tokio::sync::Mutex::new(()),
+                _lock: Some(lock),
             }),
         };
         session.heal_dangling_tool_calls().await?;
@@ -482,18 +543,58 @@ impl Session {
         source: &Session,
         boundary_turn: &TurnId,
     ) -> Result<Session> {
-        let prefix = fork_prefix(&source.events(), boundary_turn)?;
-        let source_meta = source.meta();
-        let forked_from = source.id().clone();
-        let cwd = source_meta.cwd;
+        let events = source.events();
+        let meta = source.meta();
+        Self::fork_from_parts(config, source.id(), &meta, &events, Some(boundary_turn)).await
+    }
+
+    pub async fn fork_stored(
+        config: &SessionConfig,
+        source_id: &SessionId,
+        boundary_turn: Option<&TurnId>,
+    ) -> Result<Session> {
+        let dir = session_dir(&config.root, source_id)?;
+        if !path_is_dir(&dir).await? {
+            anyhow::bail!("session not found: {source_id}");
+        }
+        let log = storage::load(&dir).await?;
+        let meta = match fs::read_to_string(dir.join(META_FILE)).await {
+            Ok(raw) => serde_json::from_str(&raw)
+                .with_context(|| format!("failed to parse {}", dir.join(META_FILE).display()))?,
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                SessionMeta::new(source_id.clone(), config.workspace.clone())
+            }
+            Err(err) => {
+                return Err(anyhow::Error::from(err)
+                    .context(format!("failed to read {}", dir.join(META_FILE).display())));
+            }
+        };
+        Self::fork_from_parts(config, source_id, &meta, &log.events, boundary_turn).await
+    }
+
+    async fn fork_from_parts(
+        config: &SessionConfig,
+        source_id: &SessionId,
+        source_meta: &SessionMeta,
+        events: &[LoggedEvent],
+        boundary_turn: Option<&TurnId>,
+    ) -> Result<Session> {
+        let resolved_boundary = match boundary_turn {
+            Some(turn) => turn.clone(),
+            None => latest_closed_turn_in_events(events).ok_or_else(|| {
+                anyhow::anyhow!("session has no closed turns to fork: {source_id}")
+            })?,
+        };
+        let prefix = fork_prefix(events, &resolved_boundary)?;
         let inherited_event_count = prefix.len() as u64;
-        let approval_mode = source_meta.approval_mode;
+        let approval_mode = source_meta.approval_mode.clone();
+        let cwd = source_meta.cwd.clone();
 
         let session = Self::open_or_create(config, SessionId::new(), cwd).await?;
         session.append_preserved(&prefix).await?;
         session
             .update_meta(|meta| {
-                meta.forked_from = Some(forked_from);
+                meta.forked_from = Some(source_id.clone());
                 meta.inherited_event_count = Some(inherited_event_count);
                 meta.approval_mode = approval_mode;
             })
@@ -503,20 +604,13 @@ impl Session {
     }
 
     pub fn latest_closed_turn(&self) -> Option<TurnId> {
-        self.events()
-            .into_iter()
-            .rev()
-            .find_map(|logged| match logged.event {
-                SessionEvent::TurnEnded { turn_id, .. } => Some(turn_id),
-                _ => None,
-            })
+        latest_closed_turn_in_events(&self.events())
     }
 
     pub async fn fork_latest(config: &SessionConfig, source: &Session) -> Result<Session> {
-        let boundary = source.latest_closed_turn().ok_or_else(|| {
-            anyhow::anyhow!("session has no closed turns to fork: {}", source.id())
-        })?;
-        Self::fork(config, source, &boundary).await
+        let events = source.events();
+        let meta = source.meta();
+        Self::fork_from_parts(config, source.id(), &meta, &events, None).await
     }
 
     pub async fn create_child(
@@ -726,6 +820,13 @@ impl Session {
     }
 }
 
+fn latest_closed_turn_in_events(events: &[LoggedEvent]) -> Option<TurnId> {
+    events.iter().rev().find_map(|logged| match &logged.event {
+        SessionEvent::TurnEnded { turn_id, .. } => Some(turn_id.clone()),
+        _ => None,
+    })
+}
+
 fn fork_prefix(events: &[LoggedEvent], boundary_turn: &TurnId) -> Result<Vec<LoggedEvent>> {
     let start = events
         .iter()
@@ -788,7 +889,7 @@ async fn tighten_existing_files(dir: &Path) {
             }
             continue;
         }
-        if name == META_FILE || storage::is_log_file_name(name) {
+        if name == META_FILE || name == LOCK_FILE || storage::is_log_file_name(name) {
             let _ = perms::tighten_file(&path).await;
         }
     }
@@ -874,13 +975,22 @@ pub async fn session_has_user_input(dir: &Path) -> Result<bool> {
 
 pub fn delete_session(root: &Path, id: &SessionId) -> Result<bool> {
     let dir = session_dir(root, id)?;
-    match std::fs::remove_dir_all(&dir) {
+    if !dir.exists() {
+        return Ok(false);
+    }
+    let lock = SessionLock::acquire(&dir, id)?;
+    #[cfg(windows)]
+    drop(lock);
+    let result = match std::fs::remove_dir_all(&dir) {
         Ok(()) => Ok(true),
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
         Err(err) => {
             Err(anyhow::Error::from(err).context(format!("failed to delete {}", dir.display())))
         }
-    }
+    };
+    #[cfg(not(windows))]
+    drop(lock);
+    result
 }
 
 fn read_meta(dir: &Path) -> Option<SessionMeta> {
@@ -1011,6 +1121,7 @@ mod tests {
         let expected_dir = root.join(id.as_str());
         assert_eq!(session.dir(), Some(expected_dir.as_path()));
         assert!(expected_dir.join(META_FILE).exists());
+        drop(session);
 
         let reopened = Session::open_or_create(&config, id.clone(), cwd.clone())
             .await
@@ -1119,6 +1230,7 @@ mod tests {
         let mut raw = fs::read_to_string(&log_path).await.unwrap();
         raw.push_str("{ this is not an event }\n");
         fs::write(&log_path, raw).await.unwrap();
+        drop(session);
 
         let reopened =
             Session::open_or_create(&config, id.clone(), PathBuf::from("/tmp/workspace"))
@@ -1195,6 +1307,7 @@ mod tests {
         assert_eq!(active.len(), 1, "exactly one active generation");
 
         let first_sealed = fs::read(&sealed[0]).await.unwrap();
+        drop(session);
 
         let reopened =
             Session::open_or_create(&config, id.clone(), PathBuf::from("/tmp/workspace"))
@@ -1244,6 +1357,7 @@ mod tests {
             }
             other => panic!("expected synthesized TurnEnded, got {other:?}"),
         }
+        drop(reopened);
 
         let reopened_again = Session::open_or_create(&config, id, PathBuf::from("/tmp/workspace"))
             .await
@@ -1318,13 +1432,15 @@ mod tests {
                 .map(|logged| &logged.event),
             Some(SessionEvent::ToolResult { .. })
         ));
+        let event_len = events.len();
+        drop(reopened);
 
         let reopened_again = Session::open_or_create(&config, id, PathBuf::from("/tmp/workspace"))
             .await
             .unwrap();
         assert_eq!(
             reopened_again.events().len(),
-            events.len(),
+            event_len,
             "healing must not repeat on later opens"
         );
 
@@ -1646,14 +1762,13 @@ mod tests {
         let messages = session.derive_messages(&ProjectionPolicy::default());
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content.first_text(), Some("one"));
+        let session_id = session.id().clone();
+        drop(session);
 
-        let reopened = Session::open_or_create(
-            &config,
-            session.id().clone(),
-            PathBuf::from("/tmp/workspace"),
-        )
-        .await
-        .unwrap();
+        let reopened =
+            Session::open_or_create(&config, session_id, PathBuf::from("/tmp/workspace"))
+                .await
+                .unwrap();
         assert_eq!(reopened.events().len(), 7, "rewind never deletes events");
         assert_eq!(
             reopened.derive_messages(&ProjectionPolicy::default()).len(),
@@ -1971,6 +2086,7 @@ mod tests {
                 .await
                 .unwrap();
         let id = session.id().clone();
+        drop(session);
 
         assert!(delete_session(&root, &id).unwrap());
         assert!(!root.join(id.as_str()).exists());
@@ -2051,6 +2167,7 @@ mod tests {
             other => panic!("expected synthesized CompactionEnded, got {other:?}"),
         }
         assert!(!has_open_compaction(&events));
+        drop(reopened);
 
         let reopened_again = Session::open(&config, id, PathBuf::from("/tmp/workspace"))
             .await
@@ -2194,5 +2311,78 @@ mod tests {
         assert_eq!(latest.id, parent_id);
 
         fs::remove_dir_all(&root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_fails_while_session_lock_is_held_and_succeeds_after_drop() {
+        let root = temp_root("lock-exclusive");
+        let config = config(&root);
+        let id = SessionId::new();
+        let owner = Session::open_or_create(&config, id.clone(), root.clone())
+            .await
+            .unwrap();
+
+        let err = match Session::open(&config, id.clone(), root.clone()).await {
+            Ok(_) => panic!("expected lock contention error"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+        assert!(message.contains("already open"), "{message}");
+        assert!(
+            message.contains(&format!("pid={}", std::process::id())),
+            "{message}"
+        );
+
+        drop(owner);
+        let reopened = Session::open(&config, id, root.clone()).await.unwrap();
+        drop(reopened);
+        fs::remove_dir_all(&root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fork_stored_succeeds_while_source_session_is_locked() {
+        let root = temp_root("fork-stored-locked");
+        let config = config(&root);
+        let source_id = SessionId::new();
+        let turn_id = TurnId::from_raw("turn-1");
+
+        let source = Session::open_or_create(&config, source_id.clone(), root.clone())
+            .await
+            .unwrap();
+        source.append(started(&turn_id)).await.unwrap();
+        source.append(user("hello")).await.unwrap();
+        source.append(ended(&turn_id)).await.unwrap();
+        source.flush().await.unwrap();
+
+        let forked = Session::fork_stored(&config, &source_id, None)
+            .await
+            .unwrap();
+        assert_ne!(forked.id(), &source_id);
+        assert_eq!(forked.meta().forked_from.as_ref(), Some(&source_id));
+        assert_eq!(forked.events().len(), 3);
+
+        drop(forked);
+        drop(source);
+        fs::remove_dir_all(&root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_session_fails_while_session_lock_is_held() {
+        let root = temp_root("delete-locked");
+        let config = config(&root);
+        let id = SessionId::new();
+        let owner = Session::open_or_create(&config, id.clone(), root.clone())
+            .await
+            .unwrap();
+
+        let err = delete_session(&root, &id).unwrap_err().to_string();
+        assert!(err.contains("already open"), "{err}");
+        assert!(root.join(id.as_str()).exists());
+
+        drop(owner);
+        assert!(delete_session(&root, &id).unwrap());
+        assert!(!root.join(id.as_str()).exists());
+
+        let _ = fs::remove_dir_all(&root).await;
     }
 }

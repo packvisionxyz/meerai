@@ -1,6 +1,6 @@
 use super::statusline::key_status_style;
 use super::*;
-use crate::app::{ApprovalClickAction, DiffListState};
+use crate::app::{ApprovalClickAction, DiffListState, ProviderConnectionAction};
 use crate::diff::DiffRow;
 
 fn auth_file_display() -> String {
@@ -113,6 +113,255 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 ("Esc", "close"),
             ]));
             frame.render_widget(footer, rows[4]);
+        }
+        ActiveModal::AuthMethodSelect {
+            provider_id,
+            provider_name,
+            selected,
+        } => {
+            let popup = centered_rect_fixed(area, 66, 11);
+            dim_backdrop(frame, area, popup);
+            let title = format!("Connect {provider_name} ({provider_id})");
+            let inner = dialog_frame(frame, app, popup, &title, true);
+
+            let rows = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(2),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "ChatGPT Plus/Pro plan usage",
+                    Style::default().fg(theme::p().muted),
+                )),
+                rows[0],
+            );
+
+            let options = ["Continue with ChatGPT", "Use an API key"];
+            let selected_idx = selected.min(options.len() - 1);
+            let list_items: Vec<ListItem<'_>> = options
+                .iter()
+                .enumerate()
+                .map(|(idx, label)| {
+                    let is_selected = idx == selected_idx;
+                    let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(idx));
+                    let prefix = if is_selected { "▸ " } else { "  " };
+                    let row = ListItem::new(Line::from(vec![
+                        Span::styled(
+                            prefix,
+                            Style::default().fg(if is_selected {
+                                theme::p().interactive
+                            } else {
+                                theme::p().faint
+                            }),
+                        ),
+                        Span::styled(*label, Style::default().fg(theme::p().text)),
+                    ]));
+                    if is_hovered && !is_selected {
+                        row.style(hover_row_style())
+                    } else {
+                        row
+                    }
+                })
+                .collect();
+            let mut state = ListState::default();
+            state.select(Some(selected_idx));
+            let list = List::new(list_items).highlight_style(selection_style());
+            frame.render_stateful_widget(list, rows[2], &mut state);
+            register_list_hit_zones(app, rows[2], state.offset(), options.len());
+
+            frame.render_widget(
+                Paragraph::new(key_hints_line(&[
+                    ("Enter", "select"),
+                    ("↑↓", "move"),
+                    ("Esc", "back"),
+                ])),
+                rows[3],
+            );
+        }
+        ActiveModal::ProviderConnection {
+            provider_id,
+            provider_name,
+            status,
+            selected,
+        } => {
+            let options = ProviderConnectionAction::options(&status);
+            let popup = centered_rect_fixed(area, 66, 12);
+            dim_backdrop(frame, area, popup);
+            let title = format!("Connect {provider_name} ({provider_id})");
+            let inner = dialog_frame(frame, app, popup, &title, true);
+
+            let rows = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+
+            let (badge, badge_color) = key_status_style(&status);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        "Status  ",
+                        Style::default()
+                            .fg(theme::p().muted)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(badge, Style::default().fg(badge_color)),
+                ])),
+                rows[0],
+            );
+
+            let selected_idx = selected.min(options.len().saturating_sub(1));
+            let list_items: Vec<ListItem<'_>> = options
+                .iter()
+                .enumerate()
+                .map(|(idx, action)| {
+                    let is_selected = idx == selected_idx;
+                    let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(idx));
+                    let prefix = if is_selected { "▸ " } else { "  " };
+                    let row = ListItem::new(Line::from(vec![
+                        Span::styled(
+                            prefix,
+                            Style::default().fg(if is_selected {
+                                theme::p().interactive
+                            } else {
+                                theme::p().faint
+                            }),
+                        ),
+                        Span::styled(action.label(), Style::default().fg(theme::p().text)),
+                    ]));
+                    if is_hovered && !is_selected {
+                        row.style(hover_row_style())
+                    } else {
+                        row
+                    }
+                })
+                .collect();
+            let mut state = ListState::default();
+            if !options.is_empty() {
+                state.select(Some(selected_idx));
+            }
+            let list = List::new(list_items).highlight_style(selection_style());
+            frame.render_stateful_widget(list, rows[2], &mut state);
+            register_list_hit_zones(app, rows[2], state.offset(), options.len());
+
+            frame.render_widget(
+                Paragraph::new(key_hints_line(&[
+                    ("Enter", "select"),
+                    ("↑↓", "move"),
+                    ("Esc", "back"),
+                ])),
+                rows[3],
+            );
+        }
+        ActiveModal::ChatGptLogin {
+            provider_id,
+            provider_name,
+            url,
+            input,
+            error,
+            busy,
+        } => {
+            let popup = centered_rect_fixed(area, 66, 19);
+            dim_backdrop(frame, area, popup);
+            let title = format!("Sign in with ChatGPT ({provider_id})");
+            let inner = dialog_frame(frame, app, popup, &title, true);
+
+            let rows = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(3),
+                Constraint::Length(2),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        "Provider  ",
+                        Style::default()
+                            .fg(theme::p().muted)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(provider_name.clone(), Style::default().fg(theme::p().text)),
+                ])),
+                rows[0],
+            );
+
+            let status = if url.is_none() && busy {
+                "Starting sign-in..."
+            } else {
+                "Waiting for the browser callback..."
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    status,
+                    Style::default().fg(if url.is_some() {
+                        theme::p().interactive
+                    } else {
+                        theme::p().muted
+                    }),
+                )),
+                rows[1],
+            );
+
+            let url_text = url.clone().unwrap_or_else(|| "(preparing URL)".to_string());
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    url_text,
+                    Style::default().fg(theme::p().faint),
+                ))
+                .wrap(Wrap { trim: false }),
+                rows[2],
+            );
+
+            if let Some(error) = error {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        error.clone(),
+                        Style::default().fg(theme::p().error),
+                    ))
+                    .wrap(Wrap { trim: false }),
+                    rows[3],
+                );
+            }
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "Paste the final redirect URL",
+                    Style::default().fg(theme::p().muted),
+                )),
+                rows[4],
+            );
+            let input_area = input_band(frame, rows[5], true);
+            let value = if input.is_empty() {
+                Span::styled(
+                    "(only needed when the browser cannot reach this host)",
+                    Style::default().fg(theme::p().faint),
+                )
+            } else {
+                Span::styled(input.clone(), Style::default().fg(theme::p().text))
+            };
+            frame.render_widget(Paragraph::new(value), input_area);
+            place_input_cursor(frame, input_area, input.chars().count());
+
+            frame.render_widget(
+                Paragraph::new(key_hints_line(&[
+                    ("Enter", "paste"),
+                    ("ctrl+y", "copy URL"),
+                    ("Esc", "cancel"),
+                ])),
+                rows[7],
+            );
         }
         ActiveModal::ApiKeyInput {
             provider_id,
@@ -809,6 +1058,147 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 key_hints_line(&[("Enter", "run"), ("↑↓", "move"), ("Esc", "close")])
             };
             frame.render_widget(Paragraph::new(footer), rows[4]);
+        }
+        ActiveModal::ServeDialog {
+            port_input,
+            secret_input,
+            editing_secret,
+            error,
+            busy,
+        } => {
+            let popup = centered_rect_fixed(area, 64, 14);
+            dim_backdrop(frame, area, popup);
+            let inner = dialog_frame(frame, app, popup, "Start Browser UI (/serve)", !busy);
+
+            let rows = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        "Bind  ",
+                        Style::default()
+                            .fg(theme::p().muted)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        "127.0.0.1 (Basic auth user: meerai)",
+                        Style::default().fg(theme::p().text),
+                    ),
+                ])),
+                rows[0],
+            );
+
+            let port_focus = !editing_secret;
+            let port_label_style = if port_focus {
+                Style::default()
+                    .fg(theme::p().interactive)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::p().muted)
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled("Port (optional)", port_label_style)),
+                rows[2],
+            );
+            let port_band_rect = rows[3];
+            let port_area = input_band(frame, port_band_rect, port_focus);
+            let (port_text, port_style) = if port_input.is_empty() {
+                (
+                    "(leave blank for OS ephemeral port)".to_string(),
+                    Style::default().fg(theme::p().faint),
+                )
+            } else {
+                (port_input.clone(), Style::default().fg(theme::p().text))
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(port_text, port_style)),
+                port_area,
+            );
+            app.modal_hit_zones.push(ModalHitZone {
+                rect: port_band_rect,
+                kind: ModalHitKind::ServeField(false),
+            });
+
+            let secret_label_style = if editing_secret {
+                Style::default()
+                    .fg(theme::p().interactive)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::p().muted)
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "Password (min 8 chars, optional)",
+                    secret_label_style,
+                )),
+                rows[5],
+            );
+            let secret_band_rect = rows[6];
+            let secret_area = input_band(frame, secret_band_rect, editing_secret);
+            let (secret_text, secret_style) = if secret_input.is_empty() {
+                (
+                    "(leave blank to auto-generate & show once)".to_string(),
+                    Style::default().fg(theme::p().faint),
+                )
+            } else {
+                (
+                    "•".repeat(secret_input.chars().count()),
+                    Style::default().fg(theme::p().text),
+                )
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(secret_text, secret_style)),
+                secret_area,
+            );
+            app.modal_hit_zones.push(ModalHitZone {
+                rect: secret_band_rect,
+                kind: ModalHitKind::ServeField(true),
+            });
+
+            if port_focus {
+                place_input_cursor(frame, port_area, port_input.chars().count());
+            } else {
+                place_input_cursor(frame, secret_area, secret_input.chars().count());
+            }
+
+            if busy {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "Starting server...",
+                        Style::default().fg(theme::p().warning),
+                    )),
+                    rows[8],
+                );
+            } else if let Some(err) = error {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        truncate_single_line(&err, rows[8].width as usize),
+                        Style::default().fg(theme::p().error),
+                    )),
+                    rows[8],
+                );
+            }
+
+            frame.render_widget(
+                Paragraph::new(key_hints_line(&[
+                    ("Enter", "start"),
+                    ("Tab", "field"),
+                    ("Esc", "cancel"),
+                ])),
+                rows[9],
+            );
         }
         ActiveModal::RewindMenu { selected, .. } => {
             let popup = cap_width(centered_rect(area, 60, 48, 44, 11), 60);

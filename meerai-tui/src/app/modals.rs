@@ -113,24 +113,7 @@ impl AppState {
                     }
                     KeyCode::Enter => {
                         if let Some((provider, status)) = providers.get(selected) {
-                            if !provider.requires_api_key {
-                                self.activate_provider_only(&provider.id);
-                                self.open_model_input();
-                            } else {
-                                let saved_url = {
-                                    let rt = self.runtime.read().unwrap();
-                                    rt.base_urls.get(&provider.id).cloned().unwrap_or_default()
-                                };
-                                self.modal = Some(ActiveModal::ApiKeyInput {
-                                    provider_id: provider.id.clone(),
-                                    provider_name: provider.display_name.clone(),
-                                    api_key: String::new(),
-                                    base_url: saved_url,
-                                    editing_base_url: false,
-                                    existing_key_status: status.clone(),
-                                    error: None,
-                                });
-                            }
+                            self.open_provider_connect(provider, status);
                         } else {
                             self.modal = Some(ActiveModal::ProviderSelect { filter, selected });
                         }
@@ -144,6 +127,153 @@ impl AppState {
                         self.modal = Some(ActiveModal::ProviderSelect { filter, selected });
                     }
                 }
+            }
+            ActiveModal::AuthMethodSelect {
+                provider_id,
+                provider_name,
+                mut selected,
+            } => {
+                const AUTH_METHODS: usize = 2;
+                match key.code {
+                    KeyCode::Esc => self.reopen_provider_select_for(&provider_id),
+                    KeyCode::Up | KeyCode::Char('p') if key.code == KeyCode::Up || has_ctrl => {
+                        selected = if selected == 0 {
+                            AUTH_METHODS - 1
+                        } else {
+                            selected - 1
+                        };
+                        self.modal = Some(ActiveModal::AuthMethodSelect {
+                            provider_id,
+                            provider_name,
+                            selected,
+                        });
+                    }
+                    KeyCode::Down | KeyCode::Char('n') if key.code == KeyCode::Down || has_ctrl => {
+                        selected = (selected + 1) % AUTH_METHODS;
+                        self.modal = Some(ActiveModal::AuthMethodSelect {
+                            provider_id,
+                            provider_name,
+                            selected,
+                        });
+                    }
+                    KeyCode::Enter => self.choose_auth_method(&provider_id, selected),
+                    _ => {
+                        self.modal = Some(ActiveModal::AuthMethodSelect {
+                            provider_id,
+                            provider_name,
+                            selected,
+                        });
+                    }
+                }
+            }
+            ActiveModal::ProviderConnection {
+                provider_id,
+                provider_name,
+                status,
+                mut selected,
+            } => {
+                let count = ProviderConnectionAction::options(&status).len();
+                match key.code {
+                    KeyCode::Esc => self.reopen_provider_select_for(&provider_id),
+                    KeyCode::Up | KeyCode::Char('p') if key.code == KeyCode::Up || has_ctrl => {
+                        selected = if selected == 0 {
+                            count - 1
+                        } else {
+                            selected - 1
+                        };
+                        self.modal = Some(ActiveModal::ProviderConnection {
+                            provider_id,
+                            provider_name,
+                            status,
+                            selected,
+                        });
+                    }
+                    KeyCode::Down | KeyCode::Char('n') if key.code == KeyCode::Down || has_ctrl => {
+                        selected = (selected + 1) % count;
+                        self.modal = Some(ActiveModal::ProviderConnection {
+                            provider_id,
+                            provider_name,
+                            status,
+                            selected,
+                        });
+                    }
+                    KeyCode::Enter => {
+                        self.apply_provider_connection_action(
+                            &provider_id,
+                            &provider_name,
+                            &status,
+                            selected,
+                        );
+                    }
+                    _ => {
+                        self.modal = Some(ActiveModal::ProviderConnection {
+                            provider_id,
+                            provider_name,
+                            status,
+                            selected,
+                        });
+                    }
+                }
+            }
+            ActiveModal::ChatGptLogin {
+                provider_id,
+                provider_name,
+                mut url,
+                mut input,
+                mut error,
+                mut busy,
+            } => {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.cancel_chatgpt_login();
+                        return true;
+                    }
+                    KeyCode::Enter => {
+                        if error.is_some() {
+                            self.login_input = None;
+                            self.login_cancel = None;
+                            self.pending_login_request = Some(provider_id.clone());
+                            input.clear();
+                            error = None;
+                            busy = true;
+                            url = None;
+                        } else {
+                            let trimmed = input.trim().to_string();
+                            if !trimmed.is_empty()
+                                && let Some(tx) = &self.login_input
+                            {
+                                let _ = tx.send(trimmed);
+                                input.clear();
+                                error = None;
+                                busy = true;
+                            }
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        error = None;
+                    }
+                    KeyCode::Char('y') if has_ctrl => {
+                        if let Some(link) = url.as_deref() {
+                            self.copy_text_to_clipboard(link);
+                            self.status_notice =
+                                Some("Authorize URL copied to clipboard".to_string());
+                        }
+                    }
+                    KeyCode::Char(c) if !has_ctrl && !has_alt => {
+                        input.push(c);
+                        error = None;
+                    }
+                    _ => {}
+                }
+                self.modal = Some(ActiveModal::ChatGptLogin {
+                    provider_id,
+                    provider_name,
+                    url,
+                    input,
+                    error,
+                    busy,
+                });
             }
             ActiveModal::ApiKeyInput {
                 provider_id,
@@ -181,7 +311,7 @@ impl AppState {
                     });
                 }
                 KeyCode::Char('d') if has_ctrl => {
-                    match self.secrets.delete_key(&provider_id) {
+                    match self.secrets.delete_credential(&provider_id) {
                         Ok(()) => {
                             api_key.clear();
                             self.invalidate_key_status();
@@ -196,7 +326,7 @@ impl AppState {
                             }
                             error = None;
                             self.status_notice =
-                                Some(format!("Removed stored key for {provider_id}"));
+                                Some(format!("Removed credential for {provider_id}"));
                         }
                         Err(err) => {
                             error = Some(format!("{err:#}"));
@@ -1232,6 +1362,144 @@ impl AppState {
                     }
                 }
             }
+            ActiveModal::ServeDialog {
+                mut port_input,
+                mut secret_input,
+                mut editing_secret,
+                mut error,
+                busy,
+            } => {
+                if busy {
+                    self.modal = Some(ActiveModal::ServeDialog {
+                        port_input,
+                        secret_input,
+                        editing_secret,
+                        error,
+                        busy,
+                    });
+                    return true;
+                }
+                match key.code {
+                    KeyCode::Esc => {
+                        self.modal = None;
+                    }
+                    KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
+                        editing_secret = !editing_secret;
+                        self.modal = Some(ActiveModal::ServeDialog {
+                            port_input,
+                            secret_input,
+                            editing_secret,
+                            error,
+                            busy: false,
+                        });
+                    }
+                    KeyCode::Char('u') if has_ctrl => {
+                        if editing_secret {
+                            secret_input.clear();
+                        } else {
+                            port_input.clear();
+                        }
+                        error = None;
+                        self.modal = Some(ActiveModal::ServeDialog {
+                            port_input,
+                            secret_input,
+                            editing_secret,
+                            error,
+                            busy: false,
+                        });
+                    }
+                    KeyCode::Backspace => {
+                        if editing_secret {
+                            secret_input.pop();
+                        } else {
+                            port_input.pop();
+                        }
+                        error = None;
+                        self.modal = Some(ActiveModal::ServeDialog {
+                            port_input,
+                            secret_input,
+                            editing_secret,
+                            error,
+                            busy: false,
+                        });
+                    }
+                    KeyCode::Enter => {
+                        let port_trimmed = port_input.trim();
+                        let parsed_port = if port_trimmed.is_empty() {
+                            Ok(None)
+                        } else {
+                            match port_trimmed.parse::<u16>() {
+                                Ok(p) if p > 0 => Ok(Some(p)),
+                                _ => Err("Port must be a number between 1 and 65535".to_string()),
+                            }
+                        };
+                        let secret_opt = if secret_input.is_empty() {
+                            Ok(None)
+                        } else if secret_input.chars().count() < 8 {
+                            Err("Password must be at least 8 characters (or leave blank to auto-generate)"
+                                .to_string())
+                        } else if secret_input.chars().any(char::is_control)
+                            || secret_input.trim().is_empty()
+                        {
+                            Err(
+                                "Password cannot be whitespace or contain control characters"
+                                    .to_string(),
+                            )
+                        } else {
+                            Ok(Some(secret_input.clone()))
+                        };
+                        match (parsed_port, secret_opt) {
+                            (Ok(port), Ok(secret)) => {
+                                self.pending_session_actions
+                                    .push(PendingSessionAction::StartWebServer { port, secret });
+                                self.status_notice = Some("Starting web UI server...".to_string());
+                                self.modal = Some(ActiveModal::ServeDialog {
+                                    port_input,
+                                    secret_input: String::new(),
+                                    editing_secret,
+                                    error: None,
+                                    busy: true,
+                                });
+                            }
+                            (Err(msg), _) | (_, Err(msg)) => {
+                                self.modal = Some(ActiveModal::ServeDialog {
+                                    port_input,
+                                    secret_input,
+                                    editing_secret,
+                                    error: Some(msg),
+                                    busy: false,
+                                });
+                            }
+                        }
+                    }
+                    KeyCode::Char(c) if !has_ctrl && !has_alt => {
+                        if editing_secret {
+                            if !c.is_control() {
+                                secret_input.push(c);
+                            }
+                        } else if c.is_ascii_digit() {
+                            port_input.push(c);
+                        }
+                        error = None;
+                        self.modal = Some(ActiveModal::ServeDialog {
+                            port_input,
+                            secret_input,
+                            editing_secret,
+                            error,
+                            busy: false,
+                        });
+                    }
+                    _ => {
+                        self.modal = Some(ActiveModal::ServeDialog {
+                            port_input,
+                            secret_input,
+                            editing_secret,
+                            error,
+                            busy: false,
+                        });
+                    }
+                }
+            }
         }
 
         true
@@ -1276,6 +1544,29 @@ impl AppState {
             }
             (ActiveModal::ProviderSelect { filter, .. }, ModalHitKind::ListItem(idx)) => {
                 self.activate_provider_at(&filter, idx);
+            }
+            (ActiveModal::AuthMethodSelect { provider_id, .. }, ModalHitKind::Close) => {
+                self.reopen_provider_select_for(&provider_id);
+            }
+            (ActiveModal::AuthMethodSelect { provider_id, .. }, ModalHitKind::ListItem(idx)) => {
+                self.choose_auth_method(&provider_id, idx);
+            }
+            (ActiveModal::ProviderConnection { provider_id, .. }, ModalHitKind::Close) => {
+                self.reopen_provider_select_for(&provider_id);
+            }
+            (
+                ActiveModal::ProviderConnection {
+                    provider_id,
+                    provider_name,
+                    status,
+                    ..
+                },
+                ModalHitKind::ListItem(idx),
+            ) => {
+                self.apply_provider_connection_action(&provider_id, &provider_name, &status, idx);
+            }
+            (ActiveModal::ChatGptLogin { .. }, ModalHitKind::Close) => {
+                self.cancel_chatgpt_login();
             }
             (
                 ActiveModal::ApiKeyInput {
@@ -1431,6 +1722,29 @@ impl AppState {
             }
             (ActiveModal::CommandPalette { .. }, ModalHitKind::Close) => {
                 self.modal = None;
+            }
+            (
+                ActiveModal::ServeDialog {
+                    port_input,
+                    secret_input,
+                    error,
+                    busy,
+                    ..
+                },
+                ModalHitKind::ServeField(target_secret),
+            ) => {
+                self.modal = Some(ActiveModal::ServeDialog {
+                    port_input,
+                    secret_input,
+                    editing_secret: target_secret,
+                    error,
+                    busy,
+                });
+            }
+            (ActiveModal::ServeDialog { busy, .. }, ModalHitKind::Close) => {
+                if !busy {
+                    self.modal = None;
+                }
             }
             (ActiveModal::CommandPalette { filter, .. }, ModalHitKind::ListItem(idx)) => {
                 let commands = filtered_commands(&filter);
@@ -1612,29 +1926,211 @@ impl AppState {
     fn activate_provider_at(&mut self, filter: &str, selected: usize) {
         let providers = self.filtered_providers(filter);
         if let Some((provider, status)) = providers.get(selected) {
-            if !provider.requires_api_key {
-                self.activate_provider_only(&provider.id);
-                self.open_model_input();
-            } else {
-                let saved_url = {
-                    let rt = self.runtime.read().unwrap();
-                    rt.base_urls.get(&provider.id).cloned().unwrap_or_default()
-                };
-                self.modal = Some(ActiveModal::ApiKeyInput {
-                    provider_id: provider.id.clone(),
-                    provider_name: provider.display_name.clone(),
-                    api_key: String::new(),
-                    base_url: saved_url,
-                    editing_base_url: false,
-                    existing_key_status: status.clone(),
-                    error: None,
-                });
-            }
+            self.open_provider_connect(provider, status);
         } else {
             self.modal = Some(ActiveModal::ProviderSelect {
                 filter: filter.to_string(),
                 selected,
             });
+        }
+    }
+
+    fn open_provider_connect(&mut self, provider: &ProviderInfo, status: &KeyStatus) {
+        if status.is_configured() && provider.auth.requires_credential() {
+            self.modal = Some(ActiveModal::ProviderConnection {
+                provider_id: provider.id.clone(),
+                provider_name: provider.display_name.clone(),
+                status: status.clone(),
+                selected: 0,
+            });
+            return;
+        }
+        match provider.auth {
+            ProviderAuthKind::None => {
+                self.activate_provider_only(&provider.id);
+                self.open_model_input();
+            }
+            ProviderAuthKind::ApiKey => self.open_api_key_input(provider, status),
+            ProviderAuthKind::OAuth => self.begin_chatgpt_login(provider),
+            ProviderAuthKind::Either => {
+                self.modal = Some(ActiveModal::AuthMethodSelect {
+                    provider_id: provider.id.clone(),
+                    provider_name: provider.display_name.clone(),
+                    selected: 0,
+                });
+            }
+        }
+    }
+
+    fn apply_provider_connection_action(
+        &mut self,
+        provider_id: &str,
+        provider_name: &str,
+        status: &KeyStatus,
+        selected: usize,
+    ) {
+        let Some(action) = ProviderConnectionAction::options(status)
+            .get(selected)
+            .copied()
+        else {
+            return;
+        };
+        match action {
+            ProviderConnectionAction::Next => {
+                self.activate_provider_only(provider_id);
+                self.open_model_input();
+            }
+            ProviderConnectionAction::Update => {
+                let provider = {
+                    let rt = self.runtime.read().unwrap();
+                    rt.catalog.provider(provider_id).cloned()
+                };
+                let Some(provider) = provider else {
+                    self.modal = None;
+                    return;
+                };
+                match provider.auth {
+                    ProviderAuthKind::ApiKey => self.open_api_key_input(&provider, status),
+                    ProviderAuthKind::OAuth => self.begin_chatgpt_login(&provider),
+                    ProviderAuthKind::Either => {
+                        self.modal = Some(ActiveModal::AuthMethodSelect {
+                            provider_id: provider.id.clone(),
+                            provider_name: provider.display_name.clone(),
+                            selected: 0,
+                        });
+                    }
+                    ProviderAuthKind::None => self.open_model_input(),
+                }
+            }
+            ProviderConnectionAction::Remove => match self.secrets.delete_credential(provider_id) {
+                Ok(()) => {
+                    self.invalidate_key_status();
+                    self.status_notice = Some(format!("Removed credential for {provider_id}"));
+                    self.reopen_provider_select_for(provider_id);
+                }
+                Err(error) => {
+                    self.status_notice = Some(format!("Failed to remove credential: {error:#}"));
+                    self.modal = Some(ActiveModal::ProviderConnection {
+                        provider_id: provider_id.to_string(),
+                        provider_name: provider_name.to_string(),
+                        status: status.clone(),
+                        selected,
+                    });
+                }
+            },
+        }
+    }
+
+    fn open_api_key_input(&mut self, provider: &ProviderInfo, status: &KeyStatus) {
+        let saved_url = {
+            let rt = self.runtime.read().unwrap();
+            rt.base_urls.get(&provider.id).cloned().unwrap_or_default()
+        };
+        self.modal = Some(ActiveModal::ApiKeyInput {
+            provider_id: provider.id.clone(),
+            provider_name: provider.display_name.clone(),
+            api_key: String::new(),
+            base_url: saved_url,
+            editing_base_url: false,
+            existing_key_status: status.clone(),
+            error: None,
+        });
+    }
+
+    fn choose_auth_method(&mut self, provider_id: &str, selected: usize) {
+        if selected == 0 {
+            let provider = {
+                let rt = self.runtime.read().unwrap();
+                rt.catalog.provider(provider_id).cloned()
+            };
+            let Some(provider) = provider else {
+                self.modal = None;
+                return;
+            };
+            self.begin_chatgpt_login(&provider);
+            return;
+        }
+        let provider = {
+            let rt = self.runtime.read().unwrap();
+            rt.catalog.provider(provider_id).cloned()
+        };
+        let Some(provider) = provider else {
+            self.modal = None;
+            return;
+        };
+        let status = self.cached_key_status(&provider);
+        self.open_api_key_input(&provider, &status);
+    }
+
+    fn begin_chatgpt_login(&mut self, provider: &ProviderInfo) {
+        self.activate_provider_only(&provider.id);
+        self.modal = Some(ActiveModal::ChatGptLogin {
+            provider_id: provider.id.clone(),
+            provider_name: provider.display_name.clone(),
+            url: None,
+            input: String::new(),
+            error: None,
+            busy: true,
+        });
+        self.pending_login_request = Some(provider.id.clone());
+    }
+
+    pub fn apply_login_started(&mut self, url: String) {
+        if let Some(ActiveModal::ChatGptLogin {
+            url: slot, busy, ..
+        }) = &mut self.modal
+        {
+            *slot = Some(url);
+            *busy = false;
+        }
+    }
+
+    pub fn apply_login_failed(&mut self, message: String) {
+        self.login_input = None;
+        self.login_cancel = None;
+        self.status_notice = Some(message.clone());
+        if let Some(ActiveModal::ChatGptLogin { error, busy, .. }) = &mut self.modal {
+            *error = Some(message);
+            *busy = false;
+        }
+    }
+
+    pub fn apply_login_succeeded(&mut self, provider_id: &str, account: Option<String>) {
+        self.login_input = None;
+        self.login_cancel = None;
+        self.modal = None;
+        self.invalidate_key_status();
+        self.reload_settings_from_disk();
+        self.activate_provider_only(provider_id);
+        self.settings.active_provider = Some(provider_id.to_string());
+        self.open_model_input();
+        self.status_notice = Some(match account {
+            Some(account) => format!("Signed in with ChatGPT as {account}"),
+            None => "Signed in with ChatGPT".to_string(),
+        });
+    }
+
+    fn cancel_chatgpt_login(&mut self) {
+        self.pending_login_request = None;
+        self.login_input = None;
+        self.login_cancel = None;
+        self.modal = None;
+        self.status_notice = Some("ChatGPT sign-in cancelled".to_string());
+    }
+
+    fn reload_settings_from_disk(&mut self) {
+        let Some(dir) = self.config_dir.clone() else {
+            return;
+        };
+        let Ok(loaded) = meerai_common::settings::load_settings_from(&dir) else {
+            return;
+        };
+        let provider = self.tab().active_provider.clone();
+        let model = self.tab().model.clone();
+        self.settings = loaded;
+        self.settings.active_provider = Some(provider);
+        if !model.is_empty() {
+            self.settings.active_model = Some(model);
         }
     }
 
@@ -1788,6 +2284,30 @@ impl AppState {
                 context_window_tokens,
             });
         }
+        self.send_plan_usage(&canonical);
+    }
+
+    pub(super) fn send_plan_usage(&self, provider_id: &str) {
+        let provider = {
+            let rt = self.runtime.read().unwrap();
+            rt.catalog.provider(provider_id).cloned()
+        };
+        let plan_usage = provider.is_some_and(|provider| {
+            matches!(
+                self.cached_key_status(&provider),
+                KeyStatus::OAuth {
+                    needs_relogin: false,
+                    ..
+                }
+            )
+        });
+        if let Ok(mut runtime) = self.runtime.write() {
+            runtime.plan_usage = plan_usage;
+        }
+        let _ = self
+            .tab()
+            .cmd_tx
+            .send(AgentCommand::SetPlanUsage { plan_usage });
     }
 
     pub(super) fn select_provider_and_model(&mut self, provider_id: &str, model_id: &str) {
@@ -1797,6 +2317,7 @@ impl AppState {
         self.tab_mut().model = clean_model.clone();
         self.settings
             .record_provider_model(&canonical, &clean_model);
+        self.settings.active_model = Some(clean_model.clone());
 
         let spec = {
             let mut rt = self.runtime.write().unwrap();
@@ -1808,12 +2329,20 @@ impl AppState {
         self.persist_settings();
         let context_window_tokens = self.model_context_window(&canonical, &clean_model);
         let _ = self.tab().cmd_tx.send(AgentCommand::SetModel {
-            model: spec,
+            model: spec.clone(),
             context_window_tokens,
         });
-        self.tab_mut().transcript.push(TranscriptEntry::System {
-            text: format!("Active model: {canonical}/{clean_model}"),
-        });
+        self.send_plan_usage(&canonical);
+        let session_id = {
+            let tab = self.tab_mut();
+            tab.transcript.push(TranscriptEntry::System {
+                text: format!("Active model: {canonical}/{clean_model}"),
+            });
+            tab.session_id.clone()
+        };
+        if let Some(reg) = &self.registry {
+            reg.note_tui_model(&session_id, &canonical, &spec);
+        }
     }
 
     pub(super) fn persist_settings(&mut self) {

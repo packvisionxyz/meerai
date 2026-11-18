@@ -99,7 +99,7 @@ fn render_block<'a>(node: &'a AstNode<'a>, out: &mut Vec<MarkdownLine>, indent: 
                 line.spans = spans;
             }
         }
-        NodeValue::ThematicBreak => {
+        NodeValue::ThematicBreak(_) => {
             out.push(MarkdownLine {
                 spans: vec![Span::styled(
                     "─".repeat(24),
@@ -275,9 +275,9 @@ fn walk_inline<'a>(node: &'a AstNode<'a>, style: Style, lines: &mut Vec<Vec<Span
                 push_span(lines, Span::styled(code.literal, inline_code_style()));
             }
             NodeValue::SoftBreak | NodeValue::LineBreak => lines.push(Vec::new()),
-            NodeValue::Strong => walk_inline(child, style.add_modifier(Modifier::BOLD), lines),
-            NodeValue::Emph => walk_inline(child, style.add_modifier(Modifier::ITALIC), lines),
-            NodeValue::Strikethrough => {
+            NodeValue::Strong(_) => walk_inline(child, style.add_modifier(Modifier::BOLD), lines),
+            NodeValue::Emph(_) => walk_inline(child, style.add_modifier(Modifier::ITALIC), lines),
+            NodeValue::Strikethrough(_) => {
                 walk_inline(child, style.add_modifier(Modifier::CROSSED_OUT), lines);
             }
             NodeValue::Link(..) => {

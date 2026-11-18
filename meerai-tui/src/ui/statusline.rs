@@ -17,8 +17,10 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
     );
     app.update_hit = None;
     app.subagent_hit = None;
+    app.web_server_hit = None;
     let mut update_hit: Option<Rect> = None;
     let mut subagent_hit: Option<Rect> = None;
+    let mut web_server_hit: Option<Rect> = None;
     let tab = app.tab();
 
     let mut spans = vec![Span::styled(" ", Style::default().bg(theme::p().surface))];
@@ -76,6 +78,17 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
         if x.saturating_add(width) <= area.x.saturating_add(area.width) {
             update_hit = Some(Rect::new(x, area.y, width, 1));
             spans.push(Span::styled(label, Style::default().fg(theme::p().warning)));
+        }
+    }
+
+    if let Some(server) = app.web_server.clone() {
+        let label = format!(" · web :{}", server.port);
+        let offset: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+        let width = label.chars().count() as u16;
+        let x = area.x.saturating_add(offset as u16);
+        if x.saturating_add(width) <= area.x.saturating_add(area.width) {
+            web_server_hit = Some(Rect::new(x, area.y, width, 1));
+            spans.push(Span::styled(label, Style::default().fg(theme::p().accent)));
         }
     }
 
@@ -186,6 +199,7 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
 
     app.update_hit = update_hit;
     app.subagent_hit = subagent_hit;
+    app.web_server_hit = web_server_hit;
     let spans: Vec<Span<'static>> = spans
         .into_iter()
         .map(|span| {
@@ -277,6 +291,13 @@ pub(super) fn key_status_style(status: &KeyStatus) -> (String, Color) {
     let badge = status.badge();
     let color = match status {
         KeyStatus::Stored | KeyStatus::Config => theme::p().success,
+        KeyStatus::OAuth { needs_relogin, .. } => {
+            if *needs_relogin {
+                theme::p().error
+            } else {
+                theme::p().success
+            }
+        }
         KeyStatus::Env(_) => theme::p().muted,
         KeyStatus::NotRequired => theme::p().muted,
         KeyStatus::Missing => theme::p().error,

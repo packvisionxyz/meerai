@@ -8,7 +8,7 @@ use meerai_agents::{
     AbortCause, AgentEvent, ErrorCode, ItemDelta, ItemStatus, SessionItem, TurnEndReason, Usage,
 };
 use meerai_client::providers::ProviderCatalog;
-use meerai_client::secrets::MemorySecretStore;
+use meerai_client::secrets::{Credential, MemorySecretStore, OAuthCredential};
 use meerai_common::definitions::DefinitionSource;
 use meerai_core::EffectClass;
 
@@ -39,6 +39,18 @@ fn test_app() -> (
         None,
     );
     (app, rx, secrets)
+}
+
+fn oauth_credential(needs_relogin: bool) -> Credential {
+    Credential::OAuth(OAuthCredential {
+        access: "plan-access".to_string(),
+        refresh: "plan-refresh".to_string(),
+        expires: u64::MAX,
+        client_id: "plan-client".to_string(),
+        scopes: vec!["chatgpt.tokens.use.direct".to_string()],
+        account: None,
+        needs_relogin,
+    })
 }
 
 fn key(code: KeyCode) -> KeyEvent {

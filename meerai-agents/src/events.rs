@@ -225,6 +225,9 @@ pub enum AgentCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_window_tokens: Option<u64>,
     },
+    SetPlanUsage {
+        plan_usage: bool,
+    },
     SetPermissionMode(ApprovalMode),
     Compact,
     ApplyAgent {

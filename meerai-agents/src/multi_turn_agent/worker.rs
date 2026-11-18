@@ -34,6 +34,7 @@ impl MultiTurnAgent {
                 | AgentCommand::Rewind { .. }
                 | AgentCommand::SubmitPrompt(_)
                 | AgentCommand::SetModel { .. }
+                | AgentCommand::SetPlanUsage { .. }
                 | AgentCommand::Reset => {}
             }
         }
@@ -76,6 +77,7 @@ pub fn spawn_worker(
                         let mut pending_reset = false;
                         let mut pending_model: Option<String> = None;
                         let mut pending_model_window: Option<u64> = None;
+                        let mut pending_plan_usage: Option<bool> = None;
                         let mut recovery: Option<QueuedPrompt> = None;
                         let recovery_model = agent
                             .harness
@@ -156,6 +158,9 @@ pub fn spawn_worker(
                                                 pending_model = Some(model);
                                                 pending_model_window = context_window_tokens;
                                             }
+                                            Some(AgentCommand::SetPlanUsage { plan_usage }) => {
+                                                pending_plan_usage = Some(plan_usage);
+                                            }
                                             Some(AgentCommand::SubmitPrompt(prompt)) => {
                                                 queued.push_back(QueuedPrompt {
                                                     text: prompt,
@@ -198,6 +203,9 @@ pub fn spawn_worker(
                             }
                             agent.persist_model().await;
                         }
+                        if let Some(plan_usage) = pending_plan_usage.take() {
+                            agent.set_plan_usage(plan_usage);
+                        }
                         if pending_reset {
                             agent.end_session(&event_tx).await;
                             agent.reset();
@@ -223,6 +231,9 @@ pub fn spawn_worker(
                         agent.set_context_window_tokens(tokens);
                     }
                     agent.persist_model().await;
+                }
+                AgentCommand::SetPlanUsage { plan_usage } => {
+                    agent.set_plan_usage(plan_usage);
                 }
                 AgentCommand::SetPermissionMode(mode) => {
                     agent.set_permission_mode(mode);

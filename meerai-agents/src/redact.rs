@@ -20,6 +20,10 @@ fn patterns() -> &'static [SecretPattern] {
             ("github_token", r"github_pat_[A-Za-z0-9_]{20,}"),
             ("aws_access_key_id", r"AKIA[0-9A-Z]{16}"),
             ("slack_token", r"xox[baprs]-[A-Za-z0-9-]{10,}"),
+            (
+                "jwt",
+                r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+            ),
             ("bearer_token", r"Bearer\s+[A-Za-z0-9._~+/-]{20,}"),
             (
                 "private_key",
@@ -89,8 +93,9 @@ mod tests {
         let slack = format!("xoxb-{}", "1".repeat(12));
         let bearer = format!("Bearer {}", "t".repeat(24));
         let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----";
+        let jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.c2lnbmF0dXJlX3ZhbHVl";
 
-        let cases: [(&str, &str); 9] = [
+        let cases: [(&str, &str); 10] = [
             ("sk-abcdefghijklmnopqrstuvwxyz012345", "openai_key"),
             ("sk-ant-api03-abcdefghijklmnopqrstuvwxyz", "anthropic_key"),
             (google.as_str(), "google_api_key"),
@@ -98,6 +103,7 @@ mod tests {
             (github_pat.as_str(), "github_token"),
             ("AKIAIOSFODNN7EXAMPLE", "aws_access_key_id"),
             (slack.as_str(), "slack_token"),
+            (jwt, "jwt"),
             (bearer.as_str(), "bearer_token"),
             (pem, "private_key"),
         ];

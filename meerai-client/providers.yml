@@ -37,7 +37,8 @@ providers:
     requires_api_key: true
   - id: openai
     display_name: "OpenAI"
-    adapter: openai
+    adapter: openai_resp
+    auth: either
     env_vars:
       - OPENAI_API_KEY
     requires_api_key: true

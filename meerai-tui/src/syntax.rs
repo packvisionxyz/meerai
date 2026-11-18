@@ -3,11 +3,9 @@ use ratatui::text::Span;
 
 use crate::theme;
 
-pub use meerai_syntax::{Language, Token, TokenKind, language_for_fence, language_for_path};
-
-pub fn token_lines(language: Option<Language>, code: &str) -> Vec<Vec<Token>> {
-    meerai_syntax::highlight_block(language, code)
-}
+pub use meerai_host::syntax::{
+    Language, Token, TokenKind, language_for_fence, language_for_path, token_lines,
+};
 
 pub fn highlight(language: Option<Language>, code: &str, base: Style) -> Vec<Vec<Span<'static>>> {
     token_lines(language, code)

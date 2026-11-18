@@ -1,6 +1,8 @@
 use super::statusline::{display_model, key_status_style, summarize_error_line};
 use super::*;
-use crate::app::{ToolCallEntry, TranscriptBuildMemo, TranscriptDocument, TranscriptRenderKey};
+use crate::app::{
+    ToolCallEntry, TranscriptAnchor, TranscriptBuildMemo, TranscriptDocument, TranscriptRenderKey,
+};
 
 pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     let inner = Rect {
@@ -15,6 +17,8 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area:
         app.transcript_cache.clear();
         app.thinking_hit_zones.clear();
         app.digest_hit_zones.clear();
+        app.transcript_anchors.clear();
+        app.anchor_rail_hover = None;
         app.transcript_wrapped_lines.clear();
         app.hover_zones.clear();
     } else if !app.transcript_cache.matches(app, inner.width) {
@@ -90,9 +94,14 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area:
         last: last_visible,
     };
 
+    let anchor_hover_range = anchor_rail_hover_range(app);
+
     let document = &app.transcript_cache.document;
     paint(frame, &document.code_bands, 2, theme::p().surface_high);
     paint(frame, &document.bands, 0, theme::p().surface);
+    if let Some(range) = anchor_hover_range {
+        paint(frame, &[range], 0, theme::p().surface_high);
+    }
     if let Some(range) = hover_range
         && paint_hover
     {
@@ -131,12 +140,48 @@ pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area:
     }
 }
 
+fn anchor_rail_hover_range(app: &AppState) -> Option<(usize, usize)> {
+    let row = app.anchor_rail_hover?;
+    let mark = app
+        .anchor_rail_layout(app.anchor_rail_area)
+        .marks
+        .into_iter()
+        .find(|mark| mark.row == row)?;
+    let zone = app
+        .thinking_hit_zones
+        .iter()
+        .find(|zone| zone.entry_idx == mark.entry_idx)?;
+    Some((zone.start_line, zone.end_line))
+}
+
 fn rebuild_transcript_document(app: &mut AppState, width: u16) {
     let key = TranscriptRenderKey::capture(app, width);
     let mut memo = app.transcript_cache.take_memo();
     let built = build_transcript_lines(app, &mut memo);
     let wrapped = wrap_tagged_lines(built, width as usize);
     let line_count = wrapped.lines.len();
+    let mut anchors: Vec<TranscriptAnchor> = {
+        let transcript = &app.tab().transcript;
+        wrapped
+            .hit_zones
+            .iter()
+            .filter(|zone| {
+                matches!(
+                    transcript.get(zone.entry_idx),
+                    Some(TranscriptEntry::User { .. })
+                )
+            })
+            .map(|zone| TranscriptAnchor {
+                entry_idx: zone.entry_idx,
+                line: zone.start_line,
+                number: 0,
+            })
+            .collect()
+    };
+    for (index, anchor) in anchors.iter_mut().enumerate() {
+        anchor.number = index + 1;
+    }
+    app.transcript_anchors = anchors;
     app.thinking_hit_zones = wrapped.hit_zones;
     app.digest_hit_zones = wrapped.digest_hit_zones;
     app.transcript_wrapped_lines = wrapped.doc_lines;
@@ -1087,27 +1132,7 @@ fn tool_path(tc: &ToolCallEntry) -> Option<String> {
 }
 
 fn edit_diff(tc: &ToolCallEntry) -> Option<Vec<crate::diff::UnifiedLine>> {
-    if !matches!(tc.name.as_str(), "code-write_file" | "code-edit_file") {
-        return None;
-    }
-    if let Some(output) = tc.output.as_deref() {
-        let parsed = crate::diff::parse_unified_diff(output);
-        if !parsed.is_empty() {
-            return Some(parsed);
-        }
-    }
-    let value = serde_json::from_str::<serde_json::Value>(&tc.args).ok()?;
-    let path = value.get("path").and_then(|v| v.as_str())?;
-    let old = value
-        .get("old_string")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let new = value
-        .get("new_string")
-        .and_then(|v| v.as_str())
-        .or_else(|| value.get("content").and_then(|v| v.as_str()))?;
-    let lines = crate::diff::build_edit_diff(path, old, new);
-    (!lines.is_empty()).then_some(lines)
+    meerai_host::diff::tool_edit_diff(&tc.name, &tc.args, tc.output.as_deref())
 }
 
 fn render_edit_diff(

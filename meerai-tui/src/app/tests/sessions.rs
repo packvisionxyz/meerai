@@ -7,6 +7,20 @@ pub(super) fn make_opened_session(
 ) -> (OpenedSession, mpsc::UnboundedReceiver<AgentCommand>) {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (_ev_tx, event_rx) = mpsc::unbounded_channel();
+    let events = transcript
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, entry)| match entry {
+            TranscriptEntry::User { text } => Some(meerai_session::LoggedEvent {
+                seq: meerai_session::Seq((idx + 1) as u64),
+                event: meerai_session::SessionEvent::UserMessage {
+                    source: meerai_session::InputSource::User,
+                    content: vec![meerai_session::ContentBlock::Text(text)],
+                },
+            }),
+            _ => None,
+        })
+        .collect();
     let opened = OpenedSession {
         session_id: SessionId::from_raw(id),
         title: title.map(str::to_string),
@@ -14,8 +28,7 @@ pub(super) fn make_opened_session(
         provider: "gemini".to_string(),
         model: "gemini-3.8-flash".to_string(),
         approval_mode: ApprovalMode::Ask,
-        transcript,
-        events: Vec::new(),
+        events,
         cmd_tx,
         event_rx,
     };
@@ -67,7 +80,10 @@ fn session_tabs_open_replace_empty_dedup_switch_and_close() {
             text: "Hello".to_string(),
         }],
     );
-    assert!(app.apply_opened_session(opened_first, true).is_some());
+    assert!(
+        app.apply_opened_session(opened_first, SessionOpenMode::ReplaceEmpty)
+            .is_some()
+    );
     assert_eq!(initial_rx.try_recv().unwrap(), AgentCommand::Quit);
     assert_eq!(app.tabs().len(), 1);
     assert_eq!(app.active_tab_index(), 0);
@@ -75,14 +91,20 @@ fn session_tabs_open_replace_empty_dedup_switch_and_close() {
     assert_eq!(app.tab().title.as_deref(), Some("Refactor parser"));
 
     let (opened_second, _rx_second) = make_opened_session("sess-2", Some("Fix tests"), Vec::new());
-    assert!(app.apply_opened_session(opened_second, true).is_some());
+    assert!(
+        app.apply_opened_session(opened_second, SessionOpenMode::ReplaceEmpty)
+            .is_some()
+    );
     assert_eq!(app.tabs().len(), 2);
     assert_eq!(app.active_tab_index(), 1);
     assert_eq!(app.tab().session_id, SessionId::from_raw("sess-2"));
 
     let (dup_first, mut dup_rx) =
         make_opened_session("sess-1", Some("Refactor parser"), Vec::new());
-    assert!(app.apply_opened_session(dup_first, false).is_none());
+    assert!(
+        app.apply_opened_session(dup_first, SessionOpenMode::NewTab)
+            .is_none()
+    );
     assert_eq!(dup_rx.try_recv().unwrap(), AgentCommand::Quit);
     assert_eq!(app.tabs().len(), 2);
     assert_eq!(app.active_tab_index(), 0);
@@ -126,7 +148,9 @@ fn background_tab_events_track_unread_and_restore_pending_approvals() {
     let tab1_id = app.tab().tab_id;
 
     let (opened_second, mut rx2) = make_opened_session("sess-bg", Some("Background"), Vec::new());
-    let (tab2_id, _) = app.apply_opened_session(opened_second, false).unwrap();
+    let (tab2_id, _) = app
+        .apply_opened_session(opened_second, SessionOpenMode::NewTab)
+        .unwrap();
     assert_eq!(app.active_tab_index(), 1);
 
     assert!(app.switch_to_tab(0));
@@ -240,10 +264,74 @@ fn sessions_command_and_modal_filter_select_and_new() {
 
     type_text(&mut app, "/new");
     app.handle_key_event(key(KeyCode::Enter));
+    assert!(app.take_pending_session_actions().is_empty());
+
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "start".to_string(),
+    });
+    type_text(&mut app, "/new");
+    app.handle_key_event(key(KeyCode::Enter));
     assert_eq!(
         app.take_pending_session_actions(),
         vec![PendingSessionAction::CreateNewTab]
     );
+}
+
+#[test]
+fn new_tab_switches_to_the_open_empty_tab_instead_of_opening_another() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.session_opener = Some(Arc::new(DummySessionOpener));
+    let empty = app.tab().session_id.clone();
+    let (opened, _rx2) = make_opened_session(
+        "sess-active",
+        Some("Active"),
+        vec![TranscriptEntry::User {
+            text: "work".to_string(),
+        }],
+    );
+    let _ = app.apply_opened_session(opened, SessionOpenMode::NewTab);
+    assert_eq!(app.active_tab_index(), 1);
+
+    app.request_new_tab();
+    assert_eq!(app.active_tab_index(), 0);
+    assert_eq!(app.tab().session_id, empty);
+    assert!(app.take_pending_session_actions().is_empty());
+}
+
+#[test]
+fn closing_the_empty_tab_remembers_it_for_the_next_launch() {
+    let (mut app, _rx, _secrets) = test_app();
+    let empty = app.tab().session_id.clone();
+    let (opened, _rx2) = make_opened_session(
+        "sess-active",
+        Some("Active"),
+        vec![TranscriptEntry::User {
+            text: "work".to_string(),
+        }],
+    );
+    let _ = app.apply_opened_session(opened, SessionOpenMode::NewTab);
+    assert_eq!(app.active_tab_index(), 1);
+
+    assert!(app.close_tab(0));
+    assert_eq!(app.persistable_empty_session(), Some(empty));
+}
+
+#[test]
+fn restored_tabs_open_in_the_background() {
+    let (mut app, _rx, _secrets) = test_app();
+    let initial = app.tab().session_id.clone();
+    let (opened, _rx2) = make_opened_session(
+        "sess-old",
+        Some("Old"),
+        vec![TranscriptEntry::User {
+            text: "old".to_string(),
+        }],
+    );
+
+    let _ = app.apply_opened_session(opened, SessionOpenMode::Background);
+    assert_eq!(app.tabs().len(), 2);
+    assert_eq!(app.active_tab_index(), 0);
+    assert_eq!(app.tab().session_id, initial);
 }
 
 #[test]
@@ -253,8 +341,17 @@ fn tab_bar_mouse_clicks_switch_tabs_and_request_new_tab() {
 
     let (mut app, _rx, _secrets) = test_app();
     app.session_opener = Some(Arc::new(DummySessionOpener));
-    let (opened_second, _rx2) = make_opened_session("sess-2", Some("Second"), Vec::new());
-    app.apply_opened_session(opened_second, false);
+    let (opened_second, _rx2) = make_opened_session(
+        "sess-2",
+        Some("Second"),
+        vec![TranscriptEntry::User {
+            text: "second".to_string(),
+        }],
+    );
+    app.tabs[0].transcript.push(TranscriptEntry::User {
+        text: "first".to_string(),
+    });
+    app.apply_opened_session(opened_second, SessionOpenMode::NewTab);
 
     let backend = TestBackend::new(120, 28);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -290,7 +387,7 @@ fn clicking_the_tab_close_button_closes_without_deleting_the_session() {
     let (mut app, _rx, _secrets) = test_app();
     let first = app.tab().session_id.clone();
     let (opened, _event_rx) = make_opened_session("ses-close-two", Some("two"), Vec::new());
-    let _ = app.apply_opened_session(opened, false);
+    let _ = app.apply_opened_session(opened, SessionOpenMode::NewTab);
     assert_eq!(app.tabs().len(), 2);
 
     app.tab_hit_zones = vec![TabHitZone {
@@ -332,7 +429,7 @@ fn session_picker_deletes_after_a_second_ctrl_d() {
 fn session_picker_deletes_an_open_session_without_asking_to_close_the_tab() {
     let (mut app, _rx, _secrets) = test_app();
     let (opened, _event_rx) = make_opened_session("ses-open", Some("Open"), Vec::new());
-    let _ = app.apply_opened_session(opened, false);
+    let _ = app.apply_opened_session(opened, SessionOpenMode::NewTab);
     let summary = make_session_summary("ses-open", Some("Open"), 10, None);
     app.modal = Some(ActiveModal::SessionSelect {
         filter: String::new(),
@@ -361,7 +458,10 @@ fn session_picker_deletes_an_open_session_without_asking_to_close_the_tab() {
 fn acp_tabs_keep_the_provider_runtime_untouched_on_switch() {
     let (mut app, _rx, _secrets) = test_app();
     let (opened, _event_rx) = make_opened_acp_session("ses-acp", "agy");
-    assert!(app.apply_opened_session(opened, false).is_some());
+    assert!(
+        app.apply_opened_session(opened, SessionOpenMode::NewTab)
+            .is_some()
+    );
 
     assert_eq!(app.active_tab_index(), 1);
     assert!(app.tab().is_acp());
@@ -402,7 +502,7 @@ fn app_with_two_more_tabs() -> (AppState, String) {
     let first = app.tab().session_id.as_str().to_string();
     for id in ["sess-b", "sess-c"] {
         let (opened, _cmd_rx) = make_opened_session(id, Some(id), Vec::new());
-        let _ = app.apply_opened_session(opened, false);
+        let _ = app.apply_opened_session(opened, SessionOpenMode::NewTab);
     }
     (app, first)
 }

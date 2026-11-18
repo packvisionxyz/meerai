@@ -10,7 +10,7 @@
 
 - **Product:** `meerai` (Pack Vision) — a pure, provider-agnostic terminal agent harness
   written in Rust, featuring a selection-first modal TUI and a scriptable headless CLI mode.
-- **Shape:** Rust Cargo workspace (`edition = "2024"`, toolchain pinned to `1.100.0`). Twelve
+- **Shape:** Rust Cargo workspace (`edition = "2024"`, toolchain pinned to `1.100.0`). Sixteen
   library crates plus the `meerai` binary, built by `meerai-cli`. Milestones M1–M13 of
   `docs/harness-spec.md` have landed; the repo is distribution-hardened (Apache-2.0
   license, CI, tag-driven releases, Pages site) and includes project-root config discovery, TUI
@@ -52,9 +52,13 @@
 | `meerai-client/` | Client-facing provider surface: `ProviderCatalog` + `providers.yml`, `ModelInfo`, `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract, `MemorySecretStore`, auth listing |
 | `meerai-providers/` | `genai` client factory + native secret stores (`auth.json`, OS keychain); re-exports the client surface |
 | `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig` (+ `TokenPricing`), `AgentEvent`, `intercept` (`Interceptor`/`StepPlan`/`ToolPlan`/`ToolContext`/`ToolOutcome`, async `before_tool`), hook engine (`hooks`: `HookEngine`/`HookContext`/`HookReport`, `HookFired` logging), `question-ask` (`QuestionAsked`/`AnswerQuestion`, not an approval), `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins + read-only custom child runs, `child_session_id` on `SubagentRun`), delegated `acp-run` (`acp_subagent`: `AcpRunToolset`/`AcpSpawner`), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
-| `meerai-tui/` | Modal TUI library (`ratatui` + `crossterm`) split into `ui/` panels and `app/` modules, transcript replay, tabs (drag + `alt+shift+arrows` reordering), collapsible per-turn activity digests (`+`/`-`, hover affordances), a cached transcript renderer, inline syntax-highlighted edit diffs and a syntax-highlighted diff modal with an `f` file list (`meerai-syntax`), expandable subagent child conversations, menu shortcuts, `/agent`/`/skill`, the `@` Mentions popup, and `workspace::WorkspaceQuery` (local walker + grep; no `meerai-tools` or `meerai-providers` dependency) |
+| `meerai-host/` | UI-neutral host seams (`SessionOpener`, `OpenedSession`, `WorkspaceQuery`/`LocalWorkspace`, `WebServerLauncher`), shared `diff`/`search`/`syntax`/`theme`/`update`, and live `SessionRegistry` event pump/ring |
+| `meerai-web-protocol/` | Serde-only Wasm-safe wire DTOs (`SnapshotResponse`, `ViewEvent`, `HostInfoDto`, `ProvidersResponse`, `SettingsSnapshotDto`, `ApiError`) |
+| `meerai-web/` | Loopback HTTP/SSE server (`hyper` + `subtle` Basic auth, `Host`/`Origin`/JSON checks, parity REST/SSE routes, embedded Wasm bundle serving) |
+| `meerai-web-client/` | Leptos 0.8 CSR Wasm browser client ([browser-ui.md](../../docs/browser-ui.md)): DOM transcript, Markdown + code highlighting, TUI modal surfaces, approval scopes, Settings, palette actions, `@` mentions, completions, built via `scripts/build-web.py` |
+| `meerai-tui/` | Modal TUI library (`ratatui` + `crossterm`) split into `ui/` panels and `app/` modules, transcript replay, `/serve`, tabs, collapsible digests, turn-anchor rail, diff/search, re-exporting `meerai-host` seams (no `meerai-tools`, `meerai-providers`, or `meerai-web` dependency) |
 | `meerai-syntax/` | Tree-sitter highlighting for Rust, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML, CSS, and JSON plus a lexical fallback; `highlight_block` returns per-line `Token`s; depends only on grammar crates |
-| `meerai-cli/` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions` (`list`, `rm`, `prune`, `fork`) subcommands, and TUI launcher |
+| `meerai-cli/` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions` (`list`, `rm`, `prune`, `fork`) / `serve` (feature `web`) subcommands, and TUI launcher |
 | `.agents/agents/`, `.agents/skills/` | Default agent (`*.md`) and skill (`*/SKILL.md`) definitions, read at runtime |
 | `.claude/agents/`, `.claude/skills/` | Lower-priority agent and skill definitions, same format |
 | `docs/` | Architecture, harness specification (`docs/harness-spec.md`), and modal TUI spec |
@@ -105,8 +109,7 @@ Notes:
 
 ## 4. Invariants
 
-1. **Scope discipline:** Keep the workspace focused on the terminal agent harness; do not
-   introduce actor frameworks, web/desktop GUIs, or unrelated bot integrations.
+1. **Scope discipline:** Keep the workspace focused on the local agent harness and local browser companion (`web` feature). Do not introduce a desktop GUI, remote browser hosting, actor frameworks, or unrelated bot integrations.
 2. **Macro dependency contract:** Proc-macros emit paths to `meerai_core`, `schemars`, and
    `serde_json`; every crate using `#[tool]` or `#[derive(Toolset)]` must list all three as direct
    dependencies.
@@ -134,8 +137,11 @@ Notes:
    Async file paths use `tokio::fs`; `BlobStore::put` uses blocking `std::fs` and is called through
    `tokio::task::spawn_blocking` in `apply_spill`.
 10. **Secrets handling:** API keys stay in `auth.json` (written by `meerai auth login`), provider
-    `api_key` config, or provider env vars; never hardcode or log them. `auth.json` is `0600` on
-    Unix. The shell tool removes provider secret variables from child processes. Tool output and
+    `api_key` config, or provider env vars; never hardcode or log them. ChatGPT plan OAuth
+    credentials (`type:"oauth"`: access, rotating refresh, issued client id, scopes, `needs_relogin`)
+    stay in `auth.json`, are rewritten under `auth.json.lock` by one writer, and never appear in
+    `list_providers` or `auth list`. `auth.json` is `0600` on Unix. The shell tool removes provider
+    secret variables from child processes. Tool output and
     diffs pass through best-effort pattern redaction (`redact_run`) before spill, log, UI, or model
     delivery; the original secret is discarded and paths are not redacted. This is not a guarantee.
 11. **Terminal safety:** `TerminalGuard` restores raw mode / alternate screen in `Drop` and installs
@@ -153,6 +159,11 @@ Notes:
     records cwd, git state, title, model, and timestamps. Windows has no mode enforcement.
     `sessions prune` is the manual retention surface; `sessions.auto_prune_days` (user config only)
     opts into startup pruning with `sessions.keep` (default 0), always sparing the active session.
+    Startup also removes empty sessions (no user message, no title, no parent) older than six hours
+    that are not the active session or an open tab. A plain TUI start opens one empty session tab,
+    restores saved tabs in the background, and reuses the remembered empty session; closing an
+    empty tab keeps it for reuse, and `/new` or `[ + ]` switches to an open empty tab instead of
+    opening a second one.
 16. **Env opt-in:** `.env` loads only with `MEERAI_LOAD_DOTENV=1|true|yes` or `--env-file <PATH>`.
 17. **Project permissions are tighten-only; project config cannot redirect:**
     `<project-root>/.meerai/settings.yml` merges over user settings. `find_project_root` walks up
@@ -245,7 +256,9 @@ Notes:
     without an explicit design; the worker path is the v1 surface.
 29. **Provider retry classification:** use the HTTP status from `genai::Error::status()` when
     present (408/409/425/429 and 5xx transient; other 4xx permanent) and the message blocklist only
-    as a fallback. Backoff is 250/500 ms plus up to 50% jitter. Do not retry a permanent status.
+    as a fallback. Backoff is 250/500 ms plus up to 50% jitter. Do not retry a permanent status. An
+    empty stream reports provider, model, stop reason, event count, elapsed time, and a hint; a
+    `content_filter`, `max_tokens`, or `stop_sequence` stop reason is non-retryable.
 
 ## 5. Patterns
 
@@ -259,7 +272,7 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 | Hand-written toolset | `impl Toolset` with `definition`/`contain`/`effect_of`/`invoke_structured` | `meerai-tools/src/code/mod.rs` |
 | Config | `AppSettings` + `find_project_root` + `load_settings_from` + `load_project_settings`/`merge_project_settings` + `${VAR\|default}` expansion | `meerai-common/src/settings.rs` |
 | Definitions | `load_definitions(&project_root)` → `DefinitionCatalog`; `.agents` before `.claude`, duplicate warning, sorted by id | `meerai-common/src/definitions.rs` |
-| Secrets | `auth.json` store, `0600`, env-var fallback | `meerai-common/src/secrets.rs` |
+| Secrets | `auth.json` store for API keys and ChatGPT plan OAuth, `0600`, one lock, env-var fallback | `meerai-client/src/secrets.rs`, `meerai-providers/src/secrets.rs`, `meerai-providers/src/oauth/` |
 | Redaction | `redact_run` patterns and `[REDACTED:<kind>]` replacement before settle | `meerai-agents/src/redact.rs`, `multi_turn_agent.rs` |
 | Session log | `Session::append` event, `derive_messages` projection | `meerai-session/src/session.rs`, `projection.rs` |
 | Session CLI | `sessions list`/`rm`/`prune`, `--continue`/`--resume`, `replay_from_events`, opt-in `auto_prune_sessions` | `meerai-session/src/replay.rs`, `session.rs`, `meerai-cli/src/main.rs` |
@@ -294,6 +307,10 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 | `meerai-tools` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-tools` |
 | `meerai-agents` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-agents` |
 | `meerai-tui` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-tui` |
+| `meerai-host` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-host` |
+| `meerai-web-protocol` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-web-protocol` |
+| `meerai-web` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-web` |
+| `meerai-web-client` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-web-client`, `cargo check -p meerai-web-client --target wasm32-unknown-unknown`, `python3 scripts/build-web.py` |
 | `meerai-syntax` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-syntax` |
 | `meerai-acp` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-acp`; live `cargo test -p meerai-acp --test live_agy -- --ignored` and `--test live_worker -- --ignored` |
 | Repo-wide | `cargo fmt --all -- --check && cargo clippy --workspace --all-targets && cargo test --workspace` (or `make verify`) |
@@ -333,12 +350,17 @@ body.
   configuration summaries, planned architecture items.
 - `docs/tui-design.md` — modal TUI behavior: layout, modes, keybindings, overlays, rendering
   invariants, dialog width caps, and planned UX.
+- `docs/browser-ui.md` — local browser companion: `meerai serve` / TUI `/serve`,
+  `SessionLock`, host design, parity API, the implemented Leptos DOM client, build, and
+  security rules.
 - `docs/acp.md` — ACP protocol reference, the implemented `agy` client and `acp-run`, trust
   boundary, planned presets and M14.
 - `docs/threat-model.md` — assets, trust boundaries, implemented controls, planned controls,
   residual risks.
 - `docs/token-efficiency.md` — token-cost and self-healing initiative: implemented phases with
   evidence, decisions, planned phases.
+- `docs/openai-chatgpt-plan-usage.md` — OpenAI ChatGPT plan usage (M15, planned): credential
+  model, Sign in with ChatGPT flow, plan request profile, error map, phases.
 - `.agents/repo/` — repository profile, patterns, and infra notes for `.agents/skills/*`. Keep in
   sync when crates, commands, or invariants change.
 
@@ -466,9 +488,18 @@ Detail in [`infra.md`](infra.md). Summary:
   Frontmatter `tools`, `permissions`, and `allowed-tools` are warning-only; `steps`/`mode` are not
   applied; a `:` model is ignored. Definitions are untrusted prompt text and grant no tools or
   permissions.
+- OpenAI plan usage uses the official **Sign in with ChatGPT** OSS flow
+  (`chatgpt.tokens.use.direct`, `api.openai.com/v1/responses`), not the Codex
+  `backend-api`. One `openai` provider serves an API key or an OAuth plan credential. Plan
+  requests force `store:false`, `stream:true`, the system prompt as `instructions`, and omit
+  `temperature` and cache retention. Plan OAuth lives in `auth.json` (never the keychain), is
+  refreshed under `auth.json.lock`, and is never listed or logged as a token. A configured
+  provider opens the TUI connection screen (next/update/remove) instead of the auth method screen.
 - Windows is a supported target: `cmd /C` for shell, x64 build only, no file-mode enforcement.
 - Terminal-first UX with modal interaction (`Normal` / `Insert` input modes, `ActiveModal`
-  overlays, `/` slash commands) — no web/desktop GUI or actor framework.
+  overlays, `/` slash commands) paired with the local Leptos Wasm browser companion (`web`
+  feature, `meerai serve` / TUI `/serve`); see [browser-ui.md](../../docs/browser-ui.md).
+  Desktop GUIs and actor frameworks remain out of scope.
 
 ## 12. Recon pointers
 

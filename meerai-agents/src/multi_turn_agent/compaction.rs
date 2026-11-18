@@ -332,10 +332,15 @@ impl MultiTurnAgent {
             .with_capture_usage(true)
             .with_stream_header_timeout(STREAM_HEADER_TIMEOUT)
             .with_stream_read_timeout(STREAM_READ_TIMEOUT);
-        if self
+        let plan_usage = self
             .harness
             .as_ref()
-            .is_none_or(|harness| harness.config.prompt_caching)
+            .is_some_and(|harness| harness.config.plan_usage);
+        if !plan_usage
+            && self
+                .harness
+                .as_ref()
+                .is_none_or(|harness| harness.config.prompt_caching)
         {
             options = options.with_cache_control(CacheControl::Ephemeral);
         }

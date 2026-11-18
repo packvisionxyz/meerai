@@ -9,9 +9,31 @@ use meerai_common::settings::{
 };
 use serde::Deserialize;
 
-use crate::secrets::SecretStore;
+use crate::secrets::{Credential, SecretStore};
 
 const BUNDLED_PROVIDERS_YAML: &str = include_str!("../providers.yml");
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderAuthKind {
+    ApiKey,
+    OAuth,
+    Either,
+    None,
+}
+
+impl ProviderAuthKind {
+    pub fn supports_api_key(self) -> bool {
+        matches!(self, Self::ApiKey | Self::Either)
+    }
+
+    pub fn supports_oauth(self) -> bool {
+        matches!(self, Self::OAuth | Self::Either)
+    }
+
+    pub fn requires_credential(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderInfo {
@@ -20,7 +42,7 @@ pub struct ProviderInfo {
     pub adapter: String,
     pub default_base_url: Option<String>,
     pub env_vars: Vec<String>,
-    pub requires_api_key: bool,
+    pub auth: ProviderAuthKind,
     pub default_model: Option<String>,
     pub config_api_key: Option<String>,
 }
@@ -37,6 +59,10 @@ impl ProviderInfo {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeyStatus {
     Stored,
+    OAuth {
+        expires_at_ms: u64,
+        needs_relogin: bool,
+    },
     Config,
     Env(String),
     NotRequired,
@@ -46,11 +72,19 @@ pub enum KeyStatus {
 impl KeyStatus {
     pub fn is_configured(&self) -> bool {
         !matches!(self, Self::Missing)
+            && !matches!(
+                self,
+                Self::OAuth {
+                    needs_relogin: true,
+                    ..
+                }
+            )
     }
 
     pub fn badge(&self) -> String {
         match self {
             Self::Stored => "saved".to_string(),
+            Self::OAuth { .. } => "plan".to_string(),
             Self::Config => "config".to_string(),
             Self::Env(var) => format!("env:{var}"),
             Self::NotRequired => "local".to_string(),
@@ -88,6 +122,7 @@ struct ProviderConfigEntry {
     #[serde(default)]
     env_vars: Vec<String>,
     requires_api_key: Option<bool>,
+    auth: Option<String>,
     default_model: Option<String>,
     #[serde(default, alias = "apiKey")]
     api_key: Option<String>,
@@ -131,9 +166,21 @@ fn parse_adapter(adapter: Option<&str>) -> String {
         "ollama" => "ollama",
         "mistral" => "mistral",
         "cohere" => "cohere",
+        "openai_resp" | "openai-responses" | "openai_responses" => "openai_resp",
         _ => "openai",
     }
     .to_string()
+}
+
+fn parse_auth_kind(raw: Option<&str>, requires_api_key: Option<bool>) -> ProviderAuthKind {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("api_key" | "api-key" | "apikey") => ProviderAuthKind::ApiKey,
+        Some("oauth") => ProviderAuthKind::OAuth,
+        Some("either" | "both") => ProviderAuthKind::Either,
+        Some("none" | "local") => ProviderAuthKind::None,
+        _ if requires_api_key == Some(false) => ProviderAuthKind::None,
+        _ => ProviderAuthKind::ApiKey,
+    }
 }
 
 fn synthesize_provider(provider_id: &str) -> ProviderInfo {
@@ -144,7 +191,7 @@ fn synthesize_provider(provider_id: &str) -> ProviderInfo {
         adapter: "openai".to_string(),
         default_base_url: None,
         env_vars: vec![format!("{upper}_API_KEY")],
-        requires_api_key: true,
+        auth: ProviderAuthKind::ApiKey,
         default_model: None,
         config_api_key: None,
     }
@@ -211,6 +258,7 @@ impl ProviderCatalog {
                 .filter(|m| !m.is_empty());
             let config_api_key =
                 resolve_config_api_key(entry.options.as_ref(), entry.api_key.as_deref());
+            let auth = parse_auth_kind(entry.auth.as_deref(), entry.requires_api_key);
 
             if let Some(existing) = self.providers.iter_mut().find(|p| p.id == id) {
                 if let Some(display_name) = entry.display_name {
@@ -225,8 +273,8 @@ impl ProviderCatalog {
                 if !entry.env_vars.is_empty() {
                     existing.env_vars = entry.env_vars;
                 }
-                if let Some(requires_api_key) = entry.requires_api_key {
-                    existing.requires_api_key = requires_api_key;
+                if entry.requires_api_key.is_some() || entry.auth.is_some() {
+                    existing.auth = auth;
                 }
                 if default_model.is_some() {
                     existing.default_model = default_model;
@@ -241,7 +289,7 @@ impl ProviderCatalog {
                     adapter: parse_adapter(entry.adapter.as_deref()),
                     default_base_url: entry.base_url,
                     env_vars: entry.env_vars,
-                    requires_api_key: entry.requires_api_key.unwrap_or(true),
+                    auth,
                     default_model,
                     config_api_key,
                 });
@@ -350,8 +398,15 @@ impl ProviderCatalog {
 }
 
 pub fn check_key_status(provider: &ProviderInfo, secrets: &dyn SecretStore) -> KeyStatus {
-    if let Ok(Some(_)) = secrets.get_key(&provider.id) {
-        return KeyStatus::Stored;
+    match secrets.read_credential(&provider.id) {
+        Ok(Some(Credential::ApiKey(_))) => return KeyStatus::Stored,
+        Ok(Some(Credential::OAuth(oauth))) => {
+            return KeyStatus::OAuth {
+                expires_at_ms: oauth.expires,
+                needs_relogin: oauth.needs_relogin,
+            };
+        }
+        _ => {}
     }
     if provider
         .config_api_key
@@ -367,18 +422,18 @@ pub fn check_key_status(provider: &ProviderInfo, secrets: &dyn SecretStore) -> K
             return KeyStatus::Env(var.clone());
         }
     }
-    if !provider.requires_api_key {
+    if !provider.auth.requires_credential() {
         return KeyStatus::NotRequired;
     }
     KeyStatus::Missing
 }
 
-pub fn resolve_api_key(
+pub fn resolve_credential(
     provider: &ProviderInfo,
     secrets: &dyn SecretStore,
-) -> Result<Option<String>> {
-    if let Some(key) = secrets.get_key(&provider.id)? {
-        return Ok(Some(key));
+) -> Result<Option<Credential>> {
+    if let Some(credential) = secrets.read_credential(&provider.id)? {
+        return Ok(Some(credential));
     }
     if let Some(key) = provider
         .config_api_key
@@ -386,17 +441,29 @@ pub fn resolve_api_key(
         .map(str::trim)
         .filter(|k| !k.is_empty())
     {
-        return Ok(Some(key.to_string()));
+        return Ok(Some(Credential::ApiKey(key.to_string())));
     }
     for var in &provider.env_vars {
         if let Ok(val) = std::env::var(var) {
             let trimmed = val.trim().to_string();
             if !trimmed.is_empty() {
-                return Ok(Some(trimmed));
+                return Ok(Some(Credential::ApiKey(trimmed)));
             }
         }
     }
     Ok(None)
+}
+
+pub fn resolve_api_key(
+    provider: &ProviderInfo,
+    secrets: &dyn SecretStore,
+) -> Result<Option<String>> {
+    Ok(
+        resolve_credential(provider, secrets)?.map(|credential| match credential {
+            Credential::ApiKey(key) => key,
+            Credential::OAuth(oauth) => oauth.access,
+        }),
+    )
 }
 
 pub fn first_configured_provider(
@@ -406,7 +473,7 @@ pub fn first_configured_provider(
     let mut seen = HashSet::new();
     for provider in catalog.providers() {
         if seen.insert(provider.id.as_str())
-            && provider.requires_api_key
+            && provider.auth.requires_credential()
             && check_key_status(provider, secrets).is_configured()
         {
             return Some(provider.id.clone());
@@ -418,6 +485,7 @@ pub fn first_configured_provider(
 #[derive(Clone, Debug)]
 pub struct RuntimeProviderState {
     pub active_provider: String,
+    pub plan_usage: bool,
     pub base_urls: HashMap<String, String>,
     pub catalog: ProviderCatalog,
 }
@@ -441,6 +509,7 @@ impl RuntimeProviderState {
             .collect();
         Self {
             active_provider,
+            plan_usage: false,
             base_urls,
             catalog,
         }
@@ -454,11 +523,37 @@ impl RuntimeProviderState {
     }
 
     pub fn effective_base_url(&self, provider: &ProviderInfo) -> Option<String> {
-        self.base_urls
-            .get(&provider.id)
-            .cloned()
-            .or_else(|| provider.default_base_url.clone())
+        if let Some(url) = self.base_urls.get(&provider.id) {
+            return Some(url.clone());
+        }
+        if self.plan_usage && provider.id == "openai" {
+            // genai adds `prompt_cache_options` for gpt-6 models whenever the endpoint string
+            // matches `https://api.openai.com`; the plan route rejects that field. The explicit
+            // default port reaches the same endpoint and bypasses that string check.
+            return Some("https://api.openai.com:443/v1/".to_string());
+        }
+        provider.default_base_url.clone()
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn plan_summary(oauth: &crate::secrets::OAuthCredential) -> String {
+    let account = oauth.account.as_deref().unwrap_or("chatgpt");
+    let remaining_ms = oauth.expires.saturating_sub(now_ms());
+    let expiry = if oauth.needs_relogin {
+        "sign in again".to_string()
+    } else if remaining_ms == 0 {
+        "expired".to_string()
+    } else {
+        format!("expires in {}m", remaining_ms / 60_000)
+    };
+    format!("{account}  {expiry}")
 }
 
 fn mask_secret(secret: &str) -> String {
@@ -500,26 +595,41 @@ fn format_auth_list_with_env(
     let mut stored_count = 0;
     let mut seen_stored = BTreeSet::new();
     for provider in catalog.providers() {
-        if let Ok(Some(key)) = secrets.get_key(&provider.id) {
-            seen_stored.insert(provider.id.clone());
-            stored_count += 1;
-            let _ = writeln!(
-                out,
+        let Ok(Some(credential)) = secrets.read_credential(&provider.id) else {
+            continue;
+        };
+        seen_stored.insert(provider.id.clone());
+        stored_count += 1;
+        let line = match &credential {
+            Credential::ApiKey(key) => format!(
                 "  {} ({})  api  {}",
                 provider.display_name,
                 provider.id,
-                mask_secret(&key)
-            );
-        }
+                mask_secret(key)
+            ),
+            Credential::OAuth(oauth) => format!(
+                "  {} ({})  plan  {}",
+                provider.display_name,
+                provider.id,
+                plan_summary(oauth)
+            ),
+        };
+        let _ = writeln!(out, "{line}");
     }
     if let Ok(extra_ids) = secrets.list_providers() {
         for id in extra_ids {
-            if !seen_stored.contains(&id)
-                && let Ok(Some(key)) = secrets.get_key(&id)
-            {
-                stored_count += 1;
-                let _ = writeln!(out, "  {}  api  {}", id, mask_secret(&key));
+            if seen_stored.contains(&id) {
+                continue;
             }
+            let Ok(Some(credential)) = secrets.read_credential(&id) else {
+                continue;
+            };
+            stored_count += 1;
+            let line = match &credential {
+                Credential::ApiKey(key) => format!("  {}  api  {}", id, mask_secret(key)),
+                Credential::OAuth(oauth) => format!("  {}  plan  {}", id, plan_summary(oauth)),
+            };
+            let _ = writeln!(out, "{line}");
         }
     }
     if stored_count == 0 {
@@ -583,7 +693,7 @@ fn format_auth_list_with_env(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::secrets::MemorySecretStore;
+    use crate::secrets::{Credential, MemorySecretStore, OAuthCredential};
 
     #[test]
     fn bundled_providers_yml_loads_opencode_and_direct_providers() {
@@ -603,11 +713,19 @@ mod tests {
         assert!(ids.contains(&"ollama"));
 
         let ollama = catalog.provider("ollama").unwrap();
-        assert!(!ollama.requires_api_key);
+        assert_eq!(ollama.auth, ProviderAuthKind::None);
 
         let alibaba = catalog.provider("alibaba-token-plan").unwrap();
         assert_eq!(alibaba.adapter, "openai");
         assert!(alibaba.default_base_url.is_some());
+
+        let openai = catalog.provider("openai").unwrap();
+        assert_eq!(openai.adapter, "openai_resp");
+        assert_eq!(openai.auth, ProviderAuthKind::Either);
+        assert_eq!(
+            catalog.format_genai_spec("openai", "gpt-5"),
+            "openai_resp::gpt-5"
+        );
 
         assert_eq!(
             catalog.format_genai_spec("opencode-go", "deepseek-v4.1-flash"),
@@ -650,7 +768,7 @@ mod tests {
         assert_eq!(openai.default_model.as_deref(), Some("gpt-4.1"));
 
         let vllm = catalog.provider("local-vllm").unwrap();
-        assert!(!vllm.requires_api_key);
+        assert_eq!(vllm.auth, ProviderAuthKind::None);
         assert_eq!(
             vllm.default_base_url.as_deref(),
             Some("http://127.0.0.1:8000/v1/")
@@ -725,6 +843,77 @@ mod tests {
         assert!(output.contains("Environment"));
         assert!(output.contains("GEMINI_API_KEY"));
         assert!(output.contains("AIza...2345"));
+    }
+
+    #[test]
+    fn oauth_credentials_drive_status_and_auth_listing() {
+        let store = MemorySecretStore::new();
+        let mut credential = OAuthCredential {
+            access: "access-token".to_string(),
+            refresh: "refresh-token".to_string(),
+            expires: now_ms() + 42 * 60_000,
+            client_id: "oaiapp_test".to_string(),
+            scopes: vec!["chatgpt.tokens.use.direct".to_string()],
+            account: Some("user@example.com".to_string()),
+            needs_relogin: false,
+        };
+        store
+            .write_credential("openai", &Credential::OAuth(credential.clone()))
+            .unwrap();
+
+        let catalog = ProviderCatalog::new();
+        let openai = catalog.provider("openai").unwrap();
+        assert_eq!(
+            check_key_status(openai, &store),
+            KeyStatus::OAuth {
+                expires_at_ms: credential.expires,
+                needs_relogin: false
+            }
+        );
+        assert_eq!(
+            resolve_api_key(openai, &store).unwrap().as_deref(),
+            Some("access-token")
+        );
+        assert!(matches!(
+            resolve_credential(openai, &store).unwrap(),
+            Some(Credential::OAuth(_))
+        ));
+
+        let output = format_auth_list_with_env(
+            &catalog,
+            &store,
+            Some(Path::new("/tmp/data/meerai/auth.json")),
+            Some(Path::new("/tmp/cfg/meerai")),
+            &|_| None,
+        );
+        assert!(output.contains("plan"));
+        assert!(output.contains("user@example.com"));
+        assert!(!output.contains("access-token"));
+
+        credential.needs_relogin = true;
+        store
+            .write_credential("openai", &Credential::OAuth(credential.clone()))
+            .unwrap();
+        let status = check_key_status(openai, &store);
+        assert!(!status.is_configured());
+        assert_eq!(status.badge(), "plan");
+    }
+
+    #[test]
+    fn plan_usage_routes_openai_through_the_explicit_default_port() {
+        let settings = AppSettings::default();
+        let mut runtime = RuntimeProviderState::from_settings(&settings, ProviderCatalog::new());
+        let openai = runtime.catalog.provider("openai").unwrap().clone();
+        assert_eq!(runtime.effective_base_url(&openai), None);
+
+        runtime.plan_usage = true;
+        assert_eq!(
+            runtime.effective_base_url(&openai).as_deref(),
+            Some("https://api.openai.com:443/v1/")
+        );
+
+        let ollama = runtime.catalog.provider("ollama").unwrap().clone();
+        assert_eq!(runtime.effective_base_url(&ollama), None);
     }
 
     #[test]

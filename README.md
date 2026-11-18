@@ -4,7 +4,7 @@ Pack Vision's terminal agent harness — written in Rust, designed for
 autonomous and interactive software engineering in the terminal with a
 selection-first, modal TUI and a scriptable headless CLI.
 
-**Status:** early-stage, distribution-hardened. The workspace has twelve library
+**Status:** early-stage, distribution-hardened. The workspace has sixteen library
 crates plus the `meerai` binary (built by `meerai-cli`). Milestones **M1–M13**
 (session log, harness, checkpoints, hooks, subagent runtime, `meerai-cli` +
 session fork, retrieval v2/v3, security & supply chain, agents/skills discovery,
@@ -67,6 +67,7 @@ x64 build under emulation; other architectures have no prebuilt binary.
 
 ```sh
 meerai auth login openrouter          # or export OPENROUTER_API_KEY
+meerai auth login openai --chatgpt    # use a ChatGPT Plus/Pro plan
 meerai                                # full-screen modal TUI
 meerai --prompt "explain this repository" --mode plan
 meerai --prompt "fix the failing test" --mode auto --json
@@ -89,10 +90,11 @@ Run `meerai --help` for the generated command and option list. Common commands:
 | `meerai --prompt "..."` | One headless turn |
 | `meerai --continue` / `--resume <ID>` | Reopen a session (TUI or headless) |
 | `meerai --fork <ID>` | Fork and resume a session |
-| `meerai auth login <provider>` | Save an API key |
+| `meerai auth login <provider>` | Save an API key, or sign in with a ChatGPT plan (`--chatgpt`) |
 | `meerai sessions list\|rm\|prune\|fork` | Manage sessions |
 | `meerai hooks trust\|untrust\|status\|verify` | Manage project hooks |
 | `meerai acp doctor` | Print the ACP handshake |
+| `meerai serve` (`--features web`) | Start the password-protected local browser companion |
 
 In the TUI, type `!` before a command to run it in the workspace, for example `!cargo test`. The command runs through the same sandbox, env scrub, and `strict_env` policy as agent shell calls; `plan` mode refuses it. Its output opens in a scrollable Terminal dialog (`j`/`k`). `Esc` backgrounds it — the dialog closes, the statusline shows `shell <command>`, and the result lands in the transcript when it finishes; `q` closes the dialog. Long commands use the shell timeout (120 s).
 
@@ -197,8 +199,9 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   items, diff and search views, approval overlay, `/compact`, `/mode`,
   `/agent`/`/skill`, a `@` Mentions popup for agents, skills, and files,
   collapsible per-turn activity summaries (`+`/`-`) with inline
-  syntax-highlighted edit diffs, menu shortcuts (`ctrl+s` sessions, `ctrl+o`
-  models, `ctrl+a` provider, `ctrl+e` diff), tab reordering
+  syntax-highlighted edit diffs, a numbered anchor rail that jumps between
+  user turns, menu shortcuts (`ctrl+s` sessions, `ctrl+o` models, `ctrl+a`
+  provider, `ctrl+e` diff), tab reordering
   (`alt+shift+arrows` or drag), a syntax-highlighted diff review with an `f`
   file list, a clickable running-subagent overlay from the statusline, a
   paged sidebar file list, a composer footer (INS/NOR · mode · model · provider ·
@@ -207,15 +210,18 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   on exit, the terminal shows the session title and a `meerai --resume <id>`
   continue line under the same gradient logo as the TUI header;
   one-shot headless turns with a token summary on stderr, NDJSON event stream,
-  `sessions list|rm|prune|fork` management, `--fork <ID>`, startup cleanup of
-  unused sessions, and opt-in startup retention (`sessions.auto_prune_days`).
+  `sessions list|rm|prune|fork` management, `--fork <ID>`, startup reuse and
+  cleanup of unused sessions, and opt-in startup retention
+  (`sessions.auto_prune_days`).
   While a turn runs, `Enter` queues the message for the next turn and `ctrl+g`
   steers it now.
 - **Config (`meerai-common`) and providers (`meerai-providers`):** a `genai`
   0.7 client factory over a provider catalog (bundled `providers.yml` plus user
-  overrides), `auth.json` storage, `settings.yml` plus a project
-  `.meerai/settings.yml` found by walking up to the repository root and merged
-  with tighten-only permissions, and `${VAR|default}` env expansion.
+  overrides), `auth.json` storage for API keys and ChatGPT plan OAuth
+  credentials, `settings.yml` plus a project `.meerai/settings.yml` found by
+  walking up to the repository root and merged with tighten-only permissions,
+  and `${VAR|default}` env expansion. The bundled `openai` provider uses the
+  Responses API and accepts either an API key or a ChatGPT plan sign-in.
 - **Tool primitives (`meerai-core`):** `Toolset`, `ToolCall`, `ToolDefinition`,
   `ToolOutput`, `ToolError`, `EffectClass`, `ToolObservation`, `ToolRun`, and
   `FileDiff`.
@@ -241,6 +247,8 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 - ACP OpenCode/Claude presets and M14 (`meerai acp` for editors). The `agy`
   client is landed. An ACP backend runs an external agent with its own tools;
   meerai policy does not apply to it.
+- Multi-account ChatGPT plan switching. One registration is supported per
+  installation.
 - Repository signing secrets (`APPLE_CERTIFICATE` / `WINDOWS_CERTIFICATE`) for
   non-empty signed/notarized GitHub Release binaries (conditional steps exist in
   `release.yml`).
@@ -301,6 +309,51 @@ they start the TUI with the stored transcript replayed. The two flags cannot be
 combined. Without `--prompt`, the TUI starts (unless a subcommand or `--version`
 is given), and a non-terminal stdin/stdout is an error.
 
+### ChatGPT plan (Sign in with ChatGPT)
+
+meerai can use a ChatGPT Plus/Pro plan instead of an API key. This uses
+OpenAI's official **Sign in with ChatGPT** plan-usage flow for open-source and
+locally hosted apps, with the `chatgpt.tokens.use.direct` scope and
+`api.openai.com/v1/responses`.
+
+```sh
+meerai auth login openai --chatgpt   # browser sign-in; paste the callback URL if needed
+meerai auth list                     # shows plan + expiry, never the token
+meerai auth logout openai            # revokes best-effort and deletes the credential
+```
+
+The credential is stored as a `type:"oauth"` entry in `auth.json` (`0600`). The
+access token lasts one hour; meerai refreshes it three minutes before expiry
+under a cross-process lock, and rotates the 30-day refresh token. On a headless
+or remote host, paste the final redirect URL when the browser cannot reach the
+loopback listener.
+
+Plan requests follow OpenAI's preview contract: `store:false`, `stream:true`,
+the system prompt as `instructions`, full history in `input`, and no
+`temperature`, cache retention, or unsupported fields. Those restrictions apply
+only to plan credentials; an API key keeps the normal request shape.
+
+Implicit prompt caching still applies: meerai omits `prompt_cache_options` and
+`prompt_cache_retention` because the plan route rejects them, and OpenAI caches
+eligible prefixes automatically. Explicit breakpoints and cache-lifetime control
+are unavailable on this route.
+
+A plan usage limit is terminal. meerai does not retry it and does not silently
+fall back to an API key. It tells you the plan limit was reached and points at
+ChatGPT's usage settings and `/connect`.
+
+In the TUI, `/connect` → OpenAI offers `Continue with ChatGPT` and `Use an API
+key` when no credential is stored. A provider that already has a credential
+opens a connection screen with `Continue to model select`, `Update credential`,
+and `Remove saved credential`, so going back to a plan does not start a new
+sign-in. The ChatGPT row opens the browser, shows the URL as text, accepts a
+pasted redirect URL for remote hosts, and copies the URL with `ctrl+y`. `Esc`
+cancels; on success the model picker opens.
+
+Account model choices come from `GET /v1/models` at login and seed the recent
+model list. Enter a model id manually if your account lists none. One ChatGPT
+registration is supported per installation.
+
 ### Token usage
 
 Headless runs without `--json` print one cumulative summary line to stderr after
@@ -345,6 +398,27 @@ grant, `a` approves and records a session grant, `n` denies, `r` denies with a
 reason, and `Esc` cancels. Turn grants are cleared at turn end. Grant resources
 are literal, not glob patterns; permission rules still use globs.
 
+### Browser companion
+
+`meerai serve` (or `/serve` in the TUI) serves the Leptos Wasm client on loopback with
+mandatory HTTP Basic auth. The browser uses the same host, registry, session log, policy,
+and approvals as the TUI. Text, controls, and diffs are DOM nodes, so selection, find, zoom,
+and screen readers work. See [docs/browser-ui.md](docs/browser-ui.md).
+
+Parity highlights:
+
+- The approval dialog offers approve once, allow for the turn, allow for the session,
+  decline, decline with reason, and cancel request. Each control maps to the TUI key with
+  the same scope.
+- `/clear` clears only the browser transcript view. `/reset` resets the conversation on the
+  host. `/close` shuts down the live worker; the tab `×` only detaches the view.
+- The per-turn activity digest uses the TUI category counts and phrasing, and folds tool
+  rows by default.
+- The command palette lists slash commands and non-command actions: copy last reply,
+  next/previous tab, move tab, and cycle approval mode.
+- `Settings` groups Connections, Session, Theme, Context, Sessions, Sandbox, and
+  Permissions. Provider keys are never read back.
+
 ### Sampling temperature
 
 Set the temperature in the user `settings.yml` (or the project `.meerai/settings.yml`, which overrides it field by field):
@@ -384,7 +458,10 @@ A firewall that silently drops the connection can end a provider stream with
 no text, no tool calls, and no usage. meerai treats that as a transient
 provider failure and retries it with the standard provider backoff (3
 attempts) before it fails the turn, so an empty answer does not silently end
-the conversation.
+the conversation. The failure shows a diagnostic block with the provider,
+model, stop reason, stream event count, elapsed time, and a hint. A provider
+stop reason of `content_filter`, `max_tokens`, or `stop_sequence` is reported
+as a non-retryable provider error instead of an empty stream.
 
 ### Agents and skills
 
@@ -507,8 +584,9 @@ meerai sessions prune --days=7 --keep=5
 Those new sessions stay even when they are older than the cutoff. The command
 prints `removed N sessions`. The cutoff uses the global session root, which
 `MEERAI_SESSION_DIR` can override. At startup meerai also deletes unused
-sessions: sessions with no user message, no title, and no parent session. The
-active session is never deleted. Automatic retention pruning is opt-in; see
+sessions: sessions with no user message, no title, no parent session, and no
+activity for six hours. The active session and every open tab are never
+deleted. Automatic retention pruning is opt-in; see
 [Session retention](#session-retention).
 
 `--continue` opens the most recently active session (`updated_at_ms` moves on
@@ -519,6 +597,12 @@ their selected answers, and compaction markers. An unmatched tool call shows as
 cancelled. System and runtime events are skipped. Session metadata records the workspace `cwd`, git branch and SHA,
 title, model, approval mode, lineage, optional harness and remote session id,
 and created/updated timestamps. See [Data locations](#data-locations).
+
+A plain TUI start adds one empty session tab and restores the saved tabs in
+the background, so the empty tab stays active. The empty session is reused on
+the next start when it is still empty; closing it keeps it for that reuse.
+`/new` and `[ + ]` switch to an open empty tab instead of opening a second
+one.
 
 The agent sets the session title from the first user prompt: first non-empty
 line, at most 80 characters. A session that already has a
@@ -566,9 +650,13 @@ sandbox:
 
 ### Auth and app data (`~/.local/share/meerai`)
 
-- `auth.json` — API keys, mode `0600`. The OS keychain (`security` on macOS,
-  `secret-tool` on Linux) is tried first; this file is the fallback.
-- `open-tabs.json` — TUI tab session ids and active index.
+- `auth.json` — API keys and ChatGPT plan OAuth credentials, mode `0600`. The OS
+  keychain (`security` on macOS, `secret-tool` on Linux) is tried first for API
+  keys; OAuth credentials stay in this file so a refresh can rotate them
+  atomically. Every entry is rewritten through one lock, and an API-key write
+  never drops a plan credential.
+- `open-tabs.json` — TUI tab session ids, active index, and the reusable empty
+  session.
 - `sessions/<session-id>/` — one directory per session:
   - `session.v<N>.jsonl` — active append-only log.
   - `session.v<N>.jsonl.zstd` — sealed generation.
@@ -739,8 +827,10 @@ cargo test --workspace
 
 `make verify` (alias `make ci`) runs the three commands. `cargo check -p
 meerai-cli --no-default-features` builds the headless surface without ratatui,
-git2, comrak, or `meerai-tui`; `cargo check -p meerai-tui --no-default-features`
-builds the TUI without the reqwest update check. CI runs both reduced-feature
+git2, comrak, `meerai-host`, `meerai-web`, or `meerai-tui`; `cargo check -p meerai-tui --no-default-features`
+builds the TUI without the reqwest update check. To build and run the opt-in
+browser companion (`meerai serve` or `/serve` in TUI), build the Leptos Wasm bundle with
+`python3 scripts/build-web.py` and run `cargo run -p meerai-cli --features web -- serve`. Basic auth is required at launch (`MEERAI_SERVE_SECRET`, masked prompt, or auto-generated once on startup). CI runs both reduced-feature
 checks. `.github/workflows/smoke.yml` runs one manual live-provider headless
 turn when `OPENROUTER_API_KEY` is set. `.github/workflows/release.yml` starts when
 CI succeeds on `main`, on a `v*` tag push, or on manual dispatch. It reuses the
@@ -848,8 +938,10 @@ OS sandboxing on Windows hosts.
 - [docs/architecture.md](docs/architecture.md) — current implementation notes, target harness architecture, protocol/loop design, and migration plan
 - [docs/harness-internals.md](docs/harness-internals.md) — implementation reference: crate layout, configuration, turn-loop internals, TUI internals, and known traps
 - [docs/tui-design.md](docs/tui-design.md) — modal TUI design, keybindings, pickers, diff review, and async Rust rendering architecture
+- [docs/browser-ui.md](docs/browser-ui.md) — local browser companion: `meerai serve` / TUI `/serve`, host registry, parity HTTP/SSE API, and the implemented Leptos DOM client behind `--features web`
 - [docs/acp.md](docs/acp.md) — Agent Client Protocol: the landed `agy` client (M13), the planned `meerai acp` editor surface (M14), and the trust boundary
 - [docs/token-efficiency.md](docs/token-efficiency.md) — initiative for prompt caching, tool-result pruning, live call repair, and verified recovery
+- [docs/openai-chatgpt-plan-usage.md](docs/openai-chatgpt-plan-usage.md) — initiative for using a ChatGPT Plus/Pro subscription through OpenAI's Sign in with ChatGPT plan-usage flow
 - [AGENTS.md](AGENTS.md) — working rules for coding agents: commands, contracts, loop, config, security, TUI, commit, and code style
 
 ## License

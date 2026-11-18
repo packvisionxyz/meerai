@@ -1903,7 +1903,7 @@ async fn idle_set_model_persists_session_meta() {
         }
     }
 
-    assert_eq!(session.meta().model.as_deref(), Some("openai::gpt-5-mini"));
+    assert_eq!(session.meta().model.as_deref(), Some("gpt-5-mini"));
 
     let _ = cmd_tx.send(AgentCommand::Quit);
 }
@@ -1953,7 +1953,7 @@ async fn model_set_during_a_turn_persists_session_meta() {
         }
     }
 
-    assert_eq!(session.meta().model.as_deref(), Some("openai::gpt-5-mini"));
+    assert_eq!(session.meta().model.as_deref(), Some("gpt-5-mini"));
 
     let _ = cmd_tx.send(AgentCommand::Quit);
 }
@@ -3410,6 +3410,44 @@ fn turn_deadline_comparison_uses_elapsed_seconds() {
 }
 
 #[test]
+fn plan_usage_codes_are_terminal_over_the_status_rule() {
+    for code in PLAN_USAGE_TERMINAL_CODES {
+        assert!(is_terminal_plan_usage_error(code));
+        assert!(!is_transient_provider_error_with_status(Some(429), code));
+        assert!(!is_transient_provider_error_with_status(Some(503), code));
+    }
+
+    assert!(!is_terminal_plan_usage_error(
+        "subscription_sharing_usage_unavailable"
+    ));
+    assert!(is_transient_provider_error_with_status(
+        Some(503),
+        "subscription_sharing_usage_unavailable"
+    ));
+    assert!(is_transient_provider_error_with_status(
+        None,
+        "subscription_sharing_user_unavailable"
+    ));
+
+    assert!(is_transient_provider_error_with_status(
+        Some(429),
+        "rate limited"
+    ));
+    assert!(is_transient_provider_error_with_status(
+        Some(500),
+        "upstream"
+    ));
+    assert!(!is_transient_provider_error_with_status(
+        Some(400),
+        "bad body"
+    ));
+    assert!(!is_transient_provider_error_with_status(
+        None,
+        "invalid model"
+    ));
+}
+
+#[test]
 fn remaining_turn_budget_handles_disabled_exhausted_and_remaining() {
     let started = Instant::now();
     assert_eq!(remaining_turn_budget(started, 0), None);
@@ -4115,7 +4153,10 @@ async fn empty_provider_stream_is_retried_and_recovers() {
             _ => None,
         })
         .collect::<Vec<String>>();
-    assert_eq!(attempts, vec![EMPTY_STREAM_ERROR.to_string()]);
+    assert_eq!(attempts.len(), 1);
+    assert!(attempts[0].starts_with(EMPTY_STREAM_ERROR));
+    assert!(attempts[0].contains("stop_reason=none"));
+    assert!(attempts[0].contains("events=1"));
 }
 
 #[tokio::test]
@@ -4153,7 +4194,7 @@ async fn empty_provider_stream_fails_as_transient_after_max_attempts() {
             .filter(|event| {
                 matches!(
                     event,
-                    SessionEvent::AssistantAttempt { error, .. } if error == EMPTY_STREAM_ERROR
+                    SessionEvent::AssistantAttempt { error, .. } if error.starts_with(EMPTY_STREAM_ERROR)
                 )
             })
             .count(),
@@ -4207,6 +4248,119 @@ async fn provider_stream_with_usage_but_no_content_is_not_retried() {
             .into_iter()
             .all(|event| !matches!(event, SessionEvent::AssistantAttempt { .. }))
     );
+}
+
+#[tokio::test]
+async fn empty_provider_stream_reports_provider_and_stop_reason() {
+    let end = || StreamEnd {
+        captured_stop_reason: Some(StopReason::Completed("STOP".to_string())),
+        ..Default::default()
+    };
+    let streamer = Arc::new(FakeStreamer::with_script(vec![
+        ScriptedStream::Events(vec![ChatStreamEvent::Start, ChatStreamEvent::End(end())]),
+        ScriptedStream::Events(vec![ChatStreamEvent::Start, ChatStreamEvent::End(end())]),
+        ScriptedStream::Events(vec![ChatStreamEvent::Start, ChatStreamEvent::End(end())]),
+    ]));
+
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+    agent.set_model("gemini::gemini-2.5-flash");
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap_err();
+    let message = format!("{error:#}");
+
+    assert!(message.starts_with(EMPTY_STREAM_ERROR));
+    assert!(message.contains("provider=gemini"));
+    assert!(message.contains("model=gemini::gemini-2.5-flash"));
+    assert!(message.contains("stop_reason=completed(STOP)"));
+    assert!(message.contains("events=2"));
+    assert!(message.contains("hint:"));
+}
+
+#[tokio::test]
+async fn empty_provider_stream_with_content_filter_is_not_retried() {
+    let end = StreamEnd {
+        captured_stop_reason: Some(StopReason::ContentFilter("SAFETY".to_string())),
+        ..Default::default()
+    };
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(end)]]));
+
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap_err();
+    let message = format!("{error:#}");
+
+    assert_eq!(streamer.requests.lock().unwrap().len(), 1);
+    assert!(message.contains("content filter"));
+    assert!(message.contains("stop_reason=content_filter(SAFETY)"));
+    assert!(session_events(&session).iter().any(|event| matches!(
+        event,
+        SessionEvent::Error {
+            code: ErrorCode::Provider,
+            retryable: false,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn captured_reasoning_only_stream_is_not_empty() {
+    let end = StreamEnd {
+        captured_reasoning_content: Some("considering the repository".to_string()),
+        captured_stop_reason: Some(StopReason::Completed("STOP".to_string())),
+        ..Default::default()
+    };
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(end)]]));
+
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(out, "");
+    assert_eq!(streamer.requests.lock().unwrap().len(), 1);
+    assert!(session_events(&session).iter().any(|event| matches!(
+        event,
+        SessionEvent::AssistantMessage { content, .. }
+            if content.iter().any(|block| matches!(
+                block,
+                ContentBlock::Reasoning(text) if text == "considering the repository"
+            ))
+    )));
 }
 
 fn path_call(call_id: &str, path: &str) -> ToolCall {
@@ -7904,6 +8058,135 @@ async fn prompt_caching_disabled_sends_no_cache_control() {
     assert_eq!(cached[0].cache_control, None);
 }
 
+#[tokio::test]
+async fn plan_usage_omits_cache_control_and_temperature() {
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("done"),
+    )]]));
+    let session = memory_session();
+    let mut agent = MultiTurnAgent::with_streamer(
+        streamer.clone(),
+        "openai_resp::gpt-5",
+        Vec::new(),
+        "",
+        MultiTurnAgentConfig::default(),
+    );
+    let config = HarnessConfig {
+        plan_usage: true,
+        prompt_caching: true,
+        temperature: Some(0.7),
+        ..HarnessConfig::default()
+    };
+    agent.set_harness(harness(&session, auto_mode(), config));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let cached = streamer.options.lock().unwrap();
+    assert_eq!(cached[0].cache_control, None);
+    assert_eq!(cached[0].temperature, None);
+}
+
+#[tokio::test]
+async fn api_key_profile_keeps_cache_control_and_temperature() {
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("done"),
+    )]]));
+    let session = memory_session();
+    let mut agent = MultiTurnAgent::with_streamer(
+        streamer.clone(),
+        "openai_resp::gpt-5",
+        Vec::new(),
+        "",
+        MultiTurnAgentConfig::default(),
+    );
+    let config = HarnessConfig {
+        plan_usage: false,
+        prompt_caching: true,
+        temperature: Some(0.7),
+        ..HarnessConfig::default()
+    };
+    agent.set_harness(harness(&session, auto_mode(), config));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let cached = streamer.options.lock().unwrap();
+    assert_eq!(
+        cached[0].cache_control,
+        Some(genai::chat::CacheControl::Ephemeral)
+    );
+    assert_eq!(cached[0].temperature, Some(f64::from(0.7f32)));
+}
+
+#[tokio::test]
+async fn plan_usage_compaction_sends_no_cache_control() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(text_end("one"))],
+        vec![ChatStreamEvent::End(text_end("two"))],
+        vec![ChatStreamEvent::End(text_end("Goal: summary"))],
+    ]));
+    let session = memory_session();
+    let config = HarnessConfig {
+        plan_usage: true,
+        verbatim_window_turns: 1,
+        ..HarnessConfig::default()
+    };
+    let mut agent = harness_agent(
+        streamer.clone(),
+        Vec::new(),
+        "system",
+        &session,
+        auto_mode(),
+        config,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("one", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    agent
+        .prompt_streaming("two", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let (compact_tx, _compact_rx) = mpsc::unbounded_channel();
+    let applied = agent
+        .run_compaction(
+            CompactionTrigger::Manual,
+            &compact_tx,
+            &CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(applied, "manual compaction must apply");
+
+    let summary_index = {
+        let requests = streamer.requests.lock().unwrap();
+        requests
+            .iter()
+            .position(|request| {
+                request
+                    .messages
+                    .last()
+                    .and_then(|message| message.content.first_text())
+                    .is_some_and(|text| text.contains("Summarize the transcript"))
+            })
+            .expect("summary request")
+    };
+
+    let cached = streamer.options.lock().unwrap();
+    assert_eq!(cached[summary_index].cache_control, None);
+}
+
 #[test]
 fn usage_copies_cache_token_details() {
     let usage = Usage {
@@ -8185,6 +8468,36 @@ async fn reload_preserves_token_pricing() {
     let harness = agent.harness().expect("harness");
     assert_eq!(harness.config.token_pricing, Some(pricing));
     assert_eq!(harness.config.max_steps_per_turn, 7);
+}
+
+#[tokio::test]
+async fn reload_preserves_plan_usage() {
+    let streamer = Arc::new(FakeStreamer::new(Vec::new()));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        Vec::new(),
+        "system",
+        &session,
+        auto_mode(),
+        HarnessConfig {
+            plan_usage: true,
+            ..HarnessConfig::default()
+        },
+    );
+
+    let context = ContextSettings {
+        max_steps_per_turn: Some(7),
+        ..ContextSettings::default()
+    };
+    agent.reload_config(None, Some(context), "reloaded system".to_string());
+
+    let harness = agent.harness().expect("harness");
+    assert!(harness.config.plan_usage);
+    assert_eq!(harness.config.max_steps_per_turn, 7);
+
+    agent.reload_config(None, None, "prompt".to_string());
+    assert!(agent.harness().expect("harness").config.plan_usage);
 }
 
 #[tokio::test]

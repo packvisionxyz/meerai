@@ -1,6 +1,7 @@
 use std::sync::{OnceLock, RwLock};
 
 use meerai_common::settings::ThemeSettings;
+use meerai_host::theme::{HostColor, HostPalette, NamedColor};
 use ratatui::style::{Color, Modifier, Style};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,70 +25,65 @@ pub struct Palette {
     pub code_function: Color,
 }
 
+fn to_ratatui_color(color: HostColor) -> Color {
+    match color {
+        HostColor::Rgb([r, g, b]) => Color::Rgb(r, g, b),
+        HostColor::Named(named) => match named {
+            NamedColor::Black => Color::Black,
+            NamedColor::Red => Color::Red,
+            NamedColor::Green => Color::Green,
+            NamedColor::Yellow => Color::Yellow,
+            NamedColor::Blue => Color::Blue,
+            NamedColor::Magenta => Color::Magenta,
+            NamedColor::Cyan => Color::Cyan,
+            NamedColor::Gray => Color::Gray,
+            NamedColor::DarkGray => Color::DarkGray,
+            NamedColor::LightRed => Color::LightRed,
+            NamedColor::LightGreen => Color::LightGreen,
+            NamedColor::LightYellow => Color::LightYellow,
+            NamedColor::LightBlue => Color::LightBlue,
+            NamedColor::LightMagenta => Color::LightMagenta,
+            NamedColor::LightCyan => Color::LightCyan,
+            NamedColor::White => Color::White,
+            NamedColor::Reset => Color::Reset,
+        },
+    }
+}
+
+impl From<HostPalette> for Palette {
+    fn from(host: HostPalette) -> Self {
+        Self {
+            background: to_ratatui_color(host.background),
+            surface: to_ratatui_color(host.surface),
+            surface_high: to_ratatui_color(host.surface_high),
+            text: to_ratatui_color(host.text),
+            muted: to_ratatui_color(host.muted),
+            faint: to_ratatui_color(host.faint),
+            accent: to_ratatui_color(host.accent),
+            interactive: to_ratatui_color(host.interactive),
+            border: to_ratatui_color(host.border),
+            error: to_ratatui_color(host.error),
+            warning: to_ratatui_color(host.warning),
+            success: to_ratatui_color(host.success),
+            info: to_ratatui_color(host.info),
+            diff_added: to_ratatui_color(host.diff_added),
+            diff_removed: to_ratatui_color(host.diff_removed),
+            diff_context: to_ratatui_color(host.diff_context),
+            code_function: to_ratatui_color(host.code_function),
+        }
+    }
+}
+
 impl Default for Palette {
     fn default() -> Self {
-        Self {
-            background: Color::Rgb(10, 10, 10),
-            surface: Color::Rgb(20, 20, 20),
-            surface_high: Color::Rgb(30, 30, 30),
-            text: Color::Rgb(238, 238, 238),
-            muted: Color::Rgb(128, 128, 128),
-            faint: Color::Rgb(76, 76, 76),
-            accent: Color::Rgb(45, 212, 191),
-            interactive: Color::Rgb(122, 186, 255),
-            border: Color::Rgb(72, 72, 72),
-            error: Color::Rgb(224, 108, 117),
-            warning: Color::Rgb(255, 158, 100),
-            success: Color::Rgb(127, 216, 143),
-            info: Color::Rgb(86, 182, 194),
-            diff_added: Color::Rgb(79, 214, 190),
-            diff_removed: Color::Rgb(197, 59, 83),
-            diff_context: Color::Rgb(125, 133, 144),
-            code_function: Color::Rgb(198, 120, 221),
-        }
+        HostPalette::default().into()
     }
 }
 
 impl Palette {
     pub fn from_settings(settings: &ThemeSettings) -> (Self, Vec<String>) {
-        let mut palette = Self::default();
-        let mut warnings = Vec::new();
-        macro_rules! apply {
-            ($($field:ident),* $(,)?) => {
-                $(
-                    if let Some(raw) = settings.$field.as_deref() {
-                        match parse_color(raw) {
-                            Some(color) => palette.$field = color,
-                            None => warnings.push(format!(
-                                "invalid theme.{} color '{}': use #rrggbb or a color name",
-                                stringify!($field),
-                                raw
-                            )),
-                        }
-                    }
-                )*
-            };
-        }
-        apply!(
-            background,
-            surface,
-            surface_high,
-            text,
-            muted,
-            faint,
-            accent,
-            interactive,
-            border,
-            error,
-            warning,
-            success,
-            info,
-            diff_added,
-            diff_removed,
-            diff_context,
-            code_function,
-        );
-        (palette, warnings)
+        let (host, warnings) = HostPalette::from_settings(settings);
+        (host.into(), warnings)
     }
 }
 
@@ -116,48 +112,7 @@ pub fn p() -> Palette {
 }
 
 pub fn parse_color(raw: &str) -> Option<Color> {
-    let value = raw.trim();
-    if let Some(hex) = value.strip_prefix('#') {
-        let digits: Vec<u8> = hex.bytes().collect();
-        let hex_pair = |a: usize| -> Option<u8> {
-            let hi = (digits.get(a).copied()? as char).to_digit(16)?;
-            let lo = (digits.get(a + 1).copied()? as char).to_digit(16)?;
-            Some((hi * 16 + lo) as u8)
-        };
-        return match digits.len() {
-            3 => {
-                let expand = |c: char| c.to_digit(16).map(|d| (d * 17) as u8);
-                Some(Color::Rgb(
-                    expand(digits[0] as char)?,
-                    expand(digits[1] as char)?,
-                    expand(digits[2] as char)?,
-                ))
-            }
-            6 => Some(Color::Rgb(hex_pair(0)?, hex_pair(2)?, hex_pair(4)?)),
-            _ => None,
-        };
-    }
-    let color = match value.to_ascii_lowercase().replace(['-', '_'], "").as_str() {
-        "black" => Color::Black,
-        "red" => Color::Red,
-        "green" => Color::Green,
-        "yellow" => Color::Yellow,
-        "blue" => Color::Blue,
-        "magenta" => Color::Magenta,
-        "cyan" => Color::Cyan,
-        "gray" | "grey" => Color::Gray,
-        "darkgray" | "darkgrey" => Color::DarkGray,
-        "lightred" => Color::LightRed,
-        "lightgreen" => Color::LightGreen,
-        "lightyellow" => Color::LightYellow,
-        "lightblue" => Color::LightBlue,
-        "lightmagenta" => Color::LightMagenta,
-        "lightcyan" => Color::LightCyan,
-        "white" => Color::White,
-        "reset" | "default" => Color::Reset,
-        _ => return None,
-    };
-    Some(color)
+    meerai_host::theme::parse_color(raw).map(to_ratatui_color)
 }
 
 pub fn text() -> Style {

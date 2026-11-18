@@ -12,12 +12,13 @@ publish.workspace = true
 
 [features]
 default = ["update"]
-update = ["dep:reqwest"]
+update = ["meerai-host/update"]
 
 [dependencies]
 meerai-agents = { path = "../meerai-agents/" }
 meerai-common = { path = "../meerai-common/" }
 meerai-core = { path = "../meerai-core/" }
+meerai-host = { path = "../meerai-host/", default-features = false }
 meerai-policy = { path = "../meerai-policy/" }
 meerai-client = { path = "../meerai-client/" }
 meerai-session = { path = "../meerai-session/" }
@@ -26,16 +27,9 @@ meerai-syntax = { path = "../meerai-syntax/" }
 anyhow = { workspace = true }
 crossterm = { workspace = true }
 futures = { workspace = true }
-git2 = { workspace = true }
-grep-matcher = { workspace = true }
-grep-regex = { workspace = true }
-grep-searcher = { workspace = true }
-ignore = { workspace = true }
 ratatui = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-reqwest = { workspace = true, optional = true }
 comrak = { workspace = true }
 regex = { workspace = true }
-similar = { workspace = true }
 tokio = { workspace = true }

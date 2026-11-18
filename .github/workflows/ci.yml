@@ -46,6 +46,12 @@ jobs:
       - name: Check TUI without update check
         run: cargo check -p meerai-tui --no-default-features
 
+      - name: Add Wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Check browser client for Wasm
+        run: cargo check -p meerai-web-client --target wasm32-unknown-unknown
+
       - name: Run tests
         run: cargo test --workspace
 

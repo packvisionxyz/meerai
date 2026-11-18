@@ -626,6 +626,7 @@ fn parses_auth_subcommands() {
         Some(CliSubcommand::Auth(AuthCommand::Login {
             provider: "openai".to_string(),
             key: Some("sk-test".to_string()),
+            chatgpt: false,
         }))
     );
 
@@ -640,7 +641,35 @@ fn parses_auth_subcommands() {
         Some(CliSubcommand::Auth(AuthCommand::Login {
             provider: "anthropic".to_string(),
             key: None,
+            chatgpt: false,
         }))
+    );
+
+    let login_chatgpt = parse_args(vec![
+        "auth".to_string(),
+        "login".to_string(),
+        "openai".to_string(),
+        "--chatgpt".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(
+        login_chatgpt.subcommand,
+        Some(CliSubcommand::Auth(AuthCommand::Login {
+            provider: "openai".to_string(),
+            key: None,
+            chatgpt: true,
+        }))
+    );
+
+    assert!(
+        parse_args(vec![
+            "auth".to_string(),
+            "login".to_string(),
+            "openai".to_string(),
+            "sk-test".to_string(),
+            "--chatgpt".to_string(),
+        ])
+        .is_err()
     );
 
     let logout = parse_args(vec![
@@ -882,24 +911,24 @@ fn select_prunable_uses_cutoff_and_keeps_newest_sessions() {
     ];
 
     assert_eq!(
-        select_prunable(&sessions, now, 30, 0, None),
+        select_prunable(&sessions, now, 30, 0, &[]),
         vec![
             SessionId::from_raw("ses-mid"),
             SessionId::from_raw("ses-old")
         ]
     );
     assert_eq!(
-        select_prunable(&sessions, now, 30, 2, None),
+        select_prunable(&sessions, now, 30, 2, &[]),
         vec![
             SessionId::from_raw("ses-mid"),
             SessionId::from_raw("ses-old")
         ]
     );
     assert_eq!(
-        select_prunable(&sessions, now, 30, 3, None),
+        select_prunable(&sessions, now, 30, 3, &[]),
         vec![SessionId::from_raw("ses-old")]
     );
-    assert!(select_prunable(&sessions, now, 30, 4, None).is_empty());
+    assert!(select_prunable(&sessions, now, 30, 4, &[]).is_empty());
 }
 
 #[test]
@@ -914,13 +943,19 @@ fn select_prunable_never_selects_the_excluded_session() {
 
     let excluded = SessionId::from_raw("ses-old");
     assert_eq!(
-        select_prunable(&sessions, now, 30, 0, Some(&excluded)),
+        select_prunable(&sessions, now, 30, 0, std::slice::from_ref(&excluded)),
         vec![SessionId::from_raw("ses-mid")]
     );
 
     let active_but_recent = SessionId::from_raw("ses-new");
     assert_eq!(
-        select_prunable(&sessions, now, 30, 0, Some(&active_but_recent)),
+        select_prunable(
+            &sessions,
+            now,
+            30,
+            0,
+            std::slice::from_ref(&active_but_recent)
+        ),
         vec![
             SessionId::from_raw("ses-mid"),
             SessionId::from_raw("ses-old")
@@ -978,7 +1013,7 @@ async fn prune_old_sessions_respects_days_keep_and_exclusion() {
     write_fake_session(&root, "ses-new", now.saturating_sub(day));
 
     let excluded = SessionId::from_raw("ses-old");
-    let count = prune_old_sessions(root.clone(), 30, 0, &excluded)
+    let count = prune_old_sessions(root.clone(), 30, 0, std::slice::from_ref(&excluded))
         .await
         .unwrap();
     assert_eq!(count, 1);
@@ -988,12 +1023,12 @@ async fn prune_old_sessions_respects_days_keep_and_exclusion() {
     assert!(root.join("ses-new").exists());
 
     let none = SessionId::from_raw("ses-none");
-    let count = prune_old_sessions(root.clone(), 30, 3, &none)
+    let count = prune_old_sessions(root.clone(), 30, 3, std::slice::from_ref(&none))
         .await
         .unwrap();
     assert_eq!(count, 0);
 
-    let count = prune_old_sessions(root.clone(), 30, 0, &none)
+    let count = prune_old_sessions(root.clone(), 30, 0, std::slice::from_ref(&none))
         .await
         .unwrap();
     assert_eq!(count, 1);
@@ -1007,9 +1042,7 @@ async fn prune_old_sessions_respects_days_keep_and_exclusion() {
 #[tokio::test]
 async fn prune_old_sessions_missing_root_is_not_an_error() {
     let root = std::env::temp_dir().join(format!("meerai-cfg1-missing-{}", SessionId::new()));
-    let count = prune_old_sessions(root, 7, 0, &SessionId::from_raw("ses-none"))
-        .await
-        .unwrap();
+    let count = prune_old_sessions(root, 7, 0, &[]).await.unwrap();
     assert_eq!(count, 0);
 }
 
@@ -1470,7 +1503,7 @@ async fn build_workspace_toolsets_blocks_sensitive_files_and_attaches_execution_
     std::fs::remove_dir_all(&root).ok();
 }
 
-#[cfg(feature = "tui")]
+#[cfg(any(feature = "tui", feature = "web"))]
 #[tokio::test]
 async fn cli_session_host_lists_creates_and_opens_sessions() {
     let root = std::env::temp_dir().join(format!("meerai-cli-host-{}", SessionId::new()));
@@ -1487,7 +1520,7 @@ async fn cli_session_host_lists_creates_and_opens_sessions() {
     let expected_model = "test-model".to_string();
     let secrets: Arc<dyn meerai_client::secrets::SecretStore> =
         Arc::new(meerai_client::secrets::MemorySecretStore::new());
-    let client = build_genai_client(runtime.clone(), secrets).unwrap();
+    let client = build_genai_client(runtime.clone(), secrets.clone()).unwrap();
 
     let mut session_config = SessionConfig::new(workspace_root.clone());
     session_config.root = sessions_root.clone();
@@ -1497,7 +1530,11 @@ async fn cli_session_host_lists_creates_and_opens_sessions() {
         workspace_root: workspace_root.clone(),
         session_config,
         runtime,
+        secrets,
+        user_settings: std::sync::Mutex::new(settings.clone()),
         settings,
+        config_dir: None,
+        data_dir: None,
         client,
         approval_mode: ApprovalMode::Ask,
         execution_world: Arc::new(meerai_tools::HostWorld::new()),
@@ -1505,6 +1542,8 @@ async fn cli_session_host_lists_creates_and_opens_sessions() {
         hooks: Arc::new(HookEngine::default()),
         custom_agents: Vec::new(),
         base_system: "Test system prompt".to_string(),
+        launch_system: String::new(),
+        launch_definitions: String::new(),
         default_provider: expected_provider.clone(),
         default_model: expected_model.clone(),
     };
@@ -1530,7 +1569,7 @@ async fn cli_session_host_lists_creates_and_opens_sessions() {
 }
 
 #[tokio::test]
-async fn empty_session_cleanup_removes_unused_sessions_only() {
+async fn empty_session_cleanup_removes_only_old_unopened_sessions() {
     use meerai_session::{
         ContentBlock, InputSource, SessionConfig, SessionEvent, TurnId, TurnTrigger,
     };
@@ -1542,7 +1581,18 @@ async fn empty_session_cleanup_removes_unused_sessions_only() {
     };
 
     let unused_id = SessionId::new();
-    let _unused = Session::open_or_create(&config, unused_id.clone(), root.clone())
+    let unused = Session::open_or_create(&config, unused_id.clone(), root.clone())
+        .await
+        .unwrap();
+    drop(unused);
+
+    let open_id = SessionId::new();
+    let _open = Session::open_or_create(&config, open_id.clone(), root.clone())
+        .await
+        .unwrap();
+
+    let young_id = SessionId::new();
+    let _young = Session::open_or_create(&config, young_id.clone(), root.clone())
         .await
         .unwrap();
 
@@ -1568,9 +1618,16 @@ async fn empty_session_cleanup_removes_unused_sessions_only() {
     .await
     .unwrap();
 
-    let removed = crate::sessions_cmd::remove_empty_sessions(&root, &active_id)
-        .await
-        .unwrap();
+    age_session(&root, &unused_id, EMPTY_SESSION_MAX_AGE_MS);
+    age_session(&root, &open_id, EMPTY_SESSION_MAX_AGE_MS);
+
+    let removed = crate::sessions_cmd::remove_empty_sessions(
+        &root,
+        EMPTY_SESSION_MAX_AGE_MS,
+        &[active_id.clone(), open_id.clone()],
+    )
+    .await
+    .unwrap();
     assert_eq!(removed, 1);
 
     let remaining: Vec<String> = list_sessions(&root)
@@ -1579,8 +1636,55 @@ async fn empty_session_cleanup_removes_unused_sessions_only() {
         .map(|summary| summary.id.to_string())
         .collect();
     assert!(remaining.contains(&active_id.to_string()));
+    assert!(remaining.contains(&open_id.to_string()));
+    assert!(remaining.contains(&young_id.to_string()));
     assert!(remaining.contains(&used_id.to_string()));
     assert!(!remaining.contains(&unused_id.to_string()));
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+fn age_session(root: &std::path::Path, id: &SessionId, age_ms: u64) {
+    let path = root.join(id.as_str()).join("meta.json");
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let mut meta: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    meta["updated_at_ms"] = serde_json::json!(now_millis().saturating_sub(age_ms));
+    std::fs::write(&path, serde_json::to_string(&meta).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn empty_session_ids_keep_order_and_skip_titled_or_used_sessions() {
+    use meerai_session::{ContentBlock, InputSource, SessionConfig, SessionEvent};
+
+    let root = std::env::temp_dir().join(format!("meerai-empty-ids-{}", SessionId::new()));
+    let config = SessionConfig {
+        root: root.clone(),
+        workspace: root.clone(),
+    };
+
+    let first = SessionId::new();
+    let _first = Session::open_or_create(&config, first.clone(), root.clone())
+        .await
+        .unwrap();
+    let titled = SessionId::new();
+    let titled_session = Session::open_or_create(&config, titled.clone(), root.clone())
+        .await
+        .unwrap();
+    titled_session.set_title("Named task").await.unwrap();
+    let used = SessionId::new();
+    let used_session = Session::open_or_create(&config, used.clone(), root.clone())
+        .await
+        .unwrap();
+    used_session
+        .append(SessionEvent::UserMessage {
+            source: InputSource::User,
+            content: vec![ContentBlock::Text("hello".to_string())],
+        })
+        .await
+        .unwrap();
+
+    let ids = empty_session_ids(&root, &[titled.clone(), first.clone(), used.clone()]).await;
+    assert_eq!(ids, vec![first]);
 
     std::fs::remove_dir_all(&root).ok();
 }
@@ -1917,4 +2021,214 @@ fn exit_summary_falls_back_to_the_session_id_without_a_title() {
         assert!(summary.contains("Session   ses_abc123"));
         assert!(summary.contains("Continue  meerai --resume ses_abc123"));
     }
+}
+
+#[test]
+fn session_model_specs_with_an_adapter_prefix_keep_the_current_provider() {
+    let catalog = ProviderCatalog::new();
+    assert_eq!(
+        split_session_model(&catalog, "openai", "openai_resp::gpt-6.1-sol"),
+        ("openai".to_string(), "gpt-6.1-sol".to_string())
+    );
+    assert_eq!(
+        split_session_model(&catalog, "openai", "anthropic::claude-sonnet-4-5"),
+        ("anthropic".to_string(), "claude-sonnet-4-5".to_string())
+    );
+    assert_eq!(
+        split_session_model(&catalog, "openai", "gpt-6.1-sol"),
+        ("openai".to_string(), "gpt-6.1-sol".to_string())
+    );
+}
+
+#[test]
+fn parses_serve_subcommand_and_flags() {
+    let bare = parse_args(["serve".to_string()]).unwrap();
+    assert_eq!(
+        bare.subcommand,
+        Some(CliSubcommand::Serve(ServeCommand {
+            port: None,
+            username: None,
+            auth: false,
+        }))
+    );
+
+    let with_port = parse_args(["serve", "--port", "8080"].map(str::to_string)).unwrap();
+    assert_eq!(
+        with_port.subcommand,
+        Some(CliSubcommand::Serve(ServeCommand {
+            port: Some(8080),
+            username: None,
+            auth: false,
+        }))
+    );
+
+    let with_resume_and_port = parse_args(
+        [
+            "serve",
+            "--resume",
+            "id",
+            "--port=9000",
+            "--user",
+            "alice",
+            "--auth",
+        ]
+        .map(str::to_string),
+    )
+    .unwrap();
+    assert_eq!(
+        with_resume_and_port.subcommand,
+        Some(CliSubcommand::Serve(ServeCommand {
+            port: Some(9000),
+            username: Some("alice".to_string()),
+            auth: true,
+        }))
+    );
+    assert_eq!(with_resume_and_port.resume.as_deref(), Some("id"));
+
+    let with_flags = parse_args(
+        [
+            "serve",
+            "--continue",
+            "-p",
+            "openai",
+            "-m",
+            "gpt-5",
+            "--mode",
+            "ask",
+            "--agent",
+            "reviewer",
+            "--skill",
+            "explore",
+            "--env-file",
+            ".env.local",
+            "--system",
+            "Be brief.",
+        ]
+        .map(str::to_string),
+    )
+    .unwrap();
+    assert_eq!(
+        with_flags.subcommand,
+        Some(CliSubcommand::Serve(ServeCommand {
+            port: None,
+            username: None,
+            auth: false,
+        }))
+    );
+    assert!(with_flags.continue_session);
+    assert_eq!(with_flags.provider.as_deref(), Some("openai"));
+    assert_eq!(with_flags.model.as_deref(), Some("gpt-5"));
+    assert_eq!(with_flags.mode.as_deref(), Some("ask"));
+    assert_eq!(with_flags.agents, vec!["reviewer"]);
+    assert_eq!(with_flags.skills, vec!["explore"]);
+    assert_eq!(with_flags.env_file.as_deref(), Some(".env.local"));
+    assert_eq!(with_flags.system, "Be brief.");
+
+    let with_fork_and_acp =
+        parse_args(["serve", "--fork", "ses-1", "--acp"].map(str::to_string)).unwrap();
+    assert_eq!(
+        with_fork_and_acp.subcommand,
+        Some(CliSubcommand::Serve(ServeCommand {
+            port: None,
+            username: None,
+            auth: false,
+        }))
+    );
+    assert_eq!(with_fork_and_acp.fork.as_deref(), Some("ses-1"));
+    assert!(with_fork_and_acp.acp);
+
+    assert!(
+        parse_args(["serve", "--help"].map(str::to_string))
+            .unwrap()
+            .show_help
+    );
+    assert!(
+        parse_args(["serve", "-h"].map(str::to_string))
+            .unwrap()
+            .show_help
+    );
+
+    assert!(parse_args(["serve", "--port", "70000"].map(str::to_string)).is_err());
+    assert!(parse_args(["serve", "--port=abc"].map(str::to_string)).is_err());
+    assert!(parse_args(["serve", "--port"].map(str::to_string)).is_err());
+    assert!(parse_args(["serve", "--port="].map(str::to_string)).is_err());
+    assert!(parse_args(["serve", "--bogus"].map(str::to_string)).is_err());
+    assert!(parse_args(["serve", "extra"].map(str::to_string)).is_err());
+    assert!(parse_args(["--port", "8080"].map(str::to_string)).is_err());
+
+    let prompt_conflict = parse_args(["serve", "--prompt", "hi"].map(str::to_string)).unwrap_err();
+    assert!(prompt_conflict.to_string().contains("cannot be combined"));
+    let prompt_before = parse_args(["--prompt", "hi", "serve"].map(str::to_string)).unwrap_err();
+    assert!(prompt_before.to_string().contains("cannot be combined"));
+}
+
+#[cfg(feature = "web")]
+#[test]
+fn resolve_serve_auth_requires_basic_auth_and_generates_secret_when_empty() {
+    let default_generated = resolve_serve_auth_with(None, None, None, false, || {
+        panic!("prompt should not run in non-interactive mode")
+    })
+    .unwrap();
+    assert!(default_generated.auth.is_enabled());
+    assert!(
+        default_generated
+            .generated_secret
+            .as_deref()
+            .is_some_and(|s| s.len() >= 8)
+    );
+    assert!(matches!(
+        default_generated.auth,
+        meerai_web::ServeAuth::Basic {
+            username: Some(ref u),
+            secret: Some(_)
+        } if u == "meerai"
+    ));
+
+    let from_env = resolve_serve_auth_with(None, None, Some("8-chars!".to_string()), false, || {
+        panic!("prompt should not run when env secret is set")
+    })
+    .unwrap();
+    assert!(from_env.generated_secret.is_none());
+    assert!(matches!(
+        from_env.auth,
+        meerai_web::ServeAuth::Basic {
+            username: Some(ref u),
+            secret: Some(_)
+        } if u == "meerai"
+    ));
+
+    let short_env = resolve_serve_auth_with(None, None, Some("7-chars".to_string()), false, || {
+        Ok(String::new())
+    })
+    .unwrap_err();
+    assert!(format!("{short_env:#}").contains("8 characters"));
+
+    let prompt_generated =
+        resolve_serve_auth_with(None, None, Some(String::new()), true, || Ok(String::new()))
+            .unwrap();
+    assert!(prompt_generated.auth.is_enabled());
+    assert!(
+        prompt_generated
+            .generated_secret
+            .as_deref()
+            .is_some_and(|s| s.len() >= 8)
+    );
+
+    let prompt_custom =
+        resolve_serve_auth_with(Some("alice".to_string()), None, None, true, || {
+            Ok("pass1234".to_string())
+        })
+        .unwrap();
+    assert!(prompt_custom.generated_secret.is_none());
+    assert!(matches!(
+        prompt_custom.auth,
+        meerai_web::ServeAuth::Basic {
+            username: Some(ref u),
+            secret: Some(_)
+        } if u == "alice"
+    ));
+
+    let prompt_short =
+        resolve_serve_auth_with(None, None, None, true, || Ok("short".to_string())).unwrap_err();
+    assert!(format!("{prompt_short:#}").contains("8 characters"));
 }

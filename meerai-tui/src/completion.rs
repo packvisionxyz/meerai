@@ -67,6 +67,11 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
         "Reload settings, theme, definitions, and prompt",
         false,
     ),
+    (
+        "/serve",
+        "Start or stop local browser UI server (/serve stop)",
+        false,
+    ),
     ("/quit", "Exit meerai", false),
 ];
 
@@ -571,75 +576,7 @@ fn build_file_candidates(files: &[String], query: &str) -> Vec<CompletionItem> {
     scored.into_iter().map(|(_, item)| item).collect()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct MatchRank {
-    pub tier: u8,
-    pub pos: usize,
-    pub len: usize,
-}
-
-pub(crate) fn score_candidate(candidate: &str, query: &str) -> Option<MatchRank> {
-    if query.is_empty() {
-        return Some(MatchRank {
-            tier: 0,
-            pos: 0,
-            len: candidate.len(),
-        });
-    }
-
-    let cand_lower = candidate.to_lowercase();
-    let query_lower = query.to_lowercase();
-
-    if cand_lower.starts_with(&query_lower) {
-        return Some(MatchRank {
-            tier: 0,
-            pos: 0,
-            len: candidate.len(),
-        });
-    }
-
-    if let Some(slash_idx) = cand_lower.rfind('/') {
-        let basename = &cand_lower[slash_idx + 1..];
-        if basename.starts_with(&query_lower) {
-            return Some(MatchRank {
-                tier: 1,
-                pos: slash_idx + 1,
-                len: candidate.len(),
-            });
-        }
-    }
-
-    if let Some(pos) = cand_lower.find(&query_lower) {
-        return Some(MatchRank {
-            tier: 2,
-            pos,
-            len: candidate.len(),
-        });
-    }
-
-    let mut query_chars = query_lower.chars();
-    let mut current = query_chars.next()?;
-    let mut first_pos = None;
-    for (idx, ch) in cand_lower.char_indices() {
-        if ch == current {
-            if first_pos.is_none() {
-                first_pos = Some(idx);
-            }
-            match query_chars.next() {
-                Some(next) => current = next,
-                None => {
-                    return Some(MatchRank {
-                        tier: 3,
-                        pos: first_pos.unwrap_or(0),
-                        len: candidate.len(),
-                    });
-                }
-            }
-        }
-    }
-
-    None
-}
+pub(crate) use meerai_host::search::{MatchRank, score_candidate};
 
 #[cfg(test)]
 mod tests {

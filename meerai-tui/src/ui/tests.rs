@@ -1,5 +1,5 @@
 use super::composer::render_composer_line;
-use super::statusline::{format_compact_ms, format_compact_tokens};
+use super::statusline::{format_compact_ms, format_compact_tokens, key_status_style};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -10,7 +10,7 @@ use meerai_agents::{
     TurnEndReason, TurnId, Usage,
 };
 use meerai_client::providers::{ProviderCatalog, RuntimeProviderState};
-use meerai_client::secrets::{MemorySecretStore, SecretStore};
+use meerai_client::secrets::{Credential, MemorySecretStore, OAuthCredential, SecretStore};
 use meerai_common::settings::AppSettings;
 use meerai_policy::ApprovalMode;
 use ratatui::Terminal;
@@ -1027,18 +1027,38 @@ fn composer_cursor_column_uses_chip_display_width() {
 
 #[test]
 fn composer_cursor_keeps_multiline_row_and_chip_columns() {
-    let agents = vec![agent_definition("reviewer")];
-    let skills = vec![skill_definition("deliver")];
+    let mut app = test_app();
+    app.skills = vec![skill_definition("deliver")];
     let input = "first line\nrun @skill/deliver";
-    let cursor = input.len();
+    app.tab_mut().input = input.to_string();
+    app.tab_mut().cursor = input.len();
 
-    let (row, raw_col) = cursor_row_col(input, cursor);
-    assert_eq!(row, 1);
+    let backend = TestBackend::new(120, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
 
-    let line = input.split('\n').nth(row).unwrap();
-    let (spans, display_col) = render_composer_line(line, Some(raw_col), &agents, &skills);
-    assert_eq!(span_text(&spans), "run deliver");
-    assert_eq!(display_col, "run deliver".chars().count());
+    let area = app.composer_input_area;
+    let cursor = terminal.backend().cursor_position();
+    assert_eq!(cursor.x, area.x + "run deliver".len() as u16);
+    assert_eq!(cursor.y, area.y + 1);
+}
+
+#[test]
+fn composer_cursor_sits_right_after_a_selected_skill_chip() {
+    let mut app = test_app();
+    app.skills = vec![skill_definition("deliver")];
+    let input = "@skill/deliver ";
+    app.tab_mut().input = input.to_string();
+    app.tab_mut().cursor = input.len();
+
+    let backend = TestBackend::new(120, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+    let area = app.composer_input_area;
+    let cursor = terminal.backend().cursor_position();
+    assert_eq!(cursor.x, area.x + "deliver ".len() as u16);
+    assert_eq!(cursor.y, area.y);
 }
 
 #[test]
@@ -1401,6 +1421,124 @@ fn renders_provider_apikey_masked_and_model_modals() {
     assert!(search_screen.contains("Preview: src/lib.rs:10"));
 }
 
+#[test]
+fn renders_auth_method_modal() {
+    let mut app = test_app();
+    app.modal = Some(ActiveModal::AuthMethodSelect {
+        provider_id: "openai".to_string(),
+        provider_name: "OpenAI".to_string(),
+        selected: 0,
+    });
+    let screen = render_to_string(&mut app);
+    assert!(screen.contains("Connect OpenAI (openai)"));
+    assert!(screen.contains("ChatGPT Plus/Pro plan usage"));
+    assert!(screen.contains("▸ Continue with ChatGPT"));
+    assert!(screen.contains("Use an API key"));
+    assert!(screen.contains("Enter select"));
+    assert!(screen.contains("Esc back"));
+}
+
+#[test]
+fn renders_provider_connection_modal() {
+    let mut app = test_app();
+    app.modal = Some(ActiveModal::ProviderConnection {
+        provider_id: "openai".to_string(),
+        provider_name: "OpenAI".to_string(),
+        status: meerai_client::providers::KeyStatus::OAuth {
+            expires_at_ms: u64::MAX,
+            needs_relogin: false,
+        },
+        selected: 0,
+    });
+    let screen = render_to_string(&mut app);
+    assert!(screen.contains("Connect OpenAI (openai)"));
+    assert!(screen.contains("Status  plan"));
+    assert!(screen.contains("▸ Continue to model select"));
+    assert!(screen.contains("Update credential"));
+    assert!(screen.contains("Remove saved credential"));
+    assert!(screen.contains("Enter select"));
+    assert!(screen.contains("Esc back"));
+}
+
+#[test]
+fn renders_chatgpt_login_modal_with_url_and_paste_field() {
+    let mut app = test_app();
+    app.modal = Some(ActiveModal::ChatGptLogin {
+        provider_id: "openai".to_string(),
+        provider_name: "OpenAI".to_string(),
+        url: Some(
+            "https://auth.openai.com/api/accounts/authorize?client_id=dynamic_agent_client"
+                .to_string(),
+        ),
+        input: String::new(),
+        error: None,
+        busy: false,
+    });
+    let screen = render_to_string(&mut app);
+    assert!(screen.contains("Sign in with ChatGPT (openai)"));
+    assert!(screen.contains("Waiting for the browser callback"));
+    assert!(screen.contains("auth.openai.com"));
+    assert!(screen.contains("Paste the final redirect URL"));
+    assert!(screen.contains("ctrl+y"));
+    assert!(screen.contains("Esc cancel"));
+}
+
+#[test]
+fn plan_badge_and_colors_for_oauth_credentials() {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let secrets = Arc::new(MemorySecretStore::new());
+    secrets.set_credential(
+        "openai",
+        Credential::OAuth(OAuthCredential {
+            access: "plan-access".to_string(),
+            refresh: "plan-refresh".to_string(),
+            expires: u64::MAX,
+            client_id: "plan-client".to_string(),
+            scopes: vec!["chatgpt.tokens.use.direct".to_string()],
+            account: None,
+            needs_relogin: false,
+        }),
+    );
+    let settings = AppSettings::default();
+    let runtime = Arc::new(RwLock::new(RuntimeProviderState::from_settings(
+        &settings,
+        ProviderCatalog::new(),
+    )));
+    let mut app = AppState::new(
+        "openai",
+        "gpt-5",
+        PathBuf::from("."),
+        tx,
+        runtime,
+        secrets,
+        settings,
+        None,
+    );
+    let sidebar = render_to_string(&mut app);
+    assert!(sidebar.contains("auth"));
+    assert!(sidebar.contains("[plan]"));
+
+    app.modal = Some(ActiveModal::ProviderSelect {
+        filter: String::new(),
+        selected: 0,
+    });
+    let providers = render_to_string(&mut app);
+    assert!(providers.contains("[plan]"));
+
+    let (badge, color) = key_status_style(&KeyStatus::OAuth {
+        expires_at_ms: u64::MAX,
+        needs_relogin: false,
+    });
+    assert_eq!(badge, "plan");
+    assert_eq!(color, theme::p().success);
+    let (badge, color) = key_status_style(&KeyStatus::OAuth {
+        expires_at_ms: 0,
+        needs_relogin: true,
+    });
+    assert_eq!(badge, "plan");
+    assert_eq!(color, theme::p().error);
+}
+
 fn rust_diff_modal(list: crate::app::DiffListState) -> ActiveModal {
     ActiveModal::DiffView {
         file_index: 0,
@@ -1542,12 +1680,11 @@ fn renders_session_tabs_badges_and_session_select_modal() {
             provider: "gemini".to_string(),
             model: "gemini-3.8-flash".to_string(),
             approval_mode: ApprovalMode::Ask,
-            transcript: Vec::new(),
             events: Vec::new(),
             cmd_tx: tx2,
             event_rx: erx2,
         },
-        false,
+        crate::app::SessionOpenMode::NewTab,
     );
     app.switch_to_tab(0);
     app.tabs[1].has_unread = true;
@@ -2319,4 +2456,150 @@ fn statusline_shows_workspace_path_and_git_branch() {
     app.git_branch = Some("feature/ui".to_string());
     let rendered = render_to_string(&mut app);
     assert!(rendered.contains("feature/ui"));
+}
+
+fn push_anchor_turn(app: &mut AppState, text: &str) {
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: text.to_string(),
+    });
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: format!("{text} answer\n{}", "detail line\n".repeat(4)),
+        reasoning: String::new(),
+        streaming: false,
+        reasoning_expanded: false,
+    });
+}
+
+fn mouse_event(
+    kind: crossterm::event::MouseEventKind,
+    column: u16,
+    row: u16,
+) -> crossterm::event::MouseEvent {
+    crossterm::event::MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    }
+}
+
+fn rail_text(row: &str, rail: Rect) -> String {
+    row.chars()
+        .skip(rail.x as usize)
+        .take(rail.width as usize)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn anchor_rail_numbers_user_turns_and_jumps_on_click() {
+    let mut app = test_app();
+    for idx in 0..8 {
+        push_anchor_turn(&mut app, &format!("question {idx}"));
+    }
+
+    render_rows_with_size(&mut app, 120, 24);
+    let rows = render_rows_with_size(&mut app, 120, 24);
+    let rail = app.anchor_rail_area;
+    assert!(rail.width >= 1);
+    assert!(rail.x > app.transcript_inner_area.right());
+    assert!(rail.x < 120 - 30, "rail sits left of the sidebar");
+
+    let layout = app.anchor_rail_layout(rail);
+    assert_eq!(layout.marks.len(), 8);
+    assert!(!layout.top_gap && !layout.bottom_gap);
+    let numbers: Vec<usize> = layout.marks.iter().map(|mark| mark.number).collect();
+    assert_eq!(numbers, (1..=8).collect::<Vec<_>>());
+    for (idx, mark) in layout.marks.iter().enumerate() {
+        assert_eq!(mark.row, rail.y + idx as u16);
+        assert_eq!(
+            rail_text(&rows[mark.row as usize], rail),
+            mark.number.to_string()
+        );
+    }
+
+    let last = *layout.marks.last().unwrap();
+    assert!(app.handle_mouse_event(mouse_event(
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        rail.x,
+        last.row,
+    )));
+    assert_eq!(
+        app.tab().scroll_offset,
+        last.line.min(app.tab().max_scroll())
+    );
+    assert!(app.tab().scroll_offset > 0);
+}
+
+#[test]
+fn anchor_rail_hover_targets_the_turn_band() {
+    let mut app = test_app();
+    for idx in 0..8 {
+        push_anchor_turn(&mut app, &format!("question {idx}"));
+    }
+    render_rows_with_size(&mut app, 120, 24);
+    render_rows_with_size(&mut app, 120, 24);
+
+    let rail = app.anchor_rail_area;
+    eprintln!("rail={rail:?} anchors={:?}", app.transcript_anchors);
+    let mark = app.anchor_rail_layout(rail).marks[3];
+    eprintln!("mark={mark:?}");
+    app.handle_mouse_event(mouse_event(
+        crossterm::event::MouseEventKind::Moved,
+        rail.x,
+        mark.row,
+    ));
+    assert_eq!(app.anchor_rail_hover, Some(mark.row));
+    let zone = app
+        .thinking_hit_zones
+        .iter()
+        .find(|zone| zone.entry_idx == mark.entry_idx)
+        .copied()
+        .expect("turn band");
+    assert!(zone.start_line < zone.end_line);
+}
+
+#[test]
+fn anchor_rail_elides_turns_that_do_not_fit_and_the_gap_jumps_to_the_end() {
+    let mut app = test_app();
+    for idx in 0..30 {
+        push_anchor_turn(&mut app, &format!("question {idx}"));
+    }
+
+    render_rows_with_size(&mut app, 120, 24);
+    render_rows_with_size(&mut app, 120, 24);
+    let rail = app.anchor_rail_area;
+    assert_eq!(rail.width, 2, "two digits for turn 30");
+
+    let layout = app.anchor_rail_layout(rail);
+    let used = layout.marks.len() + usize::from(layout.top_gap) + usize::from(layout.bottom_gap);
+    assert!(used <= rail.height as usize);
+    assert!(layout.top_gap, "earlier turns are hidden above");
+    let numbers: Vec<usize> = layout.marks.iter().map(|mark| mark.number).collect();
+    assert!(numbers.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(numbers.last(), Some(&30), "the followed turn stays visible");
+
+    let first_line = app.transcript_anchors[0].line;
+    assert!(app.handle_mouse_event(mouse_event(
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        rail.x,
+        rail.y,
+    )));
+    assert_eq!(
+        app.tab().scroll_offset,
+        first_line.min(app.tab().max_scroll())
+    );
+    assert!(!app.tab().auto_follow);
+}
+
+#[test]
+fn anchor_rail_hides_when_the_transcript_fits_the_viewport() {
+    let mut app = test_app();
+    push_anchor_turn(&mut app, "short");
+
+    render_rows_with_size(&mut app, 120, 24);
+    render_rows_with_size(&mut app, 120, 24);
+    assert_eq!(app.anchor_rail_area, Rect::default());
+    assert!(!app.anchor_rail_visible());
 }

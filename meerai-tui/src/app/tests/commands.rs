@@ -54,6 +54,10 @@ fn slash_command_handling() {
             context_window_tokens: None,
         }
     );
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        AgentCommand::SetPlanUsage { .. }
+    ));
 
     type_text(&mut app, "/clear");
     app.handle_key_event(key(KeyCode::Enter));
@@ -464,4 +468,97 @@ fn update_command_reports_the_available_version() {
         .expect("system message");
     assert!(text.contains("9.9.9"), "{text}");
     assert!(text.contains("install.sh"), "{text}");
+}
+
+struct DummyWebHandle;
+
+#[meerai_core::async_trait]
+impl crate::WebServerHandle for DummyWebHandle {
+    fn port(&self) -> u16 {
+        8765
+    }
+
+    fn url(&self) -> &str {
+        "http://127.0.0.1:8765"
+    }
+
+    async fn stop(&self) {}
+}
+
+struct DummyWebLauncher;
+
+#[meerai_core::async_trait]
+impl crate::WebServerLauncher for DummyWebLauncher {
+    async fn start(
+        &self,
+        _registry: Arc<crate::SessionRegistry>,
+        _opener: Arc<dyn crate::SessionOpener>,
+        _port: Option<u16>,
+        _secret: Option<String>,
+    ) -> anyhow::Result<(Arc<dyn crate::WebServerHandle>, crate::WebServerStart)> {
+        anyhow::bail!("unused in unit test")
+    }
+}
+
+#[test]
+fn serve_command_validates_dialog_stops_and_clicks_statusline() {
+    let (mut app, _rx, _secrets) = test_app();
+
+    submit(&mut app, "/serve");
+    assert!(matches!(
+        app.tab().transcript.last(),
+        Some(TranscriptEntry::Error { text, .. }) if text.contains("not enabled")
+    ));
+
+    app.web_launcher = Some(Arc::new(DummyWebLauncher));
+    submit(&mut app, "/serve");
+    assert!(matches!(app.modal, Some(ActiveModal::ServeDialog { .. })));
+
+    type_text(&mut app, "4040");
+    app.handle_key_event(key(KeyCode::Tab));
+    type_text(&mut app, "short");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::ServeDialog {
+            error: Some(_),
+            busy: false,
+            ..
+        })
+    ));
+
+    app.handle_key_event(key_mod(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    type_text(&mut app, "valid-pass-123");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(
+        app.take_pending_session_actions(),
+        vec![PendingSessionAction::StartWebServer {
+            port: Some(4040),
+            secret: Some("valid-pass-123".to_string()),
+        }]
+    );
+
+    app.modal = None;
+    app.web_server = Some(crate::app::RunningWebServer {
+        port: 8765,
+        url: "http://127.0.0.1:8765".to_string(),
+        handle: Arc::new(DummyWebHandle),
+    });
+    app.web_server_hit = Some(ratatui::layout::Rect::new(10, 20, 12, 1));
+    app.handle_mouse_event(crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: 12,
+        row: 20,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(
+        app.last_copied_text.as_deref(),
+        Some("http://127.0.0.1:8765")
+    );
+
+    submit(&mut app, "/serve stop");
+    assert_eq!(
+        app.take_pending_session_actions(),
+        vec![PendingSessionAction::StopWebServer]
+    );
 }

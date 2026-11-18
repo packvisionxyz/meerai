@@ -1287,6 +1287,7 @@ impl DecisionCtx<'_> {
                 | AgentCommand::Rewind { .. }
                 | AgentCommand::SubmitPrompt(_)
                 | AgentCommand::SetModel { .. }
+                | AgentCommand::SetPlanUsage { .. }
                 | AgentCommand::Reset => {}
             }
         }
@@ -1328,6 +1329,7 @@ impl DecisionCtx<'_> {
                 | AgentCommand::Rewind { .. }
                 | AgentCommand::SubmitPrompt(_)
                 | AgentCommand::SetModel { .. }
+                | AgentCommand::SetPlanUsage { .. }
                 | AgentCommand::Reset => {}
                 AgentCommand::Steer(_)
                 | AgentCommand::SetPermissionMode(_)
@@ -1382,6 +1384,11 @@ impl DecisionCtx<'_> {
             AgentCommand::Reload { .. } => {}
             AgentCommand::SetHooks(entries) => {
                 *self.hooks = Arc::new(HookEngine::new(entries));
+            }
+            AgentCommand::SetPlanUsage { plan_usage } => {
+                if let Some(harness) = self.harness.as_mut() {
+                    harness.config.plan_usage = plan_usage;
+                }
             }
             AgentCommand::Approve { .. }
             | AgentCommand::AnswerQuestion { .. }

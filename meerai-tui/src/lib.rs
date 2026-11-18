@@ -2,14 +2,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
-use meerai_agents::{AgentCommand, AgentEvent, TurnId};
+use meerai_agents::{AgentCommand, AgentEvent};
 use meerai_client::providers::RuntimeProviderState;
 use meerai_client::secrets::SecretStore;
 use meerai_common::definitions::{AgentDefinition, SkillDefinition};
 use meerai_common::settings::AppSettings;
-use meerai_core::async_trait;
 use meerai_policy::ApprovalMode;
-use meerai_session::{LoggedEvent, SessionId, SessionSummary};
+use meerai_session::{LoggedEvent, SessionId};
 use tokio::sync::mpsc;
 
 pub mod app;
@@ -36,50 +35,13 @@ pub use app::{
 };
 pub use completion::{CompletionEngine, CompletionItem, CompletionItemKind, CompletionKind};
 pub use diff::{DiffCell, DiffRow, DiffRowKind, FileDiffView};
+pub use meerai_host::{
+    Backend, ChatGptLogin, ChatGptLoginOutcome, LocalWorkspace, OpenedSession, SessionOpener,
+    SessionRegistry, WebServerHandle, WebServerLauncher, WebServerStart, WorkspaceMatch,
+    WorkspaceQuery, local_workspace,
+};
 pub use search::{SearchMatch, SearchMode, SearchPreview};
 pub use terminal::TerminalGuard;
-pub use workspace::{LocalWorkspace, WorkspaceMatch, WorkspaceQuery, local_workspace};
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum Backend {
-    #[default]
-    Native,
-    Acp {
-        preset: String,
-        remote_session_id: Option<String>,
-    },
-}
-
-pub struct OpenedSession {
-    pub session_id: SessionId,
-    pub title: Option<String>,
-    pub backend: Backend,
-    pub provider: String,
-    pub model: String,
-    pub approval_mode: ApprovalMode,
-    pub transcript: Vec<TranscriptEntry>,
-    pub events: Vec<LoggedEvent>,
-    pub cmd_tx: mpsc::UnboundedSender<AgentCommand>,
-    pub event_rx: mpsc::UnboundedReceiver<AgentEvent>,
-}
-
-#[async_trait]
-pub trait SessionOpener: Send + Sync {
-    async fn list_sessions(&self) -> Result<Vec<SessionSummary>>;
-    async fn open_session(&self, id: &SessionId) -> Result<OpenedSession>;
-    async fn create_session(&self) -> Result<OpenedSession>;
-    async fn fork_session(&self, id: &SessionId, turn: &TurnId) -> Result<OpenedSession>;
-    async fn delete_session(&self, id: &SessionId) -> Result<bool>;
-    async fn create_acp_session(&self, _preset: &str) -> Result<OpenedSession> {
-        anyhow::bail!("ACP sessions are not supported by this client")
-    }
-    async fn read_session_events(&self, _id: &SessionId) -> Result<Vec<LoggedEvent>> {
-        Err(anyhow::anyhow!("reading session events is not supported"))
-    }
-    async fn run_user_shell(&self, _command: &str) -> Result<String> {
-        Err(anyhow::anyhow!("user shell commands are not supported"))
-    }
-}
 
 pub struct TuiLaunchConfig {
     pub initial_session_id: SessionId,
@@ -108,6 +70,8 @@ pub struct TuiLaunchConfig {
     pub sandbox_kind: String,
     pub sandbox_warning: Option<String>,
     pub workspace_query: Option<Arc<dyn WorkspaceQuery>>,
+    pub registry: Option<Arc<SessionRegistry>>,
+    pub web_launcher: Option<Arc<dyn WebServerLauncher>>,
 }
 
 pub struct TuiExit {
@@ -123,10 +87,10 @@ pub async fn run_tui(
     let mut terminal = TerminalGuard::enter()?;
     let workspace_root = config.workspace_root.clone();
     let mut app = AppState::new(
-        config.initial_provider,
-        config.initial_model,
+        config.initial_provider.clone(),
+        config.initial_model.clone(),
         config.workspace_root,
-        cmd_tx,
+        cmd_tx.clone(),
         config.runtime,
         config.secrets,
         config.settings,
@@ -140,9 +104,9 @@ pub async fn run_tui(
         app.set_workspace_query(workspace);
     }
     app.set_initial_session(
-        config.initial_session_id,
-        config.initial_session_title,
-        config.initial_backend,
+        config.initial_session_id.clone(),
+        config.initial_session_title.clone(),
+        config.initial_backend.clone(),
         config.initial_transcript,
         &config.initial_events,
         config.approval_mode,
@@ -156,11 +120,36 @@ pub async fn run_tui(
     app.sandbox_active = config.sandbox_active;
     app.sandbox_kind = config.sandbox_kind;
     app.sandbox_warning = config.sandbox_warning;
+    app.web_launcher = config.web_launcher;
+    let (active_rx, _keep_tx) = if let Some(reg) = config.registry.clone() {
+        reg.register_opened_active(OpenedSession {
+            session_id: config.initial_session_id,
+            title: config.initial_session_title,
+            backend: config.initial_backend,
+            provider: config.initial_provider,
+            model: config.initial_model,
+            approval_mode: config.approval_mode,
+            events: config.initial_events,
+            cmd_tx,
+            event_rx,
+        });
+        app.registry = Some(reg);
+        let (tx, rx) = mpsc::unbounded_channel();
+        (rx, Some(tx))
+    } else {
+        (event_rx, None)
+    };
     for id in config.restore_sessions {
         app.pending_session_actions
-            .push(PendingSessionAction::OpenSessionId(id));
+            .push(PendingSessionAction::RestoreSessionId(id));
     }
-    let result = event_loop::run_event_loop(&mut terminal, &mut app, event_rx).await;
+    let result = event_loop::run_event_loop(&mut terminal, &mut app, active_rx).await;
+    if let Some(web) = app.web_server.take() {
+        web.handle.stop().await;
+    }
+    if let Some(reg) = app.registry.take() {
+        reg.shutdown_all().await;
+    }
     let exit = TuiExit {
         session_id: app.tab().session_id.clone(),
         title: app.tab().title.clone(),

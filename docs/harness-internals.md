@@ -144,9 +144,11 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
 - `sessions.auto_prune_days`/`keep` (user only) opt into startup pruning;
   the active session is always spared; output is
   `Pruned N sessions (older than N days)`. Startup also deletes empty
-  sessions (no user message, no title, no parent) via
-  `prune_empty_sessions` (`Removed N empty sessions`). Manual retention:
-  `sessions prune` (30 days, keep 0 defaults).
+  sessions (no user message, no title, no parent) that are older than six
+  hours and not open, via `prune_empty_sessions` (`Removed N empty
+  sessions`). A plain TUI start opens one empty session tab, restores the
+  saved tabs in the background, and reuses the remembered empty session.
+  Manual retention: `sessions prune` (30 days, keep 0 defaults).
 - Definitions: read-only discovery at the project root, `.agents` before
   `.claude`, duplicate ids keep `.agents` (warning names both paths),
   sorted by id, symlinks skipped. Frontmatter
@@ -207,11 +209,13 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   render reads `theme::p()`. There is no separate working-directory
   overlay: a CWD that holds `.meerai/settings.yml` is itself the project
   root, so its theme applies through the project merge.
-- Keys: keychain first (`security` on macOS, `secret-tool` on Linux),
-  `auth.json` fallback (`0600`, data dir), `MEERAI_DISABLE_KEYCHAIN`
-  forces the file. Resolution: stored → configured `api_key` → provider
-  `env_vars` from the bundled catalog. `${VAR|default}` and `{env:VAR}`
-  expansion in config secrets.
+- Keys: keychain first for API keys (`security` on macOS, `secret-tool` on
+  Linux), `auth.json` fallback (`0600`, data dir), `MEERAI_DISABLE_KEYCHAIN`
+  forces the file. ChatGPT plan OAuth credentials stay in `auth.json` and are
+  refreshed under `auth.json.lock`; the access token is resolved like a key.
+  Resolution: stored credential → configured `api_key` → provider `env_vars`
+  from the bundled catalog. `${VAR|default}` and `{env:VAR}` expansion in config
+  secrets.
 - Sessions root: `$XDG_DATA_HOME/meerai/sessions` or `MEERAI_SESSION_DIR`;
   `auth.json` and `open-tabs.json` share the data root. Dirs `0700`, files
   `0600` on Unix. `meta.json`: cwd, git branch/SHA, title, model,
@@ -361,10 +365,15 @@ implementation invariants.
   (408/409/425/429 and 5xx transient; other 4xx permanent; message
   blocklist fallback). Stream requests set a 30 s header timeout and a
   120 s per-chunk read timeout; heartbeats reset the read timer. A silent
-  stall or a fully empty stream (`EMPTY_STREAM_ERROR`) is transient and
-  retried; a stream with usage but no content is a normal end. When the
-  endpoint itself is blocked, route around it (proxy, VPN, another
-  provider, `base_url` override); meerai uses plain HTTPS.
+  stall or a fully empty stream is transient and retried; a stream with
+  usage but no content is a normal end. An empty stream carries a
+  diagnostic block (`provider`, `model`, `stop_reason`, `events`,
+  `elapsed`, and a hint) into the turn error. A provider stop reason of
+  `content_filter`, `max_tokens`, or `stop_sequence` is reported as a
+  non-retryable provider error instead of an empty transient stream, and
+  captured reasoning counts as content. When the endpoint itself is
+  blocked, route around it (proxy, VPN, another provider, `base_url`
+  override); meerai uses plain HTTPS.
 - The worker queues one recovery turn after a retryable provider or
   `LoopDetected` failure (`MAX_RECOVERY_ATTEMPTS = 1`, reset on any
   successful turn). The user-visible prompt names the failure and runs

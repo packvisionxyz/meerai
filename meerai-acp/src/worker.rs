@@ -122,6 +122,7 @@ async fn run(
                     }
                     AgentCommand::Steer(_)
                     | AgentCommand::SetModel { .. }
+                    | AgentCommand::SetPlanUsage { .. }
                     | AgentCommand::SetPermissionMode(_)
                     | AgentCommand::Compact
                     | AgentCommand::ApplyAgent { .. }

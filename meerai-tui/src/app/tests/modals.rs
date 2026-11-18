@@ -26,6 +26,53 @@ fn opens_provider_select_on_startup_when_key_missing() {
 }
 
 #[test]
+fn opens_provider_select_on_startup_when_plan_credential_needs_relogin() {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let secrets = Arc::new(MemorySecretStore::new());
+    secrets.set_credential("openai", oauth_credential(true));
+    let settings = AppSettings::default();
+    let runtime = Arc::new(RwLock::new(RuntimeProviderState::from_settings(
+        &settings,
+        ProviderCatalog::new(),
+    )));
+    let app = AppState::new(
+        "openai",
+        "gpt-5",
+        PathBuf::from("."),
+        tx,
+        runtime,
+        secrets,
+        settings,
+        None,
+    );
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::ProviderSelect { .. })
+    ));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let secrets = Arc::new(MemorySecretStore::new());
+    secrets.set_credential("openai", oauth_credential(false));
+    let settings = AppSettings::default();
+    let runtime = Arc::new(RwLock::new(RuntimeProviderState::from_settings(
+        &settings,
+        ProviderCatalog::new(),
+    )));
+    let app = AppState::new(
+        "openai",
+        "gpt-5",
+        PathBuf::from("."),
+        tx,
+        runtime,
+        secrets,
+        settings,
+        None,
+    );
+    assert!(app.modal.is_none());
+    assert!(app.active_key_status().is_configured());
+}
+
+#[test]
 fn model_context_window_tracks_the_catalog_unless_pinned() {
     let (mut app, _rx, _secrets) = test_app();
 
@@ -41,6 +88,214 @@ fn model_context_window_tracks_the_catalog_unless_pinned() {
 
     app.explicit_context_window = Some(200_000);
     assert_eq!(app.model_context_window("gemini", "gemini-2.5-pro"), None);
+}
+
+#[test]
+fn connect_flow_offers_auth_methods_for_openai() {
+    let (mut app, _rx, _secrets) = test_app();
+
+    type_text(&mut app, "/connect");
+    app.handle_key_event(key(KeyCode::Enter));
+    type_text(&mut app, "openai");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::AuthMethodSelect {
+            ref provider_id,
+            selected: 0,
+            ..
+        }) if provider_id == "openai"
+    ));
+
+    type_text(&mut app, "x");
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::AuthMethodSelect { selected: 0, .. })
+    ));
+
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::ChatGptLogin {
+            ref provider_id,
+            url: None,
+            ..
+        }) if provider_id == "openai"
+    ));
+    assert_eq!(app.pending_login_request.as_deref(), Some("openai"));
+
+    app.handle_key_event(key(KeyCode::Esc));
+    assert!(app.modal.is_none());
+    assert!(app.pending_login_request.is_none());
+
+    type_text(&mut app, "/connect");
+    app.handle_key_event(key(KeyCode::Enter));
+    type_text(&mut app, "openai");
+    app.handle_key_event(key(KeyCode::Enter));
+    app.handle_key_event(key(KeyCode::Down));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::AuthMethodSelect { selected: 1, .. })
+    ));
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::ApiKeyInput { ref provider_id, .. }) if provider_id == "openai"
+    ));
+}
+
+#[test]
+fn connect_flow_with_a_stored_plan_skips_auth_methods() {
+    let (mut app, _rx, secrets) = test_app();
+    secrets.set_credential("openai", oauth_credential(false));
+    app.invalidate_key_status();
+
+    type_text(&mut app, "/connect");
+    app.handle_key_event(key(KeyCode::Enter));
+    type_text(&mut app, "openai");
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::ProviderConnection {
+            ref provider_id,
+            selected: 0,
+            ..
+        }) if provider_id == "openai"
+    ));
+
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(app.modal, Some(ActiveModal::ModelInput { .. })));
+    assert_eq!(app.tab().active_provider, "openai");
+}
+
+#[test]
+fn connection_screen_updates_and_removes_a_plan_credential() {
+    let (mut app, _rx, secrets) = test_app();
+    secrets.set_credential("openai", oauth_credential(false));
+    app.invalidate_key_status();
+
+    type_text(&mut app, "/connect");
+    app.handle_key_event(key(KeyCode::Enter));
+    type_text(&mut app, "openai");
+    app.handle_key_event(key(KeyCode::Enter));
+
+    app.handle_key_event(key(KeyCode::Down));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::ProviderConnection { selected: 1, .. })
+    ));
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::AuthMethodSelect { .. })
+    ));
+
+    app.handle_key_event(key(KeyCode::Esc));
+    app.handle_key_event(key(KeyCode::Enter));
+    app.handle_key_event(key(KeyCode::Down));
+    app.handle_key_event(key(KeyCode::Down));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::ProviderConnection { selected: 2, .. })
+    ));
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert!(secrets.read_credential("openai").unwrap().is_none());
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::ProviderSelect { .. })
+    ));
+}
+
+#[test]
+fn connection_screen_offers_next_and_update_for_an_api_key() {
+    let (mut app, _rx, secrets) = test_app();
+    secrets.set_key("opencode-go", "oc-secret-key").unwrap();
+    app.invalidate_key_status();
+
+    type_text(&mut app, "/connect");
+    app.handle_key_event(key(KeyCode::Enter));
+    type_text(&mut app, "opencode-go");
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::ProviderConnection { selected: 0, .. })
+    ));
+
+    app.handle_key_event(key(KeyCode::Down));
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::ApiKeyInput { ref provider_id, .. }) if provider_id == "opencode-go"
+    ));
+}
+
+#[test]
+fn chatgpt_login_retry_requests_a_fresh_flow() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.modal = Some(ActiveModal::ChatGptLogin {
+        provider_id: "openai".to_string(),
+        provider_name: "OpenAI".to_string(),
+        url: Some("https://auth.openai.com/example".to_string()),
+        input: String::new(),
+        error: Some("state mismatch".to_string()),
+        busy: false,
+    });
+
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert_eq!(app.pending_login_request.as_deref(), Some("openai"));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::ChatGptLogin {
+            url: None,
+            busy: true,
+            error: None,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn model_selection_on_a_plan_credential_sends_plan_usage() {
+    let (mut app, mut rx, secrets) = test_app();
+    secrets.set_credential("gemini", oauth_credential(false));
+    app.invalidate_key_status();
+
+    app.select_provider_and_model("gemini", "gemini-2.5-pro");
+
+    let mut saw_plan = false;
+    while let Ok(command) = rx.try_recv() {
+        if matches!(
+            command,
+            meerai_agents::AgentCommand::SetPlanUsage { plan_usage: true }
+        ) {
+            saw_plan = true;
+        }
+    }
+    assert!(saw_plan);
+}
+
+#[test]
+fn auth_method_select_esc_returns_to_provider_select() {
+    let (mut app, _rx, _secrets) = test_app();
+
+    type_text(&mut app, "/connect");
+    app.handle_key_event(key(KeyCode::Enter));
+    type_text(&mut app, "openai");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::AuthMethodSelect { .. })
+    ));
+
+    app.handle_key_event(key(KeyCode::Esc));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::ProviderSelect { .. })
+    ));
 }
 
 #[test]
@@ -75,6 +330,7 @@ fn connect_flow_saves_key_deletes_and_selects_model() {
         Some(ActiveModal::ModelInput { error: Some(_), .. })
     ));
 
+    while rx.try_recv().is_ok() {}
     type_text(&mut app, "glm-5.3");
     app.handle_key_event(key(KeyCode::Enter));
     assert!(app.modal.is_none());
@@ -87,10 +343,20 @@ fn connect_flow_saves_key_deletes_and_selects_model() {
             context_window_tokens: None,
         }
     );
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        AgentCommand::SetPlanUsage { .. }
+    ));
 
     type_text(&mut app, "/provider");
     app.handle_key_event(key(KeyCode::Enter));
     type_text(&mut app, "opencode-go");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::ProviderConnection { selected: 0, .. })
+    ));
+    app.handle_key_event(key(KeyCode::Down));
     app.handle_key_event(key(KeyCode::Enter));
     app.handle_key_event(key_mod(KeyCode::Char('d'), KeyModifiers::CONTROL));
     assert_eq!(secrets.get_key("opencode-go").unwrap(), None);
@@ -539,7 +805,7 @@ fn clicking_file_change_opens_diff_modal_and_search_attaches_file() {
 fn detached_search_opens_immediately_from_slash_space_and_normal_mode() {
     let (mut app, _rx, _secrets) = test_app();
 
-    type_text(&mut app, "/se");
+    type_text(&mut app, "/sea");
     app.handle_key_event(key(KeyCode::Enter));
     assert!(matches!(
         app.modal,

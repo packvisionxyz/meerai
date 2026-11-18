@@ -138,9 +138,11 @@ Each fact has one owning document. Others link to it.
 | [architecture.md](architecture.md) | Crate layout, dependency direction, build surfaces, protocol and configuration summary (links to spec/internals for depth), target layout. |
 | [harness-internals.md](harness-internals.md) | Implementation reference: macro conventions, configuration mechanics, loop internals, traps and invariants, security posture summary. |
 | [tui-design.md](tui-design.md) | TUI behavior: layout, modes, keybindings, overlays, rendering invariants, planned UX. |
+| [browser-ui.md](browser-ui.md) | Local browser companion: implemented `meerai serve` host, protocol, server, and Leptos DOM client; parity status, build, security rules, and remaining polish. |
 | [acp.md](acp.md) | ACP: protocol reference, the implemented `agy` client, `acp-run`, trust boundary, planned presets and M14. |
 | [threat-model.md](threat-model.md) | Security: assets, trust boundaries, untrusted inputs, implemented controls, residual risks. |
 | [token-efficiency.md](token-efficiency.md) | Token-cost and self-healing initiative: implemented phases with evidence, decisions, planned phases. |
+| [openai-chatgpt-plan-usage.md](openai-chatgpt-plan-usage.md) | OpenAI ChatGPT plan usage: credential model, Sign in with ChatGPT flow, plan request profile, error map, phases. |
 
 Cross-cutting facts:
 

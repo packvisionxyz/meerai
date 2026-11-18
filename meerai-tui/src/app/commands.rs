@@ -72,16 +72,7 @@ impl AppState {
                 }
             }
             "/new" => {
-                if self.session_opener.is_some() {
-                    self.status_notice = Some("Opening new session tab...".to_string());
-                    self.pending_session_actions
-                        .push(PendingSessionAction::CreateNewTab);
-                } else {
-                    self.tab_mut().transcript.push(TranscriptEntry::Error {
-                        text: "Session switching is not available in this context.".to_string(),
-                        expanded: false,
-                    });
-                }
+                self.request_new_tab();
             }
             "/close" => {
                 self.close_active_tab();
@@ -180,25 +171,31 @@ impl AppState {
                 tab.auto_follow = true;
             }
             "/reset" => {
-                let tab = self.tab_mut();
-                tab.transcript.clear();
-                tab.pending_assistant_idx = None;
-                tab.assistant_items.clear();
-                tab.tool_items.clear();
-                tab.subagent_items.clear();
-                tab.turn_activity.clear();
-                tab.turn_id = None;
-                tab.usage = UsageStats::default();
-                tab.metrics = TurnMetrics::default();
-                tab.scroll_offset = 0;
-                tab.total_lines = 0;
-                tab.auto_follow = true;
-                tab.is_running = false;
-                tab.active_tool = None;
-                let _ = tab.cmd_tx.send(AgentCommand::Reset);
-                tab.transcript.push(TranscriptEntry::System {
-                    text: "Conversation reset.".to_string(),
-                });
+                let session_id = {
+                    let tab = self.tab_mut();
+                    tab.transcript.clear();
+                    tab.pending_assistant_idx = None;
+                    tab.assistant_items.clear();
+                    tab.tool_items.clear();
+                    tab.subagent_items.clear();
+                    tab.turn_activity.clear();
+                    tab.turn_id = None;
+                    tab.usage = UsageStats::default();
+                    tab.metrics = TurnMetrics::default();
+                    tab.scroll_offset = 0;
+                    tab.total_lines = 0;
+                    tab.auto_follow = true;
+                    tab.is_running = false;
+                    tab.active_tool = None;
+                    let _ = tab.cmd_tx.send(AgentCommand::Reset);
+                    tab.transcript.push(TranscriptEntry::System {
+                        text: "Conversation reset.".to_string(),
+                    });
+                    tab.session_id.clone()
+                };
+                if let Some(reg) = &self.registry {
+                    reg.note_tui_reset(&session_id);
+                }
             }
             "/cancel" => {
                 let tab = self.tab_mut();
@@ -228,11 +225,18 @@ impl AppState {
                 } else {
                     match parse_approval_mode(arg) {
                         Some(mode) => {
-                            tab.approval_mode = mode;
-                            let _ = tab.cmd_tx.send(AgentCommand::SetPermissionMode(mode));
-                            tab.transcript.push(TranscriptEntry::System {
-                                text: format!("Approval mode: {}", approval_mode_label(mode)),
-                            });
+                            let session_id = {
+                                let tab = self.tab_mut();
+                                tab.approval_mode = mode;
+                                let _ = tab.cmd_tx.send(AgentCommand::SetPermissionMode(mode));
+                                tab.transcript.push(TranscriptEntry::System {
+                                    text: format!("Approval mode: {}", approval_mode_label(mode)),
+                                });
+                                tab.session_id.clone()
+                            };
+                            if let Some(reg) = &self.registry {
+                                reg.note_tui_mode(&session_id, mode);
+                            }
                         }
                         None => {
                             tab.transcript.push(TranscriptEntry::Error {
@@ -276,6 +280,47 @@ impl AppState {
             "/reload" => {
                 self.pending_reload = true;
                 self.status_notice = Some("Reloading configuration...".to_string());
+            }
+            "/serve" => {
+                if arg.eq_ignore_ascii_case("stop") {
+                    if self.web_server.is_none() {
+                        self.status_notice = Some("Web UI server is not running".to_string());
+                    } else {
+                        self.pending_session_actions
+                            .push(PendingSessionAction::StopWebServer);
+                        self.status_notice = Some("Stopping web UI server...".to_string());
+                    }
+                } else if !arg.is_empty() {
+                    self.tab_mut().transcript.push(TranscriptEntry::Error {
+                        text: format!(
+                            "Unknown /serve argument '{arg}'. Expected `/serve` or `/serve stop`."
+                        ),
+                        expanded: false,
+                    });
+                } else if let Some(server) = &self.web_server {
+                    let msg = format!(
+                        "Web UI already running at {} (use /serve stop to stop).",
+                        server.url
+                    );
+                    self.status_notice = Some(msg.clone());
+                    self.tab_mut()
+                        .transcript
+                        .push(TranscriptEntry::System { text: msg });
+                } else if self.web_launcher.is_none() {
+                    self.tab_mut().transcript.push(TranscriptEntry::Error {
+                        text: "Web UI server is not enabled in this build (build with --features web)."
+                            .to_string(),
+                        expanded: false,
+                    });
+                } else {
+                    self.modal = Some(ActiveModal::ServeDialog {
+                        port_input: String::new(),
+                        secret_input: String::new(),
+                        editing_secret: false,
+                        error: None,
+                        busy: false,
+                    });
+                }
             }
             "/update" => {
                 let current = env!("CARGO_PKG_VERSION");

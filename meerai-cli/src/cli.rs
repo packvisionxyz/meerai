@@ -15,12 +15,12 @@ const COMMANDS: &[HelpRow] = &[
         description: "Show credentials across auth.json, config, and env",
     },
     HelpRow {
-        usage: "auth login <provider> [key]",
-        description: "Save an API key in {auth_path}",
+        usage: "auth login <provider> [key] [--chatgpt]",
+        description: "Save an API key, or sign in with a ChatGPT plan, in {auth_path}",
     },
     HelpRow {
         usage: "auth logout <provider>",
-        description: "Remove a stored API key from auth.json",
+        description: "Remove stored credentials from auth.json",
     },
     HelpRow {
         usage: "sessions list",
@@ -58,6 +58,10 @@ const COMMANDS: &[HelpRow] = &[
         usage: "hooks verify [--command CMD] [--reset-baseline]",
         description: "Install a Stop hook with a failure baseline",
     },
+    HelpRow {
+        usage: "serve [--port N] [--user NAME] [--auth]",
+        description: "Start the local browser UI server on 127.0.0.1 (Basic auth required)",
+    },
 ];
 
 const TUI_COMMANDS: &[HelpRow] = &[
@@ -68,6 +72,10 @@ const TUI_COMMANDS: &[HelpRow] = &[
     HelpRow {
         usage: "/skill <id>",
         description: "Apply a skill by id (or mention @skill/<id>)",
+    },
+    HelpRow {
+        usage: "/serve [stop]",
+        description: "Start or stop the local browser UI server",
     },
 ];
 
@@ -163,7 +171,8 @@ pub(crate) fn help_text() -> String {
     meerai acp doctor\n  \
     meerai auth <list|login|logout>\n  \
     meerai sessions <list|rm|prune|fork>\n  \
-    meerai hooks <trust|untrust|status|verify>\n\n",
+    meerai hooks <trust|untrust|status|verify>\n  \
+    meerai serve [--port <PORT>] [--user <NAME>] [--auth] [--continue | --resume <ID> | --fork <ID>]\n\n",
     );
     text.push_str(&help_section("Commands", COMMANDS, &auth_path));
     text.push('\n');
@@ -179,6 +188,7 @@ pub(crate) enum AuthCommand {
     Login {
         provider: String,
         key: Option<String>,
+        chatgpt: bool,
     },
     Logout {
         provider: String,
@@ -215,11 +225,19 @@ pub(crate) enum AcpCommand {
     Doctor,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServeCommand {
+    pub(crate) port: Option<u16>,
+    pub(crate) username: Option<String>,
+    pub(crate) auth: bool,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CliSubcommand {
     Acp(AcpCommand),
     Auth(AuthCommand),
     Hooks(HooksCommand),
+    Serve(ServeCommand),
     Sessions(SessionsCommand),
 }
 
@@ -253,6 +271,12 @@ pub(crate) fn parse_keep(raw: &str) -> Result<usize> {
     raw.trim()
         .parse::<usize>()
         .map_err(|_| anyhow::anyhow!("invalid value for --keep: {raw} (expected a number)"))
+}
+
+pub(crate) fn parse_port(raw: &str) -> Result<u16> {
+    raw.trim()
+        .parse::<u16>()
+        .map_err(|_| anyhow::anyhow!("invalid value for --port: {raw} (expected 0..=65535)"))
 }
 
 pub(crate) fn parse_args<I>(args: I) -> Result<CliArgs>
@@ -317,19 +341,33 @@ where
                 }
                 Some("login") => {
                     let target_provider = iter.next().ok_or_else(|| {
-                        anyhow::anyhow!("usage: meerai auth login <provider> [api-key]")
+                        anyhow::anyhow!("usage: meerai auth login <provider> [api-key] [--chatgpt]")
                     })?;
                     if target_provider == "-h" || target_provider == "--help" {
                         show_help = true;
                         continue;
                     }
-                    let key = iter.next();
-                    if let Some(extra) = iter.next() {
-                        bail!("unexpected argument for auth login: {extra}");
+                    let mut key = None;
+                    let mut chatgpt = false;
+                    for extra in iter.by_ref() {
+                        match extra.as_str() {
+                            "--chatgpt" => chatgpt = true,
+                            "-h" | "--help" => show_help = true,
+                            other if key.is_none() && !other.starts_with('-') => {
+                                key = Some(other.to_string());
+                            }
+                            other => {
+                                bail!("unexpected argument for auth login: {other}");
+                            }
+                        }
+                    }
+                    if chatgpt && key.is_some() {
+                        bail!("auth login takes either an API key or --chatgpt, not both");
                     }
                     subcommand = Some(CliSubcommand::Auth(AuthCommand::Login {
                         provider: target_provider,
                         key,
+                        chatgpt,
                     }));
                 }
                 Some("logout") => {
@@ -542,6 +580,55 @@ where
                     );
                 }
             },
+            "serve" if subcommand.is_none() => {
+                subcommand = Some(CliSubcommand::Serve(ServeCommand {
+                    port: None,
+                    username: None,
+                    auth: false,
+                }));
+            }
+            "--port" => {
+                let Some(CliSubcommand::Serve(cmd)) = subcommand.as_mut() else {
+                    bail!("--port can only be used with `serve`");
+                };
+                let value = iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("missing value for --port"))?;
+                cmd.port = Some(parse_port(&value)?);
+            }
+            _ if arg.starts_with("--port=") => {
+                let Some(CliSubcommand::Serve(cmd)) = subcommand.as_mut() else {
+                    bail!("--port can only be used with `serve`");
+                };
+                cmd.port = Some(parse_port(&arg["--port=".len()..])?);
+            }
+            "--user" | "--username" => {
+                let Some(CliSubcommand::Serve(cmd)) = subcommand.as_mut() else {
+                    bail!("{arg} can only be used with `serve`");
+                };
+                let value = iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("missing value for {arg}"))?;
+                cmd.username = Some(value);
+            }
+            _ if arg.starts_with("--user=") => {
+                let Some(CliSubcommand::Serve(cmd)) = subcommand.as_mut() else {
+                    bail!("--user can only be used with `serve`");
+                };
+                cmd.username = Some(arg["--user=".len()..].to_string());
+            }
+            _ if arg.starts_with("--username=") => {
+                let Some(CliSubcommand::Serve(cmd)) = subcommand.as_mut() else {
+                    bail!("--username can only be used with `serve`");
+                };
+                cmd.username = Some(arg["--username=".len()..].to_string());
+            }
+            "--auth" => {
+                let Some(CliSubcommand::Serve(cmd)) = subcommand.as_mut() else {
+                    bail!("--auth can only be used with `serve`");
+                };
+                cmd.auth = true;
+            }
             "-p" | "--provider" => {
                 let value = iter
                     .next()
@@ -679,7 +766,7 @@ where
         );
     }
     #[cfg(not(feature = "tui"))]
-    if acp && prompt.is_none() {
+    if acp && prompt.is_none() && !matches!(subcommand, Some(CliSubcommand::Serve(_))) {
         bail!("ACP without --prompt requires a TUI build");
     }
 

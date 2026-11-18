@@ -16,7 +16,8 @@ path = "src/main.rs"
 
 [features]
 default = ["tui"]
-tui = ["dep:meerai-tui"]
+tui = ["dep:meerai-tui", "dep:meerai-host"]
+web = ["dep:meerai-web", "dep:meerai-host"]
 
 [dependencies]
 meerai-acp = { path = "../meerai-acp/" }
@@ -24,13 +25,16 @@ meerai-agents = { path = "../meerai-agents/" }
 meerai-client = { path = "../meerai-client/" }
 meerai-common = { path = "../meerai-common/" }
 meerai-core = { path = "../meerai-core/" }
+meerai-host = { path = "../meerai-host/", optional = true }
 meerai-policy = { path = "../meerai-policy/" }
 meerai-providers = { path = "../meerai-providers/" }
 meerai-session = { path = "../meerai-session/" }
 meerai-tools = { path = "../meerai-tools/" }
 meerai-tui = { path = "../meerai-tui/", optional = true }
+meerai-web = { path = "../meerai-web/", optional = true }
 
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 dotenvy = { workspace = true }
 futures = { workspace = true }
 serde_json = { workspace = true }

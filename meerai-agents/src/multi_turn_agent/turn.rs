@@ -20,13 +20,84 @@ pub(super) fn status_is_transient(status: u16) -> bool {
     matches!(status, 408 | 409 | 425 | 429) || (500..=599).contains(&status)
 }
 
-fn is_transient_provider_error(error: &anyhow::Error, message: &str) -> bool {
-    match provider_error_status(error) {
+pub(super) fn is_terminal_plan_usage_error(message: &str) -> bool {
+    let lowered = message.to_lowercase();
+    PLAN_USAGE_TERMINAL_CODES
+        .iter()
+        .any(|code| lowered.contains(code))
+}
+
+pub(super) fn is_transient_provider_error_with_status(status: Option<u16>, message: &str) -> bool {
+    if is_terminal_plan_usage_error(message) {
+        return false;
+    }
+    match status {
         Some(status) => status_is_transient(status),
         None => !NON_TRANSIENT_ERROR_MARKERS
             .iter()
             .any(|marker| message.to_lowercase().contains(marker)),
     }
+}
+
+fn is_transient_provider_error(error: &anyhow::Error, message: &str) -> bool {
+    is_transient_provider_error_with_status(provider_error_status(error), message)
+}
+
+fn stop_reason_text(reason: &StopReason) -> String {
+    let (label, raw) = match reason {
+        StopReason::Completed(raw) => ("completed", raw),
+        StopReason::MaxTokens(raw) => ("max_tokens", raw),
+        StopReason::ToolCall(raw) => ("tool_call", raw),
+        StopReason::ContentFilter(raw) => ("content_filter", raw),
+        StopReason::StopSequence(raw) => ("stop_sequence", raw),
+        StopReason::Other(raw) => ("other", raw),
+    };
+    if raw.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label}({raw})")
+    }
+}
+
+fn empty_stream_report(
+    model: &str,
+    stop_reason: Option<&StopReason>,
+    events: usize,
+    elapsed: Duration,
+) -> (String, bool) {
+    let (summary, retryable, hint) = match stop_reason {
+        Some(StopReason::ContentFilter(_)) => (
+            "provider blocked the response with a content filter before returning content",
+            false,
+            "Rephrase the prompt or remove content that trips the provider safety filter.",
+        ),
+        Some(StopReason::MaxTokens(_)) => (
+            "provider reached the output token limit before returning content",
+            false,
+            "Raise the model output limit or shorten the prompt.",
+        ),
+        Some(StopReason::StopSequence(_)) => (
+            "provider stopped at a stop sequence before returning content",
+            false,
+            "Check the configured stop sequences and retry.",
+        ),
+        _ => (
+            EMPTY_STREAM_ERROR,
+            true,
+            "Check the provider status, network proxy or VPN, and the selected model.",
+        ),
+    };
+    let reason = stop_reason
+        .map(stop_reason_text)
+        .unwrap_or_else(|| "none".to_string());
+    (
+        format!(
+            "{summary}\n  provider={} model={model} stop_reason={reason} events={events} elapsed={:.1}s\n  hint: {hint}",
+            provider_of(model),
+            elapsed.as_secs_f64(),
+        ),
+        retryable,
+    )
 }
 
 pub(super) fn provider_backoff_after(failures: usize) -> Duration {
@@ -222,6 +293,10 @@ impl MultiTurnAgent {
             })
             .sum();
 
+        let plan_usage = self
+            .harness
+            .as_ref()
+            .is_some_and(|harness| harness.config.plan_usage);
         let mut options = ChatOptions::default()
             .with_capture_content(true)
             .with_capture_tool_calls(true)
@@ -233,17 +308,19 @@ impl MultiTurnAgent {
                 ("x-opencode-session", self.session_id.as_str()),
                 ("user-agent", MEERAI_USER_AGENT),
             ]));
-        if self
-            .harness
-            .as_ref()
-            .is_none_or(|harness| harness.config.prompt_caching)
+        if !plan_usage
+            && self
+                .harness
+                .as_ref()
+                .is_none_or(|harness| harness.config.prompt_caching)
         {
             options = options.with_cache_control(CacheControl::Ephemeral);
         }
-        if let Some(temperature) = self
-            .harness
-            .as_ref()
-            .and_then(|harness| harness.config.temperature)
+        if !plan_usage
+            && let Some(temperature) = self
+                .harness
+                .as_ref()
+                .and_then(|harness| harness.config.temperature)
         {
             options = options.with_temperature(temperature as f64);
         }
@@ -779,50 +856,55 @@ impl MultiTurnAgent {
         let mut text_item_id: Option<ItemId> = None;
         let mut reasoning_item_id: Option<ItemId> = None;
         let mut end: Option<StreamEnd> = None;
+        let started = Instant::now();
+        let mut events = 0usize;
 
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return Err(StreamFailure::Cancelled),
                 next_item = stream.next() => {
                     match next_item {
-                        Some(Ok(event)) => match event {
-                            ChatStreamEvent::Chunk(chunk) => {
-                                if !chunk.content.is_empty() {
-                                    text.push_str(&chunk.content);
-                                    let item_id = text_item_id
-                                        .get_or_insert_with(|| start_text_item(event_tx));
-                                    let _ = event_tx.send(AgentEvent::ItemDelta {
-                                        item_id: item_id.clone(),
-                                        delta: ItemDelta::AgentText(chunk.content),
-                                    });
+                        Some(Ok(event)) => {
+                            events += 1;
+                            match event {
+                                ChatStreamEvent::Chunk(chunk) => {
+                                    if !chunk.content.is_empty() {
+                                        text.push_str(&chunk.content);
+                                        let item_id = text_item_id
+                                            .get_or_insert_with(|| start_text_item(event_tx));
+                                        let _ = event_tx.send(AgentEvent::ItemDelta {
+                                            item_id: item_id.clone(),
+                                            delta: ItemDelta::AgentText(chunk.content),
+                                        });
+                                    }
                                 }
-                            }
-                            ChatStreamEvent::ReasoningChunk(chunk) => {
-                                if !chunk.content.is_empty() {
-                                    reasoning.push_str(&chunk.content);
-                                    let item_id = reasoning_item_id
-                                        .get_or_insert_with(|| start_reasoning_item(event_tx));
-                                    let _ = event_tx.send(AgentEvent::ItemDelta {
-                                        item_id: item_id.clone(),
-                                        delta: ItemDelta::ReasoningSummary(chunk.content),
-                                    });
+                                ChatStreamEvent::ReasoningChunk(chunk) => {
+                                    if !chunk.content.is_empty() {
+                                        reasoning.push_str(&chunk.content);
+                                        let item_id = reasoning_item_id
+                                            .get_or_insert_with(|| start_reasoning_item(event_tx));
+                                        let _ = event_tx.send(AgentEvent::ItemDelta {
+                                            item_id: item_id.clone(),
+                                            delta: ItemDelta::ReasoningSummary(chunk.content),
+                                        });
+                                    }
                                 }
-                            }
-                            ChatStreamEvent::End(stream_end) => end = Some(stream_end),
-                            ChatStreamEvent::ToolCallChunk(chunk) => {
-                                if let Some(existing) = tool_calls
-                                    .iter_mut()
-                                    .find(|call| call.call_id == chunk.tool_call.call_id)
-                                {
-                                    *existing = chunk.tool_call;
-                                } else {
-                                    tool_calls.push(chunk.tool_call);
+                                ChatStreamEvent::End(stream_end) => end = Some(stream_end),
+                                ChatStreamEvent::ToolCallChunk(chunk) => {
+                                    if let Some(existing) = tool_calls
+                                        .iter_mut()
+                                        .find(|call| call.call_id == chunk.tool_call.call_id)
+                                    {
+                                        *existing = chunk.tool_call;
+                                    } else {
+                                        tool_calls.push(chunk.tool_call);
+                                    }
                                 }
+                                ChatStreamEvent::Start
+                                | ChatStreamEvent::ThoughtSignatureChunk(_)
+                                | ChatStreamEvent::Heartbeat => {}
                             }
-                            ChatStreamEvent::Start
-                            | ChatStreamEvent::ThoughtSignatureChunk(_)
-                            | ChatStreamEvent::Heartbeat => {}
-                        },
+                        }
                         Some(Err(error)) => {
                             let partial = !text.is_empty() || !reasoning.is_empty();
                             return Err(StreamFailure::Provider { error, partial });
@@ -834,14 +916,29 @@ impl MultiTurnAgent {
         }
 
         let end = end.unwrap_or_default();
-        let end_is_empty = end.captured_usage.is_none()
-            && end.captured_tool_calls().unwrap_or_default().is_empty()
-            && end.captured_first_text().is_none_or(|text| text.is_empty());
-        if text.is_empty() && reasoning.is_empty() && tool_calls.is_empty() && end_is_empty {
-            return Err(StreamFailure::Provider {
-                error: anyhow!(EMPTY_STREAM_ERROR),
-                partial: false,
-            });
+        if reasoning.is_empty()
+            && let Some(captured) = end.captured_reasoning_content.as_deref()
+            && !captured.is_empty()
+        {
+            reasoning = captured.to_string();
+        }
+        let has_content = !text.is_empty()
+            || !reasoning.is_empty()
+            || !tool_calls.is_empty()
+            || end
+                .captured_first_text()
+                .is_some_and(|text| !text.is_empty())
+            || end
+                .captured_tool_calls()
+                .is_some_and(|calls| !calls.is_empty());
+        if !has_content && end.captured_usage.is_none() {
+            let (detail, retryable) = empty_stream_report(
+                &self.model,
+                end.captured_stop_reason.as_ref(),
+                events,
+                started.elapsed(),
+            );
+            return Err(StreamFailure::EmptyStream { detail, retryable });
         }
 
         Ok(CollectedStream {
@@ -896,6 +993,35 @@ impl MultiTurnAgent {
             match collected {
                 Ok(collected) => return Ok(collected),
                 Err(StreamFailure::Cancelled) => return Err(StepFailure::Cancelled),
+                Err(StreamFailure::EmptyStream { detail, retryable }) => {
+                    self.log_event(
+                        event_tx,
+                        SessionEvent::AssistantAttempt {
+                            provider: provider_of(&self.model),
+                            model: self.model.clone(),
+                            error: detail.clone(),
+                            usage: Usage::default(),
+                        },
+                    )
+                    .await;
+
+                    if retryable && transient_failures + 1 < MAX_PROVIDER_ATTEMPTS {
+                        transient_failures += 1;
+                        let delay = provider_backoff_with_jitter(transient_failures);
+                        tokio::select! {
+                            _ = cancel.cancelled() => return Err(StepFailure::Cancelled),
+                            _ = tokio::time::sleep(delay) => {}
+                        }
+                        continue;
+                    }
+
+                    let error = anyhow::Error::msg(detail);
+                    return Err(StepFailure::Error(if retryable {
+                        TurnError::transient_provider(error)
+                    } else {
+                        TurnError::provider(error)
+                    }));
+                }
                 Err(StreamFailure::Provider { error, partial }) if !partial => {
                     let message = format!("{error:#}");
                     let recoverable = self.harness.is_some() && is_context_overflow(&message);

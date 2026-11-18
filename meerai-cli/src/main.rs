@@ -12,30 +12,49 @@ mod sessions_cmd;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "web")]
+use std::io::Write as _;
 use std::io::{self, IsTerminal};
+#[cfg(feature = "web")]
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use futures::FutureExt;
 use meerai_acp::{AGY, AcpStart, AcpWorkerConfig, spawn_acp_worker};
-#[cfg(feature = "tui")]
+#[cfg(any(feature = "tui", feature = "web"))]
 use meerai_agents::spawn_worker;
 use meerai_agents::{
     AcpChild, AcpRunToolset, AcpSpawner, AgentHarness, HarnessConfig, HookEngine, MultiTurnAgent,
     QuestionToolset, SubagentToolFactory, SubagentToolset, TokenPricing,
 };
 use meerai_client::providers::{
-    ProviderCatalog, RuntimeProviderState, canonical_provider_id, first_configured_provider,
+    ProviderAuthKind, ProviderCatalog, RuntimeProviderState, canonical_provider_id,
+    check_key_status, first_configured_provider, resolve_credential,
 };
-use meerai_client::secrets::auth_file_path;
-use meerai_common::definitions::{AgentDefinition, SkillDefinition, load_definitions};
+use meerai_client::secrets::{Credential, SecretStore, auth_file_path};
+use meerai_common::definitions::{
+    AgentDefinition, SkillDefinition, load_definitions, validate_agent_model,
+};
 use meerai_common::hooks::{add_trusted_project, load_hooks_for_run, project_is_trusted};
+#[cfg(feature = "tui")]
+use meerai_common::settings::Temperature;
 use meerai_common::settings::{
-    AppSettings, HooksSettings, Temperature, default_config_dir, default_data_dir,
-    find_project_root, load_project_settings, load_settings_from, merge_project_settings,
-    save_settings_to,
+    AppSettings, HooksSettings, default_config_dir, default_data_dir, find_project_root,
+    load_project_settings, load_settings_from, merge_project_settings, save_settings_to,
 };
 use meerai_core::{Toolset, async_trait};
+#[cfg(any(feature = "tui", feature = "web"))]
+use meerai_host::{
+    AcpPresetInfo, Backend, ChatGptLogin, ChatGptLoginOutcome, HostAgentInfo, HostAuthKind,
+    HostInfoSnapshot, HostModelItem, HostPalette, HostProviderItem, HostProvidersSnapshot,
+    HostReloadOutcome, HostReloadPayload, HostSettingsUpdate, HostSettingsView, HostSkillInfo,
+    OpenedSession, ResolvedAgentApplication, ResolvedModelSelection, ResolvedSkillApplication,
+    SessionOpener, SessionRegistry, WebServerLauncher,
+};
+#[cfg(feature = "web")]
+use meerai_host::{WebServerHandle, WebServerStart};
 use meerai_policy::{ApprovalMode, PolicyEngine, parse_approval_mode, rules_from_yaml};
 use meerai_providers::providers::build_genai_client;
 use meerai_providers::secrets::default_secret_store;
@@ -49,12 +68,18 @@ use meerai_tools::{
     detect_execution_world,
 };
 #[cfg(feature = "tui")]
-use meerai_tui::{Backend, OpenedSession, SessionOpener, TuiLaunchConfig, transcript_from_events};
+use meerai_tui::{TuiLaunchConfig, transcript_from_events};
+#[cfg(feature = "web")]
+use meerai_web::{
+    BASIC_USERNAME, RunningServer, ServeAuth, ServeConfig, ServeSecret, start_server,
+};
 
 use auth_cmd::run_auth;
 use cli::{CliSubcommand, help_text, parse_args};
 use headless::{run_headless, run_headless_channels};
 use hooks_cmd::run_hooks;
+#[cfg(feature = "tui")]
+use sessions_cmd::empty_session_ids;
 use sessions_cmd::{
     auto_prune_sessions, continue_session_id, fork_session, prune_empty_sessions, run_sessions,
 };
@@ -310,6 +335,12 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let is_serve = matches!(cli.subcommand, Some(CliSubcommand::Serve(_)));
+    #[cfg(not(feature = "web"))]
+    if is_serve {
+        bail!("meerai serve requires a build with the `web` feature enabled");
+    }
+
     if let Some(CliSubcommand::Sessions(command)) = cli.subcommand.as_ref() {
         return run_sessions(command).await;
     }
@@ -380,7 +411,10 @@ async fn main() -> Result<()> {
             secrets.as_ref(),
             auth_path.as_deref(),
             config_dir.as_deref(),
-        );
+            data_dir.as_deref(),
+            &mut user_settings,
+        )
+        .await;
     }
 
     let mut selected_agents = Vec::new();
@@ -421,11 +455,14 @@ async fn main() -> Result<()> {
         }
     }
 
-    if cli.prompt.is_none() && (!io::stdin().is_terminal() || !io::stdout().is_terminal()) {
+    if cli.prompt.is_none()
+        && !is_serve
+        && (!io::stdin().is_terminal() || !io::stdout().is_terminal())
+    {
         bail!("no terminal detected; use --prompt \"...\" for headless mode (see --help)");
     }
     #[cfg(not(feature = "tui"))]
-    if cli.prompt.is_none() {
+    if cli.prompt.is_none() && !is_serve {
         bail!("this build has no TUI support; use --prompt \"...\" for headless mode");
     }
 
@@ -466,6 +503,24 @@ async fn main() -> Result<()> {
     let runtime = Arc::new(RwLock::new(RuntimeProviderState::from_settings(
         &settings, catalog,
     )));
+    {
+        let plan_usage = {
+            let rt = runtime.read().unwrap();
+            let provider = rt.active_provider_info();
+            matches!(
+                resolve_credential(&provider, secrets.as_ref())
+                    .ok()
+                    .flatten(),
+                Some(Credential::OAuth(_))
+            )
+        };
+        runtime.write().unwrap().plan_usage = plan_usage;
+    }
+    if let Err(err) =
+        meerai_providers::oauth::ensure_fresh_credential(secrets.as_ref(), &active_provider).await
+    {
+        eprintln!("Warning: ChatGPT plan credential: {err:#}");
+    }
     let client = build_genai_client(runtime.clone(), secrets.clone())?;
 
     let approval_mode =
@@ -481,17 +536,35 @@ async fn main() -> Result<()> {
 
     let session_config = SessionConfig::new(workspace_root.clone());
     #[cfg(feature = "tui")]
-    let restore_ids = if cli.prompt.is_none()
+    let (reuse_empty, restore_ids) = if cli.prompt.is_none()
+        && !is_serve
         && !cli.continue_session
         && cli.resume.is_none()
         && cli.fork.is_none()
     {
-        meerai_tui::tabs::saved_sessions_for(&workspace_root)
+        let restored = meerai_tui::tabs::restored_tabs_for(&workspace_root);
+        let mut candidates = Vec::with_capacity(restored.sessions.len() + 1);
+        if let Some(hint) = restored.empty_session.clone() {
+            candidates.push(hint);
+        }
+        for id in &restored.sessions {
+            if !candidates.contains(id) {
+                candidates.push(id.clone());
+            }
+        }
+        let empty = empty_session_ids(&default_sessions_root(), &candidates).await;
+        let reuse = empty.first().cloned();
+        let restore = restored
+            .sessions
+            .into_iter()
+            .filter(|id| !empty.contains(id))
+            .collect();
+        (reuse, restore)
     } else {
-        Vec::new()
+        (None, Vec::new())
     };
     #[cfg(not(feature = "tui"))]
-    let restore_ids: Vec<SessionId> = Vec::new();
+    let (reuse_empty, restore_ids): (Option<SessionId>, Vec<SessionId>) = (None, Vec::new());
     let session = if cli.continue_session {
         let root = default_sessions_root();
         let id = continue_session_id(&root).await?;
@@ -502,8 +575,8 @@ async fn main() -> Result<()> {
     } else if let Some(raw) = cli.fork.as_deref() {
         let root = default_sessions_root();
         fork_session(&root, &workspace_root, raw, None).await?
-    } else if let Some(first) = restore_ids.first() {
-        match Session::open(&session_config, first.clone(), workspace_root.clone()).await {
+    } else if let Some(id) = reuse_empty {
+        match Session::open(&session_config, id, workspace_root.clone()).await {
             Ok(session) => session,
             Err(_) => {
                 Session::open_or_create(&session_config, SessionId::new(), workspace_root.clone())
@@ -527,8 +600,8 @@ async fn main() -> Result<()> {
             .unwrap_or(approval_mode)
     };
     let _ = session.set_approval_mode(approval_mode.label()).await;
-    prune_empty_sessions(session.id()).await;
-    auto_prune_sessions(&settings, session.id()).await;
+    prune_empty_sessions(session.id(), &restore_ids).await;
+    auto_prune_sessions(&settings, session.id(), &restore_ids).await;
 
     let session_is_acp = session.meta().harness.as_deref() == Some("acp:agy");
     let use_acp = cli.acp || session_is_acp;
@@ -626,7 +699,11 @@ async fn main() -> Result<()> {
         workspace_root: workspace_root.clone(),
         session_config,
         runtime: runtime.clone(),
+        secrets: secrets.clone(),
         settings: settings.clone(),
+        user_settings: std::sync::Mutex::new(user_settings.clone()),
+        config_dir: config_dir.clone(),
+        data_dir: data_dir.clone(),
         client,
         approval_mode,
         execution_world,
@@ -634,6 +711,8 @@ async fn main() -> Result<()> {
         hooks,
         custom_agents: definitions.agents.clone(),
         base_system,
+        launch_system: cli.system.clone(),
+        launch_definitions: launch_definitions.clone(),
         script_runtime,
         default_provider: active_provider.clone(),
         default_model: active_model.clone(),
@@ -651,17 +730,22 @@ async fn main() -> Result<()> {
             std::process::exit(exit_code);
         }
         let agent = host.build_agent(session, &active_provider, &active_model, initial_system)?;
+        if let Err(err) =
+            meerai_providers::oauth::ensure_fresh_credential(secrets.as_ref(), &active_provider)
+                .await
+        {
+            eprintln!("Warning: ChatGPT plan credential: {err:#}");
+        }
         let exit_code = run_headless(agent, prompt, cli.json).await?;
         std::process::exit(exit_code);
     }
 
-    #[cfg(feature = "tui")]
+    #[cfg(any(feature = "tui", feature = "web"))]
     let opened = if use_acp {
         host.build_acp_opened_session(session, acp_start)?
     } else {
         let meta = session.meta();
         let events = session.events();
-        let transcript = transcript_from_events(&events);
         let agent = host.build_agent(session, &active_provider, &active_model, initial_system)?;
         let (cmd_tx, event_rx) = spawn_worker(agent);
         OpenedSession {
@@ -671,17 +755,28 @@ async fn main() -> Result<()> {
             provider: active_provider.clone(),
             model: active_model.clone(),
             approval_mode,
-            transcript,
             events,
             cmd_tx,
             event_rx,
         }
     };
+
+    #[cfg(feature = "web")]
+    if let Some(CliSubcommand::Serve(serve_cmd)) = cli.subcommand {
+        return run_serve(serve_cmd, opened, host).await;
+    }
+
     #[cfg(feature = "tui")]
     let update_available = meerai_tui::update::check_latest().await;
 
     #[cfg(feature = "tui")]
     {
+        let registry = SessionRegistry::new();
+        #[cfg(feature = "web")]
+        let web_launcher: Option<Arc<dyn WebServerLauncher>> = Some(Arc::new(CliWebServerLauncher));
+        #[cfg(not(feature = "web"))]
+        let web_launcher: Option<Arc<dyn WebServerLauncher>> = None;
+
         let exit = meerai_tui::run_tui(
             opened.cmd_tx,
             opened.event_rx,
@@ -706,19 +801,21 @@ async fn main() -> Result<()> {
                     .and_then(|context| context.context_window_tokens),
                 config_dir,
                 approval_mode: opened.approval_mode,
-                initial_transcript: opened.transcript,
+                initial_transcript: transcript_from_events(&opened.events),
                 initial_events: opened.events,
                 agents: definitions.agents,
                 skills: definitions.skills,
                 session_opener: Some(host),
                 update_available,
-                restore_sessions: restore_ids.iter().skip(1).cloned().collect(),
+                restore_sessions: restore_ids,
                 launch_system: cli.system,
                 launch_definitions,
                 sandbox_active,
                 sandbox_kind,
                 sandbox_warning,
                 workspace_query: None,
+                registry: Some(registry),
+                web_launcher,
             },
         )
         .await?;
@@ -729,12 +826,255 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    #[cfg(not(feature = "tui"))]
+    #[cfg(not(any(feature = "tui", feature = "web")))]
     {
         let _ = session;
         let _ = initial_system;
         Ok(())
     }
+    #[cfg(all(not(feature = "tui"), feature = "web"))]
+    {
+        let _ = opened;
+        let _ = restore_ids;
+        let _ = launch_definitions;
+        let _ = sandbox_active;
+        let _ = sandbox_kind;
+        let _ = sandbox_warning;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "web")]
+struct CliWebServerHandle {
+    addr: SocketAddr,
+    url: String,
+    server: tokio::sync::Mutex<Option<RunningServer>>,
+}
+
+#[cfg(feature = "web")]
+#[async_trait]
+impl WebServerHandle for CliWebServerHandle {
+    fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    fn url(&self) -> &str {
+        &self.url
+    }
+
+    async fn stop(&self) {
+        let server = self.server.lock().await.take();
+        if let Some(server) = server {
+            let _ = server.shutdown().await;
+        }
+    }
+}
+
+#[cfg(feature = "web")]
+struct CliWebServerLauncher;
+
+#[cfg(feature = "web")]
+#[async_trait]
+impl WebServerLauncher for CliWebServerLauncher {
+    async fn start(
+        &self,
+        registry: Arc<SessionRegistry>,
+        opener: Arc<dyn SessionOpener>,
+        port: Option<u16>,
+        secret: Option<String>,
+    ) -> Result<(Arc<dyn WebServerHandle>, WebServerStart)> {
+        let validated = match secret {
+            Some(raw) if !raw.is_empty() => ServeSecret::validate(raw)?,
+            _ => ServeSecret::generate()?,
+        };
+        let secret_plain = validated.expose().to_string();
+        let auth = ServeAuth::from_parts(Some(BASIC_USERNAME.to_string()), Some(validated));
+        let bind_addr = SocketAddr::from(([127, 0, 0, 1], port.unwrap_or(0)));
+        let server = start_server(ServeConfig { bind_addr, auth }, opener, registry).await?;
+        let addr = server.addr;
+        let url = format!("http://{addr}");
+        let start = WebServerStart {
+            port: addr.port(),
+            url: url.clone(),
+            secret: secret_plain,
+        };
+        let handle = Arc::new(CliWebServerHandle {
+            addr,
+            url,
+            server: tokio::sync::Mutex::new(Some(server)),
+        });
+        Ok((handle, start))
+    }
+}
+
+#[cfg(feature = "web")]
+async fn run_serve(
+    serve_cmd: cli::ServeCommand,
+    opened: OpenedSession,
+    host: Arc<CliSessionHost>,
+) -> Result<()> {
+    let resolved = resolve_serve_auth(serve_cmd.username, serve_cmd.auth)?;
+    let registry = SessionRegistry::new();
+    registry.register_opened(opened);
+    let bind_addr = SocketAddr::from(([127, 0, 0, 1], serve_cmd.port.unwrap_or(0)));
+    let server = start_server(
+        ServeConfig {
+            bind_addr,
+            auth: resolved.auth.clone(),
+        },
+        host,
+        registry.clone(),
+    )
+    .await?;
+    println!("URL:      http://{}", server.addr);
+    match &resolved.auth {
+        ServeAuth::None => println!("Auth:     none (loopback only)"),
+        ServeAuth::Basic { username, .. } => {
+            let user_label = username.as_deref().unwrap_or(BASIC_USERNAME);
+            println!("Auth:     Basic (username: {user_label})");
+        }
+    }
+    if let Some(secret) = resolved.generated_secret {
+        println!("Password: {secret}");
+    }
+    io::stdout().flush()?;
+    tokio::signal::ctrl_c()
+        .await
+        .context("failed to listen for Ctrl-C")?;
+    registry.shutdown_all().await;
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[cfg(feature = "web")]
+#[derive(Debug)]
+struct ResolvedServeAuth {
+    auth: ServeAuth,
+    generated_secret: Option<String>,
+}
+
+#[cfg(feature = "web")]
+fn resolve_serve_auth(
+    cli_username: Option<String>,
+    _prompt_secret: bool,
+) -> Result<ResolvedServeAuth> {
+    resolve_serve_auth_with(
+        cli_username,
+        std::env::var("MEERAI_SERVE_USER").ok(),
+        std::env::var("MEERAI_SERVE_SECRET").ok(),
+        io::stdin().is_terminal(),
+        prompt_serve_secret,
+    )
+}
+
+#[cfg(feature = "web")]
+fn resolve_serve_auth_with<F>(
+    cli_username: Option<String>,
+    env_username: Option<String>,
+    env_secret: Option<String>,
+    should_prompt: bool,
+    prompt_fn: F,
+) -> Result<ResolvedServeAuth>
+where
+    F: FnOnce() -> Result<String>,
+{
+    let username = cli_username
+        .or(env_username)
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| BASIC_USERNAME.to_string());
+
+    let (secret, generated_secret) = if let Some(raw) = env_secret.filter(|s| !s.is_empty()) {
+        (
+            ServeSecret::validate(raw).context("invalid MEERAI_SERVE_SECRET")?,
+            None,
+        )
+    } else if should_prompt {
+        let raw = prompt_fn()?;
+        if raw.is_empty() {
+            let generated = ServeSecret::generate()?;
+            let exposed = generated.expose().to_string();
+            (generated, Some(exposed))
+        } else {
+            (ServeSecret::validate(raw)?, None)
+        }
+    } else {
+        let generated = ServeSecret::generate()?;
+        let exposed = generated.expose().to_string();
+        (generated, Some(exposed))
+    };
+
+    Ok(ResolvedServeAuth {
+        auth: ServeAuth::from_parts(Some(username), Some(secret)),
+        generated_secret,
+    })
+}
+
+#[cfg(feature = "web")]
+fn prompt_serve_secret() -> Result<String> {
+    eprint!("Enter serve password (min 8 chars, leave empty to auto-generate): ");
+    io::stderr().flush()?;
+    read_masked_line()
+}
+
+#[cfg(all(feature = "web", unix))]
+fn read_masked_line() -> Result<String> {
+    use std::process::{Command, Stdio};
+
+    struct EchoGuard {
+        saved: Option<String>,
+    }
+
+    impl Drop for EchoGuard {
+        fn drop(&mut self) {
+            let arg = self.saved.as_deref().unwrap_or("echo");
+            let _ = Command::new("stty")
+                .arg(arg)
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+
+    let saved = Command::new("stty")
+        .arg("-g")
+        .stdin(Stdio::inherit())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let status = Command::new("stty")
+        .arg("-echo")
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("failed to disable terminal echo with stty")?;
+    if !status.success() {
+        bail!("failed to disable terminal echo with stty");
+    }
+    let _guard = EchoGuard { saved };
+
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .context("failed to read serve secret from terminal")?;
+    eprintln!();
+    Ok(line.trim_end_matches(&['\r', '\n'][..]).to_string())
+}
+
+#[cfg(all(feature = "web", not(unix)))]
+fn read_masked_line() -> Result<String> {
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .context("failed to read serve secret from terminal")?;
+    Ok(line.trim_end_matches(&['\r', '\n'][..]).to_string())
 }
 
 #[cfg(feature = "tui")]
@@ -762,11 +1102,79 @@ impl AcpSpawner for CliAcpSpawner {
     }
 }
 
+#[cfg(any(feature = "tui", feature = "web"))]
+struct HostLoginInteraction {
+    url_tx: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>,
+    paste_rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<String>>,
+    cancel_rx: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+#[cfg(any(feature = "tui", feature = "web"))]
+#[async_trait]
+impl meerai_providers::oauth::LoginInteraction for HostLoginInteraction {
+    async fn present_url(&self, url: &str) -> Result<()> {
+        let _ = auth_cmd::open_browser(url);
+        if let Some(tx) = self.url_tx.lock().await.take() {
+            let _ = tx.send(url.to_string());
+        }
+        Ok(())
+    }
+
+    async fn read_pasted_input(&self) -> Result<String> {
+        let mut paste = self.paste_rx.lock().await;
+        let cancel = self.cancel_rx.lock().await.take();
+        match cancel {
+            Some(cancel) => tokio::select! {
+                line = paste.recv() => line.context("ChatGPT sign-in was cancelled"),
+                _ = cancel => bail!("ChatGPT sign-in cancelled"),
+            },
+            None => paste.recv().await.context("ChatGPT sign-in was cancelled"),
+        }
+    }
+}
+
+fn split_session_model(
+    catalog: &ProviderCatalog,
+    current_provider: &str,
+    raw: &str,
+) -> (String, String) {
+    if let Some((prefix, model)) = raw.split_once("::") {
+        let provider = catalog
+            .provider(prefix)
+            .map(|provider| provider.id.clone())
+            .or_else(|| {
+                catalog
+                    .providers()
+                    .iter()
+                    .find(|provider| provider.adapter == prefix)
+                    .map(|provider| provider.id.clone())
+            })
+            .unwrap_or_else(|| current_provider.to_string());
+        return (provider, model.trim().to_string());
+    }
+    (current_provider.to_string(), raw.to_string())
+}
+
+#[cfg(any(feature = "tui", feature = "web"))]
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 struct CliSessionHost {
     workspace_root: PathBuf,
     session_config: SessionConfig,
     runtime: Arc<RwLock<RuntimeProviderState>>,
+    secrets: Arc<dyn SecretStore>,
     settings: AppSettings,
+    user_settings: std::sync::Mutex<AppSettings>,
+    config_dir: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
     client: meerai_core::genai::Client,
     approval_mode: ApprovalMode,
     execution_world: Arc<dyn ExecutionWorld>,
@@ -774,6 +1182,8 @@ struct CliSessionHost {
     hooks: Arc<HookEngine>,
     custom_agents: Vec<AgentDefinition>,
     base_system: String,
+    launch_system: String,
+    launch_definitions: String,
     script_runtime: Option<ScriptRuntime>,
     default_provider: String,
     default_model: String,
@@ -787,8 +1197,13 @@ impl CliSessionHost {
             .map(|rt| rt.active_provider.clone())
             .unwrap_or_else(|_| self.default_provider.clone());
         if let Some(raw) = meta_model.map(str::trim).filter(|m| !m.is_empty()) {
-            if let Some((provider, model)) = raw.split_once("::") {
-                return (canonical_provider_id(provider), model.trim().to_string());
+            let catalog = self.runtime.read().ok().map(|rt| rt.catalog.clone());
+            if let Some(catalog) = catalog {
+                return split_session_model(&catalog, &current_provider, raw);
+            }
+            if let Some((prefix, model)) = raw.split_once("::") {
+                let provider = canonical_provider_id(prefix);
+                return (provider, model.trim().to_string());
             }
             return (current_provider, raw.to_string());
         }
@@ -896,16 +1311,33 @@ impl CliSessionHost {
             .with_hooks(self.hooks.clone())
             .with_custom_agents(self.custom_agents.clone());
         agent.add_tool(subagent_tool);
+        let config = self.harness_config(provider, model);
+        let plan_usage = config.plan_usage;
+        if let Ok(mut runtime) = self.runtime.write() {
+            runtime.active_provider = canonical_provider_id(provider);
+            runtime.plan_usage = plan_usage;
+        }
         agent.set_harness(AgentHarness {
             session,
             policy,
-            config: self.harness_config(provider, model),
+            config,
         });
         Ok(agent)
     }
 
     fn harness_config(&self, provider: &str, model: &str) -> HarnessConfig {
         let mut config = HarnessConfig::from_context_settings(self.settings.context.as_ref());
+        config.plan_usage = self
+            .runtime
+            .read()
+            .ok()
+            .and_then(|runtime| runtime.catalog.provider(provider).cloned())
+            .and_then(|provider| {
+                resolve_credential(&provider, self.secrets.as_ref())
+                    .ok()
+                    .flatten()
+            })
+            .is_some_and(|credential| matches!(credential, Credential::OAuth(_)));
         let configured_window = self
             .settings
             .context
@@ -930,7 +1362,7 @@ impl CliSessionHost {
         config
     }
 
-    #[cfg(feature = "tui")]
+    #[cfg(any(feature = "tui", feature = "web"))]
     fn build_opened_session(
         &self,
         session: Session,
@@ -947,7 +1379,6 @@ impl CliSessionHost {
             return self.build_acp_opened_session(session, start);
         }
         let events = session.events();
-        let transcript = transcript_from_events(&events);
         let agent = self.build_agent(session, &provider, &model, self.base_system.clone())?;
         let (cmd_tx, event_rx) = spawn_worker(agent);
         let approval_mode = meta
@@ -962,18 +1393,16 @@ impl CliSessionHost {
             provider,
             model,
             approval_mode,
-            transcript,
             events,
             cmd_tx,
             event_rx,
         })
     }
 
-    #[cfg(feature = "tui")]
+    #[cfg(any(feature = "tui", feature = "web"))]
     fn build_acp_opened_session(&self, session: Session, start: AcpStart) -> Result<OpenedSession> {
         let meta = session.meta();
         let events = session.events();
-        let transcript = transcript_from_events(&events);
         let (cmd_tx, event_rx) = spawn_acp_worker(AcpWorkerConfig {
             session,
             preset: AGY,
@@ -995,17 +1424,213 @@ impl CliSessionHost {
             provider: "acp:agy".to_string(),
             model: "agy".to_string(),
             approval_mode,
-            transcript,
             events,
             cmd_tx,
             event_rx,
         })
     }
+
+    #[cfg(any(feature = "tui", feature = "web"))]
+    fn enabled_tool_names(&self) -> Vec<String> {
+        let code_tools = CodeTools::new(self.workspace_root.clone());
+        let repo_map = RepoMapToolset::new(self.workspace_root.clone());
+        let lsp = LspToolset::new(self.workspace_root.clone());
+        let mut sac = SearchAsCodeToolset::new(self.workspace_root.clone());
+        if let Some(runtime) = self.script_runtime {
+            sac = sac.with_runtime(runtime);
+        }
+        let mut toolsets = build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, false);
+        toolsets.push(Box::new(QuestionToolset));
+        toolsets.push(Box::new(AcpRunToolset::new(Arc::new(CliAcpSpawner))));
+        let mut names = toolsets
+            .into_iter()
+            .flat_map(|toolset| toolset.definition().into_iter().map(|def| def.name))
+            .collect::<Vec<_>>();
+        names.push("subagent-run".to_string());
+        names
+    }
+
+    #[cfg(any(feature = "tui", feature = "web"))]
+    fn persist_user_settings(&self, user: &AppSettings) -> Result<()> {
+        let dir = self
+            .config_dir
+            .as_deref()
+            .context("no configuration directory available (set HOME or XDG_CONFIG_HOME)")?;
+        save_settings_to(dir, user)
+    }
+
+    #[cfg(any(feature = "tui", feature = "web"))]
+    fn load_merged_settings(&self) -> (AppSettings, AppSettings, Vec<String>) {
+        let project_root = find_project_root(&self.workspace_root);
+        let user = self
+            .config_dir
+            .as_deref()
+            .and_then(|dir| load_settings_from(dir).ok())
+            .unwrap_or_else(|| self.user_settings.lock().unwrap().clone());
+        let mut merged = user.clone();
+        let mut warnings = Vec::new();
+        match load_project_settings(&project_root) {
+            Ok(Some(project)) => {
+                let (project_merged, project_warnings) =
+                    merge_project_settings(user.clone(), project);
+                merged = project_merged;
+                warnings.extend(project_warnings);
+            }
+            Ok(None) => {}
+            Err(err) => warnings.push(format!("ignoring project settings: {err:#}")),
+        }
+        (user, merged, warnings)
+    }
+
+    #[cfg(any(feature = "tui", feature = "web"))]
+    fn compute_host_info_from(&self, merged: &AppSettings, hooks_count: usize) -> HostInfoSnapshot {
+        let project_root = find_project_root(&self.workspace_root);
+        let definitions = load_definitions(&project_root);
+        let git_branch = meerai_host::current_branch(&self.workspace_root);
+        let acp_presets = meerai_acp::presets()
+            .iter()
+            .map(|preset| AcpPresetInfo {
+                id: preset.id.to_string(),
+                label: preset.id.to_string(),
+                command: format!("{} {}", preset.command, preset.args.join(" "))
+                    .trim()
+                    .to_string(),
+            })
+            .collect();
+        let agents = definitions
+            .agents
+            .into_iter()
+            .map(|agent| HostAgentInfo {
+                id: agent.id,
+                source: agent.source.label().to_string(),
+                description: agent.description,
+                model: agent.model,
+            })
+            .collect();
+        let skills = definitions
+            .skills
+            .into_iter()
+            .map(|skill| HostSkillInfo {
+                id: skill.id,
+                source: skill.source.label().to_string(),
+                description: skill.description,
+            })
+            .collect();
+        let raw_theme = merged.theme.clone().unwrap_or_default();
+        let (palette, _) = HostPalette::from_settings(&raw_theme);
+        let permissions_summary = merged
+            .permissions
+            .as_ref()
+            .and_then(|value| rules_from_yaml(value).ok())
+            .map(|rules| {
+                rules
+                    .into_iter()
+                    .map(|rule| {
+                        let action = String::from(rule.action);
+                        let effect = match rule.effect {
+                            meerai_policy::Effect::Allow => "allow",
+                            meerai_policy::Effect::Ask => "ask",
+                            meerai_policy::Effect::Deny => "deny",
+                        };
+                        format!("{effect}: {action}({})", rule.resource)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        HostInfoSnapshot {
+            workspace_root: self.workspace_root.display().to_string(),
+            git_branch,
+            acp_presets,
+            agents,
+            skills,
+            mcp_servers: Vec::new(),
+            enabled_tools: self.enabled_tool_names(),
+            hooks_count,
+            update_available: None,
+            install_hint: meerai_host::update::install_hint().to_string(),
+            settings: HostSettingsView {
+                theme: palette.to_hex_tokens(),
+                raw_theme,
+                context: merged.context.clone().unwrap_or_default(),
+                session: merged.sessions.clone().unwrap_or_default(),
+                sandbox: merged.sandbox.clone().unwrap_or_default(),
+                permissions_summary,
+                config_writable: self.config_dir.is_some(),
+            },
+        }
+    }
 }
 
-#[cfg(feature = "tui")]
+#[cfg(any(feature = "tui", feature = "web"))]
 #[async_trait]
 impl SessionOpener for CliSessionHost {
+    async fn ensure_credentials(&self) -> Result<()> {
+        let provider = self
+            .runtime
+            .read()
+            .map(|runtime| runtime.active_provider.clone())
+            .unwrap_or_else(|_| self.default_provider.clone());
+        meerai_providers::oauth::ensure_fresh_credential(self.secrets.as_ref(), &provider).await
+    }
+
+    async fn start_chatgpt_login(&self, provider_id: &str) -> Result<ChatGptLogin> {
+        let provider = self
+            .runtime
+            .read()
+            .ok()
+            .and_then(|runtime| runtime.catalog.provider(provider_id).cloned())
+            .with_context(|| format!("unknown provider '{provider_id}'"))?;
+        if !provider.auth.supports_oauth() {
+            bail!("provider '{provider_id}' does not support ChatGPT plan sign-in");
+        }
+        let data_dir = self
+            .data_dir
+            .clone()
+            .context("no data directory; set HOME or XDG_DATA_HOME before signing in")?;
+        let store = self.secrets.clone();
+        let provider_id = provider_id.to_string();
+        let (url_tx, url_rx) = tokio::sync::oneshot::channel();
+        let (paste_tx, paste_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let interaction = HostLoginInteraction {
+                url_tx: tokio::sync::Mutex::new(Some(url_tx)),
+                paste_rx: tokio::sync::Mutex::new(paste_rx),
+                cancel_rx: tokio::sync::Mutex::new(Some(cancel_rx)),
+            };
+            let login = std::panic::AssertUnwindSafe(meerai_providers::oauth::login_chatgpt(
+                store.as_ref(),
+                &provider_id,
+                &data_dir,
+                &interaction,
+            ))
+            .catch_unwind()
+            .await;
+            let result = match login {
+                Ok(Ok(credential)) => store
+                    .write_credential(&provider_id, &Credential::OAuth(credential.clone()))
+                    .map(|()| ChatGptLoginOutcome {
+                        provider_id: provider_id.clone(),
+                        account: credential.account,
+                    }),
+                Ok(Err(err)) => Err(err),
+                Err(panic) => Err(anyhow::anyhow!(
+                    "ChatGPT sign-in crashed: {}",
+                    panic_message(panic)
+                )),
+            };
+            let _ = result_tx.send(result);
+        });
+        let url = url_rx.await.context("ChatGPT sign-in did not start")?;
+        Ok(ChatGptLogin {
+            url,
+            paste_tx,
+            cancel_tx,
+            result_rx,
+        })
+    }
+
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let root = self.session_config.root.clone();
         sessions_cmd::run_blocking(move || list_sessions(&root)).await
@@ -1072,14 +1697,8 @@ impl SessionOpener for CliSessionHost {
     }
 
     async fn fork_session(&self, id: &SessionId, turn: &TurnId) -> Result<OpenedSession> {
-        let source = Session::open(
-            &self.session_config,
-            id.clone(),
-            self.workspace_root.clone(),
-        )
-        .await?;
-        let source_is_acp = source.meta().harness.as_deref() == Some("acp:agy");
-        let forked = Session::fork(&self.session_config, &source, turn).await?;
+        let forked = Session::fork_stored(&self.session_config, id, Some(turn)).await?;
+        let source_is_acp = forked.meta().harness.as_deref() == Some("acp:agy");
         if source_is_acp {
             return self.build_acp_opened_session(forked, AcpStart::New);
         }
@@ -1110,5 +1729,312 @@ impl SessionOpener for CliSessionHost {
 
     async fn read_session_events(&self, id: &SessionId) -> Result<Vec<LoggedEvent>> {
         Session::load_events(&self.session_config, id).await
+    }
+
+    fn workspace_root(&self) -> Option<PathBuf> {
+        Some(self.workspace_root.clone())
+    }
+
+    async fn host_info(&self) -> HostInfoSnapshot {
+        let (_user, merged, _warnings) = self.load_merged_settings();
+        self.compute_host_info_from(&merged, self.hooks.entries().len())
+    }
+
+    async fn providers_snapshot(&self) -> Result<HostProvidersSnapshot> {
+        let bundled = ProviderCatalog::load_with_user_dir(None);
+        let user_settings = self.user_settings.lock().unwrap().clone();
+        let rt = self
+            .runtime
+            .read()
+            .map_err(|_| anyhow::anyhow!("provider runtime lock poisoned"))?;
+        let providers = rt
+            .catalog
+            .providers()
+            .iter()
+            .map(|provider| {
+                let status = check_key_status(provider, self.secrets.as_ref());
+                let auth_kind = match provider.auth {
+                    ProviderAuthKind::ApiKey => HostAuthKind::ApiKey,
+                    ProviderAuthKind::OAuth => HostAuthKind::OAuth,
+                    ProviderAuthKind::Either => HostAuthKind::Either,
+                    ProviderAuthKind::None => HostAuthKind::None,
+                };
+                HostProviderItem {
+                    id: provider.id.clone(),
+                    display_name: provider.display_name.clone(),
+                    adapter: provider.adapter.clone(),
+                    auth_kind,
+                    configured: status.is_configured(),
+                    status_badge: status.badge(),
+                    env_vars: provider.env_vars.clone(),
+                    default_model: provider.default_model.clone(),
+                    base_url: rt.effective_base_url(provider),
+                    is_custom: bundled.provider(&provider.id).is_none(),
+                }
+            })
+            .collect();
+        let models = rt
+            .catalog
+            .models()
+            .iter()
+            .map(|model| HostModelItem {
+                id: model.id.clone(),
+                provider: model.provider.clone(),
+                display_name: model.id.clone(),
+                context_window_tokens: model.context_window,
+                max_output_tokens: None,
+                supports_reasoning: true,
+                supports_vision: false,
+                supports_tools: true,
+                is_custom: bundled.model_info(&model.provider, &model.id).is_none(),
+            })
+            .collect();
+        let recent_models = rt
+            .catalog
+            .providers()
+            .iter()
+            .filter_map(|provider| {
+                let recent = user_settings.recent_models_for(&provider.id);
+                (!recent.is_empty()).then(|| (provider.id.clone(), recent.to_vec()))
+            })
+            .collect();
+        Ok(HostProvidersSnapshot {
+            default_provider: Some(rt.active_provider.clone()),
+            providers,
+            models,
+            recent_models,
+        })
+    }
+
+    async fn set_api_key(&self, provider_id: &str, api_key: &str) -> Result<()> {
+        let canonical = canonical_provider_id(provider_id);
+        let exists = self
+            .runtime
+            .read()
+            .ok()
+            .and_then(|rt| rt.catalog.provider(&canonical).cloned())
+            .is_some();
+        if !exists {
+            bail!("unknown provider '{canonical}'");
+        }
+        let trimmed = api_key.trim();
+        if trimmed.is_empty() {
+            bail!("API key cannot be empty");
+        }
+        self.secrets.set_key(&canonical, trimmed)
+    }
+
+    async fn remove_credential(&self, provider_id: &str) -> Result<()> {
+        let canonical = canonical_provider_id(provider_id);
+        self.secrets.delete_credential(&canonical)
+    }
+
+    async fn set_provider_base_url(
+        &self,
+        provider_id: &str,
+        base_url: Option<String>,
+    ) -> Result<()> {
+        let canonical = canonical_provider_id(provider_id);
+        let clean = base_url
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty());
+        {
+            let mut rt = self
+                .runtime
+                .write()
+                .map_err(|_| anyhow::anyhow!("provider runtime lock poisoned"))?;
+            if let Some(ref url) = clean {
+                rt.base_urls.insert(canonical.clone(), url.clone());
+            } else {
+                rt.base_urls.remove(&canonical);
+            }
+        }
+        let updated = {
+            let mut user = self.user_settings.lock().unwrap();
+            user.set_provider_base_url(&canonical, clean);
+            user.clone()
+        };
+        if self.config_dir.is_some() {
+            self.persist_user_settings(&updated)?;
+        }
+        Ok(())
+    }
+
+    async fn select_model(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Result<ResolvedModelSelection> {
+        let canonical = canonical_provider_id(provider_id);
+        let clean_model = model_id.trim().to_string();
+        if clean_model.is_empty() {
+            bail!("model id cannot be empty");
+        }
+        let (command_model, context_window_tokens) = {
+            let mut rt = self
+                .runtime
+                .write()
+                .map_err(|_| anyhow::anyhow!("provider runtime lock poisoned"))?;
+            if rt.catalog.provider(&canonical).is_none() {
+                bail!("unknown provider '{canonical}'");
+            }
+            rt.active_provider = canonical.clone();
+            let command_model = rt.catalog.format_genai_spec(&canonical, &clean_model);
+            let ctx = rt
+                .catalog
+                .model_info(&canonical, &clean_model)
+                .and_then(|info| info.context_window);
+            (command_model, ctx)
+        };
+        let updated = {
+            let mut user = self.user_settings.lock().unwrap();
+            user.active_provider = Some(canonical.clone());
+            user.active_model = Some(clean_model.clone());
+            user.record_provider_model(&canonical, &clean_model);
+            user.clone()
+        };
+        if self.config_dir.is_some() {
+            self.persist_user_settings(&updated)?;
+        }
+        Ok(ResolvedModelSelection {
+            provider: canonical,
+            display_model: clean_model,
+            command_model,
+            context_window_tokens,
+        })
+    }
+
+    async fn resolve_agent_application(
+        &self,
+        name: &str,
+        current_provider: &str,
+    ) -> Result<ResolvedAgentApplication> {
+        let project_root = find_project_root(&self.workspace_root);
+        let definitions = load_definitions(&project_root);
+        let agent = definitions
+            .agents
+            .into_iter()
+            .find(|agent| agent.id == name)
+            .with_context(|| format!("unknown agent: {name}"))?;
+        let model_raw = match validate_agent_model(agent.model.as_deref()) {
+            Ok(raw) => raw.map(str::to_string),
+            Err(rejected) => {
+                bail!(
+                    "agent {} model '{rejected}' implies a provider change; it is not applied",
+                    agent.id
+                );
+            }
+        };
+        let (model, context_window_tokens) = if let Some(raw) = model_raw {
+            let rt = self
+                .runtime
+                .read()
+                .map_err(|_| anyhow::anyhow!("provider runtime lock poisoned"))?;
+            let spec = rt.catalog.format_genai_spec(current_provider, &raw);
+            let ctx = rt
+                .catalog
+                .model_info(current_provider, &raw)
+                .and_then(|info| info.context_window);
+            (Some(spec), ctx)
+        } else {
+            (None, None)
+        };
+        Ok(ResolvedAgentApplication {
+            name: agent.id,
+            instructions: agent.prompt,
+            model,
+            context_window_tokens,
+        })
+    }
+
+    async fn resolve_skill_application(&self, name: &str) -> Result<ResolvedSkillApplication> {
+        let project_root = find_project_root(&self.workspace_root);
+        let definitions = load_definitions(&project_root);
+        let skill = definitions
+            .skills
+            .into_iter()
+            .find(|skill| skill.id == name)
+            .with_context(|| format!("unknown skill: {name}"))?;
+        Ok(ResolvedSkillApplication {
+            name: skill.id,
+            instructions: skill.body,
+        })
+    }
+
+    async fn update_settings(&self, update: HostSettingsUpdate) -> Result<HostReloadOutcome> {
+        let mut user = self
+            .config_dir
+            .as_deref()
+            .and_then(|dir| load_settings_from(dir).ok())
+            .unwrap_or_else(|| self.user_settings.lock().unwrap().clone());
+        if update.reset_theme {
+            user.theme = None;
+        } else if let Some(theme) = update.theme {
+            if theme.is_empty() {
+                user.theme = None;
+            } else {
+                let mut current = user.theme.take().unwrap_or_default();
+                current.overlay(theme);
+                user.theme = (!current.is_empty()).then_some(current);
+            }
+        }
+        if let Some(context) = update.context {
+            user.context = Some(context);
+        }
+        if let Some(session) = update.session {
+            user.sessions = Some(session);
+        }
+        if let Some(sandbox) = update.sandbox {
+            user.sandbox = Some(sandbox);
+        }
+        self.persist_user_settings(&user)?;
+        *self.user_settings.lock().unwrap() = user;
+        self.reload_config().await
+    }
+
+    async fn reload_config(&self) -> Result<HostReloadOutcome> {
+        let project_root = find_project_root(&self.workspace_root);
+        let (user, merged, mut warnings) = self.load_merged_settings();
+        *self.user_settings.lock().unwrap() = user.clone();
+        let definitions = load_definitions(&project_root);
+        warnings.extend(definitions.warnings);
+        let rules = merged
+            .permissions
+            .as_ref()
+            .and_then(|value| rules_from_yaml(value).ok());
+        let base =
+            meerai_agents::compose_system_prompt(&self.launch_system, &self.workspace_root).await;
+        let system_prompt = format!("{base}{}", self.launch_definitions);
+        let hooks_enabled = merged
+            .hooks
+            .as_ref()
+            .and_then(|hooks| hooks.enabled)
+            .unwrap_or(true);
+        let hook_entries = if hooks_enabled {
+            let (entries, hook_warnings) = load_hooks_for_run(
+                self.config_dir.as_deref(),
+                &project_root,
+                merged.hooks.as_ref(),
+            );
+            warnings.extend(
+                hook_warnings
+                    .into_iter()
+                    .map(|warning| format!("hook config: {warning}")),
+            );
+            entries
+        } else {
+            Vec::new()
+        };
+        let host_info = self.compute_host_info_from(&merged, hook_entries.len());
+        Ok(HostReloadOutcome {
+            host_info,
+            warnings,
+            payload: HostReloadPayload {
+                rules,
+                context: merged.context.clone(),
+                system_prompt,
+                hooks: hook_entries,
+            },
+        })
     }
 }

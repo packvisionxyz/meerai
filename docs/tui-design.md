@@ -18,8 +18,12 @@ sessions. Typing a prompt never collides with scrolling history or expanding
 tool output: the composer has an Insert mode and the transcript a Normal
 mode. Actions are discoverable through slash commands, a command palette,
 and completion popups. File listing and content search go through the
-`WorkspaceQuery` trait, so a future remote client can replace the local
-walker without touching the UI.
+`WorkspaceQuery` trait so clients can reuse host workspace services.
+
+This document defines terminal behavior. The [local browser parity plan](browser-ui.md#36-parity-inventory)
+maps these workflows to browser controls without copying terminal modes,
+shortcuts, or escape sequences. The browser plan tracks implementation
+status separately.
 
 ## 2. Implemented
 
@@ -52,6 +56,14 @@ composer, and a one-row statusline.
 - The file list pages with a clickable `… and N more` footer (next page,
   back to top at the end) and scrolls with the mouse wheel. Clicking a
   changed file opens the diff modal.
+- A numbered anchor rail sits between the transcript and the sidebar, and at
+  the right edge when the sidebar is hidden. It appears when the transcript
+  scrolls and the tab has at least two user turns. Each user message has one
+  row, labelled with its turn number (1-based; the column widens for two
+  digits). The turn nearest the viewport top is accented. When not every turn
+  fits, a `⋮` row marks the hidden range. A click jumps to that turn, a click
+  on `⋮` jumps to the hidden end, and dragging across numbers scrolls. Hovering
+  a number paints that turn's band.
 - The transcript header is one line (`meerai provider/model [auth]`); an
   ACP tab shows `agy (acp)` plus the external-engine warning instead.
 - The palette follows the opencode dark theme and is overridable through the
@@ -67,7 +79,7 @@ Active in any mode unless a modal is open.
 | --- | --- |
 | `ctrl+p` / `ctrl+shift+p` | Command palette |
 | `shift+tab` | Cycle approval mode: `plan` → `ask` → `auto` |
-| `ctrl+n` | New session tab |
+| `ctrl+n` | New session tab (reuses an open empty tab) |
 | `ctrl+s` | Session picker |
 | `ctrl+w` | Close tab |
 | `alt+shift+left` / `alt+shift+right` | Move the active tab |
@@ -155,6 +167,7 @@ Typing `/` opens completion. The implemented handler set
 | `/fork` | Fork the session at the latest closed turn into a new tab; refuses while a turn runs |
 | `/acp` | Open a new `agy` ACP tab |
 | `/reload` | Re-read settings, theme, definitions, policy, hooks, prompt (§2.18) |
+| `/serve [stop]` | Start or stop the local browser server attached to this TUI's `SessionRegistry` (`web` feature) |
 | `/update` | Print the update status and install hint |
 | `/clear` | Clear the transcript view |
 | `/reset` | Reset the conversation (session log kept) |
@@ -273,10 +286,14 @@ being replayed.
   unread/finished, muted when idle; the active tab uses the accent color.
   There is no dot or spinner glyph.
 - Closing a tab quits its worker but keeps the session on disk.
-- `meerai-tui/src/tabs.rs` persists session ids and the active index per
-  workspace to `<data>/open-tabs.json`. On a plain TUI start the CLI
-  restores the first saved session as the initial tab and queues the rest;
-  the saved active index is not restored. Tests disable persistence.
+- `meerai-tui/src/tabs.rs` persists session ids, the active index, and the
+  reusable empty session per workspace to `<data>/open-tabs.json`. On a plain
+  TUI start the CLI opens one empty session tab and restores the saved sessions
+  in the background, so the empty tab stays active. The saved empty session is
+  reused instead of creating another; closing an empty tab keeps it for the
+  next start. `/new` and `[ + ]` switch to an open empty tab instead of opening
+  a second one. The saved active index is not restored. Tests disable
+  persistence.
 - The session picker (`/sessions`, `ctrl+s`) deletes with `ctrl+d` after a
   second `ctrl+d` confirmation. Open sessions close automatically; deleting
   the current session when it is the last tab creates a replacement first.
@@ -325,8 +342,7 @@ are the clipboard programs (§2.3).
 ### 2.15 Statusline
 
 One monochrome row, left to right: workspace path, git branch (when the
-workspace is a git repo), an optional sandbox warning, the `ACP:agy` badge
-on ACP tabs, a backgrounded `shell <cmd>` segment, current-turn usage
+workspace is a git repo), an optional sandbox warning, the `ACP:agy` badge on ACP tabs, a clickable `web :<port>` badge while `/serve` is running, a backgrounded `shell <cmd>` segment, current-turn usage
 (`↑prompt ↓completion Σtotal`), a clickable `update vX (/update)` hint,
 session totals with `↻cached` when cache reads exist, throughput after the
 first measured stream, and a braille spinner with the active tool or
@@ -367,7 +383,37 @@ every session, transcript, and tab, and sends `AgentCommand::Reload` plus
 are not reloaded (use `/connect`, `/model`, `/mode`); the update check is
 startup-only.
 
-### 2.19 ACP surfaces
+### 2.19 ChatGPT plan sign-in
+
+`/connect` → OpenAI opens an **Auth method** dialog with `Continue with ChatGPT`
+and `Use an API key` when the provider has no credential. Choosing ChatGPT
+starts the OpenAI Sign in with ChatGPT plan-usage flow through the host service;
+the TUI never spawns a process.
+
+A provider that already has a stored credential, environment key, or config key
+opens a **Connection** dialog instead. It shows the status badge and offers
+`Continue to model select`, `Update credential`, and, for a stored API key or
+plan credential, `Remove saved credential`. Switching away and back therefore
+does not start an unwanted sign-in. `Update credential` opens the auth method
+dialog; `Remove saved credential` deletes the stored entry and returns to the
+provider list.
+
+- The host opens the system browser and returns the authorize URL.
+- The sign-in dialog shows the provider, `Waiting for the browser callback...`,
+  the URL as wrapped text, and a paste field. Use the URL on a remote host where
+  the browser is on another machine.
+- `Enter` sends the pasted final redirect URL; `ctrl+y` copies the URL to the
+  system clipboard; `Esc` cancels and closes the loopback listener.
+- On success the credential is stored, the provider status becomes `plan`, recent
+  models reload from disk, and the model picker opens. On failure the dialog
+  keeps the error; `Enter` retries with a fresh loopback listener, and `Esc`
+  cancels.
+
+The dialog is 66 columns. The paste field is only needed when the browser cannot
+reach `127.0.0.1`; the browser callback completes the flow automatically when it
+can.
+
+### 2.20 ACP surfaces
 
 `/acp` opens a new tab bound to the `agy` adapter. The statusline shows the
 `ACP:agy` badge; the transcript header shows `agy (acp)` with
@@ -435,12 +481,15 @@ New dialogs stay narrow. Current caps (`meerai-tui/src/ui/modals.rs`):
 | --- | --- |
 | Approval | ≤ 76 |
 | Provider | ≤ 68 |
+| Auth method | 66 |
+| ChatGPT sign-in | 66 |
 | API key | 66 |
 | Model | 64 |
 | Session list | ≤ 72 |
 | Command palette | ≤ 62 |
 | Message menu | 44 |
 | Rewind menu | ≤ 60 |
+| Serve dialog | 64 |
 | Question | ≤ 76 |
 | Diff | 92% of the terminal |
 | Search | 90% of the terminal |
