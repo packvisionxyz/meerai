@@ -291,6 +291,19 @@ fn compaction_items_render_system_entries() {
 }
 
 #[test]
+fn compaction_started_items_do_not_render_system_entries() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.handle_agent_event(AgentEvent::ItemStarted {
+        item: SessionItem::Compaction {
+            id: ItemId::from_raw("item-compact"),
+            trigger: meerai_agents::events::CompactionTrigger::Pressure,
+            freed_tokens: 0,
+        },
+    });
+    assert!(app.tab().transcript.is_empty());
+}
+
+#[test]
 fn hook_completed_events_render_system_entries() {
     let (mut app, _rx, _secrets) = test_app();
 
@@ -744,6 +757,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
         }))
     );
 
+    app.tab_mut().turn_activity.insert(0, true);
     let backend = TestBackend::new(120, 28);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
@@ -1050,4 +1064,44 @@ fn question_asked_and_answered_appear_in_the_transcript() {
             ..
         })
     ));
+}
+
+#[test]
+fn queued_edit_modal_tracks_drained_queue_indices() {
+    let (mut app, _rx, _secrets) = test_app();
+    let tab_id = app.tab().tab_id;
+    app.tab_mut().is_running = true;
+    app.tab_mut().queued = vec!["first".to_string(), "second".to_string()];
+    app.modal = Some(ActiveModal::QueuedEdit {
+        index: 1,
+        input: "second".to_string(),
+        error: None,
+    });
+
+    app.handle_tab_agent_event(
+        tab_id,
+        AgentEvent::TurnCompleted {
+            turn_id: TurnId::from_raw("turn-1"),
+            reason: meerai_agents::TurnEndReason::Completed,
+        },
+    );
+
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::QueuedEdit { index: 0, .. })
+    ));
+
+    app.handle_tab_agent_event(
+        tab_id,
+        AgentEvent::TurnCompleted {
+            turn_id: TurnId::from_raw("turn-2"),
+            reason: meerai_agents::TurnEndReason::Completed,
+        },
+    );
+
+    assert!(app.modal.is_none());
+    assert_eq!(
+        app.status_notice.as_deref(),
+        Some("Queued message was already sent")
+    );
 }

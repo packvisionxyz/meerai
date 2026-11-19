@@ -86,11 +86,11 @@ impl WasmTransport {
         });
     }
 
-    pub fn submit_prompt(&self, session_id: String, prompt: String) {
+    pub fn submit_prompt(&self, session_id: String, prompt: String, display: Option<String>) {
         let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/sessions/{session_id}/prompt");
-            let payload = match serde_json::to_string(&SubmitPromptRequest { prompt }) {
+            let payload = match serde_json::to_string(&SubmitPromptRequest { prompt, display }) {
                 Ok(json) => json,
                 Err(err) => {
                     handle.update(move |state| {
@@ -132,11 +132,12 @@ impl WasmTransport {
         });
     }
 
-    pub fn steer_prompt(&self, session_id: String, prompt: String) {
+    pub fn steer_prompt(&self, session_id: String, prompt: String, display: Option<String>) {
         let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/sessions/{session_id}/steer");
-            let Ok(payload) = serde_json::to_string(&SubmitPromptRequest { prompt }) else {
+            let Ok(payload) = serde_json::to_string(&SubmitPromptRequest { prompt, display })
+            else {
                 return;
             };
             match fetch_text("POST", &path, Some(&payload)).await {
@@ -164,11 +165,18 @@ impl WasmTransport {
                         });
                     }
                     Err(err) => {
+                        handle.update(|state| state.pending_replace_session = None);
                         set_error(&handle, format!("Invalid create-session response: {err}"))
                     }
                 },
-                Ok((status, body)) => set_error(&handle, format_api_error(status, &body)),
-                Err(err) => set_error(&handle, err),
+                Ok((status, body)) => {
+                    handle.update(|state| state.pending_replace_session = None);
+                    set_error(&handle, format_api_error(status, &body))
+                }
+                Err(err) => {
+                    handle.update(|state| state.pending_replace_session = None);
+                    set_error(&handle, err)
+                }
             }
         });
     }

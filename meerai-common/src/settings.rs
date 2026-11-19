@@ -112,6 +112,43 @@ impl Temperature {
 
 impl Eq for Temperature {}
 
+pub const DEFAULT_TEMPERATURE: f32 = 0.2;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EffortLevel {
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+impl EffortLevel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    pub fn default_temperature(self) -> f32 {
+        match self {
+            Self::Low => 0.0,
+            Self::Medium => DEFAULT_TEMPERATURE,
+            Self::High => 0.5,
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Low => Self::Medium,
+            Self::Medium => Self::High,
+            Self::High => Self::Low,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -144,6 +181,8 @@ pub struct ContextSettings {
     pub post_edit_diagnostics: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<Temperature>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<EffortLevel>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,6 +366,27 @@ impl AppSettings {
         entry.recent_models.retain(|m| m != &clean);
         entry.recent_models.insert(0, clean);
         entry.recent_models.truncate(MAX_RECENT_MODELS);
+    }
+
+    pub fn forget_provider_model(&mut self, provider_id: &str, model_id: &str) {
+        let clean = model_id.trim();
+        if clean.is_empty() {
+            return;
+        }
+        if let Some(entry) = self.providers.get_mut(provider_id) {
+            entry.recent_models.retain(|m| m != clean);
+            if entry.model.as_deref() == Some(clean) {
+                entry.model = None;
+            }
+            if entry.is_empty() {
+                self.providers.remove(provider_id);
+            }
+        }
+        if self.active_provider.as_deref() == Some(provider_id)
+            && self.active_model.as_deref() == Some(clean)
+        {
+            self.active_model = None;
+        }
     }
 }
 
@@ -569,6 +629,7 @@ fn merge_context(
             summarizer_model: project.summarizer_model.or(user.summarizer_model),
             post_edit_diagnostics: project.post_edit_diagnostics.or(user.post_edit_diagnostics),
             temperature: project.temperature.or(user.temperature),
+            effort: project.effort.or(user.effort),
         }),
     }
 }
@@ -1348,5 +1409,121 @@ providers:
         assert_eq!(sandbox.require_for_shell, Some(true));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("require_for_scripts=false"));
+    }
+
+    #[test]
+    fn effort_tiers_map_to_expected_temperatures() {
+        assert_eq!(EffortLevel::Low.default_temperature(), 0.0);
+        assert_eq!(EffortLevel::Medium.default_temperature(), 0.2);
+        assert_eq!(EffortLevel::High.default_temperature(), 0.5);
+        assert_eq!(EffortLevel::default(), EffortLevel::Medium);
+        assert_eq!(DEFAULT_TEMPERATURE, 0.2);
+    }
+
+    #[test]
+    fn effort_labels_round_trip_through_serde() {
+        for level in [EffortLevel::Low, EffortLevel::Medium, EffortLevel::High] {
+            let yaml = serde_yaml::to_string(&level).unwrap();
+            let back: EffortLevel = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(back, level);
+            assert_eq!(yaml.trim(), level.label());
+        }
+    }
+
+    #[test]
+    fn effort_cycle_wraps_through_all_tiers() {
+        assert_eq!(EffortLevel::Low.cycle(), EffortLevel::Medium);
+        assert_eq!(EffortLevel::Medium.cycle(), EffortLevel::High);
+        assert_eq!(EffortLevel::High.cycle(), EffortLevel::Low);
+    }
+
+    #[test]
+    fn forget_provider_model_clears_history_saved_and_active() {
+        let mut settings = AppSettings {
+            active_provider: Some("openai".to_string()),
+            active_model: Some("gpt-5".to_string()),
+            ..AppSettings::default()
+        };
+        let entry = SavedProviderSettings {
+            model: Some("gpt-5".to_string()),
+            recent_models: vec!["gpt-5".to_string(), "gpt-4o".to_string()],
+            ..SavedProviderSettings::default()
+        };
+        settings.providers.insert("openai".to_string(), entry);
+
+        settings.forget_provider_model("openai", "gpt-5");
+
+        let entry = settings.providers.get("openai").expect("provider kept");
+        assert_eq!(entry.model, None);
+        assert_eq!(entry.recent_models, vec!["gpt-4o".to_string()]);
+        assert_eq!(settings.active_model, None);
+        assert_eq!(settings.active_provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn forget_provider_model_drops_empty_provider_entry() {
+        let mut settings = AppSettings::default();
+        let entry = SavedProviderSettings {
+            recent_models: vec!["gpt-5".to_string()],
+            ..SavedProviderSettings::default()
+        };
+        settings.providers.insert("openai".to_string(), entry);
+
+        settings.forget_provider_model("openai", "gpt-5");
+
+        assert!(!settings.providers.contains_key("openai"));
+    }
+
+    #[test]
+    fn forget_provider_model_keeps_unrelated_active_model() {
+        let mut settings = AppSettings {
+            active_provider: Some("anthropic".to_string()),
+            active_model: Some("claude-sonnet-4-5".to_string()),
+            ..AppSettings::default()
+        };
+        let entry = SavedProviderSettings {
+            recent_models: vec!["gpt-5".to_string()],
+            ..SavedProviderSettings::default()
+        };
+        settings.providers.insert("openai".to_string(), entry);
+
+        settings.forget_provider_model("openai", "gpt-5");
+
+        assert_eq!(settings.active_model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(settings.active_provider.as_deref(), Some("anthropic"));
+    }
+
+    #[test]
+    fn forget_provider_model_ignores_blank_model() {
+        let mut settings = AppSettings::default();
+        let entry = SavedProviderSettings {
+            recent_models: vec!["gpt-5".to_string()],
+            ..SavedProviderSettings::default()
+        };
+        settings.providers.insert("openai".to_string(), entry);
+
+        settings.forget_provider_model("openai", "   ");
+
+        assert_eq!(
+            settings
+                .providers
+                .get("openai")
+                .expect("provider kept")
+                .recent_models,
+            vec!["gpt-5".to_string()]
+        );
+    }
+
+    #[test]
+    fn project_effort_overrides_user_effort() {
+        let user = settings_from_yaml("context:\n  effort: low\n");
+        let project = settings_from_yaml("context:\n  effort: high\n");
+
+        let (merged, _) = merge_project_settings(user, project);
+
+        assert_eq!(
+            merged.context.and_then(|context| context.effort),
+            Some(EffortLevel::High)
+        );
     }
 }

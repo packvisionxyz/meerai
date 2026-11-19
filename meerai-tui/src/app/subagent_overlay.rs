@@ -70,9 +70,7 @@ impl AppState {
 
     fn focus_subagent(&mut self, entry_idx: usize) {
         let tab_id = self.tab().tab_id;
-        let turn = self.tab().transcript[..=entry_idx]
-            .iter()
-            .rposition(|entry| matches!(entry, TranscriptEntry::User { .. }));
+        let group = crate::ui::transcript::activity_group_start(&self.tab().transcript, entry_idx);
         let mut child = None;
         {
             let tab = self.tab_mut();
@@ -81,8 +79,8 @@ impl AppState {
                 return;
             };
             subagent.expanded = true;
-            if let Some(turn) = turn {
-                tab.turn_activity.insert(turn, true);
+            if let Some(group) = group {
+                tab.turn_activity.insert(group, true);
             }
             if subagent.nested.is_none()
                 && let Some(session_id) = subagent.child_session_id.clone()

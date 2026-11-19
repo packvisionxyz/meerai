@@ -484,7 +484,9 @@ Detail in [`infra.md`](infra.md). Summary:
   (agents, then skills, then files; ids in teal for agents and blue for skills; Tab accepts, Enter
   accepts without submitting, Esc dismisses) applies the selected definitions before the prompt. A
   known accepted mention renders as an `<id>` chip in the composer while the raw
-  `@agent/<id>`/`@skill/<id>` stays in the buffer; unknown and partial tokens render as typed.
+  `@agent/<id>`/`@skill/<id>` stays in the buffer; unknown and partial tokens render as typed. On
+  submit the token is applied and stripped from the prompt sent to the model, and a directly
+  submitted user message keeps it as the same `<id>` chip (replay shows the stripped prompt).
   Frontmatter `tools`, `permissions`, and `allowed-tools` are warning-only; `steps`/`mode` are not
   applied; a `:` model is ignored. Definitions are untrusted prompt text and grant no tools or
   permissions.
@@ -496,6 +498,19 @@ Detail in [`infra.md`](infra.md). Summary:
   refreshed under `auth.json.lock`, and is never listed or logged as a token. A configured
   provider opens the TUI connection screen (next/update/remove) instead of the auth method screen.
 - Windows is a supported target: `cmd /C` for shell, x64 build only, no file-mode enforcement.
+- Sampling tiers are a user setting: `context.effort` is `low` (0.00), `medium` (0.20, the
+  default), or `high` (0.50). The tier sets the temperature when `temperature` is unset, and is
+  sent as the provider reasoning-effort hint. That hint is honored by only some adapters; DeepSeek,
+  Groq, xAI, and `open_router` receive the tier temperature and ignore the hint. Both clients show
+  the real value (`temp 0.20 · medium`), never `temp default`. `/effort` cycles or sets the tier in
+  both clients; the browser also provides a Settings selector.
+- Activity digests group each contiguous run of thoughts, tool calls, and subagents immediately
+  before the visible message that follows it (or at the end when work trails), folding an
+  `Assistant` entry's reasoning right above its visible text in both live and replay views.
+- Stale or misspelled model ids are removable in both clients: `forget_provider_model` drops the id
+  from `recent_models`, clears the saved `provider.model`, and clears the active model when it
+  matches. TUI uses `ctrl+d` in the model picker; the browser uses the `Forget` badge, which routes
+  through `UpdateSettingsRequest.forget_model`.
 - Terminal-first UX with modal interaction (`Normal` / `Insert` input modes, `ActiveModal`
   overlays, `/` slash commands) paired with the local Leptos Wasm browser companion (`web`
   feature, `meerai serve` / TUI `/serve`); see [browser-ui.md](../../docs/browser-ui.md).

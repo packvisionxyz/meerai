@@ -209,6 +209,23 @@ fn sidebar_shows_the_workspace_without_duplicated_metrics() {
 }
 
 #[test]
+fn user_bubble_renders_known_mentions_as_chips_and_keeps_unknown_tokens() {
+    let mut app = test_app();
+    app.skills = vec![skill_definition("orchestrate")];
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "@skill/orchestrate plan the work".to_string(),
+    });
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "@skill/missing keep this".to_string(),
+    });
+
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("orchestrate plan the work"));
+    assert!(!rendered.contains("@skill/orchestrate"));
+    assert!(rendered.contains("@skill/missing keep this"));
+}
+
+#[test]
 fn running_tools_expand_to_show_full_arguments() {
     let mut app = test_app();
     app.tab_mut().transcript.push(TranscriptEntry::User {
@@ -227,7 +244,7 @@ fn running_tools_expand_to_show_full_arguments() {
             output: None,
             expanded: false,
         }));
-    app.tab_mut().turn_activity.insert(0, true);
+    app.tab_mut().turn_activity.insert(1, true);
 
     let collapsed = render_to_string(&mut app);
     assert!(collapsed.contains("Searching"));
@@ -306,7 +323,7 @@ fn hover_highlights_the_row_under_the_pointer() {
             output: None,
             expanded: false,
         }));
-    app.tab_mut().turn_activity.insert(0, true);
+    app.tab_mut().turn_activity.insert(1, true);
 
     let _ = render_to_string(&mut app);
     let tool_row = (0..28)
@@ -373,7 +390,7 @@ fn clicking_a_tool_row_expands_and_collapses_its_output() {
             ),
             expanded: false,
         }));
-    app.tab_mut().turn_activity.insert(0, true);
+    app.tab_mut().turn_activity.insert(1, true);
 
     let collapsed = render_to_string(&mut app);
     assert!(collapsed.contains("+ Read"));
@@ -427,7 +444,7 @@ fn tool_runs_have_a_band_and_shaded_text_when_finished() {
             output: None,
             expanded: false,
         }));
-    app.tab_mut().turn_activity.insert(0, true);
+    app.tab_mut().turn_activity.insert(1, true);
 
     let backend = TestBackend::new(120, 28);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -514,7 +531,7 @@ fn renders_turn_digest_grouping_tools_and_thoughts() {
     assert!(collapsed.contains("All done."));
     assert!(collapsed.contains("[error]"));
 
-    app.tab_mut().turn_activity.insert(0, true);
+    app.tab_mut().turn_activity.insert(1, true);
     let expanded = render_to_string(&mut app);
     assert!(expanded.contains("- 1 command · 1 read · 1 edit · 1 thought"));
     assert!(expanded.contains("+ Thought (1 line)"));
@@ -547,14 +564,14 @@ fn clicking_the_digest_expands_and_collapses_turn_activity() {
     let zone = app
         .digest_hit_zones
         .iter()
-        .find(|zone| zone.entry_idx == 0)
+        .find(|zone| zone.entry_idx == 1)
         .copied()
         .expect("digest hit zone");
     let col = app.transcript_inner_area.x + 2;
     let row = app.transcript_inner_area.y + zone.start_line as u16;
     assert!(app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), col, row)));
     assert!(app.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), col, row)));
-    assert_eq!(app.tab().turn_activity.get(&0), Some(&true));
+    assert_eq!(app.tab().turn_activity.get(&1), Some(&true));
 
     let expanded = render_to_string(&mut app);
     assert!(expanded.contains("Searched"));
@@ -563,7 +580,7 @@ fn clicking_the_digest_expands_and_collapses_turn_activity() {
     let row = app.transcript_inner_area.y + zone.start_line as u16;
     assert!(app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), col, row)));
     assert!(app.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), col, row)));
-    assert_eq!(app.tab().turn_activity.get(&0), Some(&false));
+    assert_eq!(app.tab().turn_activity.get(&1), Some(&false));
     let recollapsed = render_to_string(&mut app);
     assert!(!recollapsed.contains("Searched"));
 }
@@ -587,7 +604,7 @@ fn subagent_expands_to_show_child_conversation() {
             nested_refreshed_at: None,
             nested_loading: false,
         }));
-    app.tab_mut().turn_activity.insert(0, true);
+    app.tab_mut().turn_activity.insert(1, true);
 
     let collapsed = render_to_string(&mut app);
     assert!(collapsed.contains("+ [subagent] explore [ok]"));
@@ -711,7 +728,7 @@ fn digest_hover_marks_summary_for_text_highlight() {
     let row = app.transcript_inner_area.y + zone.start_line as u16;
     let _ = app.handle_mouse_event(mouse(crossterm::event::MouseEventKind::Moved, col, row));
     let _ = render_to_string(&mut app);
-    assert_eq!(app.hovered_digest, Some(0));
+    assert_eq!(app.hovered_digest, Some(1));
 }
 
 #[test]
@@ -729,6 +746,7 @@ fn expanded_edit_renders_colored_diff_with_counts() {
             output: Some(diff.to_string()),
             expanded: false,
         }));
+    app.tab_mut().turn_activity.insert(0, true);
 
     let collapsed = render_to_string(&mut app);
     assert!(collapsed.contains("+ Edited src/lib.rs [ok] +1 -1"));
@@ -1315,7 +1333,7 @@ fn renders_collapsible_thinking_and_records_click_hit_zone() {
         delta: ItemDelta::AgentText("Hello!".to_string()),
     });
 
-    app.tab_mut().turn_activity.insert(0, true);
+    app.tab_mut().turn_activity.insert(1, true);
     let collapsed = render_to_string(&mut app);
     assert!(collapsed.contains("+ Thinking (2 lines)"));
     assert!(!collapsed.contains("secret thought step 1"));
@@ -1763,7 +1781,7 @@ fn renders_distinct_user_thinking_tool_and_response_roles() {
         streaming: false,
         reasoning_expanded: true,
     });
-    app.tab_mut().turn_activity.insert(0, true);
+    app.tab_mut().turn_activity.insert(1, true);
 
     let rendered = render_to_string(&mut app);
     assert!(!rendered.contains("▌ you"));
@@ -2028,7 +2046,7 @@ fn transcript_sample(app: &mut AppState) {
         streaming: false,
         reasoning_expanded: false,
     });
-    app.tab_mut().turn_activity.insert(0, true);
+    app.tab_mut().turn_activity.insert(1, true);
 }
 
 fn screen_row(app: &AppState, needle: &str) -> u16 {
@@ -2141,7 +2159,7 @@ fn transcript_document_rebuilds_when_nested_subagent_content_arrives() {
             nested_refreshed_at: None,
             nested_loading: true,
         }));
-    app.tab_mut().turn_activity.insert(0, true);
+    app.tab_mut().turn_activity.insert(1, true);
 
     let loading = render_to_string(&mut app);
     assert!(loading.contains("loading conversation…"));
@@ -2186,7 +2204,7 @@ fn transcript_document_ignores_the_spinner_without_an_active_tool() {
             output: None,
             expanded: false,
         }));
-    app.tab_mut().turn_activity.insert(0, true);
+    app.tab_mut().turn_activity.insert(1, true);
     let _ = render_to_string(&mut app);
     let builds = app.transcript_builds();
 
@@ -2204,7 +2222,7 @@ fn transcript_document_rebuilds_when_an_item_completes_with_same_size_text() {
     app.tab_mut().transcript.push(TranscriptEntry::User {
         text: "go".to_string(),
     });
-    app.tab_mut().turn_activity.insert(0, true);
+    app.tab_mut().turn_activity.insert(1, true);
     let reasoning_id = ItemId::from_raw("item-cache-reasoning");
     app.handle_agent_event(AgentEvent::TurnStarted {
         turn_id: TurnId::from_raw("turn-cache-reasoning"),
@@ -2293,7 +2311,7 @@ fn hover_repaints_without_rebuilding_the_transcript_document() {
         .draw(|frame| render(frame, &mut app))
         .expect("hover digest");
     assert_eq!(app.transcript_builds(), builds, "hover must not rebuild");
-    assert_eq!(app.hovered_digest, Some(0));
+    assert_eq!(app.hovered_digest, Some(1));
     let buffer = terminal.backend().buffer();
     assert_eq!(buffer[(area.x, digest_row)].fg, palette.faint);
     assert_eq!(buffer[(area.x + 2, digest_row)].fg, palette.text);
@@ -2431,14 +2449,15 @@ fn composer_shows_mode_provider_model_and_temperature() {
 }
 
 #[test]
-fn composer_shows_default_temperature_for_out_of_range_settings() {
+fn composer_falls_back_to_medium_tier_for_out_of_range_settings() {
     use meerai_common::settings::Temperature;
 
     let mut app = test_app();
     app.context_temperature = Some(Temperature::new(5.0)).and_then(Temperature::effective);
     let rendered = render_to_string(&mut app);
-    assert!(rendered.contains("temp default"));
+    assert!(rendered.contains("temp 0.20 · medium"));
     assert!(!rendered.contains("5.00"));
+    assert!(!rendered.contains("temp default"));
 }
 
 #[test]
@@ -2602,4 +2621,217 @@ fn anchor_rail_hides_when_the_transcript_fits_the_viewport() {
     render_rows_with_size(&mut app, 120, 24);
     assert_eq!(app.anchor_rail_area, Rect::default());
     assert!(!app.anchor_rail_visible());
+}
+
+#[test]
+fn turn_digest_renders_after_the_turn_content() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "first".to_string(),
+    });
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: "I will check the TUI mouse handling code.".to_string(),
+        reasoning: String::new(),
+        streaming: false,
+        reasoning_expanded: false,
+    });
+    app.tab_mut()
+        .transcript
+        .push(TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
+            call_id: "c1".to_string(),
+            name: "code-shell".to_string(),
+            args: "{}".to_string(),
+            status: ToolCallStatus::Succeeded,
+            output: None,
+            expanded: false,
+        }));
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "second".to_string(),
+    });
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: "Done second.".to_string(),
+        reasoning: String::new(),
+        streaming: false,
+        reasoning_expanded: false,
+    });
+
+    let out = render_to_string(&mut app);
+    let message = out
+        .find("I will check the TUI mouse handling code.")
+        .unwrap();
+    let digest = out.find("+ 1 command").unwrap();
+    let next_user = out.find("second").unwrap();
+    assert!(message < digest, "digest follows the turn content");
+    assert!(digest < next_user, "digest precedes the next turn");
+}
+
+#[test]
+fn groups_contiguous_activity_around_visible_assistant_messages() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "fix it".to_string(),
+    });
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: "I do ...".to_string(),
+        reasoning: "initial thought".to_string(),
+        streaming: false,
+        reasoning_expanded: false,
+    });
+    for i in 0..2 {
+        app.tab_mut()
+            .transcript
+            .push(TranscriptEntry::ToolCall(crate::app::ToolCallEntry {
+                call_id: format!("c-{i}"),
+                name: "code-grep".to_string(),
+                args: "{}".to_string(),
+                status: ToolCallStatus::Succeeded,
+                output: None,
+                expanded: false,
+            }));
+    }
+    for i in 0..4 {
+        app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+            text: String::new(),
+            reasoning: format!("step thought {i}"),
+            streaming: false,
+            reasoning_expanded: false,
+        });
+    }
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: "....".to_string(),
+        reasoning: "final thought".to_string(),
+        streaming: false,
+        reasoning_expanded: false,
+    });
+
+    let collapsed = render_to_string(&mut app);
+    let d1 = collapsed.find("+ 1 thought").expect("first digest");
+    let m1 = collapsed.find("I do ...").expect("first message");
+    let d2 = collapsed
+        .find("+ 2 tools · 5 thoughts")
+        .expect("second digest");
+    let m2 = collapsed.find("....").expect("final message");
+    assert!(d1 < m1 && m1 < d2 && d2 < m2, "{collapsed}");
+
+    app.tab_mut().turn_activity.insert(1, true);
+    let expanded_first = render_to_string(&mut app);
+    assert!(expanded_first.contains("- 1 thought"));
+    assert!(expanded_first.contains("+ 2 tools · 5 thoughts"));
+    assert!(expanded_first.contains("+ Thought (1 line)"));
+    assert!(!expanded_first.contains("Searched"));
+}
+
+#[test]
+fn double_click_in_utf8_gutter_does_not_panic_and_selects_first_word() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "hello world".to_string(),
+    });
+    app.tab_mut().turn_activity.insert(1, true);
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: "answer two".to_string(),
+        reasoning: "thinking deeply".to_string(),
+        streaming: false,
+        reasoning_expanded: true,
+    });
+    let _ = render_to_string(&mut app);
+
+    let user_row_idx = app
+        .transcript_wrapped_lines
+        .iter()
+        .position(|line| line.text.contains("hello world"))
+        .expect("user row");
+    let reasoning_row_idx = app
+        .transcript_wrapped_lines
+        .iter()
+        .position(|line| line.text.contains("thinking deeply"))
+        .expect("reasoning row");
+    let assistant_row_idx = app
+        .transcript_wrapped_lines
+        .iter()
+        .position(|line| line.text.contains("answer two"))
+        .expect("assistant row");
+
+    assert_eq!(app.word_bounds_at(user_row_idx, 0), Some((2, 6)));
+    assert_eq!(app.word_bounds_at(reasoning_row_idx, 1), Some((4, 11)));
+
+    let inner = app.transcript_inner_area;
+    let vis_start = app.tab().scroll_offset;
+    let y = inner.y + (assistant_row_idx - vis_start) as u16;
+    let x = inner.x;
+    for _ in 0..2 {
+        app.handle_mouse_event(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        app.handle_mouse_event(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+    }
+    assert_eq!(app.last_copied_text.as_deref(), Some("answer"));
+}
+
+#[test]
+fn queued_panel_tracks_hover_and_edits_or_removes_items() {
+    let mut app = test_app();
+    app.tab_mut().is_running = true;
+    app.tab_mut().queued = vec!["first task".to_string(), "second task".to_string()];
+
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("first task"));
+    assert!(rendered.contains("second task"));
+    let edit_zone = app
+        .queued_hit_zones
+        .iter()
+        .find(|z| z.kind == crate::app::QueuedHitKind::Edit(0))
+        .copied()
+        .expect("edit hit zone");
+    let remove_zone = app
+        .queued_hit_zones
+        .iter()
+        .find(|z| z.kind == crate::app::QueuedHitKind::Remove(1))
+        .copied()
+        .expect("remove hit zone");
+
+    assert!(app.handle_mouse_event(crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Moved,
+        column: edit_zone.rect.x,
+        row: edit_zone.rect.y,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    }));
+    assert_eq!(app.hovered_queued, Some(edit_zone.kind));
+
+    assert!(app.handle_mouse_event(crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: remove_zone.rect.x,
+        row: remove_zone.rect.y,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    }));
+    assert_eq!(app.tab().queued, vec!["first task".to_string()]);
+
+    assert!(app.handle_mouse_event(crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: edit_zone.rect.x,
+        row: edit_zone.rect.y,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    }));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::QueuedEdit { index: 0, .. })
+    ));
+    app.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('!'),
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    app.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert!(app.modal.is_none());
+    assert_eq!(app.tab().queued, vec!["first task!".to_string()]);
 }

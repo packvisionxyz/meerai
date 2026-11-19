@@ -8737,3 +8737,66 @@ async fn batch_diagnostics_land_after_every_tool_result() {
         "runtime notes must follow every tool result: {notes:?} <= {last_result}"
     );
 }
+
+#[tokio::test]
+async fn effort_tier_flows_into_chat_options_and_plan_usage_omits_it() {
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("done"),
+    )]]));
+    let session = memory_session();
+    let mut agent = MultiTurnAgent::with_streamer(
+        streamer.clone(),
+        "openai_resp::gpt-5",
+        Vec::new(),
+        "",
+        MultiTurnAgentConfig::default(),
+    );
+    let config =
+        HarnessConfig::from_context_settings(Some(&meerai_common::settings::ContextSettings {
+            effort: Some(meerai_common::settings::EffortLevel::High),
+            ..Default::default()
+        }));
+    agent.set_harness(harness(&session, auto_mode(), config));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    {
+        let cached = streamer.options.lock().unwrap();
+        assert_eq!(cached[0].temperature, Some(0.5));
+        assert!(matches!(
+            cached[0].reasoning_effort,
+            Some(genai::chat::ReasoningEffort::High)
+        ));
+    }
+
+    let plan_streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("done"),
+    )]]));
+    let plan_session = memory_session();
+    let mut plan_agent = MultiTurnAgent::with_streamer(
+        plan_streamer.clone(),
+        "openai_resp::gpt-5",
+        Vec::new(),
+        "",
+        MultiTurnAgentConfig::default(),
+    );
+    let plan_config = HarnessConfig {
+        plan_usage: true,
+        effort: Some(meerai_common::settings::EffortLevel::High),
+        temperature: Some(0.5),
+        ..HarnessConfig::default()
+    };
+    plan_agent.set_harness(harness(&plan_session, auto_mode(), plan_config));
+    plan_agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let plan_cached = plan_streamer.options.lock().unwrap();
+    assert_eq!(plan_cached[0].temperature, None);
+    assert!(plan_cached[0].reasoning_effort.is_none());
+}

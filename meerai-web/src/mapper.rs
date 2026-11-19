@@ -5,14 +5,14 @@ use meerai_agents::{
     ApprovalRequest, QuestionAnswer, QuestionPrompt, QuestionRequest, RewindScope,
 };
 use meerai_common::settings::{
-    ContextSettings, SandboxSettings, SessionSettings, Temperature, ThemeSettings,
+    ContextSettings, EffortLevel, SandboxSettings, SessionSettings, Temperature, ThemeSettings,
 };
 use meerai_core::EffectClass;
 use meerai_host::{
-    Backend, ChatGptLoginStatus, DiffRowKind, FileChangeEntry, FileDiffView, HostAuthKind,
-    HostError, HostInfoSnapshot, HostProvidersSnapshot, HostSettingsUpdate, LiveEntry,
-    LiveSessionDetail, LiveSessionSummary, RegistryEventKind, RegistrySnapshot, ResolvedThemeHex,
-    SearchMatch, SearchMode, SearchPreview, SessionStatus as HostSessionStatus,
+    Backend, ChatGptLoginStatus, DiffRowKind, FileChangeEntry, FileDiffView, ForgetModel,
+    HostAuthKind, HostError, HostInfoSnapshot, HostProvidersSnapshot, HostSettingsUpdate,
+    LiveEntry, LiveSessionDetail, LiveSessionSummary, RegistryEventKind, RegistrySnapshot,
+    ResolvedThemeHex, SearchMatch, SearchMode, SearchPreview, SessionStatus as HostSessionStatus,
     TurnMetricsSnapshot, UnifiedLine, UnifiedLineKind, UsageStatsSnapshot,
 };
 use meerai_policy::ApprovalMode;
@@ -23,14 +23,15 @@ use meerai_session::{ApprovalDecision, ApprovalKind, GrantScope, LoggedEvent};
 use meerai_web_protocol::{
     AcpPresetDto, AgentInfoDto, ApiError, ApiErrorCode, ApprovalDecisionDto, ApprovalKindDto,
     ApprovalModeDto, ApprovalRequestDto, AuthKindDto, BackendKind, ChatGptLoginStateDto,
-    ContextSettingsDto, DiffCellDto, DiffRowDto, DiffRowKindDto, EffectClassDto, FileChangeDto,
-    FileDiffResponse, GrantScopeDto, HostInfoDto, McpServerInfoDto, ModelItemDto, ProviderItemDto,
-    ProvidersResponse, QuestionAnswerDto, QuestionOptionDto, QuestionPromptDto, QuestionRequestDto,
-    RewindScopeDto, SandboxSettingsDto, SearchModeDto, SessionDetailDto, SessionSettingsDto,
-    SessionStatus, SessionSummaryDto, SettingsSnapshotDto, SkillInfoDto, SnapshotResponse,
-    ThemeOverrideDto, ThemeTokensDto, TranscriptEntryDto, TurnMetricsDto, UnifiedLineDto,
-    UnifiedLineKindDto, UpdateSettingsRequest, UsageDto, ViewEvent, WorkspacePreviewLineDto,
-    WorkspacePreviewResponse, WorkspaceSearchMatchDto, WorkspaceSearchResponse,
+    ContextSettingsDto, DiffCellDto, DiffRowDto, DiffRowKindDto, EffectClassDto, EffortDto,
+    FileChangeDto, FileDiffResponse, GrantScopeDto, HostInfoDto, McpServerInfoDto, ModelItemDto,
+    ProviderItemDto, ProvidersResponse, QuestionAnswerDto, QuestionOptionDto, QuestionPromptDto,
+    QuestionRequestDto, RewindScopeDto, SandboxSettingsDto, SearchModeDto, SessionDetailDto,
+    SessionSettingsDto, SessionStatus, SessionSummaryDto, SettingsSnapshotDto, SkillInfoDto,
+    SnapshotResponse, ThemeOverrideDto, ThemeTokensDto, TranscriptEntryDto, TurnMetricsDto,
+    UnifiedLineDto, UnifiedLineKindDto, UpdateSettingsRequest, UsageDto, ViewEvent,
+    WorkspacePreviewLineDto, WorkspacePreviewResponse, WorkspaceSearchMatchDto,
+    WorkspaceSearchResponse,
 };
 use serde::Serialize;
 
@@ -517,6 +518,11 @@ pub fn map_host_info(info: HostInfoSnapshot) -> HostInfoDto {
                 summarizer_model: info.settings.context.summarizer_model,
                 post_edit_diagnostics: info.settings.context.post_edit_diagnostics,
                 temperature: info.settings.context.temperature.map(|t| t.value()),
+                effort: info.settings.context.effort.map(|e| match e {
+                    EffortLevel::Low => EffortDto::Low,
+                    EffortLevel::Medium => EffortDto::Medium,
+                    EffortLevel::High => EffortDto::High,
+                }),
             },
             session: SessionSettingsDto {
                 auto_prune_days: info.settings.session.auto_prune_days,
@@ -702,6 +708,11 @@ pub fn map_settings_update(req: UpdateSettingsRequest) -> HostSettingsUpdate {
             summarizer_model: c.summarizer_model,
             post_edit_diagnostics: c.post_edit_diagnostics,
             temperature: c.temperature.map(Temperature::new),
+            effort: c.effort.map(|e| match e {
+                EffortDto::Low => EffortLevel::Low,
+                EffortDto::Medium => EffortLevel::Medium,
+                EffortDto::High => EffortLevel::High,
+            }),
         }),
         session: req.session.map(|s| SessionSettings {
             auto_prune_days: s.auto_prune_days,
@@ -711,6 +722,10 @@ pub fn map_settings_update(req: UpdateSettingsRequest) -> HostSettingsUpdate {
             require_for_scripts: s.require_for_scripts,
             require_for_shell: s.require_for_shell,
             strict_env: s.strict_env,
+        }),
+        forget_model: req.forget_model.map(|f| ForgetModel {
+            provider: f.provider,
+            model: f.model,
         }),
     }
 }

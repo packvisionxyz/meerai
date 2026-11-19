@@ -56,6 +56,10 @@ enum LoopMsg {
         session_id: SessionId,
         created: Result<OpenedSession>,
     },
+    SessionCreatedForReplace {
+        replaced_tab: u64,
+        created: Result<OpenedSession>,
+    },
     SessionResolved {
         mode: SessionOpenMode,
         result: Result<SessionResolveOutcome>,
@@ -231,7 +235,12 @@ pub async fn run_event_loop(
 
         if app.pending_reload {
             app.pending_reload = false;
+            app.pending_quiet_reload = false;
             app.perform_reload().await;
+            needs_redraw = true;
+        } else if app.pending_quiet_reload {
+            app.pending_quiet_reload = false;
+            app.perform_reload_quiet().await;
             needs_redraw = true;
         }
 
@@ -562,6 +571,36 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
                     });
                 });
             }
+            PendingSessionAction::ReplaceLastTab => {
+                let Some(opener) = opener.clone() else {
+                    continue;
+                };
+                let replaced_tab = app.tab().tab_id;
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let created = opener.create_session().await;
+                    let _ = tx.send(LoopMsg::SessionCreatedForReplace {
+                        replaced_tab,
+                        created,
+                    });
+                });
+            }
+            PendingSessionAction::SyncContext => {
+                if let (Some(opener), Some(reg)) = (opener.clone(), app.registry.clone()) {
+                    let context = app.settings.context.clone();
+                    tokio::spawn(async move {
+                        let update = meerai_host::HostSettingsUpdate {
+                            context,
+                            ..Default::default()
+                        };
+                        if let Ok(outcome) = opener.update_settings(update).await {
+                            reg.emit_reload(&outcome);
+                        }
+                    });
+                } else {
+                    app.pending_quiet_reload = true;
+                }
+            }
         }
     }
     changed
@@ -759,6 +798,25 @@ fn handle_loop_msg(
                     app.status_notice = Some(truncate_notice(&msg));
                     app.pending_session_actions
                         .push(PendingSessionAction::RefreshSessions);
+                }
+            }
+            true
+        }
+        LoopMsg::SessionCreatedForReplace {
+            replaced_tab,
+            created,
+        } => {
+            match created {
+                Ok(opened) => {
+                    let _ = mount_opened_session(app, opened, SessionOpenMode::NewTab, loop_tx);
+                    if let Some(idx) = app.tab_index_by_id(replaced_tab) {
+                        app.close_tab(idx);
+                    }
+                    app.status_notice = Some(format!("Session {}", app.tab().session_id));
+                }
+                Err(err) => {
+                    let msg = format!("Could not create a new session: {err:#}");
+                    app.status_notice = Some(truncate_notice(&msg));
                 }
             }
             true
@@ -1082,6 +1140,21 @@ fn handle_registry_event(app: &mut AppState, ev: RegistryEvent) -> bool {
                 tab.transcript = entries.into_iter().map(live_to_transcript).collect();
                 tab.is_running = false;
                 tab.transcript_version = tab.transcript_version.wrapping_add(1);
+            }
+            true
+        }
+        RegistryEventKind::Reloaded { host_info, .. } => {
+            app.context_temperature = host_info
+                .settings
+                .context
+                .temperature
+                .and_then(meerai_common::settings::Temperature::effective);
+            app.context_effort = host_info.settings.context.effort;
+            app.explicit_context_window = host_info.settings.context.context_window_tokens;
+            if let Some(dir) = app.config_dir.as_deref()
+                && let Ok(user) = meerai_common::settings::load_settings_from(dir)
+            {
+                app.settings = user;
             }
             true
         }

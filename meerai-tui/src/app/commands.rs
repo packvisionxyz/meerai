@@ -51,6 +51,35 @@ impl AppState {
         }
     }
 
+    pub(super) fn set_effort_from_arg(&mut self, arg: &str) {
+        let value = arg.trim().to_lowercase();
+        let next = match value.as_str() {
+            "" => self.context_effort.unwrap_or_default().cycle(),
+            "low" => EffortLevel::Low,
+            "medium" | "mid" => EffortLevel::Medium,
+            "high" => EffortLevel::High,
+            other => {
+                self.status_notice = Some(format!(
+                    "Unknown effort '{other}' · use low, medium, or high"
+                ));
+                return;
+            }
+        };
+        self.context_effort = Some(next);
+        self.context_temperature = Some(next.default_temperature());
+        let context = self.settings.context.get_or_insert_with(Default::default);
+        context.effort = Some(next);
+        context.temperature = None;
+        self.persist_settings();
+        self.pending_session_actions
+            .push(PendingSessionAction::SyncContext);
+        self.status_notice = Some(format!(
+            "Effort {} · temp {:.2}",
+            next.label(),
+            next.default_temperature()
+        ));
+    }
+
     pub(super) fn handle_slash_command(&mut self, command: &str) {
         let mut parts = command.splitn(2, char::is_whitespace);
         let cmd = parts.next().unwrap_or_default();
@@ -157,6 +186,9 @@ impl AppState {
                     let (target_provider, target_model) = self.resolve_model_target(arg);
                     self.select_provider_and_model(&target_provider, &target_model);
                 }
+            }
+            "/effort" => {
+                self.set_effort_from_arg(arg);
             }
             "/clear" => {
                 let tab = self.tab_mut();
@@ -547,6 +579,7 @@ fn format_help_text() -> String {
         .map(|(cmd, _, _)| match *cmd {
             "/sessions" => "/sessions [id]".to_string(),
             "/model" => "/model [name]".to_string(),
+            "/effort" => "/effort [low|medium|high]".to_string(),
             "/agent" => "/agent <id> (or @agent/<id>)".to_string(),
             "/skill" => "/skill <id> (or @skill/<id>)".to_string(),
             "/mode" => "/mode [plan|ask|auto]".to_string(),

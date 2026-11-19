@@ -137,13 +137,21 @@ selects text and copies it on release. There is no keyboard Select mode.
   a completion; `Esc` dismisses completion, then returns to `NOR` without
   discarding the draft.
 - Composer clicks move the cursor and start a drag selection. Drag paints
-  the selection with `surface_high`; Backspace/Delete or typing deletes it.
-  Unlike the transcript, composer drag selection does not auto-copy.
+  the selection with the accent background and background-colored text;
+  Backspace/Delete or typing deletes it. Unlike the transcript, composer
+  drag selection does not auto-copy. A double-click within 400 ms on the
+  same cell selects the word under the cursor (`register_click`,
+  `word_bounds_at`).
+- The queued panel sits directly above the composer and shows up to four
+  queued messages, each with `edit` and `✕` hit zones
+  (`render_queued_panel`, `ui/composer.rs`). It is hidden below 32 columns.
+  `✕` drops the message; `edit` opens the narrow queued-edit dialog, and
+  `Enter` commits the new text in place.
 - The composer footer shows the input-mode badge (`INS`/`NOR`), approval
-  mode badge, model, provider, and the effective merged temperature
-  (`temp 0.70`, or `temp default` when unset or out of range), driven by
-  `context.temperature`. An ACP tab shows
-  `agy (acp)` in place of model/provider.
+  mode badge, model, provider, and the effective temperature with its tier
+  (`temp 0.20 · medium`), driven by `context.effort` and
+  `context.temperature`. An ACP tab shows `agy (acp)` in place of
+  model/provider.
 - `!` at the start of a line runs a user shell command (§2.14).
 
 ### 2.5 Slash commands
@@ -157,6 +165,7 @@ Typing `/` opens completion. The implemented handler set
 | `/auth` | Credential sources |
 | `/connect`, `/provider` | Configure or switch provider |
 | `/models`, `/model [name]` | Pick or set the model |
+| `/effort [low\|medium\|high]` | Show, set, or cycle the reasoning tier (§2.4) |
 | `/agent <id>`, `/skill <id>` | Apply a markdown definition |
 | `/agents`, `/skills` | Mentions popup filtered to that kind |
 | `/mode [plan\|ask\|auto]` | Show or set the approval mode |
@@ -203,7 +212,9 @@ path in the normal text color. Rows show the bare id, not the `@agent/` or
   map through chip display widths; editing operates on the raw text.
 - On submit, skills apply before the agent, mentions are stripped, repeats
   apply once, and an unknown mention stays as text. A mention-only prompt
-  applies definitions without starting a turn.
+  applies definitions without starting a turn. A directly submitted user message keeps a
+  known mention as the same `<id>` chip, while the prompt sent to the model and
+  the session log carry the stripped text; replay shows the stripped prompt.
 
 ### 2.7 Approval overlay
 
@@ -356,6 +367,13 @@ Clicking that segment opens a `SubagentOverlay` above the composer; a row
 click expands that child session in the transcript and keeps the overlay;
 Esc or a click outside closes it.
 
+The model picker (`/model`, `ctrl+o`) lists catalog, saved, and recent
+models. `ctrl+d` removes the highlighted model, or the typed model id when
+nothing is highlighted: it drops the id from `recent_models`, clears the
+saved `provider.model`, and clears the active model when it matches
+(`forget_provider_model`, `meerai-common/src/settings.rs`). The change is
+persisted immediately.
+
 ### 2.16 Notifications and exit summary
 
 - The window title is `M | <title> ●` idle, `M | <title> · working ●`
@@ -493,6 +511,7 @@ New dialogs stay narrow. Current caps (`meerai-tui/src/ui/modals.rs`):
 | Message menu | 44 |
 | Rewind menu | ≤ 60 |
 | Serve dialog | 64 |
+| Queued edit | 64 |
 | Question | ≤ 76 |
 | Diff | 92% of the terminal |
 | Search | 90% of the terminal |
@@ -512,17 +531,21 @@ New dialogs stay narrow. Current caps (`meerai-tui/src/ui/modals.rs`):
   `SessionTab::transcript_version` at every transcript mutation. Hover is
   an overlay paint, never baked into cached lines. Markdown, edit-diff
   parses, and tree-sitter tokens are memoized per entry.
-- **Turn digests.** `build_transcript_lines` emits one per-turn digest
-  under the user message. `code-shell`/`sac-run_script` count as commands,
-  `code-read_file` as reads, `code-write_file`/`code-edit_file` as edits,
-  `subagent-run`/`acp-run` as agents, other tools as tools, and non-empty
-  reasoning as thoughts. Active groups use gerunds (`Running 1 ·
-  Reading 2`); finished groups use noun counts (`1 command · 2 reads`).
-  The digest collapses the turn's tool rows, thought blocks, and subagent
-  rows by default, even while running; the `+`/`-` marker is a glyph, and
-  the toggle is mouse-click only. Response text, errors, and system notices
-  stay visible. Keep the tool-name mapping in `ui/transcript.rs` when tool
-  names change.
+- **Turn digests.** `build_transcript_lines` emits one digest per contiguous run
+  of activity (thoughts, tools, and subagents), immediately before the visible
+  message (`Assistant` text, `User`, `Question`, `System`, or `Error`) that
+  follows it—or at the end of the transcript while work trails. When an
+  `Assistant` entry carries both reasoning and response text, its reasoning folds
+  into the digest right above that response. `code-shell`/`sac-run_script` count
+  as commands, `code-read_file` as reads, `code-write_file`/`code-edit_file` as
+  edits, `subagent-run`/`acp-run` as agents, other tools as tools, and non-empty
+  reasoning as thoughts. Active groups use gerunds (`Running 1 · Reading 2`);
+  finished groups use noun counts (`1 command · 2 reads`). Each digest is keyed
+  by its first activity entry index and collapses its group's tool rows, thought
+  blocks, and subagent rows by default, even while running; the `+`/`-` marker
+  is a glyph, and the toggle is mouse-click only. Response text, errors, and
+  system notices stay visible. Keep the tool-name mapping in `ui/transcript.rs`
+  when tool names change.
 - **Tool rows.** Action labels come from `activity_verbs`
   (`Reading`/`Read`, `Running`/`Ran`, `Editing`/`Edited`,
   `Searching`/`Searched`). Rows are expandable even while running:

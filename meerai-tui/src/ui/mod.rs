@@ -16,9 +16,9 @@ use regex::Regex;
 
 use crate::app::{
     ActiveModal, AppState, CompletionHitZone, DocPos, HoverZone, InputMode, MentionKind,
-    ModalHitKind, ModalHitZone, TabHitKind, TabHitZone, ThinkingHitZone, ToolCallStatus,
-    TranscriptEntry, TranscriptWrappedLine, UserAction, mention_is_known,
-    normalize_selection_in_bounds, parse_mention_token,
+    ModalHitKind, ModalHitZone, QueuedHitKind, QueuedHitZone, TabHitKind, TabHitZone,
+    ThinkingHitZone, ToolCallStatus, TranscriptEntry, TranscriptWrappedLine, UserAction,
+    mention_is_known, normalize_selection_in_bounds, parse_mention_token,
 };
 use crate::completion::{CompletionItemKind, CompletionKind};
 use crate::diff::{DiffCell, DiffRowKind};
@@ -32,7 +32,7 @@ mod selection;
 mod sidebar;
 mod statusline;
 mod subagent_overlay;
-mod transcript;
+pub(crate) mod transcript;
 
 #[cfg(test)]
 mod tests;

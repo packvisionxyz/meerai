@@ -68,9 +68,11 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: R
     ) {
         "temp plan".to_string()
     } else {
-        app.context_temperature
-            .map(|value| format!("temp {value:.2}"))
-            .unwrap_or_else(|| "temp default".to_string())
+        let effort = app.context_effort.unwrap_or_default();
+        let value = app
+            .context_temperature
+            .unwrap_or_else(|| effort.default_temperature());
+        format!("temp {value:.2} · {}", effort.label())
     };
     let model = super::statusline::display_model(app);
     let (input_badge, input_color) = match app.mode {
@@ -122,6 +124,8 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: R
             );
         }
     }
+
+    render_queued_panel(frame, app, area);
 
     let tab = app.tab();
     let placeholder = match app.mode {
@@ -628,6 +632,101 @@ pub(super) fn render_completion_popup(
         app.completion_hit_zones.push(CompletionHitZone {
             rect: Rect::new(inner.x, inner.y + row as u16, inner.width, 1),
             index: idx,
+        });
+    }
+}
+
+fn render_queued_panel(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
+    app.queued_hit_zones.clear();
+    app.queued_panel_area = Rect::default();
+    let queued = app.tab().queued.clone();
+    if queued.is_empty() || area.width < 32 || area.y < 4 || app.completion.is_active() {
+        return;
+    }
+    let max_rows = 4u16;
+    let shown = queued.len().min(max_rows as usize);
+    let height = shown as u16;
+    let panel = Rect {
+        x: area.x.saturating_add(2),
+        y: area.y.saturating_sub(height),
+        width: area.width.saturating_sub(4),
+        height,
+    };
+    app.queued_panel_area = panel;
+    frame.render_widget(Clear, panel);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::p().surface)),
+        panel,
+    );
+
+    let hovered = app.hovered_queued;
+    for row in 0..height {
+        let idx = row as usize;
+        let Some(text) = queued.get(idx) else {
+            break;
+        };
+        let rect = Rect::new(panel.x, panel.y + row, panel.width, 1);
+        let edit = QueuedHitKind::Edit(idx);
+        let remove = QueuedHitKind::Remove(idx);
+        let remove_w = 3u16;
+        let edit_x = panel.x + panel.width.saturating_sub(remove_w + 5);
+        let edit_rect = Rect::new(edit_x, rect.y, 5, 1);
+        let remove_rect = Rect::new(
+            panel.x + panel.width.saturating_sub(remove_w),
+            rect.y,
+            remove_w,
+            1,
+        );
+
+        let preview_w = edit_x.saturating_sub(panel.x).saturating_sub(1) as usize;
+        let preview =
+            meerai_core::text::truncate_single_line(text, preview_w.saturating_sub(2).max(2));
+        let label_style = if hovered == Some(edit) || hovered == Some(remove) {
+            Style::default().fg(theme::p().text)
+        } else {
+            Style::default().fg(theme::p().muted)
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("↳ ", Style::default().fg(theme::p().warning)),
+                Span::styled(preview, label_style),
+            ])),
+            Rect::new(rect.x, rect.y, preview_w as u16, 1),
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "edit",
+                if hovered == Some(edit) {
+                    Style::default()
+                        .fg(theme::p().accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme::p().faint)
+                },
+            )),
+            edit_rect,
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "✕",
+                if hovered == Some(remove) {
+                    Style::default()
+                        .fg(theme::p().error)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme::p().faint)
+                },
+            )),
+            remove_rect,
+        );
+
+        app.queued_hit_zones.push(QueuedHitZone {
+            rect: edit_rect,
+            kind: edit,
+        });
+        app.queued_hit_zones.push(QueuedHitZone {
+            rect: remove_rect,
+            kind: remove,
         });
     }
 }

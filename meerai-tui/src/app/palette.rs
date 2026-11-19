@@ -146,6 +146,13 @@ pub(crate) const PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         section: "Turn",
+        label: "Cycle reasoning effort",
+        hint: "/effort",
+        keywords: "effort reasoning temperature sampling low medium high",
+        action: PaletteAction::Slash("/effort"),
+    },
+    PaletteCommand {
+        section: "Turn",
         label: "Compact context",
         hint: "ctrl+k",
         keywords: "compaction summarize context tokens compact",

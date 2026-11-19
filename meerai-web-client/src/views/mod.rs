@@ -536,17 +536,33 @@ fn StatusLine(store: StoreHandle) -> impl IntoView {
                 Some(t) => (t.usage.clone(), t.metrics.clone(), t.pending_queue.len()),
                 None => (Default::default(), Default::default(), 0),
             };
-            (root, short_root, branch, session, usage, metrics, queue_len)
+            let context = &s.host_info.settings.context;
+            let effort = context
+                .effort
+                .unwrap_or(meerai_web_protocol::EffortDto::Medium);
+            let temp = context
+                .temperature
+                .filter(|t| (0.0..=2.0).contains(t) && t.is_finite())
+                .unwrap_or_else(|| crate::state::effort_default_temperature(effort));
+            (
+                root, short_root, branch, session, usage, metrics, queue_len, effort, temp,
+            )
         })
     });
 
     view! {
         {move || {
-            let (full_root, short_root, branch, session, usage, metrics, queue_len) = line_memo.get();
+            let (full_root, short_root, branch, session, usage, metrics, queue_len, effort, temp) =
+                line_memo.get();
             let mut parts = vec![short_root];
             if let Some(branch) = branch {
                 parts.push(branch);
             }
+
+            parts.push(format!(
+                "temp {temp:.2} · {}",
+                crate::state::effort_label(effort)
+            ));
 
             let prompt_tok = usage.prompt_tokens.unwrap_or(0).max(0) as u64;
             let comp_tok = usage.completion_tokens.unwrap_or(0).max(0) as u64;

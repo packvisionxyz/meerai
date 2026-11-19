@@ -73,16 +73,16 @@ The client renders:
 
 - Snapshot-first state, SSE cursor resume, resync, a manual Reconnect control, and dismissible notice/error banners.
 - Draggable tabs with `+` session creation, status dots, `ACP` tags, unread markers, a workspace inspector sidebar (MCP servers, tools, cost/metrics, changed files, subagents), a mobile drawer, and a numbered turn rail with a jump-to-latest pill.
-- Collapsed activity digests with the TUI category counts, gerund phrasing, and structured tool summaries.
+- Collapsed activity digests per contiguous activity run (with thoughts, tools, and subagents in chronological order, including reasoning preceding a visible reply), using the TUI category counts, gerund phrasing, and structured tool summaries.
 - Markdown, highlighted code blocks, per-reply and tool-output copy buttons, and inline unified edit diffs.
 - Streaming assistant text and reasoning, system lines, errors, subagent rows, and question results.
 - Header model/mode pills, `ACP:<preset>` and update status badges, and a pending request reopen pill.
-- FIFO composer queue, steering (queued items or the active draft), cancel, compact, reset, and resolved `@agent`/`@skill` definition chips.
+- FIFO composer queue, steering (queued items or the active draft), cancel, compact, reset, and resolved `@agent`/`@skill` definition chips in the composer and in directly submitted user messages. Submitting strips known mention tokens from the prompt sent to the model and keeps the chip in the user message; replay shows the stripped prompt.
 - Approval decisions for once, turn, session, decline, decline with reason, and cancel.
 - Question answers with single or multiple choice, free text, Back/Next, keyboard navigation, submit, and cancel.
 - Session picker, history, fork, rewind, delete, workspace diff, debounced search with highlighted preview lines, and workspace inspector actions.
 - User shell through `!command`, with a scrollable shell dialog and transcript result.
-- Provider and model pickers (cross-provider or scoped by provider, recent and custom models, active/configured sorting), API key and base URL entry (including independent Base URL edits for keyless or already-configured providers), clickable ChatGPT sign-in, removal of stored credentials, and Settings (`Providers & Models`, `Current session`, grouped `Context & Limits` with model spec suggestions, `Theme` with color swatches, `Retention`, `Sandbox`, `Permissions`) with `config_writable` guards.
+- Provider and model pickers (cross-provider or scoped by provider, recent and custom models, active/configured sorting, removal of recent or misspelled model ids via the `Forget` badge), API key and base URL entry (including independent Base URL edits for keyless or already-configured providers), clickable ChatGPT sign-in, removal of stored credentials, and Settings (`Providers & Models`, `Current session`, grouped `Context & Limits` with model spec suggestions and a reasoning-effort tier selector (`low` 0.00, `medium` 0.20, `high` 0.50), `Theme` with color swatches, `Retention`, `Sandbox`, `Permissions`) with `config_writable` guards.
 - Command palette, slash commands, `@` mentions, completion, Help, and an auto-refreshing subagent overlay.
 
 The interface is flat and DOM-native: one surface scale, 1px borders, a single teal accent, rounded cards, no gradients, and a shared transcript and composer column capped at 880 px alongside the left Sessions panel (`Sessions`) and the right inspector sidebar (toggled from the far-right utility cluster). Transcript bubbles, error/system banners, markdown blocks, and subagent cards wrap long content inside the conversation column; subagent entries keep both their Markdown `Report` and child `Messages` collapsible inside `<details>` blocks, and optimistic in-flight or queued prompts render at the bottom of the transcript until committed. Hover and focus states are visible, dialogs trap `Tab` focus and restore focus to the opener on close, and the composer is a focused input card with an inline pending-request reopen bar when needed, anchored completion, an embedded stateful send/queue/stop action, working status animations, and hint keys below the card. The empty state offers three starter prompts that fill the composer. Light, dark, or custom colors come from the browser color scheme selector (`Host theme`, `System`, `Light`, `Dark`) or the host theme tokens; the client validates host tokens, sets `color-scheme` and contrast foregrounds, and writes CSS custom properties.
@@ -116,7 +116,7 @@ The replay projection reconstructs transcript entries from logged events ([`meer
 | --- | --- |
 | Layout, theme, transcript | Implemented: responsive shell, theme tokens, sidebar, turn rail, activity digests, Markdown, highlighted code. |
 | Keyboard, navigation, copy | Implemented for the shortcuts in §4.3. Browser find, selection, zoom, and copy work on the DOM. |
-| Composer and active turns | Implemented: multiline editing, IME, queue, steer, cancel, compact, reset. |
+| Composer and active turns | Implemented: multiline editing, IME, queue, steer, cancel, compact, reset. Queued prompts show `Steer`, `Edit`, and `Remove`; `Edit` opens the narrow queued-edit dialog and saves the new text in place. |
 | Slash commands and palette | Implemented for the dispatcher's current command set plus `/settings` for in-browser configuration. Unknown commands stay errors, never prompts. |
 | Mentions and definitions | Implemented: completion, apply, and resolved agent/skill chips with remove controls; the raw text stays in the textarea. |
 | Approvals | Implemented: once, turn, session, decline, reason, cancel. A resolved request closes in every client. |
@@ -126,7 +126,7 @@ The replay projection reconstructs transcript entries from logged events ([`meer
 | Tabs and sessions | Implemented: open, resume, HTML5 drag or shortcut reorder, `+` create, detach, fork, confirmed delete. The left Sessions sidebar lists live and stored sessions; row actions appear on hover or keyboard focus. Tab state stays local. |
 | Workspace review and search | Implemented: changed files, unified diff with a split toggle, debounced file/content search, highlighted preview. |
 | User shell | Implemented through `SessionOpener::run_user_shell`; the dialog and transcript receive the output. |
-| Status and usage | Implemented: workspace, branch, connection, mode, model, live turn timer, active tool, turn/session token counters, cached tokens, cost, throughput, and update status badge. Browser notifications are not shown yet. |
+| Status and usage | Implemented: workspace, branch, connection, mode, model, effective temperature with its tier (`temp 0.20 · medium`), live turn timer, active tool, turn/session token counters, cached tokens, cost, throughput, and update status badge. Browser notifications are not shown yet. |
 | Reload | Implemented through `/reload`; it reloads config and reports warnings. |
 | Providers and sign-in | Implemented: provider status, model choice, API key, ChatGPT sign-in, paste, cancel, removal. |
 | ACP | Implemented: `/acp` creates an ACP session; tabs and header show `ACP` badges with the external-engine warning banner. |
@@ -264,6 +264,9 @@ cargo test -p meerai-web-client
 python3 scripts/build-web.py --dev
 python3 scripts/build-web.py
 cargo run -p meerai-cli --features web -- serve
+make build-web
+make run-web
+make serve
 ```
 
 `MEERAI_WEB_DIR` points the server at an unembedded bundle during development. The release build embeds `target/web`.

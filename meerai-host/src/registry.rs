@@ -608,11 +608,22 @@ impl SessionRegistry {
         state.sessions.get(id).map(|r| r.cmd_tx.clone())
     }
 
-    pub fn note_tui_user_prompt(&self, session_id: &SessionId, prompt: &str, steer: bool) {
+    pub fn note_tui_user_prompt(
+        &self,
+        session_id: &SessionId,
+        prompt: &str,
+        display: Option<&str>,
+        steer: bool,
+    ) {
         let prompt = prompt.trim().to_string();
         if prompt.is_empty() {
             return;
         }
+        let display = display
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .unwrap_or(&prompt)
+            .to_string();
         let mut state = self.inner.state.lock().unwrap();
         if !state.sessions.contains_key(session_id) {
             return;
@@ -635,7 +646,7 @@ impl SessionRegistry {
                 } else {
                     None
                 },
-                text: prompt.clone(),
+                text: display.clone(),
             });
             record.summary.clone()
         };
@@ -644,7 +655,7 @@ impl SessionRegistry {
             RegistryEventKind::UserPromptSubmitted {
                 session_id: session_id.clone(),
                 entry_id,
-                text: prompt,
+                text: display,
             },
         );
         state.push_event(
@@ -790,11 +801,17 @@ impl SessionRegistry {
         SubscribeResult::Replay { events, rx }
     }
 
-    pub fn submit_prompt(&self, session_id: &SessionId, prompt: String) -> Result<(), HostError> {
+    pub fn submit_prompt(
+        &self,
+        session_id: &SessionId,
+        prompt: String,
+        display: Option<String>,
+    ) -> Result<(), HostError> {
         let prompt = prompt.trim().to_string();
         if prompt.is_empty() {
             return Err(HostError::EmptyPrompt);
         }
+        let display = display_text(display, &prompt);
 
         let cmd_tx = {
             let mut state = self.inner.state.lock().unwrap();
@@ -820,7 +837,7 @@ impl SessionRegistry {
                 record.entries.push(LiveEntry::User {
                     id: entry_id.clone(),
                     turn_id: None,
-                    text: prompt.clone(),
+                    text: display.clone(),
                 });
                 (record.summary.clone(), record.cmd_tx.clone())
             };
@@ -830,7 +847,7 @@ impl SessionRegistry {
                 RegistryEventKind::UserPromptSubmitted {
                     session_id: session_id.clone(),
                     entry_id,
-                    text: prompt.clone(),
+                    text: display,
                 },
             );
             state.push_event(
@@ -845,11 +862,17 @@ impl SessionRegistry {
             .map_err(|_| HostError::WorkerClosed)
     }
 
-    pub fn steer_prompt(&self, session_id: &SessionId, prompt: String) -> Result<(), HostError> {
+    pub fn steer_prompt(
+        &self,
+        session_id: &SessionId,
+        prompt: String,
+        display: Option<String>,
+    ) -> Result<(), HostError> {
         let prompt = prompt.trim().to_string();
         if prompt.is_empty() {
             return Err(HostError::EmptyPrompt);
         }
+        let display = display_text(display, &prompt);
 
         let cmd_tx = {
             let mut state = self.inner.state.lock().unwrap();
@@ -872,7 +895,7 @@ impl SessionRegistry {
             record.entries.push(LiveEntry::User {
                 id: entry_id.clone(),
                 turn_id: record.summary.active_turn_id.clone(),
-                text: prompt.clone(),
+                text: display.clone(),
             });
             let cmd_tx = record.cmd_tx.clone();
             state.push_event(
@@ -880,7 +903,7 @@ impl SessionRegistry {
                 RegistryEventKind::UserPromptSubmitted {
                     session_id: session_id.clone(),
                     entry_id,
-                    text: prompt.clone(),
+                    text: display,
                 },
             );
             cmd_tx
@@ -2509,6 +2532,13 @@ fn display_model(model: &str) -> String {
         .unwrap_or_else(|| model.to_string())
 }
 
+fn display_text(display: Option<String>, prompt: &str) -> String {
+    display
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| prompt.to_string())
+}
+
 fn normalize_title(raw: &str) -> Option<String> {
     let line = raw.lines().map(str::trim).find(|line| !line.is_empty())?;
     let single: String = line
@@ -2582,6 +2612,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_prompt_keeps_display_text_and_sends_the_clean_prompt() {
+        let registry = SessionRegistry::new();
+        let mut worker = open_test_session(&registry, "ses-display", None, Vec::new());
+
+        registry
+            .submit_prompt(
+                &worker.session_id,
+                "review this".to_string(),
+                Some("@skill/orchestrate review this".to_string()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            worker.cmd_rx.recv().await,
+            Some(AgentCommand::SubmitPrompt("review this".to_string()))
+        );
+        let snap = registry.snapshot();
+        assert_eq!(snap.sessions[0].title.as_deref(), Some("review this"));
+        assert!(
+            snap.active_session
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .any(|entry| matches!(
+                    entry,
+                    LiveEntry::User { text, .. } if text == "@skill/orchestrate review this"
+                ))
+        );
+    }
+
+    #[tokio::test]
     async fn streams_deltas_completes_turn_and_updates_snapshot() {
         let registry = SessionRegistry::new();
         let mut worker = open_test_session(
@@ -2619,7 +2681,11 @@ mod tests {
         assert!(initial_replay.is_empty());
 
         assert_eq!(
-            registry.submit_prompt(&worker.session_id, "  fix bug\nmore details  ".to_string()),
+            registry.submit_prompt(
+                &worker.session_id,
+                "  fix bug\nmore details  ".to_string(),
+                None
+            ),
             Ok(())
         );
         assert_eq!(
@@ -2780,11 +2846,11 @@ mod tests {
         let worker = open_test_session(&registry, "ses-guards", Some("Guards"), Vec::new());
 
         assert_eq!(
-            registry.submit_prompt(&worker.session_id, "   \n ".to_string()),
+            registry.submit_prompt(&worker.session_id, "   \n ".to_string(), None),
             Err(HostError::EmptyPrompt)
         );
         assert_eq!(
-            registry.submit_prompt(&SessionId::from_raw("missing"), "hi".to_string()),
+            registry.submit_prompt(&SessionId::from_raw("missing"), "hi".to_string(), None),
             Err(HostError::SessionNotFound(SessionId::from_raw("missing")))
         );
 
@@ -2798,7 +2864,7 @@ mod tests {
             .unwrap();
         wait_until(|| registry.snapshot().sessions[0].status == SessionStatus::Running).await;
         assert_eq!(
-            registry.submit_prompt(&worker.session_id, "second".to_string()),
+            registry.submit_prompt(&worker.session_id, "second".to_string(), None),
             Err(HostError::Busy)
         );
 
@@ -2821,7 +2887,7 @@ mod tests {
         wait_until(|| registry.snapshot().sessions[0].status == SessionStatus::WaitingApproval)
             .await;
         assert_eq!(
-            registry.submit_prompt(&worker.session_id, "blocked".to_string()),
+            registry.submit_prompt(&worker.session_id, "blocked".to_string(), None),
             Err(HostError::Busy)
         );
 
@@ -2855,7 +2921,7 @@ mod tests {
         })
         .await;
         assert_eq!(
-            registry.submit_prompt(&worker.session_id, "during recovery".to_string()),
+            registry.submit_prompt(&worker.session_id, "during recovery".to_string(), None),
             Err(HostError::Busy)
         );
 
@@ -2885,7 +2951,7 @@ mod tests {
 
         drop(worker.cmd_rx);
         assert_eq!(
-            registry.submit_prompt(&worker.session_id, "after close".to_string()),
+            registry.submit_prompt(&worker.session_id, "after close".to_string(), None),
             Err(HostError::WorkerClosed)
         );
     }

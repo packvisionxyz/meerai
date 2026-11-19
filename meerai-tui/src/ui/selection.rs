@@ -196,7 +196,10 @@ pub(super) fn capture_screen_lines(frame: &mut Frame<'_>, app: &mut AppState) {
 }
 
 pub(super) fn render_selection_highlight(frame: &mut Frame<'_>, app: &AppState) {
-    let highlight = Style::default().bg(theme::p().border).fg(theme::p().text);
+    let highlight = Style::default()
+        .bg(theme::p().accent)
+        .fg(theme::p().background)
+        .add_modifier(Modifier::BOLD);
 
     if let Some(sel) = app.doc_selection
         && sel.anchor != sel.head

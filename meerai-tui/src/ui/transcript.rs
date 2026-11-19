@@ -432,44 +432,130 @@ impl TurnDigest {
     }
 }
 
-fn turn_digests(transcript: &[TranscriptEntry]) -> Vec<Option<TurnDigest>> {
-    let mut digests: Vec<Option<TurnDigest>> = (0..transcript.len()).map(|_| None).collect();
-    let mut current: Option<usize> = None;
-    let mut digest = TurnDigest::default();
+#[derive(Clone, Copy)]
+enum DigestItem {
+    Reasoning(usize),
+    ToolCall(usize),
+    Subagent(usize),
+}
+
+struct ActivityGroup {
+    start_idx: usize,
+    digest: TurnDigest,
+    items: Vec<DigestItem>,
+}
+
+enum TranscriptSegment {
+    Digest(ActivityGroup),
+    Entry(usize),
+}
+
+fn segment_transcript(transcript: &[TranscriptEntry]) -> Vec<TranscriptSegment> {
+    let mut segments = Vec::new();
+    let mut current: Option<ActivityGroup> = None;
+
+    let flush = |segments: &mut Vec<TranscriptSegment>, current: &mut Option<ActivityGroup>| {
+        if let Some(group) = current.take()
+            && !group.digest.is_empty()
+        {
+            segments.push(TranscriptSegment::Digest(group));
+        }
+    };
 
     for (idx, entry) in transcript.iter().enumerate() {
-        if matches!(entry, TranscriptEntry::User { .. }) {
-            if let Some(start) = current {
-                digests[start] = Some(std::mem::take(&mut digest));
-            }
-            current = Some(idx);
-            digest = TurnDigest::default();
-        }
         match entry {
+            TranscriptEntry::ToolCall(tc) if tc.name == meerai_agents::QUESTION_TOOL => continue,
             TranscriptEntry::Assistant {
-                reasoning,
+                text, reasoning, ..
+            } if text.is_empty() && reasoning.is_empty() => continue,
+            TranscriptEntry::Assistant {
+                text,
+                reasoning: _,
                 streaming,
                 ..
-            } if !reasoning.is_empty() => {
-                digest.thoughts += 1;
-                digest.thoughts_active |= *streaming;
+            } if text.is_empty() => {
+                let group = current.get_or_insert_with(|| ActivityGroup {
+                    start_idx: idx,
+                    digest: TurnDigest::default(),
+                    items: Vec::new(),
+                });
+                group.digest.thoughts += 1;
+                group.digest.thoughts_active |= *streaming;
+                group.items.push(DigestItem::Reasoning(idx));
             }
-            TranscriptEntry::ToolCall(call) => digest.record_tool(&call.name, &call.status),
+            TranscriptEntry::ToolCall(tc) => {
+                let group = current.get_or_insert_with(|| ActivityGroup {
+                    start_idx: idx,
+                    digest: TurnDigest::default(),
+                    items: Vec::new(),
+                });
+                group.digest.record_tool(&tc.name, &tc.status);
+                group.items.push(DigestItem::ToolCall(idx));
+            }
             TranscriptEntry::Subagent(sub) => {
-                digest.agents += 1;
-                digest.agents_active |= matches!(
+                let group = current.get_or_insert_with(|| ActivityGroup {
+                    start_idx: idx,
+                    digest: TurnDigest::default(),
+                    items: Vec::new(),
+                });
+                group.digest.agents += 1;
+                group.digest.agents_active |= matches!(
                     sub.status,
                     ToolCallStatus::Proposed | ToolCallStatus::Running
                 );
+                group.items.push(DigestItem::Subagent(idx));
             }
-            _ => {}
+            TranscriptEntry::Assistant { reasoning, .. } => {
+                if !reasoning.is_empty() {
+                    let group = current.get_or_insert_with(|| ActivityGroup {
+                        start_idx: idx,
+                        digest: TurnDigest::default(),
+                        items: Vec::new(),
+                    });
+                    group.digest.thoughts += 1;
+                    group.items.push(DigestItem::Reasoning(idx));
+                }
+                flush(&mut segments, &mut current);
+                segments.push(TranscriptSegment::Entry(idx));
+            }
+            TranscriptEntry::User { .. }
+            | TranscriptEntry::Question { .. }
+            | TranscriptEntry::System { .. }
+            | TranscriptEntry::Error { .. } => {
+                flush(&mut segments, &mut current);
+                segments.push(TranscriptSegment::Entry(idx));
+            }
         }
     }
 
-    if let Some(start) = current {
-        digests[start] = Some(digest);
-    }
-    digests
+    flush(&mut segments, &mut current);
+    segments
+}
+
+pub(crate) fn is_activity_group_start(transcript: &[TranscriptEntry], idx: usize) -> bool {
+    segment_transcript(transcript)
+        .iter()
+        .any(|seg| matches!(seg, TranscriptSegment::Digest(group) if group.start_idx == idx))
+}
+
+pub(crate) fn activity_group_start(
+    transcript: &[TranscriptEntry],
+    entry_idx: usize,
+) -> Option<usize> {
+    segment_transcript(transcript)
+        .into_iter()
+        .find_map(|seg| match seg {
+            TranscriptSegment::Digest(group)
+                if group.items.iter().any(|item| match *item {
+                    DigestItem::Reasoning(i)
+                    | DigestItem::ToolCall(i)
+                    | DigestItem::Subagent(i) => i == entry_idx,
+                }) =>
+            {
+                Some(group.start_idx)
+            }
+            _ => None,
+        })
 }
 
 fn digest_line(digest: &TurnDigest, expanded: bool) -> Option<Line<'static>> {
@@ -483,6 +569,52 @@ fn digest_line(digest: &TurnDigest, expanded: bool) -> Option<Line<'static>> {
         ),
         Span::styled(digest.summary(), Style::default().fg(theme::p().faint)),
     ]))
+}
+
+fn push_user_mention_spans(
+    spans: &mut Vec<Span<'static>>,
+    line: &str,
+    agents: &[AgentDefinition],
+    skills: &[SkillDefinition],
+) {
+    let plain_style = Style::default().fg(theme::p().text);
+    let mut plain_start = 0;
+    let mut index = 0;
+    while index < line.len() {
+        let Some(ch) = line[index..].chars().next() else {
+            break;
+        };
+        if ch == '@'
+            && let Some((kind, id, end)) = parse_mention_token(line, index)
+            && mention_is_known(kind, id, agents, skills)
+        {
+            if plain_start < index {
+                spans.push(Span::styled(
+                    line[plain_start..index].to_string(),
+                    plain_style,
+                ));
+            }
+            spans.push(Span::styled(id.to_string(), user_mention_chip_style(kind)));
+            index = end;
+            plain_start = end;
+            continue;
+        }
+        index += ch.len_utf8();
+    }
+    if plain_start < line.len() {
+        spans.push(Span::styled(line[plain_start..].to_string(), plain_style));
+    }
+}
+
+fn user_mention_chip_style(kind: MentionKind) -> Style {
+    let color = match kind {
+        MentionKind::Agent => theme::p().accent,
+        MentionKind::Skill => theme::p().interactive,
+    };
+    Style::default()
+        .fg(color)
+        .bg(theme::p().surface_high)
+        .add_modifier(Modifier::BOLD)
 }
 
 struct BuiltTranscript {
@@ -503,68 +635,91 @@ fn build_transcript_lines(app: &AppState, memo: &mut TranscriptBuildMemo) -> Bui
         };
     }
 
-    let digests = turn_digests(transcript);
+    enum RenderOp {
+        Blank,
+        DigestHeader {
+            start_idx: usize,
+            digest: TurnDigest,
+            expanded: bool,
+        },
+        Reasoning(usize),
+        Entry(usize),
+    }
 
-    lines.push(tagged_line(Line::default(), None, 0));
-    let mut current_turn: Option<usize> = None;
-    for (idx, entry) in transcript.iter().enumerate() {
-        if let TranscriptEntry::ToolCall(tc) = entry
-            && tc.name == meerai_agents::QUESTION_TOOL
-        {
-            continue;
-        }
-        if matches!(entry, TranscriptEntry::User { .. }) {
-            current_turn = Some(idx);
-        }
-        let collapsed = current_turn
-            .map(|turn| !tab.turn_activity.get(&turn).copied().unwrap_or(false))
-            .unwrap_or(false);
-        let hidden = collapsed
-            && match entry {
-                TranscriptEntry::ToolCall(_) | TranscriptEntry::Subagent(_) => true,
-                TranscriptEntry::Assistant {
-                    text, reasoning, ..
-                } => text.is_empty() && !reasoning.is_empty(),
-                _ => false,
-            };
-        if hidden {
-            continue;
-        }
-        if idx > 0 {
-            lines.push(tagged_line(Line::default(), None, 0));
-            if !matches!(
-                entry,
-                TranscriptEntry::ToolCall(_) | TranscriptEntry::Subagent(_)
-            ) {
-                lines.push(tagged_line(Line::default(), None, 0));
-            }
-        }
-        match entry {
-            TranscriptEntry::User { text } => {
-                for line in text.split('\n') {
-                    lines.push(banded_line(
-                        Line::from(vec![
-                            Span::styled("▌ ", Style::default().fg(theme::p().accent)),
-                            Span::styled(line.to_string(), Style::default().fg(theme::p().text)),
-                        ]),
-                        Some(idx),
-                        2,
-                    ));
+    let segments = segment_transcript(transcript);
+    let mut ops = Vec::new();
+    let mut emitted_any = false;
+    let mut prev_was_digest = false;
+    for seg in segments {
+        match seg {
+            TranscriptSegment::Digest(group) => {
+                if emitted_any {
+                    ops.push(RenderOp::Blank);
                 }
-                if let Some(digest) = digests.get(idx).and_then(|d| d.as_ref()) {
-                    let expanded = tab.turn_activity.get(&idx).copied().unwrap_or(false);
-                    if let Some(line) = digest_line(digest, expanded) {
-                        lines.push(with_digest(tagged_line(line, None, 2), idx));
+                let expanded = tab
+                    .turn_activity
+                    .get(&group.start_idx)
+                    .copied()
+                    .unwrap_or(false);
+                ops.push(RenderOp::DigestHeader {
+                    start_idx: group.start_idx,
+                    digest: group.digest,
+                    expanded,
+                });
+                if expanded {
+                    for item in group.items {
+                        ops.push(RenderOp::Blank);
+                        match item {
+                            DigestItem::Reasoning(idx) => ops.push(RenderOp::Reasoning(idx)),
+                            DigestItem::ToolCall(idx) | DigestItem::Subagent(idx) => {
+                                ops.push(RenderOp::Entry(idx))
+                            }
+                        }
                     }
                 }
+                emitted_any = true;
+                prev_was_digest = true;
             }
-            TranscriptEntry::Assistant {
-                text,
-                reasoning,
-                streaming,
-                reasoning_expanded,
+            TranscriptSegment::Entry(idx) => {
+                if emitted_any {
+                    ops.push(RenderOp::Blank);
+                    if !prev_was_digest || matches!(transcript[idx], TranscriptEntry::User { .. }) {
+                        ops.push(RenderOp::Blank);
+                    }
+                }
+                ops.push(RenderOp::Entry(idx));
+                emitted_any = true;
+                prev_was_digest = false;
+            }
+        }
+    }
+
+    lines.push(tagged_line(Line::default(), None, 0));
+    for op in ops {
+        let idx = match op {
+            RenderOp::Blank => {
+                lines.push(tagged_line(Line::default(), None, 0));
+                continue;
+            }
+            RenderOp::DigestHeader {
+                start_idx,
+                digest,
+                expanded,
             } => {
-                if !reasoning.is_empty() && !collapsed {
+                if let Some(line) = digest_line(&digest, expanded) {
+                    lines.push(with_digest(tagged_line(line, None, 2), start_idx));
+                }
+                continue;
+            }
+            RenderOp::Reasoning(idx) => {
+                if let Some(TranscriptEntry::Assistant {
+                    reasoning,
+                    streaming,
+                    reasoning_expanded,
+                    ..
+                }) = transcript.get(idx)
+                    && !reasoning.is_empty()
+                {
                     let line_count = reasoning.lines().count().max(1);
                     let label = if *streaming { "Thinking" } else { "Thought" };
                     let count = if line_count == 1 {
@@ -621,6 +776,20 @@ fn build_transcript_lines(app: &AppState, memo: &mut TranscriptBuildMemo) -> Bui
                         ));
                     }
                 }
+                continue;
+            }
+            RenderOp::Entry(idx) => idx,
+        };
+        match &transcript[idx] {
+            TranscriptEntry::User { text } => {
+                for line in text.split('\n') {
+                    let mut spans =
+                        vec![Span::styled("▌ ", Style::default().fg(theme::p().accent))];
+                    push_user_mention_spans(&mut spans, line, &app.agents, &app.skills);
+                    lines.push(banded_line(Line::from(spans), Some(idx), 2));
+                }
+            }
+            TranscriptEntry::Assistant { text, .. } => {
                 if !text.is_empty() {
                     let mut in_code_block = false;
                     let rendered = memo.markdown(idx, text);

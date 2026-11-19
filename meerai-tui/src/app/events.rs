@@ -153,7 +153,21 @@ impl AppState {
                             | AgentEvent::Error { .. }
                             | AgentEvent::ItemCompleted { .. }
                     );
+                let before_queued = self.tabs[tab_idx].queued.len();
                 self.tabs[tab_idx].apply_agent_event(other);
+                let after_queued = self.tabs[tab_idx].queued.len();
+                if is_active
+                    && after_queued < before_queued
+                    && let Some(ActiveModal::QueuedEdit { index, .. }) = &mut self.modal
+                {
+                    let drained = before_queued - after_queued;
+                    if *index < drained {
+                        self.modal = None;
+                        self.status_notice = Some("Queued message was already sent".to_string());
+                    } else {
+                        *index -= drained;
+                    }
+                }
                 if mark_unread {
                     self.tabs[tab_idx].has_unread = true;
                 }
@@ -302,11 +316,6 @@ impl SessionTab {
                             nested_loading: false,
                         }));
                     self.subagent_items.insert(id, idx);
-                }
-                SessionItem::Compaction { freed_tokens, .. } => {
-                    self.transcript.push(TranscriptEntry::System {
-                        text: format!("Compaction freed {freed_tokens} tokens"),
-                    });
                 }
                 _ => {}
             },

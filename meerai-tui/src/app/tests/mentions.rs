@@ -40,7 +40,7 @@ fn mention_parser_applies_skills_then_agent_and_cleans_text() {
 }
 
 #[test]
-fn submitting_mention_applies_agent_then_prompt() {
+fn submitting_mention_applies_agent_and_keeps_it_in_the_bubble() {
     let (mut app, mut rx, _secrets) = test_app();
     app.agents = vec![sample_agent(
         "reviewer",
@@ -70,7 +70,7 @@ fn submitting_mention_applies_agent_then_prompt() {
     assert_eq!(
         app.tab().transcript.last(),
         Some(&TranscriptEntry::User {
-            text: "do the task".to_string()
+            text: "@agent/reviewer do the task".to_string()
         })
     );
 }

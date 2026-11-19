@@ -56,6 +56,10 @@ impl AppState {
                         | ActiveModal::ProviderConnection { .. }
                         | ActiveModal::Question { .. }
                         | ActiveModal::RewindMenu { .. } => {}
+                        ActiveModal::QueuedEdit { input, error, .. } => {
+                            input.push_str(&clean);
+                            *error = None;
+                        }
                         ActiveModal::Approval {
                             reason,
                             editing_reason,
@@ -253,16 +257,19 @@ impl AppState {
             let hovered_file = self.hovered_file_change_at(mouse.column, mouse.row);
             let hovered_completion = self.completion_hit_at(mouse.column, mouse.row);
             let hovered_rail = self.anchor_rail_hover_row(mouse.column, mouse.row);
+            let hovered_queued = self.queued_hit_at(mouse.column, mouse.row);
             let changed = hovered_entry != self.hovered_entry
                 || hovered_tab != self.hovered_tab
                 || hovered_file != self.hovered_file_change
                 || hovered_completion != self.hovered_completion
-                || hovered_rail != self.anchor_rail_hover;
+                || hovered_rail != self.anchor_rail_hover
+                || hovered_queued != self.hovered_queued;
             self.hovered_entry = hovered_entry;
             self.hovered_tab = hovered_tab;
             self.hovered_file_change = hovered_file;
             self.hovered_completion = hovered_completion;
             self.anchor_rail_hover = hovered_rail;
+            self.hovered_queued = hovered_queued;
             return changed;
         }
 
@@ -288,6 +295,11 @@ impl AppState {
                     self.doc_selection = None;
                     return true;
                 }
+                if self.modal.is_none() && self.click_queued_at(mouse.column, mouse.row) {
+                    self.selection = None;
+                    self.doc_selection = None;
+                    return true;
+                }
                 self.composer_selection = None;
                 self.composer_drag_anchor = None;
 
@@ -309,6 +321,29 @@ impl AppState {
                             self.copy_text_to_clipboard(&text);
                         }
                         self.doc_selection = Some(sel);
+                        return true;
+                    }
+                    let streak = self.register_click(mouse.column, mouse.row);
+                    if streak >= 2
+                        && let Some((start, end)) = self.word_bounds_at(doc_pos.line, doc_pos.col)
+                    {
+                        let sel = DocSelection {
+                            anchor: DocPos {
+                                line: doc_pos.line,
+                                col: start,
+                            },
+                            head: DocPos {
+                                line: doc_pos.line,
+                                col: end,
+                            },
+                            active: false,
+                        };
+                        let text = self.extract_doc_selected_text(sel);
+                        if !text.is_empty() {
+                            self.copy_text_to_clipboard(&text);
+                        }
+                        self.doc_selection = Some(sel);
+                        self.last_transcript_anchor = Some(sel.anchor);
                         return true;
                     }
                     self.last_transcript_anchor = Some(doc_pos);
@@ -505,6 +540,55 @@ impl AppState {
             sel.head = head;
             self.doc_selection = Some(sel);
         }
+    }
+
+    fn register_click(&mut self, column: u16, row: u16) -> u8 {
+        const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
+        let now = Instant::now();
+        let streak = match self.last_click {
+            Some((at, last_col, last_row))
+                if now.duration_since(at) <= DOUBLE_CLICK_WINDOW
+                    && last_col == column
+                    && last_row == row =>
+            {
+                self.click_streak.saturating_add(1).min(3)
+            }
+            _ => 1,
+        };
+        self.last_click = Some((now, column, row));
+        self.click_streak = streak;
+        streak
+    }
+
+    pub(crate) fn word_bounds_at(&self, line: usize, col: usize) -> Option<(usize, usize)> {
+        let row = self.transcript_wrapped_lines.get(line)?;
+        let chars: Vec<char> = row.text.chars().collect();
+        if chars.is_empty() {
+            return None;
+        }
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let click = col.min(chars.len() - 1);
+        let click = if click < row.gutter_len {
+            let first = chars
+                .get(row.gutter_len..)?
+                .iter()
+                .position(|&c| is_word(c))?;
+            row.gutter_len + first
+        } else {
+            click
+        };
+        if !is_word(chars[click]) {
+            return None;
+        }
+        let mut start = click;
+        while start > row.gutter_len && is_word(chars[start - 1]) {
+            start -= 1;
+        }
+        let mut end = click;
+        while end + 1 < chars.len() && is_word(chars[end + 1]) {
+            end += 1;
+        }
+        Some((start, end))
     }
 
     pub fn screen_to_doc_pos_exact(&self, column: u16, row: u16) -> Option<DocPos> {
@@ -979,16 +1063,13 @@ impl AppState {
             .map(|z| z.entry_idx)
     }
 
-    fn toggle_turn_activity(&mut self, user_idx: usize) -> bool {
-        if !matches!(
-            self.tab().transcript.get(user_idx),
-            Some(TranscriptEntry::User { .. })
-        ) {
+    fn toggle_turn_activity(&mut self, group_idx: usize) -> bool {
+        if !crate::ui::transcript::is_activity_group_start(&self.tab().transcript, group_idx) {
             return false;
         }
         let tab = self.tab_mut();
-        let expanded = tab.turn_activity.get(&user_idx).copied().unwrap_or(false);
-        tab.turn_activity.insert(user_idx, !expanded);
+        let expanded = tab.turn_activity.get(&group_idx).copied().unwrap_or(false);
+        tab.turn_activity.insert(group_idx, !expanded);
         true
     }
 
@@ -1106,6 +1187,50 @@ impl AppState {
                 draft,
             });
         self.status_notice = Some("Forking session...".to_string());
+        true
+    }
+
+    fn queued_hit_at(&self, column: u16, row: u16) -> Option<QueuedHitKind> {
+        self.queued_hit_zones
+            .iter()
+            .find(|zone| {
+                column >= zone.rect.x
+                    && column < zone.rect.x + zone.rect.width
+                    && row >= zone.rect.y
+                    && row < zone.rect.y + zone.rect.height
+            })
+            .map(|zone| zone.kind)
+    }
+
+    fn click_queued_at(&mut self, column: u16, row: u16) -> bool {
+        let Some(kind) = self.queued_hit_at(column, row) else {
+            return false;
+        };
+        match kind {
+            QueuedHitKind::Remove(idx) => {
+                let removed = {
+                    let tab = self.tab_mut();
+                    if idx < tab.queued.len() {
+                        Some(tab.queued.remove(idx))
+                    } else {
+                        None
+                    }
+                };
+                if let Some(text) = removed {
+                    let preview = meerai_core::text::truncate_single_line(&text, 40);
+                    self.status_notice = Some(format!("Removed queued: {preview}"));
+                }
+            }
+            QueuedHitKind::Edit(idx) => {
+                if let Some(text) = self.tab().queued.get(idx).cloned() {
+                    self.modal = Some(ActiveModal::QueuedEdit {
+                        index: idx,
+                        input: text,
+                        error: None,
+                    });
+                }
+            }
+        }
         true
     }
 
@@ -1708,10 +1833,8 @@ impl AppState {
         }
 
         let plan = parse_mentions(&raw_input, &self.agents, &self.skills);
-        let remaining = plan
-            .text
-            .clone()
-            .unwrap_or_else(|| raw_input.trim_end().to_string());
+        let display = raw_input.trim_end().to_string();
+        let remaining = plan.text.clone().unwrap_or_else(|| display.clone());
 
         if remaining.is_empty() {
             self.apply_mentions(&plan);
@@ -1754,7 +1877,7 @@ impl AppState {
             tab.auto_follow = true;
             tab.is_running = true;
             tab.transcript.push(TranscriptEntry::User {
-                text: remaining.clone(),
+                text: display.clone(),
             });
             let _ = tab
                 .cmd_tx
@@ -1763,8 +1886,8 @@ impl AppState {
         };
         if let Some(reg) = &self.registry {
             self.tui_prompt_echoes
-                .push_back((session_id.clone(), remaining.clone()));
-            reg.note_tui_user_prompt(&session_id, &remaining, false);
+                .push_back((session_id.clone(), display.clone()));
+            reg.note_tui_user_prompt(&session_id, &remaining, Some(&display), false);
         }
         self.completion.reset();
     }
@@ -1774,7 +1897,7 @@ impl AppState {
             self.submit_input();
             return;
         }
-        let text = {
+        let display = {
             let tab = self.tab_mut();
             if let Some(next) = tab.queued.first().cloned() {
                 tab.queued.remove(0);
@@ -1789,17 +1912,21 @@ impl AppState {
                 typed
             }
         };
+        let plan = parse_mentions(&display, &self.agents, &self.skills);
+        self.apply_mentions(&plan);
+        let text = plan.text.unwrap_or_else(|| display.clone());
         let session_id = {
             let tab = self.tab_mut();
-            tab.transcript
-                .push(TranscriptEntry::User { text: text.clone() });
+            tab.transcript.push(TranscriptEntry::User {
+                text: display.clone(),
+            });
             let _ = tab.cmd_tx.send(AgentCommand::Steer(text.clone()));
             tab.session_id.clone()
         };
         if let Some(reg) = &self.registry {
             self.tui_prompt_echoes
-                .push_back((session_id.clone(), text.clone()));
-            reg.note_tui_user_prompt(&session_id, &text, true);
+                .push_back((session_id.clone(), display.clone()));
+            reg.note_tui_user_prompt(&session_id, &text, Some(&display), true);
         }
         self.status_notice = Some("Sent now".to_string());
         self.completion.reset();

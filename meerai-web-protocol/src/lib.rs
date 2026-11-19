@@ -485,6 +485,16 @@ pub struct ContextSettingsDto {
     pub post_edit_diagnostics: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<EffortDto>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EffortDto {
+    Low,
+    Medium,
+    High,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -736,6 +746,8 @@ pub enum ViewEvent {
 #[serde(rename_all = "camelCase")]
 pub struct SubmitPromptRequest {
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -995,6 +1007,15 @@ pub struct UpdateSettingsRequest {
     pub session: Option<SessionSettingsDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<SandboxSettingsDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forget_model: Option<ForgetModelDto>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgetModelDto {
+    pub provider: String,
+    pub model: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1299,10 +1320,15 @@ mod tests {
     fn request_and_response_round_trip() {
         let req = SubmitPromptRequest {
             prompt: "explain this".to_owned(),
+            display: Some("@skill/verify explain this".to_owned()),
         };
         let req_json = serde_json::to_string(&req).unwrap();
         let decoded_req: SubmitPromptRequest = serde_json::from_str(&req_json).unwrap();
         assert_eq!(decoded_req, req);
+
+        let legacy: SubmitPromptRequest = serde_json::from_str(r#"{"prompt":"hi"}"#).unwrap();
+        assert_eq!(legacy.prompt, "hi");
+        assert!(legacy.display.is_none());
 
         let resp = SubmitPromptResponse {
             accepted: true,

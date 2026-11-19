@@ -394,7 +394,13 @@ Per-model context comes from `ProviderCatalog`. Knobs (`context` in
 | `recovery_model` | unset | model for the one recovery turn |
 | `rollback_on_verify_failure` | false | auto-mode snapshot restore on a verify block |
 | `post_edit_diagnostics` | false | LSP diagnostics after successful edits |
-| `temperature` | provider default | sampling temperature, 0.0..=2.0 |
+| `temperature` | `0.20` (medium tier) | sampling temperature, 0.0..=2.0 |
+| `effort` | `medium` | reasoning tier: `low` 0.00, `medium` 0.20, `high` 0.50 |
+
+`effort` sets the temperature for its tier when `temperature` is unset, and
+is also sent as the provider reasoning-effort hint. Adapters that ignore
+that hint (DeepSeek, Groq, xAI, `open_router`) still receive the tier
+temperature.
 
 The CLI asks `ProviderCatalog::model_info(provider, model)` for the active
 model: a catalog `context_window` replaces the configured default only

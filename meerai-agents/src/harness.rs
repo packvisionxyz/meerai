@@ -1,4 +1,4 @@
-use meerai_common::settings::ContextSettings;
+use meerai_common::settings::{ContextSettings, DEFAULT_TEMPERATURE, EffortLevel, Temperature};
 use meerai_policy::PolicyEngine;
 use meerai_session::Session;
 
@@ -25,6 +25,7 @@ pub struct HarnessConfig {
     pub max_turn_secs: u64,
     pub summarizer_model: Option<String>,
     pub temperature: Option<f32>,
+    pub effort: Option<EffortLevel>,
     pub token_pricing: Option<TokenPricing>,
 }
 
@@ -45,7 +46,8 @@ impl Default for HarnessConfig {
             max_session_tokens: None,
             max_turn_secs: 1_800,
             summarizer_model: None,
-            temperature: None,
+            temperature: Some(DEFAULT_TEMPERATURE),
+            effort: Some(EffortLevel::Medium),
             token_pricing: None,
         }
     }
@@ -102,9 +104,12 @@ impl HarnessConfig {
                 cfg.summarizer_model = Some(trimmed.to_string());
             }
         }
-        if let Some(temperature) = context.temperature {
-            cfg.temperature = temperature.effective();
-        }
+        let effort = context.effort.unwrap_or_default();
+        cfg.effort = Some(effort);
+        cfg.temperature = context
+            .temperature
+            .and_then(Temperature::effective)
+            .or_else(|| Temperature::new(effort.default_temperature()).effective());
         cfg
     }
 }
@@ -152,7 +157,15 @@ mod tests {
             temperature: Some(Temperature::new(5.0)),
             ..ContextSettings::default()
         }));
-        assert_eq!(config.temperature, None);
+        assert_eq!(config.temperature, Some(DEFAULT_TEMPERATURE));
+        assert_eq!(config.effort, Some(EffortLevel::Medium));
+
+        let high = HarnessConfig::from_context_settings(Some(&ContextSettings {
+            effort: Some(EffortLevel::High),
+            ..ContextSettings::default()
+        }));
+        assert_eq!(high.effort, Some(EffortLevel::High));
+        assert_eq!(high.temperature, Some(0.5));
     }
 
     #[test]

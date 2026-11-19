@@ -40,6 +40,7 @@ enum ModalIdentity {
     RewindMenu,
     CommandPalette,
     Settings,
+    QueuedEdit,
     Help,
     SubagentOverlay(String),
 }
@@ -76,6 +77,7 @@ fn modal_identity(modal: &ActiveModal) -> ModalIdentity {
         ActiveModal::RewindMenu { .. } => ModalIdentity::RewindMenu,
         ActiveModal::CommandPalette { .. } => ModalIdentity::CommandPalette,
         ActiveModal::Settings(_) => ModalIdentity::Settings,
+        ActiveModal::QueuedEdit { .. } => ModalIdentity::QueuedEdit,
         ActiveModal::Help => ModalIdentity::Help,
         ActiveModal::SubagentOverlay { entry_id, .. } => {
             ModalIdentity::SubagentOverlay(entry_id.clone())
@@ -157,6 +159,7 @@ pub fn ModalLayer(store: StoreHandle) -> impl IntoView {
             Some(ModalIdentity::RewindMenu) => view! { <RewindModal store=store /> }.into_any(),
             Some(ModalIdentity::CommandPalette) => view! { <CommandPaletteModal store=store /> }.into_any(),
             Some(ModalIdentity::Settings) => view! { <SettingsModal store=store /> }.into_any(),
+            Some(ModalIdentity::QueuedEdit) => view! { <QueuedEditModal store=store /> }.into_any(),
             Some(ModalIdentity::Help) => help_modal(store),
             Some(ModalIdentity::SubagentOverlay(_)) => view! { <SubagentModal store=store /> }.into_any(),
         }}
@@ -1433,6 +1436,59 @@ fn TerminalModal(store: StoreHandle) -> impl IntoView {
 }
 
 #[component]
+fn QueuedEditModal(store: StoreHandle) -> impl IntoView {
+    let (index, initial) = store.with(|s| match &s.modal {
+        Some(ActiveModal::QueuedEdit { index, input, .. }) => (*index, input.text.clone()),
+        _ => (0, String::new()),
+    });
+    let error = Memo::new(move |_| {
+        store.with(|s| match &s.modal {
+            Some(ActiveModal::QueuedEdit { error, .. }) => error.clone(),
+            _ => None,
+        })
+    });
+    let body = view! {
+        <div class="modal-form">
+            <label class="field">
+                <span class="field-label">{format!("Queued message {}", index + 1)}</span>
+                <textarea
+                    class="input"
+                    rows="4"
+                    placeholder="Queued prompt"
+                    prop:value=initial
+                    on:input=move |ev| {
+                        let value = event_target_value(&ev);
+                        store.update(|s| {
+                            if let Some(ActiveModal::QueuedEdit { input, error, .. }) = &mut s.modal {
+                                input.replace_text(value);
+                                *error = None;
+                            }
+                        });
+                    }
+                    on:keydown=move |ev| {
+                        if ev.key() == "Enter" && !ev.shift_key() && !ev.is_composing() {
+                            ev.prevent_default();
+                            store.update(crate::state::commit_queued_edit);
+                        }
+                    }
+                ></textarea>
+            </label>
+            {move || error.get().map(|msg| view! { <div class="banner error">{msg}</div> }.into_any())}
+            <div class="hint">"Press Enter to save (Shift+Enter for newline), or Esc to discard."</div>
+        </div>
+    }
+    .into_any();
+    let actions = view! {
+        <button class="btn" on:click=move |_| store.update(|s| s.modal = None)>"Cancel"</button>
+        <button class="btn primary" on:click=move |_| {
+            store.update(crate::state::commit_queued_edit);
+        }>"Save"</button>
+    }
+    .into_any();
+    shell("Edit queued message", store, body, actions)
+}
+
+#[component]
 fn RewindModal(store: StoreHandle) -> impl IntoView {
     let rewind_state = Memo::new(move |_| {
         store.with(|s| match &s.modal {
@@ -2145,6 +2201,7 @@ fn model_row(
     provider_status: Option<(String, bool)>,
 ) -> AnyView {
     let click_model = model.clone();
+    let forget_model = model.clone();
     let ctx_label = model
         .context_window_tokens
         .map(|c| format!("{}k ctx", c / 1000))
@@ -2169,27 +2226,52 @@ fn model_row(
         parts.push(caps);
     }
     let meta = parts.join(" · ");
-    view! {
-        <button class="pick-row" class:active=selected || current on:click=move |_| {
-            let model = click_model.clone();
-            if let (Some(id), Some(t)) = (
-                store.with(|s| s.active_session_id.clone()),
-                crate::transport::current(),
-            ) {
-                t.set_model(id, model.provider.clone(), model.id.clone());
-            }
-            store.update(|s| s.modal = None);
-        }>
-            <span class="pick-title">{format!("{}/{}", model.provider, model.id)}</span>
-            <span class="pick-meta">{meta}</span>
-            {recent.then(|| view! { <span class="badge">"recent"</span> }.into_any())}
-            {current.then(|| view! { <span class="badge ok">"active"</span> }.into_any())}
-            {provider_status.map(|(badge, configured)| view! {
-                <span class=format!("badge {}", if configured { "ok" } else { "warn" })>{badge}</span>
-            }.into_any())}
-        </button>
+    let row_content = view! {
+        <span class="pick-title">{format!("{}/{}", model.provider, model.id)}</span>
+        <span class="pick-meta">{meta}</span>
+        {recent.then(|| view! { <span class="badge">"recent"</span> }.into_any())}
+        {current.then(|| view! { <span class="badge ok">"active"</span> }.into_any())}
+        {provider_status.map(|(badge, configured)| view! {
+            <span class=format!("badge {}", if configured { "ok" } else { "warn" })>{badge}</span>
+        }.into_any())}
+    };
+    let select_model = move || {
+        let model = click_model.clone();
+        if let (Some(id), Some(t)) = (
+            store.with(|s| s.active_session_id.clone()),
+            crate::transport::current(),
+        ) {
+            t.set_model(id, model.provider.clone(), model.id.clone());
+        }
+        store.update(|s| s.modal = None);
+    };
+    if recent {
+        view! {
+            <div class="pick-row" class:active=selected || current>
+                <button class="pick-main" on:click=move |_| select_model()>
+                    {row_content}
+                </button>
+                <button
+                    class="badge warn pick-remove"
+                    title="Remove this model from saved history"
+                    on:click=move |_| {
+                        let target = forget_model.clone();
+                        store.update(move |s| {
+                            crate::state::forget_model(s, &target.provider, &target.id)
+                        });
+                    }
+                >"Forget"</button>
+            </div>
+        }
+        .into_any()
+    } else {
+        view! {
+            <button class="pick-row" class:active=selected || current on:click=move |_| select_model()>
+                {row_content}
+            </button>
+        }
+        .into_any()
     }
-    .into_any()
 }
 
 fn decide(

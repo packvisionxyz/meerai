@@ -23,11 +23,12 @@ pub use search::{
     search_content, search_files,
 };
 pub use session::{
-    AcpPresetInfo, Backend, ChatGptLogin, ChatGptLoginOutcome, HostAgentInfo, HostAuthKind,
-    HostInfoSnapshot, HostMcpServerInfo, HostModelItem, HostProviderItem, HostProvidersSnapshot,
-    HostReloadOutcome, HostReloadPayload, HostSettingsUpdate, HostSettingsView, HostSkillInfo,
-    OpenedSession, ResolvedAgentApplication, ResolvedModelSelection, ResolvedSkillApplication,
-    SessionOpener, WebServerHandle, WebServerLauncher, WebServerStart,
+    AcpPresetInfo, Backend, ChatGptLogin, ChatGptLoginOutcome, ForgetModel, HostAgentInfo,
+    HostAuthKind, HostInfoSnapshot, HostMcpServerInfo, HostModelItem, HostProviderItem,
+    HostProvidersSnapshot, HostReloadOutcome, HostReloadPayload, HostSettingsUpdate,
+    HostSettingsView, HostSkillInfo, OpenedSession, ResolvedAgentApplication,
+    ResolvedModelSelection, ResolvedSkillApplication, SessionOpener, WebServerHandle,
+    WebServerLauncher, WebServerStart,
 };
 pub use theme::{HostColor, HostPalette, NamedColor, ResolvedThemeHex};
 pub use workspace::{LocalWorkspace, WorkspaceMatch, WorkspaceQuery, local_workspace};

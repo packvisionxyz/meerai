@@ -28,7 +28,7 @@ use meerai_client::providers::{
 };
 use meerai_client::secrets::SecretStore;
 use meerai_common::definitions::{AgentDefinition, SkillDefinition};
-use meerai_common::settings::AppSettings;
+use meerai_common::settings::{AppSettings, EffortLevel};
 use meerai_core::text::truncate_single_line;
 use meerai_host::{SessionRegistry, WebServerHandle, WebServerLauncher};
 use meerai_policy::ApprovalMode;
@@ -166,6 +166,11 @@ pub enum ActiveModal {
         error: Option<String>,
         busy: bool,
     },
+    QueuedEdit {
+        index: usize,
+        input: String,
+        error: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,6 +213,8 @@ pub enum PendingSessionAction {
         session_id: SessionId,
     },
     CreateNewTab,
+    ReplaceLastTab,
+    SyncContext,
     CreateAcpTab {
         preset: String,
     },
@@ -242,6 +249,18 @@ pub enum TabHitKind {
     Tab(usize),
     CloseTab(usize),
     NewTab,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueuedHitKind {
+    Edit(usize),
+    Remove(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueuedHitZone {
+    pub rect: Rect,
+    pub kind: QueuedHitKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1046,6 +1065,7 @@ pub struct AppState {
     pub secrets: Arc<dyn SecretStore>,
     pub settings: AppSettings,
     pub context_temperature: Option<f32>,
+    pub context_effort: Option<EffortLevel>,
     pub explicit_context_window: Option<u64>,
     pub config_dir: Option<PathBuf>,
     pub pending_login_request: Option<String>,
@@ -1092,6 +1112,7 @@ pub struct AppState {
     pub launch_system: String,
     pub launch_definitions: String,
     pub(super) pending_reload: bool,
+    pub(super) pending_quiet_reload: bool,
     pub(super) session_delete_confirm: Option<SessionId>,
     pub(crate) tab_persistence: bool,
     pub update_hit: Option<Rect>,
@@ -1104,10 +1125,15 @@ pub struct AppState {
     pub composer_input_area: Rect,
     pub composer_scroll: usize,
     pub composer_selection: Option<(usize, usize)>,
+    pub queued_panel_area: Rect,
+    pub queued_hit_zones: Vec<QueuedHitZone>,
+    pub hovered_queued: Option<QueuedHitKind>,
     pub(super) composer_drag_anchor: Option<usize>,
     pub(super) tab_drag: Option<TabDrag>,
     pub(super) pending_toggle: Option<usize>,
     pub(super) pending_digest: Option<usize>,
+    pub(super) last_click: Option<(Instant, u16, u16)>,
+    pub(super) click_streak: u8,
     pub selection: Option<TextSelection>,
     pub doc_selection: Option<DocSelection>,
     pub last_transcript_anchor: Option<DocPos>,
@@ -1211,6 +1237,7 @@ impl AppState {
             secrets,
             settings,
             context_temperature: None,
+            context_effort: None,
             explicit_context_window: None,
             config_dir,
             pending_login_request: None,
@@ -1257,6 +1284,7 @@ impl AppState {
             launch_system: String::new(),
             launch_definitions: String::new(),
             pending_reload: false,
+            pending_quiet_reload: false,
             session_delete_confirm: None,
             tab_persistence: false,
             update_hit: None,
@@ -1269,10 +1297,15 @@ impl AppState {
             composer_input_area: Rect::default(),
             composer_scroll: 0,
             composer_selection: None,
+            queued_panel_area: Rect::default(),
+            queued_hit_zones: Vec::new(),
+            hovered_queued: None,
             composer_drag_anchor: None,
             tab_drag: None,
             pending_toggle: None,
             pending_digest: None,
+            last_click: None,
+            click_streak: 0,
             selection: None,
             doc_selection: None,
             last_transcript_anchor: None,
@@ -1406,6 +1439,8 @@ impl AppState {
         self.last_transcript_anchor = None;
         self.transcript_wrapped_lines.clear();
         self.transcript_cache.clear();
+        self.queued_hit_zones.clear();
+        self.hovered_queued = None;
         self.file_change_scroll = 0;
         self.file_change_more_hit = None;
         self.pending_g = false;
@@ -1502,10 +1537,20 @@ impl AppState {
     }
 
     pub fn close_tab(&mut self, index: usize) -> bool {
-        if self.tabs.len() <= 1 || index >= self.tabs.len() {
-            if self.tabs.len() <= 1 {
-                self.status_notice = Some("Cannot close the last tab (use /quit to exit)".into());
+        if self.tabs.len() <= 1 {
+            if index >= self.tabs.len() {
+                return false;
             }
+            if self.session_opener.is_none() {
+                self.status_notice = Some("Cannot close the last tab (use /quit to exit)".into());
+                return false;
+            }
+            self.status_notice = Some("Closing the last tab and opening a new one...".into());
+            self.pending_session_actions
+                .push(PendingSessionAction::ReplaceLastTab);
+            return true;
+        }
+        if index >= self.tabs.len() {
             return false;
         }
 

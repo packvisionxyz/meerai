@@ -455,6 +455,36 @@ impl AppState {
                             error,
                         });
                     }
+                    KeyCode::Char('d') if has_ctrl => {
+                        let target = selected_recent
+                            .and_then(|idx| recent.get(idx).cloned())
+                            .or_else(|| {
+                                let typed = input.trim();
+                                (!typed.is_empty()).then(|| typed.to_string())
+                            });
+                        if let Some(model) = target {
+                            let provider = self.tab().active_provider.clone();
+                            let (target_provider, target_model) = self.resolve_model_target(&model);
+                            let provider_id = if target_provider.is_empty() {
+                                provider
+                            } else {
+                                target_provider
+                            };
+                            self.settings
+                                .forget_provider_model(&provider_id, &target_model);
+                            self.persist_settings();
+                            input.clear();
+                            selected_recent = None;
+                            error = None;
+                            self.status_notice =
+                                Some(format!("Removed {provider_id}/{target_model}"));
+                        }
+                        self.modal = Some(ActiveModal::ModelInput {
+                            input,
+                            selected_recent,
+                            error,
+                        });
+                    }
                     KeyCode::Up | KeyCode::Char('p') if key.code == KeyCode::Up || has_ctrl => {
                         if !recent.is_empty() {
                             let next = match selected_recent {
@@ -1362,6 +1392,65 @@ impl AppState {
                     }
                 }
             }
+            ActiveModal::QueuedEdit {
+                index,
+                mut input,
+                mut error,
+            } => match key.code {
+                KeyCode::Esc => {
+                    self.modal = None;
+                }
+                KeyCode::Backspace => {
+                    input.pop();
+                    error = None;
+                    self.modal = Some(ActiveModal::QueuedEdit {
+                        index,
+                        input,
+                        error,
+                    });
+                }
+                KeyCode::Enter => {
+                    let text = input.trim().to_string();
+                    if text.is_empty() {
+                        self.modal = Some(ActiveModal::QueuedEdit {
+                            index,
+                            input,
+                            error: Some("Message is required".to_string()),
+                        });
+                    } else {
+                        let updated = {
+                            let tab = self.tab_mut();
+                            match tab.queued.get_mut(index) {
+                                Some(slot) => {
+                                    *slot = text.clone();
+                                    true
+                                }
+                                None => false,
+                            }
+                        };
+                        if updated {
+                            self.status_notice = Some("Queued message updated".to_string());
+                        }
+                        self.modal = None;
+                    }
+                }
+                KeyCode::Char(c) if !has_ctrl && !has_alt => {
+                    input.push(c);
+                    error = None;
+                    self.modal = Some(ActiveModal::QueuedEdit {
+                        index,
+                        input,
+                        error,
+                    });
+                }
+                _ => {
+                    self.modal = Some(ActiveModal::QueuedEdit {
+                        index,
+                        input,
+                        error,
+                    });
+                }
+            },
             ActiveModal::ServeDialog {
                 mut port_input,
                 mut secret_input,

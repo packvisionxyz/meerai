@@ -473,6 +473,7 @@ async fn ac4_rejects_missing_wrong_user_and_wrong_secret_with_401() {
     let wrong_secret = basic_auth_header("meerai", "wrong-secret-value-123");
     let prompt_body = serde_json::to_vec(&SubmitPromptRequest {
         prompt: "should fail".to_string(),
+        display: None,
     })
     .unwrap();
     let r_secret = send_raw_request(
@@ -510,6 +511,7 @@ async fn ac5_rejects_bad_origin_content_type_host_and_options_preflight() {
     let auth = basic_auth_header("meerai", TEST_SECRET);
     let prompt_body = serde_json::to_vec(&SubmitPromptRequest {
         prompt: "blocked".to_string(),
+        display: None,
     })
     .unwrap();
 
@@ -607,6 +609,7 @@ async fn ac3_rejects_prompt_while_turn_running() {
 
     let first_body = serde_json::to_vec(&SubmitPromptRequest {
         prompt: "first prompt".to_string(),
+        display: None,
     })
     .unwrap();
     let first = send_raw_request(
@@ -629,6 +632,7 @@ async fn ac3_rejects_prompt_while_turn_running() {
 
     let second_body = serde_json::to_vec(&SubmitPromptRequest {
         prompt: "second prompt".to_string(),
+        display: None,
     })
     .unwrap();
     let second = send_raw_request(
@@ -704,6 +708,7 @@ async fn ac1_end_to_end_stream_replay_resync_and_snapshot() {
 
     let prompt_body = serde_json::to_vec(&SubmitPromptRequest {
         prompt: "explain meerai".to_string(),
+        display: None,
     })
     .unwrap();
     let post = send_raw_request(

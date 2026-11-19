@@ -796,6 +796,7 @@ async fn main() -> Result<()> {
                     .as_ref()
                     .and_then(|context| context.temperature)
                     .and_then(Temperature::effective),
+                context_effort: settings.context.as_ref().and_then(|context| context.effort),
                 explicit_context_window: settings
                     .context
                     .as_ref()
@@ -1998,6 +1999,9 @@ impl SessionOpener for CliSessionHost {
         }
         if let Some(sandbox) = update.sandbox {
             user.sandbox = Some(sandbox);
+        }
+        if let Some(forget) = update.forget_model {
+            user.forget_provider_model(&forget.provider, &forget.model);
         }
         self.persist_user_settings(&user)?;
         *self.user_settings.lock().unwrap() = user;

@@ -633,6 +633,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 Paragraph::new(key_hints_line(&[
                     ("Enter", "apply"),
                     ("↑↓", "recent"),
+                    ("ctrl+d", "forget"),
                     ("ctrl+u", "clear"),
                     ("Esc", "close"),
                 ])),
@@ -1058,6 +1059,60 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 key_hints_line(&[("Enter", "run"), ("↑↓", "move"), ("Esc", "close")])
             };
             frame.render_widget(Paragraph::new(footer), rows[4]);
+        }
+        ActiveModal::QueuedEdit {
+            index,
+            input,
+            error,
+        } => {
+            let popup = centered_rect_fixed(area, 64, 9);
+            dim_backdrop(frame, area, popup);
+            let inner = dialog_frame(frame, app, popup, "Edit queued message", true);
+
+            let rows = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(1),
+            ])
+            .split(inner);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("Message {}", index + 1),
+                    Style::default().fg(theme::p().muted),
+                )),
+                rows[0],
+            );
+
+            let text = if input.is_empty() {
+                Span::styled("Type a new message", Style::default().fg(theme::p().faint))
+            } else {
+                Span::styled(input.clone(), Style::default().fg(theme::p().text))
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("› ", Style::default().fg(theme::p().accent)),
+                    text,
+                ])),
+                rows[1],
+            );
+
+            if let Some(message) = error {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        message.clone(),
+                        Style::default().fg(theme::p().error),
+                    )),
+                    rows[2],
+                );
+            }
+
+            frame.render_widget(
+                Paragraph::new(key_hints_line(&[("Enter", "save"), ("Esc", "cancel")])),
+                rows[4],
+            );
         }
         ActiveModal::ServeDialog {
             port_input,

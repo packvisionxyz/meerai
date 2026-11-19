@@ -61,18 +61,18 @@ impl TransportClient {
         self.inner.resync();
     }
 
-    pub fn submit_prompt(&self, session_id: String, prompt: String) {
+    pub fn submit_prompt(&self, session_id: String, prompt: String, display: Option<String>) {
         #[cfg(target_arch = "wasm32")]
-        self.inner.submit_prompt(session_id, prompt);
+        self.inner.submit_prompt(session_id, prompt, display);
         #[cfg(not(target_arch = "wasm32"))]
-        let _ = (session_id, prompt);
+        let _ = (session_id, prompt, display);
     }
 
-    pub fn steer_prompt(&self, session_id: String, prompt: String) {
+    pub fn steer_prompt(&self, session_id: String, prompt: String, display: Option<String>) {
         #[cfg(target_arch = "wasm32")]
-        self.inner.steer_prompt(session_id, prompt);
+        self.inner.steer_prompt(session_id, prompt, display);
         #[cfg(not(target_arch = "wasm32"))]
-        let _ = (session_id, prompt);
+        let _ = (session_id, prompt, display);
     }
 
     pub fn cancel_turn(&self, session_id: String) {

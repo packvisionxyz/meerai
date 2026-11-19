@@ -29,6 +29,11 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
     ("/models", "Open model input modal", false),
     ("/model", "Switch active LLM model", true),
     (
+        "/effort",
+        "Show, set, or cycle reasoning effort (low|medium|high)",
+        true,
+    ),
+    (
         "/agent",
         "Apply an agent by id (or mention @agent/<id>)",
         true,

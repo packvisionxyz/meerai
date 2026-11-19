@@ -1,5 +1,14 @@
 use super::*;
+use meerai_common::settings::EffortLevel;
 use meerai_core::ToolDefinition;
+
+fn effort_level(effort: EffortLevel) -> genai::chat::ReasoningEffort {
+    match effort {
+        EffortLevel::Low => genai::chat::ReasoningEffort::Low,
+        EffortLevel::Medium => genai::chat::ReasoningEffort::Medium,
+        EffortLevel::High => genai::chat::ReasoningEffort::High,
+    }
+}
 
 fn is_context_overflow(message: &str) -> bool {
     let lowered = message.to_lowercase();
@@ -323,6 +332,9 @@ impl MultiTurnAgent {
                 .and_then(|harness| harness.config.temperature)
         {
             options = options.with_temperature(temperature as f64);
+        }
+        if !plan_usage && let Some(effort) = self.harness.as_ref().and_then(|h| h.config.effort) {
+            options = options.with_reasoning_effort(effort_level(effort));
         }
 
         let harnessed = self.harness.is_some();

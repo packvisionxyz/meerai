@@ -20,8 +20,6 @@ endif
 BIN_NAME := meerai
 BIN_PKG  := meerai-cli
 DIST_DIR := dist
-COLOR    ?= never
-CARGO    := CARGO_TERM_COLOR=$(COLOR) cargo
 
 UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)
 UNAME_M := $(shell uname -m 2>/dev/null || echo x86_64)
@@ -50,8 +48,8 @@ BUILD_TARGET := $(if $(target),$(target),$(HOST_TARGET))
 .DEFAULT_GOAL := help
 .SILENT:
 
-.PHONY: build build-debug check ci clean clean-dist dev fmt fmt-check format help \
-	install lint package run test verify watch
+.PHONY: build build-debug build-web check ci clean clean-dist fmt fmt-check format help \
+	install lint package run run-web serve test verify watch
 
 # =============================================================================
 # Help & Information
@@ -76,28 +74,32 @@ check: ## Check required toolchain commands
 
 ##@ Development
 
-dev: ## Run meerai locally in development mode (pass flags via ARGS="...")
-	$(CARGO) run -p $(BIN_PKG) -- $(ARGS)
+run: ## Run meerai locally in development mode (pass flags via ARGS="...")
+	cargo run -p $(BIN_PKG) -- $(ARGS)
 
-run: dev ## Alias for dev
+run-web: build-web ## Build the web bundle and run meerai with web enabled (pass flags via ARGS="...")
+	cargo run -p $(BIN_PKG) --features web -- $(ARGS)
+
+serve: build-web ## Build the web bundle and start the browser UI server (pass flags via ARGS="...")
+	cargo run -p $(BIN_PKG) --features web -- serve $(ARGS)
 
 watch: ## Watch source changes and rerun meerai (requires cargo-watch)
 	@command -v cargo-watch >/dev/null 2>&1 || { echo "Install cargo-watch first: cargo install cargo-watch"; exit 1; }
-	$(CARGO) watch -x "run -p $(BIN_PKG) -- $(ARGS)"
+	cargo watch -x "run -p $(BIN_PKG) -- $(ARGS)"
 
 fmt: ## Format all workspace Rust crates
-	$(CARGO) fmt --all
+	cargo fmt --all
 
 format: fmt ## Alias for fmt
 
 fmt-check: ## Check workspace formatting without modifying files
-	$(CARGO) fmt --all -- --check
+	cargo fmt --all -- --check
 
 lint: ## Run clippy across all workspace targets
-	$(CARGO) clippy --workspace --all-targets
+	cargo clippy --workspace --all-targets
 
 test: ## Run all workspace tests
-	$(CARGO) test --workspace
+	cargo test --workspace
 
 ci: fmt-check lint test ## Run local CI verification (fmt-check -> lint -> test)
 
@@ -110,20 +112,23 @@ verify: ci ## Alias for ci, matching the CI "verify" job
 ##@ Build & Packaging
 
 build: ## Build release binary (optional target=<triple>, e.g. target=x86_64-unknown-linux-gnu)
-	$(CARGO) build --release --locked -p $(BIN_PKG) $(if $(target),--target $(target),) $(ARGS)
+	cargo build --release --locked -p $(BIN_PKG) $(if $(target),--target $(target),) $(ARGS)
 	@BIN_PATH="target/$(if $(target),$(target)/,)release/$(BIN_NAME)$(BIN_EXT)"; \
 	echo "Built binary: $$BIN_PATH"
 
 build-debug: ## Build debug binary
-	$(CARGO) build -p $(BIN_PKG) $(ARGS)
+	cargo build -p $(BIN_PKG) $(ARGS)
+
+build-web: ## Build the browser UI Wasm bundle into target/web (pass flags via WEB_ARGS="...")
+	python3 scripts/build-web.py $(WEB_ARGS)
 
 install: ## Build the release binary and install it locally, replacing the installed version
-	$(CARGO) install --path $(BIN_PKG) --locked --force --target-dir target $(if $(target),--target $(target),) $(ARGS)
+	cargo install --path $(BIN_PKG) --locked --force --target-dir target $(if $(target),--target $(target),) $(ARGS)
 	@echo "Installed $(BIN_NAME) from $(BIN_PKG)"
 
 package: ## Build and package release archive + SHA256 into dist/ (optional target=<triple>)
 	@mkdir -p $(DIST_DIR)
-	$(CARGO) build --release --locked -p $(BIN_PKG) --target $(BUILD_TARGET) $(ARGS)
+	cargo build --release --locked -p $(BIN_PKG) --target $(BUILD_TARGET) $(ARGS)
 	@ARCHIVE_BASE="$(BIN_NAME)-$(BUILD_TARGET)"; \
 	if [[ "$(BUILD_TARGET)" == *windows* ]]; then \
 		ARCHIVE="$$ARCHIVE_BASE.zip"; \
@@ -149,7 +154,7 @@ package: ## Build and package release archive + SHA256 into dist/ (optional targ
 ##@ Cleanup
 
 clean: clean-dist ## Clean Cargo build and release artifacts
-	$(CARGO) clean
+	cargo clean
 
 clean-dist: ## Remove packaged release artifacts in dist/
 	rm -rf $(DIST_DIR)

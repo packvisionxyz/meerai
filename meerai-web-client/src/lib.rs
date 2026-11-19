@@ -54,10 +54,10 @@ mod tests {
     use super::*;
     use crate::state::{
         accept_completion, apply_opened_session, apply_session_detail, cycle_approval_mode,
-        detach_tab_view, drain_next_queued_if_idle, execute_slash_command, extract_mentions,
-        group_transcript_blocks, move_tab_to, open_diff_modal, remove_mention_token,
-        reorder_active_tab, resolved_mention_chips, select_tab_index, submit_or_queue_composer,
-        update_completion,
+        detach_tab_view, dispatch_prompt_text, drain_next_queued_if_idle, execute_slash_command,
+        extract_mentions, group_transcript_blocks, mention_segments, move_tab_to, open_diff_modal,
+        remove_mention_token, reorder_active_tab, resolved_mention_chips, select_tab_index,
+        submit_or_queue_composer, update_completion,
     };
 
     fn summary(id: &str, status: SessionStatus) -> SessionSummaryDto {
@@ -519,6 +519,91 @@ mod tests {
     }
 
     #[test]
+    fn mention_extraction_cleans_known_tokens_and_keeps_unknown_ones() {
+        let mut host = HostInfoDto::default();
+        host.skills.push(SkillInfoDto {
+            id: "orchestrate".to_owned(),
+            source: ".agents".to_owned(),
+            description: None,
+        });
+
+        let mentions = extract_mentions("@skill/orchestrate\nreview   this", &host);
+        assert_eq!(mentions.skills, vec!["orchestrate".to_owned()]);
+        assert_eq!(mentions.cleaned, "review this");
+        assert!(!mentions.mention_only);
+
+        let unknown = extract_mentions("@skill/missing keep", &host);
+        assert!(unknown.skills.is_empty());
+        assert_eq!(unknown.cleaned, "@skill/missing keep");
+    }
+
+    #[test]
+    fn mention_segments_split_known_tokens_and_preserve_plain_text() {
+        let mut host = HostInfoDto::default();
+        host.agents.push(AgentInfoDto {
+            id: "reviewer".to_owned(),
+            source: ".agents".to_owned(),
+            description: None,
+            model: None,
+        });
+
+        let segments = mention_segments("go @agent/reviewer now", &host);
+        assert_eq!(
+            segments,
+            vec![
+                crate::state::MentionSegment {
+                    category: None,
+                    text: "go ".to_owned(),
+                },
+                crate::state::MentionSegment {
+                    category: Some(MentionCategory::Agent),
+                    text: "reviewer".to_owned(),
+                },
+                crate::state::MentionSegment {
+                    category: None,
+                    text: " now".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_prompt_cleans_known_mentions_from_the_model_prompt() {
+        let mut state = AppState {
+            connection: ConnectionState::Connected,
+            ..AppState::default()
+        };
+        state.host_info.skills.push(SkillInfoDto {
+            id: "orchestrate".to_owned(),
+            source: ".agents".to_owned(),
+            description: None,
+        });
+        apply_opened_session(&mut state, summary("s-1", SessionStatus::Idle));
+
+        dispatch_prompt_text(&mut state, "@skill/orchestrate review this".to_owned());
+        assert_eq!(
+            state.active_tab().unwrap().pending_submit.as_deref(),
+            Some("review this")
+        );
+
+        let mut running = AppState {
+            connection: ConnectionState::Connected,
+            ..AppState::default()
+        };
+        running.host_info = state.host_info.clone();
+        apply_opened_session(&mut running, summary("s-2", SessionStatus::Running));
+        dispatch_prompt_text(&mut running, "@skill/orchestrate review this".to_owned());
+        let queued: Vec<String> = running
+            .active_tab()
+            .unwrap()
+            .pending_queue
+            .iter()
+            .cloned()
+            .collect();
+        assert_eq!(queued, vec!["review this".to_owned()]);
+    }
+
+    #[test]
     fn steer_draft_when_busy_and_rewind_syncs_tab_draft() {
         let mut state = AppState {
             connection: ConnectionState::Connected,
@@ -858,5 +943,90 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn effort_command_queued_edit_mention_punctuation_and_last_tab_detach() {
+        let mut state = AppState {
+            connection: ConnectionState::Connected,
+            ..AppState::default()
+        };
+        state.host_info.settings.config_writable = true;
+        state.host_info.skills.push(SkillInfoDto {
+            id: "orchestrate".to_owned(),
+            source: ".agents".to_owned(),
+            description: None,
+        });
+        apply_opened_session(&mut state, summary("s-1", SessionStatus::Running));
+
+        execute_slash_command(&mut state, "/effort");
+        assert_eq!(
+            state.host_info.settings.context.effort,
+            Some(meerai_web_protocol::EffortDto::High)
+        );
+        assert_eq!(state.host_info.settings.context.temperature, None);
+        execute_slash_command(&mut state, "/effort low");
+        assert_eq!(
+            state.host_info.settings.context.effort,
+            Some(meerai_web_protocol::EffortDto::Low)
+        );
+
+        let mentions = extract_mentions("@skill/orchestrate, review this", &state.host_info);
+        assert_eq!(mentions.skills, vec!["orchestrate".to_owned()]);
+        assert_eq!(mentions.cleaned, ", review this");
+
+        {
+            let tab = state.active_tab_mut().unwrap();
+            tab.pending_queue.push_back("first".to_owned());
+            tab.pending_queue.push_back("second".to_owned());
+        }
+        crate::state::open_queued_edit(&mut state, 1);
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::QueuedEdit { index: 1, .. })
+        ));
+        if let Some(ActiveModal::QueuedEdit { input, .. }) = &mut state.modal {
+            input.replace_text("   ");
+        }
+        crate::state::commit_queued_edit(&mut state);
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::QueuedEdit { error: Some(_), .. })
+        ));
+
+        crate::state::remove_queued(&mut state, 0);
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::QueuedEdit { index: 0, .. })
+        ));
+        if let Some(ActiveModal::QueuedEdit { input, .. }) = &mut state.modal {
+            input.replace_text("updated second");
+        }
+        crate::state::commit_queued_edit(&mut state);
+        assert!(state.modal.is_none());
+        assert_eq!(
+            state
+                .active_tab()
+                .unwrap()
+                .pending_queue
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["updated second".to_owned()]
+        );
+
+        detach_tab_view(&mut state, "s-1");
+        assert_eq!(state.visible_sessions().len(), 1);
+        assert_eq!(state.pending_replace_session.as_deref(), Some("s-1"));
+        crate::state::apply_created_session(&mut state, summary("s-2", SessionStatus::Idle));
+        assert!(state.pending_replace_session.is_none());
+        assert_eq!(
+            state
+                .visible_sessions()
+                .into_iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["s-2"]
+        );
     }
 }

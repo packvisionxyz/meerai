@@ -5,8 +5,9 @@ use wasm_bindgen::JsCast;
 
 use crate::markdown::render_markdown;
 use crate::state::{
-    SessionTabState, TranscriptBlock, activity_summary, activity_verb, group_transcript_blocks,
-    open_rewind_modal, set_status_notice, summarize_tool_args, update_completion,
+    DigestItem, MentionCategory, SessionTabState, TranscriptBlock, activity_summary, activity_verb,
+    extract_mentions, group_transcript_blocks, mention_segments, open_rewind_modal,
+    set_status_notice, summarize_tool_args, update_completion,
 };
 use crate::store::StoreHandle;
 use crate::text::UiEffect;
@@ -229,7 +230,22 @@ fn render_block(store: StoreHandle, tab: &SessionTabState, block: TranscriptBloc
             text,
         } => {
             let anchor = format!("turn-{id}");
-            let copy_text = text.to_owned();
+            let host = store.with(|s| s.host_info.clone());
+            let copy_text = extract_mentions(text, &host).cleaned;
+            let body: Vec<AnyView> = mention_segments(text, &host)
+                .into_iter()
+                .map(|segment| match segment.category {
+                    Some(category) => {
+                        let class = match category {
+                            MentionCategory::Agent => "def-chip agent",
+                            MentionCategory::Skill => "def-chip skill",
+                            MentionCategory::File => "def-chip",
+                        };
+                        view! { <span class=class>{segment.text}</span> }.into_any()
+                    }
+                    None => view! { <span>{segment.text}</span> }.into_any(),
+                })
+                .collect();
             let has_turn = turn_id.is_some();
             let turn_rewind = turn_id.map(str::to_owned);
             let turn_fork = turn_id.map(str::to_owned);
@@ -268,17 +284,17 @@ fn render_block(store: StoreHandle, tab: &SessionTabState, block: TranscriptBloc
                         </div>
                     </div>
                     <div class="msg-label">"You"</div>
-                    <div class="user-msg">{text.to_owned()}</div>
+                    <div class="user-msg">
+                        {AnyView::from(Fragment::new(body))}
+                    </div>
                 </article>
             }
             .into_any()
         }
-        TranscriptBlock::ActivityDigest {
-            digest_id,
-            tools,
-            reasoning,
-        } => render_digest(store, tab, digest_id, tools, reasoning),
-        TranscriptBlock::Assistant(entry) => render_assistant(store, tab, entry),
+        TranscriptBlock::ActivityDigest { digest_id, items } => {
+            render_digest(store, tab, digest_id, items)
+        }
+        TranscriptBlock::Assistant(entry) => render_assistant(store, entry),
         TranscriptBlock::System(entry) => {
             let text = match entry {
                 TranscriptEntryDto::System { text, .. } => text.clone(),
@@ -299,7 +315,6 @@ fn render_block(store: StoreHandle, tab: &SessionTabState, block: TranscriptBloc
             }
             .into_any()
         }
-        TranscriptBlock::Subagent(entry) => render_subagent(store, tab, entry),
         TranscriptBlock::Question(entry) => render_question(entry),
     }
 }
@@ -308,35 +323,40 @@ fn render_digest(
     store: StoreHandle,
     tab: &SessionTabState,
     digest_id: String,
-    tools: Vec<&TranscriptEntryDto>,
-    reasoning: Vec<&TranscriptEntryDto>,
+    items: Vec<DigestItem<'_>>,
 ) -> AnyView {
     let expanded = tab.expanded_digests.contains(&digest_id);
     let toggle_id = digest_id.clone();
-    let pairs: Vec<(&str, bool)> = tools
-        .iter()
-        .map(|entry| match entry {
-            TranscriptEntryDto::ToolCall { name, status, .. } => {
-                (name.as_str(), status == "running")
+    let mut pairs: Vec<(&str, bool)> = Vec::new();
+    let mut thoughts = 0usize;
+    for item in &items {
+        match item {
+            DigestItem::ToolCall(TranscriptEntryDto::ToolCall { name, status, .. }) => {
+                pairs.push((name.as_str(), status == "running"));
             }
-            _ => ("tool", false),
-        })
-        .collect();
+            DigestItem::Subagent(TranscriptEntryDto::Subagent { status, .. }) => {
+                pairs.push(("subagent-run", status == "running"));
+            }
+            DigestItem::Reasoning(_) => thoughts += 1,
+            _ => {}
+        }
+    }
     let has_running = pairs.iter().any(|(_, running)| *running);
-    let summary = activity_summary(&pairs, reasoning.len());
+    let summary = activity_summary(&pairs, thoughts);
     let summary = if summary.is_empty() {
         "Activity".to_owned()
     } else {
         summary
     };
     let body = if expanded {
-        let mut rows = Vec::new();
-        for entry in &tools {
-            rows.push(render_tool_row(store, tab, entry));
-        }
-        for entry in &reasoning {
-            rows.push(render_reasoning(store, tab, entry, "Thought"));
-        }
+        let rows = items
+            .iter()
+            .map(|item| match item {
+                DigestItem::ToolCall(entry) => render_tool_row(store, tab, entry),
+                DigestItem::Subagent(entry) => render_subagent(store, tab, entry),
+                DigestItem::Reasoning(entry) => render_reasoning(store, tab, entry, "Thought"),
+            })
+            .collect::<Vec<_>>();
         view! { <div class="digest-body">{AnyView::from(Fragment::new(rows))}</div> }.into_any()
     } else {
         view! { <div></div> }.into_any()
@@ -484,49 +504,28 @@ fn render_edit_diff(lines: &[meerai_web_protocol::UnifiedLineDto]) -> AnyView {
     .into_any()
 }
 
-fn render_assistant(
-    store: StoreHandle,
-    tab: &SessionTabState,
-    entry: &TranscriptEntryDto,
-) -> AnyView {
-    let TranscriptEntryDto::Assistant {
-        id,
-        text,
-        reasoning,
-    } = entry
-    else {
+fn render_assistant(store: StoreHandle, entry: &TranscriptEntryDto) -> AnyView {
+    let TranscriptEntryDto::Assistant { text, .. } = entry else {
         return view! { <div></div> }.into_any();
     };
-    if text.trim().is_empty() && reasoning.trim().is_empty() {
+    if text.trim().is_empty() {
         return view! { <div></div> }.into_any();
     }
-    let has_text = !text.trim().is_empty();
     let copy_text = text.clone();
-    let body = if !has_text {
-        view! { <div></div> }.into_any()
-    } else {
-        render_markdown(text)
-    };
-    let reasoning_view = render_reasoning(store, tab, entry, "Reasoning");
-    let _ = id;
+    let body = render_markdown(text);
     view! {
         <div class="assistant">
             <div class="assistant-head">
                 <div class="msg-label assistant-label"><span class="assistant-dot"></span>"meerai"</div>
-                {has_text.then(|| {
-                    view! {
-                        <button
-                            class="btn tiny assistant-copy"
-                            title="Copy reply markdown"
-                            on:click=move |_| {
-                                crate::store::copy_text(copy_text.clone());
-                                store.update(|s| set_status_notice(s, "Copied reply"));
-                            }
-                        >"Copy"</button>
+                <button
+                    class="btn tiny assistant-copy"
+                    title="Copy reply markdown"
+                    on:click=move |_| {
+                        crate::store::copy_text(copy_text.clone());
+                        store.update(|s| set_status_notice(s, "Copied reply"));
                     }
-                })}
+                >"Copy"</button>
             </div>
-            {reasoning_view}
             {body}
         </div>
     }
@@ -657,6 +656,7 @@ fn render_pending_inputs(
     for (index, prompt) in queued.into_iter().enumerate() {
         let steer_index = index;
         let drop_index = index;
+        let edit_index = index;
         cards.push(
             view! {
                 <article class="turn pending">
@@ -670,12 +670,13 @@ fn render_pending_inputs(
                             >"Steer"</button>
                             <button
                                 class="btn tiny"
+                                title="Edit this queued prompt"
+                                on:click=move |_| store.update(|s| crate::state::open_queued_edit(s, edit_index))
+                            >"Edit"</button>
+                            <button
+                                class="btn tiny"
                                 title="Remove from queue"
-                                on:click=move |_| store.update(|s| {
-                                    if let Some(tab) = s.active_tab_mut() {
-                                        tab.pending_queue.remove(drop_index);
-                                    }
-                                })
+                                on:click=move |_| store.update(|s| crate::state::remove_queued(s, drop_index))
                             >"Remove"</button>
                         </div>
                     </div>

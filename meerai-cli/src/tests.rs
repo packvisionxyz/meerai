@@ -514,6 +514,7 @@ fn harness_config_uses_defaults_and_context_overrides() {
         recovery_model: Some("openrouter:fallback-model".to_string()),
         post_edit_diagnostics: None,
         temperature: None,
+        effort: None,
     };
     let config = HarnessConfig::from_context_settings(Some(&context));
     assert_eq!(config.context_window_tokens, 200_000);

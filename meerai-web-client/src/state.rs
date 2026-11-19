@@ -7,11 +7,11 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use crate::text::{TextBuffer, UiEffects};
 use meerai_web_protocol::{
     ApprovalModeDto, ApprovalRequestDto, BackendKind, ChatGptLoginStateDto, ContextSettingsDto,
-    FileChangeDto, FileDiffResponse, HostInfoDto, ModelItemDto, ProviderItemDto, ProvidersResponse,
-    QuestionRequestDto, ReloadResponse, RewindScopeDto, SandboxSettingsDto, SessionDetailDto,
-    SessionSettingsDto, SessionStatus, SessionSummaryDto, SnapshotResponse, ThemeOverrideDto,
-    TranscriptEntryDto, TurnMetricsDto, UpdateSettingsRequest, UsageDto, ViewEvent,
-    WorkspacePreviewResponse, WorkspaceSearchResponse,
+    EffortDto, FileChangeDto, FileDiffResponse, HostInfoDto, ModelItemDto, ProviderItemDto,
+    ProvidersResponse, QuestionRequestDto, ReloadResponse, RewindScopeDto, SandboxSettingsDto,
+    SessionDetailDto, SessionSettingsDto, SessionStatus, SessionSummaryDto, SnapshotResponse,
+    ThemeOverrideDto, TranscriptEntryDto, TurnMetricsDto, UpdateSettingsRequest, UsageDto,
+    ViewEvent, WorkspacePreviewResponse, WorkspaceSearchResponse,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +102,12 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         cmd: "/model",
         args: "[name]",
         desc: "Switch active model",
+        takes_arg: true,
+    },
+    SlashCommandSpec {
+        cmd: "/effort",
+        args: "[low|medium|high]",
+        desc: "Show, set, or cycle reasoning effort",
         takes_arg: true,
     },
     SlashCommandSpec {
@@ -322,6 +328,11 @@ pub const PALETTE_ACTIONS: &[PaletteActionSpec] = &[
         hint: "Alt+M",
     },
     PaletteActionSpec {
+        key: "cycle-effort",
+        label: "Cycle reasoning effort",
+        hint: "/effort",
+    },
+    PaletteActionSpec {
         key: "new-session",
         label: "New session tab",
         hint: "/new",
@@ -393,6 +404,7 @@ pub fn execute_palette_action(state: &mut AppState, tx: &mut UiEffects, key: &st
         "move-tab-left" => reorder_active_tab(state, -1),
         "move-tab-right" => reorder_active_tab(state, 1),
         "cycle-mode" => cycle_approval_mode(state),
+        "cycle-effort" => execute_slash_command(state, "/effort"),
         "new-session" => {
             if let Some(t) = crate::transport::current() {
                 t.create_session(None);
@@ -418,6 +430,7 @@ pub struct SettingsFormState {
     pub prompt_caching: bool,
     pub rollback_on_verify_failure: bool,
     pub post_edit_diagnostics: bool,
+    pub effort: Option<EffortDto>,
     pub require_for_scripts: bool,
     pub require_for_shell: bool,
     pub strict_env: bool,
@@ -498,6 +511,7 @@ impl SettingsFormState {
             prompt_caching: c.prompt_caching.unwrap_or(true),
             rollback_on_verify_failure: c.rollback_on_verify_failure.unwrap_or(false),
             post_edit_diagnostics: c.post_edit_diagnostics.unwrap_or(false),
+            effort: c.effort,
             require_for_scripts: s.sandbox.require_for_scripts.unwrap_or(false),
             require_for_shell: s.sandbox.require_for_shell.unwrap_or(false),
             strict_env: s.sandbox.strict_env.unwrap_or(false),
@@ -626,7 +640,9 @@ impl SettingsFormState {
                 summarizer_model: opt_str("summarizer_model"),
                 post_edit_diagnostics: Some(self.post_edit_diagnostics),
                 temperature: parse_temp("temperature")?,
+                effort: self.effort,
             }),
+            forget_model: None,
             session: Some(SessionSettingsDto {
                 auto_prune_days: parse_u64("auto prune days", "auto_prune_days")?,
                 keep: parse_usize("keep count", "session_keep")?,
@@ -756,6 +772,11 @@ pub enum ActiveModal {
         selected: usize,
     },
     Settings(SettingsFormState),
+    QueuedEdit {
+        index: usize,
+        input: TextBuffer,
+        error: Option<String>,
+    },
     Help,
     SubagentOverlay {
         entry_id: String,
@@ -799,6 +820,7 @@ pub struct AppState {
     pub sessions: Vec<SessionSummaryDto>,
     pub tab_order: Vec<String>,
     pub hidden_session_ids: HashSet<String>,
+    pub pending_replace_session: Option<String>,
     pub session_tabs: HashMap<String, SessionTabState>,
     pub session_panel: SessionPanel,
     pub host_info: HostInfoDto,
@@ -830,6 +852,7 @@ impl Default for AppState {
             sessions: Vec::new(),
             tab_order: Vec::new(),
             hidden_session_ids: HashSet::new(),
+            pending_replace_session: None,
             session_tabs: HashMap::new(),
             session_panel: SessionPanel::default(),
             host_info: HostInfoDto::default(),
@@ -1035,6 +1058,11 @@ pub fn apply_session_detail(state: &mut AppState, detail: SessionDetailDto) {
 
 pub fn apply_created_session(state: &mut AppState, session: SessionSummaryDto) {
     let id = session.id.clone();
+    if let Some(prev) = state.pending_replace_session.take()
+        && prev != id
+    {
+        state.hidden_session_ids.insert(prev);
+    }
     state.hidden_session_ids.remove(&id);
     upsert_session(state, session);
     switch_to_session(state, &id);
@@ -1652,7 +1680,11 @@ pub fn reorder_active_tab(state: &mut AppState, delta: isize) {
 pub fn detach_tab_view(state: &mut AppState, session_id: &str) {
     let visible = state.visible_sessions();
     if visible.len() <= 1 {
-        set_status_notice(state, "Cannot close the last open tab");
+        state.pending_replace_session = Some(session_id.to_owned());
+        set_status_notice(state, "Closing the last tab, opening a new session");
+        if let Some(t) = crate::transport::current() {
+            t.create_session(None);
+        }
         return;
     }
     let visible_ids: Vec<String> = visible.into_iter().map(|s| s.id.clone()).collect();
@@ -1741,6 +1773,11 @@ pub fn dispatch_prompt_text(state: &mut AppState, trimmed: String) {
         state.error_banner = Some("No active session".to_owned());
         return;
     };
+    let prompt = if mentions.skills.is_empty() && mentions.agent.is_none() {
+        trimmed.clone()
+    } else {
+        mentions.cleaned
+    };
 
     if state.is_busy() {
         state
@@ -1748,7 +1785,7 @@ pub fn dispatch_prompt_text(state: &mut AppState, trimmed: String) {
             .entry(sid)
             .or_default()
             .pending_queue
-            .push_back(trimmed);
+            .push_back(prompt);
         set_status_notice(state, "Queued prompt (click item to steer now)");
         return;
     }
@@ -1759,9 +1796,96 @@ pub fn dispatch_prompt_text(state: &mut AppState, trimmed: String) {
         .session_tabs
         .entry(sid.clone())
         .or_default()
-        .pending_submit = Some(trimmed.clone());
+        .pending_submit = Some(prompt.clone());
     if let Some(t) = crate::transport::current() {
-        t.submit_prompt(sid, trimmed);
+        t.submit_prompt(sid, prompt, Some(trimmed));
+    }
+}
+
+pub fn forget_model(state: &mut AppState, provider: &str, model: &str) {
+    if let Some(providers) = state.providers.as_mut()
+        && let Some(list) = providers.recent_models.get_mut(provider)
+    {
+        list.retain(|m| m != model);
+        if list.is_empty() {
+            providers.recent_models.remove(provider);
+        }
+    }
+    if let Some(t) = crate::transport::current() {
+        t.update_settings(UpdateSettingsRequest {
+            reset_theme: false,
+            theme: None,
+            context: None,
+            session: None,
+            sandbox: None,
+            forget_model: Some(meerai_web_protocol::ForgetModelDto {
+                provider: provider.to_owned(),
+                model: model.to_owned(),
+            }),
+        });
+    }
+    set_status_notice(state, format!("Removed {provider}/{model}"));
+}
+
+pub fn open_queued_edit(state: &mut AppState, index: usize) {
+    let Some(prompt) = state
+        .active_tab()
+        .and_then(|tab| tab.pending_queue.get(index))
+        .cloned()
+    else {
+        return;
+    };
+    state.modal = Some(ActiveModal::QueuedEdit {
+        index,
+        input: TextBuffer::new(prompt),
+        error: None,
+    });
+}
+
+pub fn commit_queued_edit(state: &mut AppState) {
+    let Some(ActiveModal::QueuedEdit { index, input, .. }) = state.modal.clone() else {
+        return;
+    };
+    let text = input.text.trim().to_owned();
+    if text.is_empty() {
+        if let Some(ActiveModal::QueuedEdit { error, .. }) = &mut state.modal {
+            *error = Some("Message is required".to_owned());
+        }
+        return;
+    }
+    if let Some(tab) = state.active_tab_mut()
+        && let Some(slot) = tab.pending_queue.get_mut(index)
+    {
+        *slot = text;
+        state.modal = None;
+        set_status_notice(state, "Queued message updated");
+    }
+}
+
+fn adjust_queued_edit_modal(state: &mut AppState, session_id: &str, removed_idx: usize) {
+    if state.active_session_id.as_deref() != Some(session_id) {
+        return;
+    }
+    if let Some(ActiveModal::QueuedEdit { index, .. }) = &mut state.modal {
+        if *index == removed_idx {
+            state.modal = None;
+            set_status_notice(state, "Queued message was removed or sent");
+        } else if *index > removed_idx {
+            *index -= 1;
+        }
+    }
+}
+
+pub fn remove_queued(state: &mut AppState, index: usize) {
+    let Some(sid) = state.active_session_id.clone() else {
+        return;
+    };
+    if let Some(tab) = state.active_tab_mut()
+        && index < tab.pending_queue.len()
+    {
+        tab.pending_queue.remove(index);
+        adjust_queued_edit_modal(state, &sid, index);
+        set_status_notice(state, "Removed queued message");
     }
 }
 
@@ -1774,21 +1898,43 @@ pub fn steer_or_send_queued(state: &mut AppState, index: usize) {
         .get_mut(&sid)
         .and_then(|tab| tab.pending_queue.remove(index))
     {
+        adjust_queued_edit_modal(state, &sid, index);
+        let mentions = extract_mentions(&prompt, &state.host_info);
+        if let Some(t) = crate::transport::current() {
+            for skill in &mentions.skills {
+                t.apply_skill(sid.clone(), skill.clone());
+            }
+            if let Some(agent) = &mentions.agent {
+                t.apply_agent(sid.clone(), agent.clone());
+            }
+        }
+        let has_mentions = !mentions.skills.is_empty() || mentions.agent.is_some();
+        let clean = if has_mentions {
+            mentions.cleaned
+        } else {
+            prompt.clone()
+        };
+        if clean.is_empty() {
+            let tab = state.session_tabs.entry(sid).or_default();
+            push_applied_mentions_notice(tab, &mentions.skills, mentions.agent.as_deref());
+            return;
+        }
+        let display = has_mentions.then_some(prompt);
         if !state.is_busy() {
             state.sending = true;
             state
                 .session_tabs
                 .entry(sid.clone())
                 .or_default()
-                .pending_submit = Some(prompt.clone());
+                .pending_submit = Some(clean.clone());
         }
         let Some(t) = crate::transport::current() else {
             return;
         };
         if state.is_busy() {
-            t.steer_prompt(sid, prompt);
+            t.steer_prompt(sid, clean, display);
         } else {
-            t.submit_prompt(sid, prompt);
+            t.submit_prompt(sid, clean, display);
         }
         return;
     }
@@ -1796,6 +1942,23 @@ pub fn steer_or_send_queued(state: &mut AppState, index: usize) {
     if index == 0 && state.is_busy() {
         let trimmed = state.draft.text.trim().to_owned();
         if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with('!') {
+            return;
+        }
+        let mentions = extract_mentions(&trimmed, &state.host_info);
+        if let Some(t) = crate::transport::current() {
+            for skill in &mentions.skills {
+                t.apply_skill(sid.clone(), skill.clone());
+            }
+            if let Some(agent) = &mentions.agent {
+                t.apply_agent(sid.clone(), agent.clone());
+            }
+        }
+        let prompt = if mentions.skills.is_empty() && mentions.agent.is_none() {
+            trimmed.clone()
+        } else {
+            mentions.cleaned
+        };
+        if prompt.is_empty() {
             return;
         }
         state.completion = CompletionState::default();
@@ -1806,8 +1969,21 @@ pub fn steer_or_send_queued(state: &mut AppState, index: usize) {
             tab.draft_text.clear();
         }
         if let Some(t) = crate::transport::current() {
-            t.steer_prompt(sid, trimmed);
+            t.steer_prompt(sid, prompt, Some(trimmed));
         }
+    }
+}
+
+fn push_applied_mentions_notice(tab: &mut SessionTabState, skills: &[String], agent: Option<&str>) {
+    let mut applied = Vec::new();
+    for s in skills {
+        applied.push(format!("skill:{s}"));
+    }
+    if let Some(a) = agent {
+        applied.push(format!("agent:{a}"));
+    }
+    if !applied.is_empty() {
+        push_local_system(tab, format!("Applied {}", applied.join(", ")));
     }
 }
 
@@ -1823,18 +1999,45 @@ pub fn drain_next_queued_if_idle(state: &mut AppState, session_id: &str) {
     if !is_session_idle {
         return;
     }
-    let next = state
+    while let Some(queued_text) = state
         .session_tabs
         .get_mut(session_id)
-        .and_then(|tab| tab.pending_queue.pop_front());
-    if let Some(prompt) = next {
+        .and_then(|tab| tab.pending_queue.pop_front())
+    {
+        adjust_queued_edit_modal(state, session_id, 0);
+        let mentions = extract_mentions(&queued_text, &state.host_info);
+        let has_mentions = !mentions.skills.is_empty() || mentions.agent.is_some();
+        if has_mentions && let Some(t) = crate::transport::current() {
+            for skill in &mentions.skills {
+                t.apply_skill(session_id.to_owned(), skill.clone());
+            }
+            if let Some(agent) = &mentions.agent {
+                t.apply_agent(session_id.to_owned(), agent.clone());
+            }
+        }
+        let prompt = if has_mentions {
+            mentions.cleaned
+        } else {
+            queued_text.clone()
+        };
+        if prompt.is_empty() {
+            if let Some(tab) = state.session_tabs.get_mut(session_id) {
+                push_applied_mentions_notice(tab, &mentions.skills, mentions.agent.as_deref());
+            }
+            continue;
+        }
         state.sending = true;
         if let Some(tab) = state.session_tabs.get_mut(session_id) {
             tab.pending_submit = Some(prompt.clone());
         }
         if let Some(t) = crate::transport::current() {
-            t.submit_prompt(session_id.to_owned(), prompt);
+            t.submit_prompt(
+                session_id.to_owned(),
+                prompt,
+                has_mentions.then_some(queued_text),
+            );
         }
+        break;
     }
 }
 
@@ -1949,6 +2152,9 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
                     t.set_model(sid, provider, model);
                 }
             }
+        }
+        "/effort" => {
+            set_effort_from_arg(state, arg);
         }
         "/agent" => {
             if arg.is_empty() {
@@ -2115,6 +2321,74 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
             ));
         }
     }
+}
+
+pub fn effort_label(effort: EffortDto) -> &'static str {
+    match effort {
+        EffortDto::Low => "low",
+        EffortDto::Medium => "medium",
+        EffortDto::High => "high",
+    }
+}
+
+pub fn effort_default_temperature(effort: EffortDto) -> f32 {
+    match effort {
+        EffortDto::Low => 0.0,
+        EffortDto::Medium => 0.2,
+        EffortDto::High => 0.5,
+    }
+}
+
+pub fn set_effort_from_arg(state: &mut AppState, arg: &str) {
+    let value = arg.trim().to_ascii_lowercase();
+    let current = state
+        .host_info
+        .settings
+        .context
+        .effort
+        .unwrap_or(EffortDto::Medium);
+    let next = match value.as_str() {
+        "" => match current {
+            EffortDto::Low => EffortDto::Medium,
+            EffortDto::Medium => EffortDto::High,
+            EffortDto::High => EffortDto::Low,
+        },
+        "low" => EffortDto::Low,
+        "medium" | "mid" => EffortDto::Medium,
+        "high" => EffortDto::High,
+        other => {
+            set_status_notice(
+                state,
+                format!("Unknown effort '{other}' · use low, medium, or high"),
+            );
+            return;
+        }
+    };
+    if !state.host_info.settings.config_writable {
+        set_status_notice(state, "User settings file is read-only on this host.");
+        return;
+    }
+    state.host_info.settings.context.effort = Some(next);
+    state.host_info.settings.context.temperature = None;
+    let context = state.host_info.settings.context.clone();
+    if let Some(t) = crate::transport::current() {
+        t.update_settings(UpdateSettingsRequest {
+            reset_theme: false,
+            theme: None,
+            context: Some(context),
+            session: None,
+            sandbox: None,
+            forget_model: None,
+        });
+    }
+    set_status_notice(
+        state,
+        format!(
+            "Effort {} · temp {:.2}",
+            effort_label(next),
+            effort_default_temperature(next)
+        ),
+    );
 }
 
 pub fn set_approval_mode(state: &mut AppState, mode: ApprovalModeDto) {
@@ -2549,38 +2823,139 @@ pub struct ExtractedMentions {
     pub agent: Option<String>,
     pub skills: Vec<String>,
     pub mention_only: bool,
+    pub cleaned: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MentionSegment {
+    pub category: Option<MentionCategory>,
+    pub text: String,
+}
+
+pub fn mention_segments(input: &str, host: &HostInfoDto) -> Vec<MentionSegment> {
+    let agent_ids: HashSet<&str> = host.agents.iter().map(|a| a.id.as_str()).collect();
+    let skill_ids: HashSet<&str> = host.skills.iter().map(|s| s.id.as_str()).collect();
+    let mut segments = Vec::new();
+    let mut plain_start = 0;
+    let mut index = 0;
+
+    while let Some(offset) = input[index..].find('@') {
+        let at = index + offset;
+        if let Some((category, id, end)) = scan_mention(input, at, &agent_ids, &skill_ids) {
+            if at > plain_start {
+                segments.push(MentionSegment {
+                    category: None,
+                    text: input[plain_start..at].to_owned(),
+                });
+            }
+            segments.push(MentionSegment {
+                category: Some(category),
+                text: id.to_owned(),
+            });
+            index = end;
+            plain_start = end;
+        } else {
+            index = at + 1;
+        }
+    }
+
+    if plain_start < input.len() {
+        segments.push(MentionSegment {
+            category: None,
+            text: input[plain_start..].to_owned(),
+        });
+    }
+    segments
+}
+
+fn is_mention_id_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')
+}
+
+fn scan_mention<'a>(
+    input: &'a str,
+    at: usize,
+    agent_ids: &HashSet<&str>,
+    skill_ids: &HashSet<&str>,
+) -> Option<(MentionCategory, &'a str, usize)> {
+    let rest = input.get(at + 1..)?;
+    let (category, rest) = if let Some(rest) = rest.strip_prefix("agent/") {
+        (MentionCategory::Agent, rest)
+    } else {
+        (MentionCategory::Skill, rest.strip_prefix("skill/")?)
+    };
+    let id_len = rest
+        .char_indices()
+        .find(|(_, ch)| !is_mention_id_char(*ch))
+        .map(|(idx, _)| idx)
+        .unwrap_or(rest.len());
+    if id_len == 0 {
+        return None;
+    }
+    let id = &rest[..id_len];
+    let known = match category {
+        MentionCategory::Agent => agent_ids.contains(id),
+        MentionCategory::Skill => skill_ids.contains(id),
+        MentionCategory::File => false,
+    };
+    known.then_some((category, id, at + 1 + 6 + id_len))
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut pending_space = false;
+    let mut pending_newline = false;
+    for ch in text.chars() {
+        if ch == '\n' {
+            pending_newline = true;
+            pending_space = false;
+        } else if ch.is_whitespace() {
+            pending_space = true;
+        } else {
+            if !result.is_empty() {
+                if pending_newline {
+                    result.push('\n');
+                } else if pending_space {
+                    result.push(' ');
+                }
+            }
+            pending_newline = false;
+            pending_space = false;
+            result.push(ch);
+        }
+    }
+    result
 }
 
 pub fn extract_mentions(input: &str, host: &HostInfoDto) -> ExtractedMentions {
-    let agent_ids: HashSet<&str> = host.agents.iter().map(|a| a.id.as_str()).collect();
-    let skill_ids: HashSet<&str> = host.skills.iter().map(|s| s.id.as_str()).collect();
     let mut agent = None;
     let mut skills = Vec::new();
     let mut seen_skills = HashSet::new();
+    let mut cleaned = String::new();
     let mut has_non_definition_text = false;
 
-    for token in input.split_whitespace() {
-        if let Some(name) = token.strip_prefix("@agent/")
-            && agent_ids.contains(name)
-        {
-            agent = Some(name.to_owned());
-            continue;
-        }
-        if let Some(name) = token.strip_prefix("@skill/")
-            && skill_ids.contains(name)
-        {
-            if seen_skills.insert(name.to_owned()) {
-                skills.push(name.to_owned());
+    for segment in mention_segments(input, host) {
+        match segment.category {
+            Some(MentionCategory::Agent) => agent = Some(segment.text),
+            Some(MentionCategory::Skill) => {
+                if seen_skills.insert(segment.text.clone()) {
+                    skills.push(segment.text);
+                }
             }
-            continue;
+            Some(MentionCategory::File) | None => {
+                if !segment.text.trim().is_empty() {
+                    has_non_definition_text = true;
+                }
+                cleaned.push_str(&segment.text);
+            }
         }
-        has_non_definition_text = true;
     }
 
     ExtractedMentions {
         mention_only: !has_non_definition_text && (agent.is_some() || !skills.is_empty()),
         agent,
         skills,
+        cleaned: collapse_whitespace(&cleaned),
     }
 }
 
@@ -2848,6 +3223,13 @@ pub fn activity_summary(blocks: &[(&str, bool)], thoughts: usize) -> String {
     .join(" · ")
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum DigestItem<'a> {
+    Reasoning(&'a TranscriptEntryDto),
+    ToolCall(&'a TranscriptEntryDto),
+    Subagent(&'a TranscriptEntryDto),
+}
+
 #[derive(Clone, Debug)]
 pub enum TranscriptBlock<'a> {
     User {
@@ -2858,101 +3240,88 @@ pub enum TranscriptBlock<'a> {
     },
     ActivityDigest {
         digest_id: String,
-        tools: Vec<&'a TranscriptEntryDto>,
-        reasoning: Vec<&'a TranscriptEntryDto>,
+        items: Vec<DigestItem<'a>>,
     },
     Assistant(&'a TranscriptEntryDto),
     System(&'a TranscriptEntryDto),
     Error(&'a TranscriptEntryDto),
-    Subagent(&'a TranscriptEntryDto),
     Question(&'a TranscriptEntryDto),
-}
-
-fn folds_into_digest(entry: &TranscriptEntryDto) -> bool {
-    match entry {
-        TranscriptEntryDto::ToolCall { name, .. } => name != crate::state::QUESTION_TOOL,
-        TranscriptEntryDto::Assistant {
-            text, reasoning, ..
-        } => text.trim().is_empty() && !reasoning.trim().is_empty(),
-        _ => false,
-    }
 }
 
 pub fn group_transcript_blocks<'a>(entries: &'a [TranscriptEntryDto]) -> Vec<TranscriptBlock<'a>> {
     let mut blocks: Vec<TranscriptBlock<'a>> = Vec::new();
     let mut turn_num = 0usize;
-    let mut fold_start: Option<usize> = None;
-    let mut folded: Vec<&'a TranscriptEntryDto> = Vec::new();
+    let mut folded: Vec<DigestItem<'a>> = Vec::new();
 
-    let flush = |blocks: &mut Vec<TranscriptBlock<'a>>,
-                 fold_start: &mut Option<usize>,
-                 folded: &mut Vec<&'a TranscriptEntryDto>| {
-        let Some(at) = fold_start.take() else {
-            folded.clear();
-            return;
-        };
+    let flush = |blocks: &mut Vec<TranscriptBlock<'a>>, folded: &mut Vec<DigestItem<'a>>| {
         if folded.is_empty() {
             return;
         }
         let items = std::mem::take(folded);
-        let (reasoning, tools): (Vec<_>, Vec<_>) = items
-            .into_iter()
-            .partition(|e| matches!(e, TranscriptEntryDto::Assistant { .. }));
-        let digest_id = format!(
-            "digest-{at}-{}",
-            tools
-                .first()
-                .or_else(|| reasoning.first())
-                .map(|e| entry_id_of(e))
-                .unwrap_or("turn")
-        );
-        blocks.insert(
-            at + 1,
-            TranscriptBlock::ActivityDigest {
-                digest_id,
-                tools,
-                reasoning,
-            },
-        );
+        let first_id = match items[0] {
+            DigestItem::Reasoning(e) | DigestItem::ToolCall(e) | DigestItem::Subagent(e) => {
+                entry_id_of(e)
+            }
+        };
+        blocks.push(TranscriptBlock::ActivityDigest {
+            digest_id: format!("digest-{first_id}"),
+            items,
+        });
     };
 
     for entry in entries {
-        if let TranscriptEntryDto::User { id, turn_id, text } = entry {
-            flush(&mut blocks, &mut fold_start, &mut folded);
-            turn_num += 1;
-            blocks.push(TranscriptBlock::User {
-                turn_num,
-                id,
-                turn_id: turn_id.as_deref(),
-                text,
-            });
-            fold_start = Some(blocks.len() - 1);
-            continue;
-        }
-        if folds_into_digest(entry) {
-            if fold_start.is_some() {
-                folded.push(entry);
-            } else if matches!(entry, TranscriptEntryDto::ToolCall { .. }) {
-                blocks.push(TranscriptBlock::ActivityDigest {
-                    digest_id: format!("digest-{}", entry_id_of(entry)),
-                    tools: vec![entry],
-                    reasoning: Vec::new(),
+        match entry {
+            TranscriptEntryDto::ToolCall { name, .. } if name == crate::state::QUESTION_TOOL => {
+                continue;
+            }
+            TranscriptEntryDto::Assistant {
+                text, reasoning, ..
+            } if text.trim().is_empty() && reasoning.trim().is_empty() => continue,
+            TranscriptEntryDto::User { id, turn_id, text } => {
+                flush(&mut blocks, &mut folded);
+                turn_num += 1;
+                blocks.push(TranscriptBlock::User {
+                    turn_num,
+                    id,
+                    turn_id: turn_id.as_deref(),
+                    text,
                 });
-            } else {
+            }
+            TranscriptEntryDto::Assistant {
+                text, reasoning, ..
+            } if text.trim().is_empty() => {
+                if !reasoning.trim().is_empty() {
+                    folded.push(DigestItem::Reasoning(entry));
+                }
+            }
+            TranscriptEntryDto::ToolCall { .. } => {
+                folded.push(DigestItem::ToolCall(entry));
+            }
+            TranscriptEntryDto::Subagent { .. } => {
+                folded.push(DigestItem::Subagent(entry));
+            }
+            TranscriptEntryDto::Assistant { reasoning, .. } => {
+                if !reasoning.trim().is_empty() {
+                    folded.push(DigestItem::Reasoning(entry));
+                }
+                flush(&mut blocks, &mut folded);
                 blocks.push(TranscriptBlock::Assistant(entry));
             }
-            continue;
+            TranscriptEntryDto::System { .. } => {
+                flush(&mut blocks, &mut folded);
+                blocks.push(TranscriptBlock::System(entry));
+            }
+            TranscriptEntryDto::Error { .. } => {
+                flush(&mut blocks, &mut folded);
+                blocks.push(TranscriptBlock::Error(entry));
+            }
+            TranscriptEntryDto::Question { .. } => {
+                flush(&mut blocks, &mut folded);
+                blocks.push(TranscriptBlock::Question(entry));
+            }
         }
-        blocks.push(match entry {
-            TranscriptEntryDto::Assistant { .. } => TranscriptBlock::Assistant(entry),
-            TranscriptEntryDto::System { .. } => TranscriptBlock::System(entry),
-            TranscriptEntryDto::Error { .. } => TranscriptBlock::Error(entry),
-            TranscriptEntryDto::Subagent { .. } => TranscriptBlock::Subagent(entry),
-            TranscriptEntryDto::Question { .. } => TranscriptBlock::Question(entry),
-            TranscriptEntryDto::User { .. } | TranscriptEntryDto::ToolCall { .. } => continue,
-        });
     }
-    flush(&mut blocks, &mut fold_start, &mut folded);
+    flush(&mut blocks, &mut folded);
     blocks
 }
 
@@ -3374,7 +3743,7 @@ mod tests {
     }
 
     #[test]
-    fn digest_follows_user_turn_and_folds_tools_and_reasoning() {
+    fn digest_groups_contiguous_activity_before_visible_messages() {
         let entries = vec![
             user("u1", Some("t1"), "first"),
             tool("c1", "code-read_file", "succeeded"),
@@ -3393,19 +3762,78 @@ mod tests {
                 TranscriptBlock::Assistant(_) => "assistant",
                 TranscriptBlock::System(_) => "system",
                 TranscriptBlock::Error(_) => "error",
-                TranscriptBlock::Subagent(_) => "subagent",
                 TranscriptBlock::Question(_) => "question",
             })
             .collect();
         assert_eq!(kinds, ["user", "digest", "assistant", "user", "digest"]);
         match &blocks[1] {
-            TranscriptBlock::ActivityDigest {
-                tools, reasoning, ..
-            } => {
-                assert_eq!(tools.len(), 2);
-                assert_eq!(reasoning.len(), 1);
+            TranscriptBlock::ActivityDigest { items, .. } => {
+                assert_eq!(items.len(), 4);
+                assert!(matches!(items[0], DigestItem::ToolCall(_)));
+                assert!(matches!(items[1], DigestItem::ToolCall(_)));
+                assert!(matches!(items[2], DigestItem::Reasoning(_)));
+                assert!(matches!(items[3], DigestItem::Reasoning(_)));
             }
             other => panic!("expected digest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn digest_splits_runs_between_assistant_messages_and_folds_subagents() {
+        let entries = vec![
+            user("u1", Some("t1"), "fix it"),
+            assistant("a0", "I do ...", "t0"),
+            tool("c1", "code-grep", "succeeded"),
+            tool("c2", "code-grep", "succeeded"),
+            assistant("a1", "", "t1"),
+            assistant("a2", "", "t2"),
+            assistant("a3", "", "t3"),
+            assistant("a4", "", "t4"),
+            assistant("a5", "....", "t5"),
+            TranscriptEntryDto::Subagent {
+                id: "sub1".to_owned(),
+                agent: "explore".to_owned(),
+                status: "succeeded".to_owned(),
+                report: None,
+                child_session_id: None,
+            },
+        ];
+        let blocks = group_transcript_blocks(&entries);
+        let kinds: Vec<&str> = blocks
+            .iter()
+            .map(|b| match b {
+                TranscriptBlock::User { .. } => "user",
+                TranscriptBlock::ActivityDigest { .. } => "digest",
+                TranscriptBlock::Assistant(_) => "assistant",
+                TranscriptBlock::System(_) => "system",
+                TranscriptBlock::Error(_) => "error",
+                TranscriptBlock::Question(_) => "question",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "user",
+                "digest",
+                "assistant",
+                "digest",
+                "assistant",
+                "digest"
+            ]
+        );
+        match (&blocks[1], &blocks[3], &blocks[5]) {
+            (
+                TranscriptBlock::ActivityDigest { items: first, .. },
+                TranscriptBlock::ActivityDigest { items: second, .. },
+                TranscriptBlock::ActivityDigest { items: third, .. },
+            ) => {
+                assert_eq!(first.len(), 1);
+                assert!(matches!(first[0], DigestItem::Reasoning(_)));
+                assert_eq!(second.len(), 7);
+                assert_eq!(third.len(), 1);
+                assert!(matches!(third[0], DigestItem::Subagent(_)));
+            }
+            _ => panic!("unexpected blocks"),
         }
     }
 

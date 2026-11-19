@@ -1890,6 +1890,7 @@ kbd {
   gap: 8px;
   align-items: center;
   min-width: 0;
+  padding: 0;
   border: 0;
   background: transparent;
   color: inherit;
@@ -1913,6 +1914,16 @@ kbd {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.pick-remove {
+  cursor: pointer;
+  margin-left: 4px;
+}
+
+.pick-remove:hover {
+  color: var(--m-error);
+  text-decoration: underline;
 }
 
 .badge {

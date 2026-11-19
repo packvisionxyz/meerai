@@ -206,6 +206,13 @@ pub struct HostSettingsUpdate {
     pub context: Option<ContextSettings>,
     pub session: Option<SessionSettings>,
     pub sandbox: Option<SandboxSettings>,
+    pub forget_model: Option<ForgetModel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForgetModel {
+    pub provider: String,
+    pub model: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

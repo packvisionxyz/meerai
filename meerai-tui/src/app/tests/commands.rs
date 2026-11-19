@@ -562,3 +562,56 @@ fn serve_command_validates_dialog_stops_and_clicks_statusline() {
         vec![PendingSessionAction::StopWebServer]
     );
 }
+
+#[test]
+fn effort_command_updates_state_queues_sync_and_appears_in_help() {
+    let (mut app, _rx, _secrets) = test_app();
+
+    submit(&mut app, "/effort");
+    assert_eq!(
+        app.context_effort,
+        Some(meerai_common::settings::EffortLevel::High)
+    );
+    assert_eq!(app.context_temperature, Some(0.5));
+    assert_eq!(
+        app.settings.context.as_ref().and_then(|c| c.effort),
+        Some(meerai_common::settings::EffortLevel::High)
+    );
+    assert_eq!(
+        app.settings.context.as_ref().and_then(|c| c.temperature),
+        None
+    );
+    assert_eq!(
+        app.take_pending_session_actions(),
+        vec![PendingSessionAction::SyncContext]
+    );
+
+    submit(&mut app, "/effort low");
+    assert_eq!(
+        app.context_effort,
+        Some(meerai_common::settings::EffortLevel::Low)
+    );
+    assert_eq!(app.context_temperature, Some(0.0));
+    assert_eq!(
+        app.take_pending_session_actions(),
+        vec![PendingSessionAction::SyncContext]
+    );
+
+    submit(&mut app, "/effort bogus");
+    assert_eq!(
+        app.context_effort,
+        Some(meerai_common::settings::EffortLevel::Low)
+    );
+    assert!(
+        app.status_notice
+            .as_deref()
+            .is_some_and(|n| n.contains("Unknown effort 'bogus'"))
+    );
+    assert!(app.take_pending_session_actions().is_empty());
+
+    submit(&mut app, "/help");
+    assert!(matches!(
+        app.tab().transcript.last(),
+        Some(TranscriptEntry::System { text }) if text.contains("/effort [low|medium|high]")
+    ));
+}

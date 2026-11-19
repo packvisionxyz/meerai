@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::AnyView;
 use meerai_web_protocol::{
-    ApprovalModeDto, AuthKindDto, BackendKind, ProviderItemDto, ThemeOverrideDto,
+    ApprovalModeDto, AuthKindDto, BackendKind, EffortDto, ProviderItemDto, ThemeOverrideDto,
     UpdateSettingsRequest,
 };
 
@@ -632,6 +632,7 @@ fn theme_body(store: StoreHandle) -> AnyView {
                             context: None,
                             session: None,
                             sandbox: None,
+                            forget_model: None,
                         });
                     }
                 }>
@@ -734,6 +735,51 @@ fn context_body(store: StoreHandle) -> AnyView {
         .into_any()
     };
 
+    let render_effort = |current: Option<EffortDto>| {
+        let selected = current.unwrap_or(EffortDto::Medium);
+        let option = |value: EffortDto, label: &'static str, temp: &'static str| {
+            let is_selected = selected == value;
+            view! {
+                <option value=label prop:selected=is_selected>
+                    {format!("{label} · temp {temp}")}
+                </option>
+            }
+        };
+        view! {
+            <label class="settings-row settings-field">
+                <div class="settings-field-label">
+                    <span>"Reasoning effort"</span>
+                    <span class="settings-field-help">
+                        "Sets temperature per tier: low 0.00, medium 0.20, high 0.50."
+                    </span>
+                </div>
+                <select
+                    class="input"
+                    on:change=move |ev| {
+                        let next = match event_target_value(&ev).as_str() {
+                            "low" => Some(EffortDto::Low),
+                            "high" => Some(EffortDto::High),
+                            _ => Some(EffortDto::Medium),
+                        };
+                        store.update(|s| {
+                            if let Some(ActiveModal::Settings(form)) = &mut s.modal {
+                                form.effort = next;
+                                if let Some(field) = form.inputs.get_mut("temperature") {
+                                    field.clear();
+                                }
+                            }
+                        });
+                    }
+                >
+                    {option(EffortDto::Low, "low", "0.00")}
+                    {option(EffortDto::Medium, "medium", "0.20")}
+                    {option(EffortDto::High, "high", "0.50")}
+                </select>
+            </label>
+        }
+        .into_any()
+    };
+
     let render_toggle = |key: &'static str, checked: bool| {
         let (label, help) = toggle_meta(key);
         view! {
@@ -771,6 +817,13 @@ fn context_body(store: StoreHandle) -> AnyView {
 
             <div class="settings-group-title">"Models & Sampling"</div>
             <div class="settings-list">
+                {
+                let effort = store.with(|s| match &s.modal {
+                    Some(ActiveModal::Settings(form)) => form.effort,
+                    _ => None,
+                });
+                render_effort(effort)
+            }
                 {render_input("temperature", None)}
                 {render_input("recovery_model", Some("context-model-specs"))}
                 {render_input("summarizer_model", Some("context-model-specs"))}
@@ -990,8 +1043,8 @@ fn context_field_meta(key: &str) -> (&'static str, &'static str, &'static str) {
         ),
         "temperature" => (
             "Temperature",
-            "Sampling temperature from 0.0 to 2.0.",
-            "Provider default",
+            "Optional sampling temperature override from 0.0 to 2.0.",
+            "Tier default (0.00 / 0.20 / 0.50)",
         ),
         _ => ("Value", "", ""),
     }

@@ -974,7 +974,10 @@ async fn handle_submit_prompt(
         Ok(req) => req,
         Err(resp) => return resp,
     };
-    match state.registry.submit_prompt(&session_id, prompt_req.prompt) {
+    match state
+        .registry
+        .submit_prompt(&session_id, prompt_req.prompt, prompt_req.display)
+    {
         Ok(()) => json_response(
             StatusCode::OK,
             &SubmitPromptResponse {
@@ -999,7 +1002,10 @@ async fn handle_steer_prompt(
         Ok(req) => req,
         Err(resp) => return resp,
     };
-    match state.registry.steer_prompt(&session_id, prompt_req.prompt) {
+    match state
+        .registry
+        .steer_prompt(&session_id, prompt_req.prompt, prompt_req.display)
+    {
         Ok(()) => json_response(
             StatusCode::OK,
             &SubmitPromptResponse {

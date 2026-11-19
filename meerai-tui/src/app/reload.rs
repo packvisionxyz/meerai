@@ -11,6 +11,14 @@ use super::*;
 
 impl AppState {
     pub(crate) async fn perform_reload(&mut self) {
+        self.perform_reload_inner(true).await;
+    }
+
+    pub(crate) async fn perform_reload_quiet(&mut self) {
+        self.perform_reload_inner(false).await;
+    }
+
+    async fn perform_reload_inner(&mut self, announce: bool) {
         let project_root = find_project_root(&self.workspace_root);
         let user = self
             .config_dir
@@ -45,6 +53,7 @@ impl AppState {
             .as_ref()
             .and_then(|context| context.temperature)
             .and_then(Temperature::effective);
+        self.context_effort = merged.context.as_ref().and_then(|context| context.effort);
         self.explicit_context_window = merged
             .context
             .as_ref()
@@ -81,16 +90,18 @@ impl AppState {
                 .send(AgentCommand::SetHooks(hook_entries.clone()));
         }
 
-        let mut text = String::from(
-            "Reloaded settings, theme, definitions, prompt, policy, and context budgets.",
-        );
-        if !warnings.is_empty() {
-            text.push_str("\n\nWarnings:\n- ");
-            text.push_str(&warnings.join("\n- "));
+        if announce {
+            let mut text = String::from(
+                "Reloaded settings, theme, definitions, prompt, policy, and context budgets.",
+            );
+            if !warnings.is_empty() {
+                text.push_str("\n\nWarnings:\n- ");
+                text.push_str(&warnings.join("\n- "));
+            }
+            let tab = self.tab_mut();
+            tab.auto_follow = true;
+            tab.transcript.push(TranscriptEntry::System { text });
+            self.status_notice = Some("Reloaded configuration".to_string());
         }
-        let tab = self.tab_mut();
-        tab.auto_follow = true;
-        tab.transcript.push(TranscriptEntry::System { text });
-        self.status_notice = Some("Reloaded configuration".to_string());
     }
 }

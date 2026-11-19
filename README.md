@@ -412,8 +412,9 @@ Parity highlights:
   the same scope.
 - `/clear` clears only the browser transcript view. `/reset` resets the conversation on the
   host. `/close` shuts down the live worker; the tab `×` only detaches the view.
-- The per-turn activity digest uses the TUI category counts and phrasing, and folds tool
-  rows by default.
+- Activity digests group each contiguous run of thoughts, tools, and subagents in
+  chronological order before the visible message that follows it, using the TUI category
+  counts and phrasing and folding activity rows by default.
 - The command palette lists slash commands and non-command actions: copy last reply,
   next/previous tab, move tab, and cycle approval mode.
 - `Settings` groups Connections, Session, Theme, Context, Sessions, Sandbox, and
@@ -543,7 +544,9 @@ the popup open so you can pick; an exact file path dismisses it as before.
 
 On submit, skills apply before the agent, the mention is removed from the prompt,
 and repeats apply once. An unknown mention stays as text. A prompt that is only
-mentions applies the definitions without starting a turn.
+mentions applies the definitions without starting a turn. A directly submitted user message
+keeps a known mention as the same `<id>` chip, while the model and the session
+log receive the stripped text; replay shows the stripped prompt.
 
 `/agent` and `/skill` remain explicit shortcuts and send
 `AgentCommand::ApplyAgent` or `AgentCommand::ApplySkill`, which appends a System
@@ -830,7 +833,7 @@ meerai-cli --no-default-features` builds the headless surface without ratatui,
 git2, comrak, `meerai-host`, `meerai-web`, or `meerai-tui`; `cargo check -p meerai-tui --no-default-features`
 builds the TUI without the reqwest update check. To build and run the opt-in
 browser companion (`meerai serve` or `/serve` in TUI), build the Leptos Wasm bundle with
-`python3 scripts/build-web.py` and run `cargo run -p meerai-cli --features web -- serve`. It binds `127.0.0.1:28860` with Basic auth (`meerai` / `12345678`) by default unless overridden (`--port`, `--user`, `--password`, `MEERAI_SERVE_SECRET`, or `--auth`). CI runs both reduced-feature
+`python3 scripts/build-web.py` and run `cargo run -p meerai-cli --features web -- serve` (or use `make build-web`, `make run-web`, and `make serve`). It binds `127.0.0.1:28860` with Basic auth (`meerai` / `12345678`) by default unless overridden (`--port`, `--user`, `--password`, `MEERAI_SERVE_SECRET`, or `--auth`). CI runs both reduced-feature
 checks. `.github/workflows/smoke.yml` runs one manual live-provider headless
 turn when `OPENROUTER_API_KEY` is set. `.github/workflows/release.yml` starts when
 CI succeeds on `main`, on a `v*` tag push, or on manual dispatch. It reuses the
