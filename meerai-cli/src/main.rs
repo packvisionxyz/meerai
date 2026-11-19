@@ -71,7 +71,8 @@ use meerai_tools::{
 use meerai_tui::{TuiLaunchConfig, transcript_from_events};
 #[cfg(feature = "web")]
 use meerai_web::{
-    BASIC_USERNAME, RunningServer, ServeAuth, ServeConfig, ServeSecret, start_server,
+    BASIC_USERNAME, DEFAULT_SERVE_PORT, DEFAULT_SERVE_SECRET, RunningServer, ServeAuth,
+    ServeConfig, ServeSecret, start_server,
 };
 
 use auth_cmd::run_auth;
@@ -885,11 +886,11 @@ impl WebServerLauncher for CliWebServerLauncher {
     ) -> Result<(Arc<dyn WebServerHandle>, WebServerStart)> {
         let validated = match secret {
             Some(raw) if !raw.is_empty() => ServeSecret::validate(raw)?,
-            _ => ServeSecret::generate()?,
+            _ => ServeSecret::validate(DEFAULT_SERVE_SECRET)?,
         };
         let secret_plain = validated.expose().to_string();
         let auth = ServeAuth::from_parts(Some(BASIC_USERNAME.to_string()), Some(validated));
-        let bind_addr = SocketAddr::from(([127, 0, 0, 1], port.unwrap_or(0)));
+        let bind_addr = SocketAddr::from(([127, 0, 0, 1], port.unwrap_or(DEFAULT_SERVE_PORT)));
         let server = start_server(ServeConfig { bind_addr, auth }, opener, registry).await?;
         let addr = server.addr;
         let url = format!("http://{addr}");
@@ -913,10 +914,11 @@ async fn run_serve(
     opened: OpenedSession,
     host: Arc<CliSessionHost>,
 ) -> Result<()> {
-    let resolved = resolve_serve_auth(serve_cmd.username, serve_cmd.auth)?;
+    let resolved = resolve_serve_auth(serve_cmd.username, serve_cmd.password, serve_cmd.auth)?;
     let registry = SessionRegistry::new();
     registry.register_opened(opened);
-    let bind_addr = SocketAddr::from(([127, 0, 0, 1], serve_cmd.port.unwrap_or(0)));
+    let bind_addr =
+        SocketAddr::from(([127, 0, 0, 1], serve_cmd.port.unwrap_or(DEFAULT_SERVE_PORT)));
     let server = start_server(
         ServeConfig {
             bind_addr,
@@ -934,8 +936,8 @@ async fn run_serve(
             println!("Auth:     Basic (username: {user_label})");
         }
     }
-    if let Some(secret) = resolved.generated_secret {
-        println!("Password: {secret}");
+    if let Some(secret) = resolved.default_secret {
+        println!("Password: {secret} (default)");
     }
     io::stdout().flush()?;
     tokio::signal::ctrl_c()
@@ -950,19 +952,21 @@ async fn run_serve(
 #[derive(Debug)]
 struct ResolvedServeAuth {
     auth: ServeAuth,
-    generated_secret: Option<String>,
+    default_secret: Option<String>,
 }
 
 #[cfg(feature = "web")]
 fn resolve_serve_auth(
     cli_username: Option<String>,
-    _prompt_secret: bool,
+    cli_secret: Option<String>,
+    prompt_secret: bool,
 ) -> Result<ResolvedServeAuth> {
     resolve_serve_auth_with(
         cli_username,
+        cli_secret,
         std::env::var("MEERAI_SERVE_USER").ok(),
         std::env::var("MEERAI_SERVE_SECRET").ok(),
-        io::stdin().is_terminal(),
+        prompt_secret && io::stdin().is_terminal(),
         prompt_serve_secret,
     )
 }
@@ -970,6 +974,7 @@ fn resolve_serve_auth(
 #[cfg(feature = "web")]
 fn resolve_serve_auth_with<F>(
     cli_username: Option<String>,
+    cli_secret: Option<String>,
     env_username: Option<String>,
     env_secret: Option<String>,
     should_prompt: bool,
@@ -984,7 +989,12 @@ where
         .filter(|u| !u.is_empty())
         .unwrap_or_else(|| BASIC_USERNAME.to_string());
 
-    let (secret, generated_secret) = if let Some(raw) = env_secret.filter(|s| !s.is_empty()) {
+    let (secret, default_secret) = if let Some(raw) = cli_secret.filter(|s| !s.is_empty()) {
+        (
+            ServeSecret::validate(raw).context("invalid --password")?,
+            None,
+        )
+    } else if let Some(raw) = env_secret.filter(|s| !s.is_empty()) {
         (
             ServeSecret::validate(raw).context("invalid MEERAI_SERVE_SECRET")?,
             None,
@@ -992,27 +1002,29 @@ where
     } else if should_prompt {
         let raw = prompt_fn()?;
         if raw.is_empty() {
-            let generated = ServeSecret::generate()?;
-            let exposed = generated.expose().to_string();
-            (generated, Some(exposed))
+            (
+                ServeSecret::validate(DEFAULT_SERVE_SECRET)?,
+                Some(DEFAULT_SERVE_SECRET.to_string()),
+            )
         } else {
             (ServeSecret::validate(raw)?, None)
         }
     } else {
-        let generated = ServeSecret::generate()?;
-        let exposed = generated.expose().to_string();
-        (generated, Some(exposed))
+        (
+            ServeSecret::validate(DEFAULT_SERVE_SECRET)?,
+            Some(DEFAULT_SERVE_SECRET.to_string()),
+        )
     };
 
     Ok(ResolvedServeAuth {
         auth: ServeAuth::from_parts(Some(username), Some(secret)),
-        generated_secret,
+        default_secret,
     })
 }
 
 #[cfg(feature = "web")]
 fn prompt_serve_secret() -> Result<String> {
-    eprint!("Enter serve password (min 8 chars, leave empty to auto-generate): ");
+    eprint!("Enter serve password (min 8 chars, leave empty for default): ");
     io::stderr().flush()?;
     read_masked_line()
 }

@@ -830,7 +830,7 @@ meerai-cli --no-default-features` builds the headless surface without ratatui,
 git2, comrak, `meerai-host`, `meerai-web`, or `meerai-tui`; `cargo check -p meerai-tui --no-default-features`
 builds the TUI without the reqwest update check. To build and run the opt-in
 browser companion (`meerai serve` or `/serve` in TUI), build the Leptos Wasm bundle with
-`python3 scripts/build-web.py` and run `cargo run -p meerai-cli --features web -- serve`. Basic auth is required at launch (`MEERAI_SERVE_SECRET`, masked prompt, or auto-generated once on startup). CI runs both reduced-feature
+`python3 scripts/build-web.py` and run `cargo run -p meerai-cli --features web -- serve`. It binds `127.0.0.1:28860` with Basic auth (`meerai` / `12345678`) by default unless overridden (`--port`, `--user`, `--password`, `MEERAI_SERVE_SECRET`, or `--auth`). CI runs both reduced-feature
 checks. `.github/workflows/smoke.yml` runs one manual live-provider headless
 turn when `OPENROUTER_API_KEY` is set. `.github/workflows/release.yml` starts when
 CI succeeds on `main`, on a `v*` tag push, or on manual dispatch. It reuses the

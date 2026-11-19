@@ -1,3 +1,7 @@
+mod session_panel;
+
+pub use session_panel::{HistoryStatus, SessionPanel, SessionPanelAction, SessionPanelRow};
+
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use crate::text::{TextBuffer, UiEffects};
@@ -5,12 +9,10 @@ use meerai_web_protocol::{
     ApprovalModeDto, ApprovalRequestDto, BackendKind, ChatGptLoginStateDto, ContextSettingsDto,
     FileChangeDto, FileDiffResponse, HostInfoDto, ModelItemDto, ProviderItemDto, ProvidersResponse,
     QuestionRequestDto, ReloadResponse, RewindScopeDto, SandboxSettingsDto, SessionDetailDto,
-    SessionHistoryResponse, SessionSettingsDto, SessionStatus, SessionSummaryDto, SnapshotResponse,
-    StoredSessionDto, ThemeOverrideDto, TranscriptEntryDto, TurnMetricsDto, UpdateSettingsRequest,
-    UsageDto, ViewEvent, WorkspacePreviewResponse, WorkspaceSearchResponse,
+    SessionSettingsDto, SessionStatus, SessionSummaryDto, SnapshotResponse, ThemeOverrideDto,
+    TranscriptEntryDto, TurnMetricsDto, UpdateSettingsRequest, UsageDto, ViewEvent,
+    WorkspacePreviewResponse, WorkspaceSearchResponse,
 };
-
-pub const SIDEBAR_BREAKPOINT_WIDTH: f32 = 900.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionState {
@@ -44,7 +46,7 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         cmd: "/sessions",
-        args: "[id]",
+        args: "[id|filter]",
         desc: "Browse, switch, fork, or delete sessions",
         takes_arg: true,
     },
@@ -165,7 +167,7 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         cmd: "/clear",
         args: "",
-        desc: "Reset conversation history",
+        desc: "Clear visible chat transcript",
         takes_arg: false,
     },
     SlashCommandSpec {
@@ -275,6 +277,13 @@ pub enum SettingsSection {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderModalReturn {
+    Close,
+    ProviderSelect,
+    SettingsConnections,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaletteActionSpec {
     pub key: &'static str,
     pub label: &'static str,
@@ -285,32 +294,57 @@ pub const PALETTE_ACTIONS: &[PaletteActionSpec] = &[
     PaletteActionSpec {
         key: "copy-last",
         label: "Copy last reply",
-        hint: "Y",
+        hint: "Alt+C",
     },
     PaletteActionSpec {
         key: "next-tab",
         label: "Next session tab",
-        hint: "Alt+Right",
+        hint: "Alt+]",
     },
     PaletteActionSpec {
         key: "prev-tab",
         label: "Previous session tab",
-        hint: "Alt+Left",
+        hint: "Alt+[",
     },
     PaletteActionSpec {
         key: "move-tab-left",
         label: "Move tab left",
-        hint: "Alt+Shift+Left",
+        hint: "Alt+Shift+[",
     },
     PaletteActionSpec {
         key: "move-tab-right",
         label: "Move tab right",
-        hint: "Alt+Shift+Right",
+        hint: "Alt+Shift+]",
     },
     PaletteActionSpec {
         key: "cycle-mode",
         label: "Cycle approval mode",
         hint: "Alt+M",
+    },
+    PaletteActionSpec {
+        key: "new-session",
+        label: "New session tab",
+        hint: "/new",
+    },
+    PaletteActionSpec {
+        key: "toggle-sidebar",
+        label: "Toggle workspace sidebar",
+        hint: "Ctrl+B",
+    },
+    PaletteActionSpec {
+        key: "open-diff",
+        label: "Inspect workspace diff",
+        hint: "Alt+Shift+D",
+    },
+    PaletteActionSpec {
+        key: "open-search",
+        label: "Search workspace",
+        hint: "Alt+Shift+F",
+    },
+    PaletteActionSpec {
+        key: "open-settings",
+        label: "Open settings",
+        hint: "/settings",
     },
 ];
 
@@ -349,9 +383,9 @@ pub fn execute_palette_action(state: &mut AppState, tx: &mut UiEffects, key: &st
     match key {
         "copy-last" => {
             if copy_last_reply(state, tx) {
-                state.status_notice = Some("Copied the latest reply".to_owned());
+                set_status_notice(state, "Copied the latest reply");
             } else {
-                state.status_notice = Some("No assistant reply to copy".to_owned());
+                set_status_notice(state, "No assistant reply to copy");
             }
         }
         "next-tab" => cycle_tab(state, 1),
@@ -359,6 +393,15 @@ pub fn execute_palette_action(state: &mut AppState, tx: &mut UiEffects, key: &st
         "move-tab-left" => reorder_active_tab(state, -1),
         "move-tab-right" => reorder_active_tab(state, 1),
         "cycle-mode" => cycle_approval_mode(state),
+        "new-session" => {
+            if let Some(t) = crate::transport::current() {
+                t.create_session(None);
+            }
+        }
+        "toggle-sidebar" => state.sidebar_open = !state.sidebar_open,
+        "open-diff" => open_diff_modal(state, None),
+        "open-search" => open_search_modal(state, meerai_web_protocol::SearchModeDto::Content, ""),
+        "open-settings" => open_settings(state, None),
         _ => {}
     }
 }
@@ -366,7 +409,9 @@ pub fn execute_palette_action(state: &mut AppState, tx: &mut UiEffects, key: &st
 #[derive(Clone, Debug)]
 pub struct SettingsFormState {
     pub section: SettingsSection,
+    pub provider_filter: TextBuffer,
     pub reset_theme: bool,
+    pub color_scheme: Option<String>,
     pub theme_fields: BTreeMap<&'static str, TextBuffer>,
     pub inputs: BTreeMap<&'static str, TextBuffer>,
     pub reasoning_pruning: bool,
@@ -443,8 +488,10 @@ impl SettingsFormState {
             inputs.insert(k, TextBuffer::new(val));
         }
         Self {
-            section: SettingsSection::Session,
+            section: SettingsSection::Connections,
+            provider_filter: TextBuffer::new(""),
             reset_theme: false,
+            color_scheme: raw.color_scheme.clone(),
             theme_fields,
             inputs,
             reasoning_pruning: c.reasoning_pruning.unwrap_or(true),
@@ -513,7 +560,7 @@ impl SettingsFormState {
             }
         };
 
-        let opt_hex = |key: &str| -> Result<Option<String>, String> {
+        let opt_color = |key: &str| -> Result<Option<String>, String> {
             let v = self
                 .theme_fields
                 .get(key)
@@ -522,11 +569,10 @@ impl SettingsFormState {
             if v.is_empty() {
                 return Ok(None);
             }
-            if !(v.starts_with('#')
-                && (v.len() == 7 || v.len() == 4)
-                && v[1..].chars().all(|c| c.is_ascii_hexdigit()))
-            {
-                return Err(format!("Invalid hex color for {key}: {v}"));
+            if !crate::theme::is_valid_color(&v) {
+                return Err(format!(
+                    "Invalid color for {key}: {v} (use #rgb, #rrggbb, or a CSS color name)"
+                ));
             }
             Ok(Some(v))
         };
@@ -535,23 +581,24 @@ impl SettingsFormState {
             None
         } else {
             Some(ThemeOverrideDto {
-                background: opt_hex("background")?,
-                surface: opt_hex("surface")?,
-                surface_high: opt_hex("surface_high")?,
-                text: opt_hex("text")?,
-                muted: opt_hex("muted")?,
-                faint: opt_hex("faint")?,
-                accent: opt_hex("accent")?,
-                interactive: opt_hex("interactive")?,
-                border: opt_hex("border")?,
-                error: opt_hex("error")?,
-                warning: opt_hex("warning")?,
-                success: opt_hex("success")?,
-                info: opt_hex("info")?,
-                diff_added: opt_hex("diff_added")?,
-                diff_removed: opt_hex("diff_removed")?,
-                diff_context: opt_hex("diff_context")?,
-                code_function: opt_hex("code_function")?,
+                color_scheme: self.color_scheme.clone(),
+                background: opt_color("background")?,
+                surface: opt_color("surface")?,
+                surface_high: opt_color("surface_high")?,
+                text: opt_color("text")?,
+                muted: opt_color("muted")?,
+                faint: opt_color("faint")?,
+                accent: opt_color("accent")?,
+                interactive: opt_color("interactive")?,
+                border: opt_color("border")?,
+                error: opt_color("error")?,
+                warning: opt_color("warning")?,
+                success: opt_color("success")?,
+                info: opt_color("info")?,
+                diff_added: opt_color("diff_added")?,
+                diff_removed: opt_color("diff_removed")?,
+                diff_context: opt_color("diff_context")?,
+                code_function: opt_color("code_function")?,
             })
         };
 
@@ -622,14 +669,19 @@ pub enum ActiveModal {
     AuthMethodSelect {
         provider_id: String,
         provider_name: String,
+        return_to: ProviderModalReturn,
         selected: usize,
     },
     ProviderConnection {
         provider_id: String,
         provider_name: String,
+        auth_kind: meerai_web_protocol::AuthKindDto,
         status_badge: String,
         configured: bool,
         base_url: Option<String>,
+        env_vars: Vec<String>,
+        default_model: Option<String>,
+        return_to: ProviderModalReturn,
         selected: usize,
     },
     ChatGptLogin {
@@ -641,20 +693,26 @@ pub enum ActiveModal {
         state: Option<ChatGptLoginStateDto>,
         error: Option<String>,
         busy: bool,
+        return_to: ProviderModalReturn,
     },
     ApiKeyInput {
         provider_id: String,
         provider_name: String,
+        auth_kind: meerai_web_protocol::AuthKindDto,
         status_badge: String,
+        configured: bool,
+        env_vars: Vec<String>,
         api_key: TextBuffer,
         base_url: TextBuffer,
         error: Option<String>,
         busy: bool,
+        return_to: ProviderModalReturn,
     },
     ModelInput {
         filter: TextBuffer,
         provider_id: Option<String>,
         selected: usize,
+        return_to: ProviderModalReturn,
     },
     DiffView {
         selected_path: Option<String>,
@@ -693,21 +751,8 @@ pub enum ActiveModal {
         selected_turn: usize,
         scope: RewindScopeDto,
     },
-    SessionSelect {
-        filter: TextBuffer,
-        history: Vec<StoredSessionDto>,
-        selected: usize,
-        loading: bool,
-        confirm_delete: Option<String>,
-    },
     CommandPalette {
         filter: TextBuffer,
-        selected: usize,
-    },
-    UserMessageActions {
-        entry_id: String,
-        turn_id: Option<String>,
-        text: String,
         selected: usize,
     },
     Settings(SettingsFormState),
@@ -727,6 +772,8 @@ pub enum ActiveModal {
 #[derive(Clone, Debug, Default)]
 pub struct SessionTabState {
     pub entries: Vec<TranscriptEntryDto>,
+    pub entries_version: u64,
+    pub hydrated: bool,
     pub streaming_item_id: Option<String>,
     pub streaming_text: String,
     pub streaming_reasoning: String,
@@ -734,6 +781,7 @@ pub struct SessionTabState {
     pub pending_questions: Vec<QuestionRequestDto>,
     pub usage: UsageDto,
     pub metrics: TurnMetricsDto,
+    pub pending_submit: Option<String>,
     pub pending_queue: VecDeque<String>,
     pub draft_text: String,
     pub expanded_digests: HashSet<String>,
@@ -744,7 +792,6 @@ pub struct SessionTabState {
     pub child_sessions: HashMap<String, Vec<TranscriptEntryDto>>,
     pub child_loading: HashSet<String>,
     pub unread: bool,
-    pub local_notices: Vec<(String, String)>,
 }
 
 pub struct AppState {
@@ -753,6 +800,7 @@ pub struct AppState {
     pub tab_order: Vec<String>,
     pub hidden_session_ids: HashSet<String>,
     pub session_tabs: HashMap<String, SessionTabState>,
+    pub session_panel: SessionPanel,
     pub host_info: HostInfoDto,
     pub file_changes: Vec<FileChangeDto>,
     pub providers: Option<ProvidersResponse>,
@@ -765,11 +813,13 @@ pub struct AppState {
     pub saved_draft_before_history: String,
     pub completion: CompletionState,
     pub sidebar_open: bool,
+    pub sidebar_tools_expanded: bool,
     pub modal: Option<ActiveModal>,
-    pub modal_fallback: TextBuffer,
     pub sending: bool,
+    pub reset_confirm_pending: bool,
     pub error_banner: Option<String>,
     pub status_notice: Option<String>,
+    pub notice_seq: u64,
     pub last_title_sent: String,
 }
 
@@ -781,6 +831,7 @@ impl Default for AppState {
             tab_order: Vec::new(),
             hidden_session_ids: HashSet::new(),
             session_tabs: HashMap::new(),
+            session_panel: SessionPanel::default(),
             host_info: HostInfoDto::default(),
             file_changes: Vec::new(),
             providers: None,
@@ -793,11 +844,13 @@ impl Default for AppState {
             saved_draft_before_history: String::new(),
             completion: CompletionState::default(),
             sidebar_open: true,
+            sidebar_tools_expanded: false,
             modal: None,
-            modal_fallback: TextBuffer::new(""),
             sending: false,
+            reset_confirm_pending: false,
             error_banner: None,
             status_notice: None,
+            notice_seq: 0,
             last_title_sent: String::new(),
         }
     }
@@ -906,6 +959,11 @@ impl AppState {
     }
 }
 
+pub fn set_status_notice(state: &mut AppState, msg: impl Into<String>) {
+    state.notice_seq = state.notice_seq.wrapping_add(1);
+    state.status_notice = Some(msg.into());
+}
+
 pub fn apply_snapshot(state: &mut AppState, snapshot: SnapshotResponse) {
     state.connection = ConnectionState::Connected;
     state.last_event_id = snapshot.event_id;
@@ -942,6 +1000,8 @@ pub fn apply_active_detail(state: &mut AppState, detail: SessionDetailDto) {
     upsert_session(state, detail.summary);
     let tab = state.session_tabs.entry(id.clone()).or_default();
     tab.entries = detail.entries;
+    tab.entries_version = tab.entries_version.wrapping_add(1);
+    tab.hydrated = true;
     tab.streaming_item_id = detail.streaming_item_id;
     tab.streaming_text = detail.streaming_text;
     tab.streaming_reasoning = detail.streaming_reasoning;
@@ -953,6 +1013,26 @@ pub fn apply_active_detail(state: &mut AppState, detail: SessionDetailDto) {
     sync_pending_modal_for_active(state);
 }
 
+pub fn apply_session_detail(state: &mut AppState, detail: SessionDetailDto) {
+    let id = detail.summary.id.clone();
+    upsert_session(state, detail.summary);
+    let tab = state.session_tabs.entry(id.clone()).or_default();
+    tab.entries = detail.entries;
+    tab.entries_version = tab.entries_version.wrapping_add(1);
+    tab.hydrated = true;
+    tab.streaming_item_id = detail.streaming_item_id;
+    tab.streaming_text = detail.streaming_text;
+    tab.streaming_reasoning = detail.streaming_reasoning;
+    tab.pending_approvals = detail.pending_approvals;
+    tab.pending_questions = detail.pending_questions;
+    tab.usage = detail.usage;
+    tab.metrics = detail.metrics;
+    if state.active_session_id.as_deref() == Some(id.as_str()) {
+        tab.unread = false;
+        sync_pending_modal_for_active(state);
+    }
+}
+
 pub fn apply_created_session(state: &mut AppState, session: SessionSummaryDto) {
     let id = session.id.clone();
     state.hidden_session_ids.remove(&id);
@@ -960,8 +1040,21 @@ pub fn apply_created_session(state: &mut AppState, session: SessionSummaryDto) {
     switch_to_session(state, &id);
     let tab = state.session_tabs.entry(id).or_default();
     tab.entries.clear();
+    tab.entries_version = tab.entries_version.wrapping_add(1);
+    tab.hydrated = true;
     clear_streaming_tab(tab);
+    state.modal = None;
     state.error_banner = None;
+}
+
+pub fn apply_opened_session(state: &mut AppState, session: SessionSummaryDto) {
+    let id = session.id.clone();
+    state.hidden_session_ids.remove(&id);
+    upsert_session(state, session);
+    if let Some(tab) = state.session_tabs.get_mut(&id) {
+        tab.hydrated = false;
+    }
+    switch_to_session(state, &id);
 }
 
 pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
@@ -979,8 +1072,8 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
             let id = session.id.clone();
             let became_idle = session.status == SessionStatus::Idle && !session.user_shell_running;
             upsert_session(state, session);
-            if became_idle && Some(id.as_str()) == state.active_session_id.as_deref() {
-                drain_next_queued_if_idle(state);
+            if became_idle {
+                drain_next_queued_if_idle(state, &id);
             }
             EventEffect::None
         }
@@ -1008,10 +1101,15 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
         ViewEvent::SessionReset { session_id } => {
             let tab = state.session_tabs.entry(session_id.clone()).or_default();
             tab.entries.clear();
+            tab.entries_version = tab.entries_version.wrapping_add(1);
+            tab.pending_submit = None;
             clear_streaming_tab(tab);
             tab.pending_approvals.clear();
             tab.pending_questions.clear();
+            tab.usage = UsageDto::default();
+            tab.metrics = TurnMetricsDto::default();
             if state.active_session_id.as_deref() == Some(session_id.as_str()) {
+                state.reset_confirm_pending = false;
                 sync_pending_modal_for_active(state);
             }
             EventEffect::None
@@ -1029,6 +1127,7 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
             if let Some(new_entries) = entries {
                 tab.entries = new_entries;
             }
+            tab.entries_version = tab.entries_version.wrapping_add(1);
             clear_streaming_tab(tab);
             let msg = if let Some(err) = error {
                 format!("Rewind error: {err}")
@@ -1042,7 +1141,10 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
             if state.active_session_id.as_deref() == Some(session_id.as_str())
                 && let Some(prompt) = restored_prompt
             {
-                state.draft.replace_text(prompt);
+                state.draft.replace_text(prompt.clone());
+                if let Some(tab) = state.active_tab_mut() {
+                    tab.draft_text = prompt;
+                }
             }
             EventEffect::None
         }
@@ -1069,12 +1171,14 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
             text,
         } => {
             let tab = state.session_tabs.entry(session_id.clone()).or_default();
+            tab.pending_submit = None;
             if !tab.entries.iter().any(|e| entry_id_of(e) == entry_id) {
                 tab.entries.push(TranscriptEntryDto::User {
                     id: entry_id,
                     turn_id: None,
                     text,
                 });
+                tab.entries_version = tab.entries_version.wrapping_add(1);
             }
             EventEffect::None
         }
@@ -1114,12 +1218,14 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
                 clear_streaming_tab(tab);
             }
             upsert_entry(&mut tab.entries, entry);
+            tab.entries_version = tab.entries_version.wrapping_add(1);
             mark_unread_if_bg(state, &session_id);
             EventEffect::None
         }
         ViewEvent::EntryUpdated { session_id, entry } => {
             let tab = state.session_tabs.entry(session_id.clone()).or_default();
             upsert_entry(&mut tab.entries, entry);
+            tab.entries_version = tab.entries_version.wrapping_add(1);
             EventEffect::None
         }
         ViewEvent::ApprovalRequested {
@@ -1223,9 +1329,7 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
             let tab = state.session_tabs.entry(session_id.clone()).or_default();
             clear_streaming_tab(tab);
             mark_unread_if_bg(state, &session_id);
-            if state.active_session_id.as_deref() == Some(session_id.as_str()) {
-                drain_next_queued_if_idle(state);
-            }
+            drain_next_queued_if_idle(state, &session_id);
             EventEffect::None
         }
         ViewEvent::Error {
@@ -1234,6 +1338,7 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
             message,
         } => {
             let tab = state.session_tabs.entry(session_id.clone()).or_default();
+            tab.pending_submit = None;
             clear_streaming_tab(tab);
             if state.active_session_id.as_deref() == Some(session_id.as_str()) {
                 state.error_banner = Some(format!("{code}: {message}"));
@@ -1242,21 +1347,27 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
         }
         ViewEvent::FileChangesUpdated { changes } => {
             state.file_changes = changes;
+            sync_diff_modal_on_changes(state);
             EventEffect::None
         }
         ViewEvent::Reloaded {
             host_info,
             warnings,
         } => {
-            state.host_info = host_info;
-            if !warnings.is_empty() {
-                state.status_notice = Some(format!("Reload warnings: {}", warnings.join("; ")));
+            state.host_info = *host_info;
+            let notice = if !warnings.is_empty() {
+                format!("Reload warnings: {}", warnings.join("; "))
             } else {
-                state.status_notice = Some("Reloaded configuration".to_owned());
-            }
+                "Reloaded configuration".to_owned()
+            };
+            set_status_notice(state, notice.clone());
             if let Some(ActiveModal::Settings(form)) = &mut state.modal {
+                let prev_section = form.section;
+                let prev_filter = form.provider_filter.clone();
                 *form = SettingsFormState::from_host(&state.host_info);
-                form.status = state.status_notice.clone();
+                form.section = prev_section;
+                form.provider_filter = prev_filter;
+                form.status = Some(notice);
             }
             EventEffect::None
         }
@@ -1274,6 +1385,7 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
             account,
             message,
         } => {
+            let mut completed_return = None;
             if let Some(ActiveModal::ChatGptLogin {
                 provider_id: pid,
                 attempt_id: att,
@@ -1281,37 +1393,45 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
                 state: st,
                 error,
                 busy,
+                return_to,
                 ..
             }) = &mut state.modal
                 && pid == &provider_id
+                && (att.is_none() || att.as_deref() == Some(attempt_id.as_str()))
             {
-                if att.is_none() || att.as_deref() == Some(attempt_id.as_str()) {
-                    *att = Some(attempt_id);
-                    if let Some(u) = url {
-                        *modal_url = Some(u);
+                *att = Some(attempt_id);
+                if let Some(u) = url {
+                    *modal_url = Some(u);
+                }
+                *st = Some(login_state);
+                match login_state {
+                    ChatGptLoginStateDto::Started => {
+                        *busy = false;
+                        *error = None;
                     }
-                    *st = Some(login_state);
-                    match login_state {
-                        ChatGptLoginStateDto::Started => {
-                            *busy = false;
-                            *error = None;
-                        }
-                        ChatGptLoginStateDto::Completed => {
-                            let acct = account.unwrap_or_else(|| "signed in".to_owned());
-                            state.status_notice = Some(format!("Connected {provider_id} ({acct})"));
-                            state.modal = None;
-                            if let Some(t) = crate::transport::current() {
-                                t.fetch_providers();
-                            }
-                        }
-                        ChatGptLoginStateDto::Failed => {
-                            *busy = false;
-                            *error = message;
-                        }
-                        ChatGptLoginStateDto::Cancelled => {
-                            state.modal = None;
-                        }
+                    ChatGptLoginStateDto::Completed => {
+                        completed_return = Some((*return_to, account));
                     }
+                    ChatGptLoginStateDto::Failed => {
+                        *busy = false;
+                        *error = message;
+                    }
+                    ChatGptLoginStateDto::Cancelled => {
+                        let origin = *return_to;
+                        return_from_provider_modal(state, origin);
+                    }
+                }
+            }
+            if let Some((origin, account)) = completed_return {
+                let acct = account.unwrap_or_else(|| "signed in".to_owned());
+                set_status_notice(state, format!("Connected {provider_id} ({acct})"));
+                if origin == ProviderModalReturn::SettingsConnections {
+                    open_settings(state, Some(SettingsSection::Connections));
+                } else {
+                    open_model_input_for(state, Some(provider_id), origin);
+                }
+                if let Some(t) = crate::transport::current() {
+                    t.fetch_providers();
                 }
             }
             EventEffect::None
@@ -1327,18 +1447,6 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
     }
 }
 
-pub fn apply_history_response(state: &mut AppState, history: SessionHistoryResponse) {
-    if let Some(ActiveModal::SessionSelect {
-        history: slot,
-        loading,
-        ..
-    }) = &mut state.modal
-    {
-        *slot = history.sessions;
-        *loading = false;
-    }
-}
-
 pub fn apply_providers_response(state: &mut AppState, providers: ProvidersResponse) {
     state.providers = Some(providers);
     update_completion(state);
@@ -1346,17 +1454,19 @@ pub fn apply_providers_response(state: &mut AppState, providers: ProvidersRespon
 
 pub fn apply_reload_response(state: &mut AppState, resp: ReloadResponse) {
     state.host_info = resp.host_info;
-    state.status_notice = if resp.warnings.is_empty() {
-        Some("Reloaded configuration".to_owned())
+    let notice = if resp.warnings.is_empty() {
+        "Reloaded configuration".to_owned()
     } else {
-        Some(format!(
-            "Reloaded with warnings: {}",
-            resp.warnings.join("; ")
-        ))
+        format!("Reloaded with warnings: {}", resp.warnings.join("; "))
     };
+    set_status_notice(state, notice.clone());
     if let Some(ActiveModal::Settings(form)) = &mut state.modal {
+        let prev_section = form.section;
+        let prev_filter = form.provider_filter.clone();
         *form = SettingsFormState::from_host(&state.host_info);
-        form.status = state.status_notice.clone();
+        form.section = prev_section;
+        form.provider_filter = prev_filter;
+        form.status = Some(notice);
     }
 }
 
@@ -1384,10 +1494,7 @@ pub fn apply_shell_output(state: &mut AppState, _session_id: &str, result: Resul
     }
 }
 
-pub fn sync_pending_modal_for_active(state: &mut AppState) {
-    if state.modal.is_some() {
-        return;
-    }
+pub fn reopen_pending_request(state: &mut AppState) {
     let Some(sid) = state.active_session_id.clone() else {
         return;
     };
@@ -1411,30 +1518,62 @@ pub fn sync_pending_modal_for_active(state: &mut AppState) {
     }
 }
 
+pub fn sync_pending_modal_for_active(state: &mut AppState) {
+    if state.modal.is_some() {
+        return;
+    }
+    reopen_pending_request(state);
+}
+
+pub fn activate_and_switch_session(state: &mut AppState, session_id: &str) {
+    if !state.sessions.iter().any(|s| s.id == session_id) {
+        return;
+    }
+    switch_to_session(state, session_id);
+    if let Some(t) = crate::transport::current() {
+        t.activate_session(session_id.to_owned());
+    }
+}
+
 pub fn switch_to_session(state: &mut AppState, session_id: &str) {
     if !state.sessions.iter().any(|s| s.id == session_id) {
         return;
     }
     state.hidden_session_ids.remove(session_id);
+    let changed = state.active_session_id.as_deref() != Some(session_id);
     if let Some(prev) = state.active_session_id.clone()
         && prev != session_id
     {
         let prev_draft = state.draft.text.clone();
         state.session_tabs.entry(prev).or_default().draft_text = prev_draft;
     }
-    state.active_session_id = Some(session_id.to_owned());
-    let next_draft = state
-        .session_tabs
-        .entry(session_id.to_owned())
-        .or_default()
-        .draft_text
-        .clone();
-    state.draft.replace_text(next_draft);
-    if let Some(tab) = state.session_tabs.get_mut(session_id) {
-        tab.unread = false;
+    if changed
+        && matches!(
+            state.modal,
+            Some(
+                ActiveModal::Approval { .. }
+                    | ActiveModal::Question { .. }
+                    | ActiveModal::RewindMenu { .. }
+                    | ActiveModal::SubagentOverlay { .. }
+            )
+        )
+    {
+        state.modal = None;
     }
+    state.reset_confirm_pending = false;
+    state.active_session_id = Some(session_id.to_owned());
+    let (next_draft, needs_hydrate) = {
+        let tab = state.session_tabs.entry(session_id.to_owned()).or_default();
+        tab.unread = false;
+        (tab.draft_text.clone(), !tab.hydrated)
+    };
+    state.draft.replace_text(next_draft);
     state.error_banner = None;
     update_completion(state);
+    if needs_hydrate && let Some(t) = crate::transport::current() {
+        t.fetch_session_detail(session_id.to_owned());
+    }
+    drain_next_queued_if_idle(state, session_id);
     sync_pending_modal_for_active(state);
 }
 
@@ -1445,11 +1584,23 @@ pub fn select_tab_index(state: &mut AppState, idx: usize) {
         .map(|s| s.id.clone())
         .collect();
     if let Some(id) = visible_ids.get(idx).cloned() {
-        switch_to_session(state, &id);
-        if let Some(t) = crate::transport::current() {
-            t.activate_session(id);
-        }
+        activate_and_switch_session(state, &id);
     }
+}
+
+pub fn move_tab_to(state: &mut AppState, from_id: &str, to_id: &str) {
+    if from_id == to_id {
+        return;
+    }
+    sync_tab_order(state);
+    let Some(from_idx) = state.tab_order.iter().position(|id| id == from_id) else {
+        return;
+    };
+    let Some(to_idx) = state.tab_order.iter().position(|id| id == to_id) else {
+        return;
+    };
+    let item = state.tab_order.remove(from_idx);
+    state.tab_order.insert(to_idx, item);
 }
 
 pub fn cycle_tab(state: &mut AppState, delta: isize) {
@@ -1501,7 +1652,7 @@ pub fn reorder_active_tab(state: &mut AppState, delta: isize) {
 pub fn detach_tab_view(state: &mut AppState, session_id: &str) {
     let visible = state.visible_sessions();
     if visible.len() <= 1 {
-        state.status_notice = Some("Cannot close the last open tab".to_owned());
+        set_status_notice(state, "Cannot close the last open tab");
         return;
     }
     let visible_ids: Vec<String> = visible.into_iter().map(|s| s.id.clone()).collect();
@@ -1518,22 +1669,24 @@ pub fn detach_tab_view(state: &mut AppState, session_id: &str) {
     if state.active_session_id.as_deref() == Some(session_id)
         && let Some(next) = next_id
     {
-        switch_to_session(state, &next);
-        if let Some(t) = crate::transport::current() {
-            t.activate_session(next);
-        }
+        activate_and_switch_session(state, &next);
+    }
+}
+
+impl AppState {
+    pub fn can_submit_composer(&self) -> bool {
+        let draft = self.draft.text.trim();
+        self.connection != ConnectionState::Disconnected
+            && !draft.is_empty()
+            && (self.active_session_id.is_some() || draft.starts_with('/'))
     }
 }
 
 pub fn submit_or_queue_composer(state: &mut AppState) {
-    if state.connection == ConnectionState::Disconnected {
+    if !state.can_submit_composer() {
         return;
     }
-    let raw = state.draft.text.clone();
-    let trimmed = raw.trim().to_owned();
-    if trimmed.is_empty() {
-        return;
-    }
+    let trimmed = state.draft.text.trim().to_owned();
     state.completion = CompletionState::default();
     state.prompt_history_idx = None;
     record_prompt_history(state, &trimmed);
@@ -1596,12 +1749,17 @@ pub fn dispatch_prompt_text(state: &mut AppState, trimmed: String) {
             .or_default()
             .pending_queue
             .push_back(trimmed);
-        state.status_notice = Some("Queued prompt (click Steer to interrupt now)".to_owned());
+        set_status_notice(state, "Queued prompt (click item to steer now)");
         return;
     }
 
     state.sending = true;
     state.error_banner = None;
+    state
+        .session_tabs
+        .entry(sid.clone())
+        .or_default()
+        .pending_submit = Some(trimmed.clone());
     if let Some(t) = crate::transport::current() {
         t.submit_prompt(sid, trimmed);
     }
@@ -1611,39 +1769,71 @@ pub fn steer_or_send_queued(state: &mut AppState, index: usize) {
     let Some(sid) = state.active_session_id.clone() else {
         return;
     };
-    let Some(prompt) = state
+    if let Some(prompt) = state
         .session_tabs
         .get_mut(&sid)
         .and_then(|tab| tab.pending_queue.remove(index))
-    else {
+    {
+        if !state.is_busy() {
+            state.sending = true;
+            state
+                .session_tabs
+                .entry(sid.clone())
+                .or_default()
+                .pending_submit = Some(prompt.clone());
+        }
+        let Some(t) = crate::transport::current() else {
+            return;
+        };
+        if state.is_busy() {
+            t.steer_prompt(sid, prompt);
+        } else {
+            t.submit_prompt(sid, prompt);
+        }
         return;
-    };
-    let Some(t) = crate::transport::current() else {
-        return;
-    };
-    if state.is_busy() {
-        t.steer_prompt(sid, prompt);
-    } else {
-        state.sending = true;
-        t.submit_prompt(sid, prompt);
+    }
+
+    if index == 0 && state.is_busy() {
+        let trimmed = state.draft.text.trim().to_owned();
+        if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with('!') {
+            return;
+        }
+        state.completion = CompletionState::default();
+        state.prompt_history_idx = None;
+        record_prompt_history(state, &trimmed);
+        state.draft.clear();
+        if let Some(tab) = state.active_tab_mut() {
+            tab.draft_text.clear();
+        }
+        if let Some(t) = crate::transport::current() {
+            t.steer_prompt(sid, trimmed);
+        }
     }
 }
 
-pub fn drain_next_queued_if_idle(state: &mut AppState) {
-    if state.is_busy() || state.connection == ConnectionState::Disconnected {
+pub fn drain_next_queued_if_idle(state: &mut AppState, session_id: &str) {
+    if state.sending || state.connection == ConnectionState::Disconnected {
         return;
     }
-    let Some(sid) = state.active_session_id.clone() else {
+    let is_session_idle = state
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .is_some_and(|s| s.status == SessionStatus::Idle && !s.user_shell_running);
+    if !is_session_idle {
         return;
-    };
+    }
     let next = state
         .session_tabs
-        .get_mut(&sid)
+        .get_mut(session_id)
         .and_then(|tab| tab.pending_queue.pop_front());
     if let Some(prompt) = next {
         state.sending = true;
+        if let Some(tab) = state.session_tabs.get_mut(session_id) {
+            tab.pending_submit = Some(prompt.clone());
+        }
         if let Some(t) = crate::transport::current() {
-            t.submit_prompt(sid, prompt);
+            t.submit_prompt(session_id.to_owned(), prompt);
         }
     }
 }
@@ -1692,12 +1882,9 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
         }
         "/sessions" => {
             if !arg.is_empty() && state.sessions.iter().any(|s| s.id == arg) {
-                switch_to_session(state, arg);
-                if let Some(t) = crate::transport::current() {
-                    t.activate_session(arg.to_owned());
-                }
+                activate_and_switch_session(state, arg);
             } else {
-                open_session_select(state, arg);
+                state.session_panel.reveal(Some(arg));
             }
         }
         "/new" => {
@@ -1716,7 +1903,7 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
                         }
                     }
                     None => {
-                        state.status_notice = Some("No closed turn to fork.".to_owned());
+                        set_status_notice(state, "No closed turn to fork.");
                     }
                 }
             }
@@ -1765,7 +1952,7 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
         }
         "/agent" => {
             if arg.is_empty() {
-                state.status_notice = Some(format!(
+                let msg = format!(
                     "Usage: /agent <id>. Available: {}",
                     state
                         .host_info
@@ -1774,7 +1961,8 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
                         .map(|a| a.id.as_str())
                         .collect::<Vec<_>>()
                         .join(", ")
-                ));
+                );
+                set_status_notice(state, msg);
             } else if let Some(sid) = state.active_session_id.clone()
                 && let Some(t) = crate::transport::current()
             {
@@ -1787,7 +1975,7 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
         }
         "/skill" => {
             if arg.is_empty() {
-                state.status_notice = Some(format!(
+                let msg = format!(
                     "Usage: /skill <id>. Available: {}",
                     state
                         .host_info
@@ -1796,7 +1984,8 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
                         .map(|s| s.id.as_str())
                         .collect::<Vec<_>>()
                         .join(", ")
-                ));
+                );
+                set_status_notice(state, msg);
             } else if let Some(sid) = state.active_session_id.clone()
                 && let Some(t) = crate::transport::current()
             {
@@ -1822,6 +2011,7 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
         "/clear" => {
             if let Some(tab) = state.active_tab_mut() {
                 tab.entries.clear();
+                tab.entries_version = tab.entries_version.wrapping_add(1);
                 tab.streaming_item_id = None;
                 tab.streaming_text.clear();
                 tab.streaming_reasoning.clear();
@@ -1830,8 +2020,7 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
                 tab.expanded_reasoning.clear();
                 tab.expanded_errors.clear();
                 tab.expanded_subagents.clear();
-                state.status_notice =
-                    Some("Cleared this view. The session log is unchanged.".to_owned());
+                set_status_notice(state, "Cleared this view. The session log is unchanged.");
             }
         }
         "/reset" => {
@@ -1886,11 +2075,7 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
                 t.reload_config();
             }
         }
-        "/settings" => {
-            state.modal = Some(ActiveModal::Settings(SettingsFormState::from_host(
-                &state.host_info,
-            )));
-        }
+        "/settings" => open_settings(state, None),
         "/update" => {
             let msg = match &state.host_info.update_available {
                 Some(v) => format!(
@@ -1903,9 +2088,9 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
                 ),
             };
             if let Some(tab) = state.active_tab_mut() {
-                push_local_system(tab, msg.clone());
+                push_local_system(tab, msg);
             } else {
-                state.status_notice = Some(msg);
+                set_status_notice(state, msg);
             }
         }
         "/quit" | "/q" => {
@@ -1913,7 +2098,7 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
             if let Some(tab) = state.active_tab_mut() {
                 push_local_system(tab, msg.to_owned());
             } else {
-                state.status_notice = Some(msg.to_owned());
+                set_status_notice(state, msg);
             }
         }
         "/serve" => {
@@ -1921,7 +2106,7 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
             if let Some(tab) = state.active_tab_mut() {
                 push_local_system(tab, msg.to_owned());
             } else {
-                state.status_notice = Some(msg.to_owned());
+                set_status_notice(state, msg);
             }
         }
         _ => {
@@ -1968,6 +2153,17 @@ pub fn cycle_approval_mode(state: &mut AppState) {
     set_approval_mode(state, next);
 }
 
+pub fn open_settings(state: &mut AppState, section: Option<SettingsSection>) {
+    if let Some(t) = crate::transport::current() {
+        t.fetch_providers();
+    }
+    let mut form = SettingsFormState::from_host(&state.host_info);
+    if let Some(sec) = section {
+        form.section = sec;
+    }
+    state.modal = Some(ActiveModal::Settings(form));
+}
+
 pub fn open_provider_select(state: &mut AppState) {
     if let Some(t) = crate::transport::current() {
         t.fetch_providers();
@@ -1979,44 +2175,58 @@ pub fn open_provider_select(state: &mut AppState) {
 }
 
 pub fn open_model_input(state: &mut AppState) {
+    open_model_input_for(state, None, ProviderModalReturn::Close);
+}
+
+pub fn open_model_input_for(
+    state: &mut AppState,
+    provider_id: Option<String>,
+    return_to: ProviderModalReturn,
+) {
     if let Some(t) = crate::transport::current() {
         t.fetch_providers();
     }
-    let provider_id = state
-        .active_session()
-        .map(|s| s.provider.clone())
-        .or_else(|| {
-            state
-                .providers
-                .as_ref()
-                .and_then(|p| p.default_provider.clone())
-        });
     state.modal = Some(ActiveModal::ModelInput {
         filter: TextBuffer::new(""),
         provider_id,
         selected: 0,
+        return_to,
     });
 }
 
-pub fn open_session_select(state: &mut AppState, initial_filter: &str) {
-    if let Some(t) = crate::transport::current() {
-        t.fetch_history();
+pub fn return_from_provider_modal(state: &mut AppState, return_to: ProviderModalReturn) {
+    match return_to {
+        ProviderModalReturn::Close => state.modal = None,
+        ProviderModalReturn::ProviderSelect => open_provider_select(state),
+        ProviderModalReturn::SettingsConnections => {
+            open_settings(state, Some(SettingsSection::Connections));
+        }
     }
-    state.modal = Some(ActiveModal::SessionSelect {
-        filter: TextBuffer::new(initial_filter),
-        history: Vec::new(),
-        selected: 0,
-        loading: true,
-        confirm_delete: None,
-    });
 }
 
 pub fn open_diff_modal(state: &mut AppState, path: Option<String>) {
+    open_diff_modal_with_status(state, path, None);
+}
+
+pub fn open_diff_modal_with_status(
+    state: &mut AppState,
+    path: Option<String>,
+    status: Option<String>,
+) {
     let target = path.or_else(|| state.file_changes.first().map(|c| c.path.clone()));
+    let resolved_status = status.or_else(|| {
+        target.as_ref().and_then(|p| {
+            state
+                .file_changes
+                .iter()
+                .find(|c| &c.path == p)
+                .map(|c| c.status.clone())
+        })
+    });
     if let Some(t) = crate::transport::current() {
         t.fetch_workspace_changes();
         if let Some(p) = &target {
-            t.fetch_workspace_diff(p.clone());
+            t.fetch_workspace_diff(p.clone(), resolved_status);
         }
     }
     state.modal = Some(ActiveModal::DiffView {
@@ -2026,6 +2236,46 @@ pub fn open_diff_modal(state: &mut AppState, path: Option<String>) {
         diff: None,
         error: None,
     });
+}
+
+pub fn sync_diff_modal_on_changes(state: &mut AppState) {
+    let Some(ActiveModal::DiffView {
+        selected_path,
+        diff,
+        loading,
+        error,
+        ..
+    }) = state.modal.as_mut()
+    else {
+        return;
+    };
+
+    if let Some(current_path) = selected_path.as_ref()
+        && let Some(entry) = state.file_changes.iter().find(|c| &c.path == current_path)
+    {
+        if diff.is_none() {
+            *loading = true;
+        }
+        if let Some(t) = crate::transport::current() {
+            t.fetch_workspace_diff(entry.path.clone(), Some(entry.status.clone()));
+        }
+        return;
+    }
+
+    if let Some(first) = state.file_changes.first().cloned() {
+        *selected_path = Some(first.path.clone());
+        *diff = None;
+        *loading = true;
+        *error = None;
+        if let Some(t) = crate::transport::current() {
+            t.fetch_workspace_diff(first.path, Some(first.status));
+        }
+    } else {
+        *selected_path = None;
+        *diff = None;
+        *loading = false;
+        *error = None;
+    }
 }
 
 pub fn open_search_modal(
@@ -2051,7 +2301,7 @@ pub fn open_search_modal(
 pub fn open_rewind_modal(state: &mut AppState, turn_hint: Option<&str>) {
     let turns = state.user_turns();
     if turns.is_empty() {
-        state.status_notice = Some("No recorded turns to rewind to.".to_owned());
+        set_status_notice(state, "No recorded turns to rewind to.");
         return;
     }
     let selected_turn = turn_hint
@@ -2064,55 +2314,103 @@ pub fn open_rewind_modal(state: &mut AppState, turn_hint: Option<&str>) {
     });
 }
 
-pub fn activate_provider_from_modal(state: &mut AppState, provider: ProviderItemDto) {
-    if provider.configured && provider.auth_kind != meerai_web_protocol::AuthKindDto::None {
+pub fn activate_provider_from_modal(
+    state: &mut AppState,
+    provider: ProviderItemDto,
+    return_to: ProviderModalReturn,
+) {
+    if provider.configured {
         state.modal = Some(ActiveModal::ProviderConnection {
             provider_id: provider.id,
             provider_name: provider.display_name,
+            auth_kind: provider.auth_kind,
             status_badge: provider.status_badge,
             configured: provider.configured,
             base_url: provider.base_url,
+            env_vars: provider.env_vars,
+            default_model: provider.default_model,
+            return_to,
             selected: 0,
         });
         return;
     }
     match provider.auth_kind {
         meerai_web_protocol::AuthKindDto::None => {
-            state.modal = Some(ActiveModal::ModelInput {
-                filter: TextBuffer::new(""),
-                provider_id: Some(provider.id),
-                selected: 0,
-            });
+            open_model_input_for(state, Some(provider.id), return_to);
         }
         meerai_web_protocol::AuthKindDto::ApiKey => {
-            open_api_key_modal(state, &provider);
+            open_api_key_modal(state, &provider, return_to);
         }
         meerai_web_protocol::AuthKindDto::OAuth => {
-            start_oauth_modal(state, &provider);
+            start_oauth_modal(state, &provider, return_to);
         }
         meerai_web_protocol::AuthKindDto::Either => {
             state.modal = Some(ActiveModal::AuthMethodSelect {
                 provider_id: provider.id,
                 provider_name: provider.display_name,
+                return_to,
                 selected: 0,
             });
         }
     }
 }
 
-pub fn open_api_key_modal(state: &mut AppState, provider: &ProviderItemDto) {
+pub fn open_provider_model_select(
+    state: &mut AppState,
+    provider_id: String,
+    return_to: ProviderModalReturn,
+) {
+    open_model_input_for(state, Some(provider_id), return_to);
+}
+
+pub fn open_provider_credential_update(
+    state: &mut AppState,
+    provider: &ProviderItemDto,
+    return_to: ProviderModalReturn,
+) {
+    match provider.auth_kind {
+        meerai_web_protocol::AuthKindDto::None | meerai_web_protocol::AuthKindDto::ApiKey => {
+            open_api_key_modal(state, provider, return_to);
+        }
+        meerai_web_protocol::AuthKindDto::OAuth => {
+            start_oauth_modal(state, provider, return_to);
+        }
+        meerai_web_protocol::AuthKindDto::Either => {
+            state.modal = Some(ActiveModal::AuthMethodSelect {
+                provider_id: provider.id.clone(),
+                provider_name: provider.display_name.clone(),
+                return_to,
+                selected: 0,
+            });
+        }
+    }
+}
+
+pub fn open_api_key_modal(
+    state: &mut AppState,
+    provider: &ProviderItemDto,
+    return_to: ProviderModalReturn,
+) {
     state.modal = Some(ActiveModal::ApiKeyInput {
         provider_id: provider.id.clone(),
         provider_name: provider.display_name.clone(),
+        auth_kind: provider.auth_kind,
         status_badge: provider.status_badge.clone(),
+        configured: provider.configured,
+        env_vars: provider.env_vars.clone(),
         api_key: TextBuffer::new(""),
         base_url: TextBuffer::new(provider.base_url.clone().unwrap_or_default()),
         error: None,
         busy: false,
+        return_to,
     });
 }
 
-pub fn start_oauth_modal(state: &mut AppState, provider: &ProviderItemDto) {
+pub fn start_oauth_modal(
+    state: &mut AppState,
+    provider: &ProviderItemDto,
+    return_to: ProviderModalReturn,
+) {
     if let Some(t) = crate::transport::current() {
         t.start_chatgpt_login(provider.id.clone());
     }
@@ -2125,6 +2423,7 @@ pub fn start_oauth_modal(state: &mut AppState, provider: &ProviderItemDto) {
         state: None,
         error: None,
         busy: true,
+        return_to,
     });
 }
 
@@ -2285,6 +2584,35 @@ pub fn extract_mentions(input: &str, host: &HostInfoDto) -> ExtractedMentions {
     }
 }
 
+pub fn resolved_mention_chips(
+    input: &str,
+    host: &HostInfoDto,
+) -> Vec<(MentionCategory, String, String)> {
+    let agent_ids: HashSet<&str> = host.agents.iter().map(|a| a.id.as_str()).collect();
+    let skill_ids: HashSet<&str> = host.skills.iter().map(|s| s.id.as_str()).collect();
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for token in input.split_whitespace() {
+        if let Some(name) = token.strip_prefix("@agent/")
+            && agent_ids.contains(name)
+            && seen.insert(token.to_owned())
+        {
+            out.push((MentionCategory::Agent, name.to_owned(), token.to_owned()));
+        } else if let Some(name) = token.strip_prefix("@skill/")
+            && skill_ids.contains(name)
+            && seen.insert(token.to_owned())
+        {
+            out.push((MentionCategory::Skill, name.to_owned(), token.to_owned()));
+        }
+    }
+    out
+}
+
+pub fn remove_mention_token(input: &str, token: &str) -> String {
+    let kept: Vec<&str> = input.split_whitespace().filter(|t| *t != token).collect();
+    kept.join(" ")
+}
+
 pub fn model_completion_items(
     providers: Option<&ProvidersResponse>,
     active_provider: &str,
@@ -2299,37 +2627,36 @@ pub fn model_completion_items(
 
     if let Some(recent) = providers.recent_models.get(active_provider) {
         for m in recent {
-            if q.is_empty() || m.to_ascii_lowercase().contains(&q) {
-                if seen.insert((active_provider.to_owned(), m.clone())) {
-                    out.push(CompletionItem {
-                        label: format!("{active_provider}/{m}"),
-                        insert: format!("{active_provider}/{m}"),
-                        detail: "recent".to_owned(),
-                        category: None,
-                    });
-                }
+            if (q.is_empty() || m.to_ascii_lowercase().contains(&q))
+                && seen.insert((active_provider.to_owned(), m.clone()))
+            {
+                out.push(CompletionItem {
+                    label: format!("{active_provider}/{m}"),
+                    insert: format!("{active_provider}/{m}"),
+                    detail: "recent".to_owned(),
+                    category: None,
+                });
             }
         }
     }
 
     for model in &providers.models {
         let full = format!("{}/{}", model.provider, model.id);
-        if q.is_empty()
+        if (q.is_empty()
             || model.id.to_ascii_lowercase().contains(&q)
-            || full.to_ascii_lowercase().contains(&q)
+            || full.to_ascii_lowercase().contains(&q))
+            && seen.insert((model.provider.clone(), model.id.clone()))
         {
-            if seen.insert((model.provider.clone(), model.id.clone())) {
-                let detail = model
-                    .context_window_tokens
-                    .map(|c| format!("{}k ctx", c / 1000))
-                    .unwrap_or_else(|| model.provider.clone());
-                out.push(CompletionItem {
-                    label: full.clone(),
-                    insert: full,
-                    detail,
-                    category: None,
-                });
-            }
+            let detail = model
+                .context_window_tokens
+                .map(|c| format!("{}k ctx", c / 1000))
+                .unwrap_or_else(|| model.provider.clone());
+            out.push(CompletionItem {
+                label: full.clone(),
+                insert: full,
+                detail,
+                category: None,
+            });
         }
         if out.len() >= 18 {
             break;
@@ -2641,23 +2968,61 @@ pub fn entry_id_of(entry: &TranscriptEntryDto) -> &str {
     }
 }
 
+pub fn is_removable_credential_badge(badge: &str) -> bool {
+    matches!(badge, "saved" | "plan")
+}
+
+pub fn provider_for_model<'a>(
+    providers: Option<&'a ProvidersResponse>,
+    provider_id: &str,
+) -> Option<&'a ProviderItemDto> {
+    providers.and_then(|resp| resp.providers.iter().find(|p| p.id == provider_id))
+}
+
+pub fn is_recent_model(
+    providers: Option<&ProvidersResponse>,
+    provider_id: &str,
+    model_id: &str,
+) -> bool {
+    providers
+        .and_then(|resp| resp.recent_models.get(provider_id))
+        .is_some_and(|list| list.iter().any(|m| m == model_id))
+}
+
 pub fn filtered_providers(
     providers: Option<&ProvidersResponse>,
+    filter: &str,
+) -> Vec<ProviderItemDto> {
+    filtered_providers_sorted(providers, None, filter)
+}
+
+pub fn filtered_providers_sorted(
+    providers: Option<&ProvidersResponse>,
+    active_provider: Option<&str>,
     filter: &str,
 ) -> Vec<ProviderItemDto> {
     let Some(resp) = providers else {
         return Vec::new();
     };
     let q = filter.trim().to_ascii_lowercase();
-    resp.providers
+    let mut items: Vec<ProviderItemDto> = resp
+        .providers
         .iter()
         .filter(|p| {
             q.is_empty()
                 || p.id.to_ascii_lowercase().contains(&q)
                 || p.display_name.to_ascii_lowercase().contains(&q)
+                || p.adapter.to_ascii_lowercase().contains(&q)
+                || p.status_badge.to_ascii_lowercase().contains(&q)
         })
         .cloned()
-        .collect()
+        .collect();
+    items.sort_by_key(|p| {
+        let is_active = active_provider.is_some_and(|a| a == p.id);
+        let is_default = resp.default_provider.as_deref() == Some(p.id.as_str());
+        (!is_active, !p.configured, !is_default)
+    });
+    items
 }
 
 pub fn filtered_models(
@@ -2665,47 +3030,157 @@ pub fn filtered_models(
     provider_filter: Option<&str>,
     filter: &str,
 ) -> Vec<ModelItemDto> {
+    filtered_models_sorted(providers, provider_filter, None, filter)
+}
+
+pub fn filtered_models_sorted(
+    providers: Option<&ProvidersResponse>,
+    provider_filter: Option<&str>,
+    active_provider: Option<&str>,
+    filter: &str,
+) -> Vec<ModelItemDto> {
     let Some(resp) = providers else {
         return Vec::new();
     };
+    let mut combined = Vec::new();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+
+    for m in &resp.models {
+        if seen.insert((m.provider.clone(), m.id.clone())) {
+            combined.push(m.clone());
+        }
+    }
+    for (provider, recent) in &resp.recent_models {
+        for model_id in recent {
+            if seen.insert((provider.clone(), model_id.clone())) {
+                combined.push(ModelItemDto {
+                    id: model_id.clone(),
+                    provider: provider.clone(),
+                    display_name: model_id.clone(),
+                    context_window_tokens: None,
+                    max_output_tokens: None,
+                    supports_reasoning: true,
+                    supports_vision: false,
+                    supports_tools: true,
+                    is_custom: true,
+                });
+            }
+        }
+    }
+    for provider in &resp.providers {
+        if let Some(model_id) = &provider.default_model
+            && !model_id.trim().is_empty()
+            && seen.insert((provider.id.clone(), model_id.clone()))
+        {
+            combined.push(ModelItemDto {
+                id: model_id.clone(),
+                provider: provider.id.clone(),
+                display_name: model_id.clone(),
+                context_window_tokens: None,
+                max_output_tokens: None,
+                supports_reasoning: true,
+                supports_vision: false,
+                supports_tools: true,
+                is_custom: false,
+            });
+        }
+    }
+
     let q = filter.trim().to_ascii_lowercase();
-    let mut items: Vec<ModelItemDto> = resp
-        .models
-        .iter()
+    let mut items: Vec<ModelItemDto> = combined
+        .into_iter()
         .filter(|m| {
             provider_filter.is_none_or(|p| m.provider == p || q.contains('/'))
                 && (q.is_empty()
                     || m.id.to_ascii_lowercase().contains(&q)
+                    || m.display_name.to_ascii_lowercase().contains(&q)
                     || format!("{}/{}", m.provider, m.id)
                         .to_ascii_lowercase()
                         .contains(&q))
         })
-        .cloned()
         .collect();
-    if let Some(p) = provider_filter
-        && let Some(recent) = resp.recent_models.get(p)
-    {
-        items.sort_by_key(|m| recent.iter().position(|r| r == &m.id).unwrap_or(usize::MAX));
-    }
+
+    let configured_map: HashMap<&str, bool> = resp
+        .providers
+        .iter()
+        .map(|p| (p.id.as_str(), p.configured))
+        .collect();
+    let default_map: HashMap<&str, &str> = resp
+        .providers
+        .iter()
+        .filter_map(|p| p.default_model.as_deref().map(|d| (p.id.as_str(), d)))
+        .collect();
+
+    items.sort_by_key(|m| {
+        let scope_tier = match provider_filter {
+            Some(p) => {
+                if m.provider == p {
+                    0u8
+                } else {
+                    1
+                }
+            }
+            None => {
+                let is_active = active_provider.is_some_and(|a| a == m.provider);
+                let is_configured = configured_map
+                    .get(m.provider.as_str())
+                    .copied()
+                    .unwrap_or(false);
+                if is_active {
+                    0
+                } else if is_configured {
+                    1
+                } else {
+                    2
+                }
+            }
+        };
+        let recent_rank = resp
+            .recent_models
+            .get(&m.provider)
+            .and_then(|list| list.iter().position(|r| r == &m.id))
+            .unwrap_or(usize::MAX);
+        let is_default = default_map
+            .get(m.provider.as_str())
+            .is_some_and(|d| *d == m.id);
+        (scope_tier, recent_rank, !is_default)
+    });
     items
 }
 
-pub fn filtered_history(history: &[StoredSessionDto], filter: &str) -> Vec<StoredSessionDto> {
-    let q = filter.trim().to_ascii_lowercase();
-    history
-        .iter()
-        .filter(|s| {
-            q.is_empty()
-                || s.id.to_ascii_lowercase().contains(&q)
-                || s.title
-                    .as_deref()
-                    .is_some_and(|t| t.to_ascii_lowercase().contains(&q))
-                || s.model
-                    .as_deref()
-                    .is_some_and(|m| m.to_ascii_lowercase().contains(&q))
+pub fn resolve_model_input_target(
+    state: &AppState,
+    provider_scope: Option<&str>,
+    raw: &str,
+) -> Option<(String, String)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let fallback = provider_scope
+        .map(str::to_owned)
+        .or_else(|| state.active_session().map(|s| s.provider.clone()))
+        .or_else(|| {
+            state
+                .providers
+                .as_ref()
+                .and_then(|p| p.default_provider.clone())
         })
-        .cloned()
-        .collect()
+        .unwrap_or_else(|| "openai".to_owned());
+    Some(parse_provider_model_arg(trimmed, &fallback))
+}
+
+pub fn custom_model_candidate(
+    state: &AppState,
+    provider_scope: Option<&str>,
+    filter: &str,
+    models: &[ModelItemDto],
+) -> Option<(String, String)> {
+    let (provider, model) = resolve_model_input_target(state, provider_scope, filter)?;
+    let exact = models
+        .iter()
+        .any(|m| m.provider == provider && m.id == model);
+    (!exact).then_some((provider, model))
 }
 
 pub fn filtered_commands(filter: &str) -> Vec<&'static SlashCommandSpec> {
@@ -2732,9 +3207,64 @@ pub fn parse_provider_model_arg(raw: &str, fallback_provider: &str) -> (String, 
     (fallback_provider.to_owned(), trimmed.to_owned())
 }
 
+pub fn summarize_tool_args(name: &str, raw_args: &str) -> String {
+    let trimmed = raw_args.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        let pick_str = |keys: &[&str]| -> Option<String> {
+            keys.iter().find_map(|k| {
+                map.get(*k)
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            })
+        };
+        let summary = match name {
+            "code-read_file" | "code-write_file" | "code-edit_file" | "code-list_dir" => {
+                pick_str(&["path", "Path", "file_path", "dir"])
+            }
+            "code-shell" => pick_str(&["command", "CommandLine", "cmd"]),
+            "code-grep" | "code-glob" => pick_str(&["pattern", "query", "glob", "path"]),
+            "subagent-run" | "acp-run" => pick_str(&["agent", "preset", "role", "task", "prompt"]),
+            _ => pick_str(&["path", "Path", "command", "query", "pattern", "name", "url"]),
+        };
+        if let Some(text) = summary {
+            return text.lines().next().unwrap_or(&text).to_owned();
+        }
+    }
+    trimmed.lines().next().unwrap_or(trimmed).to_owned()
+}
+
+pub fn format_tokens(count: u64) -> String {
+    if count >= 1_000_000 {
+        format!("{:.1}M", count as f64 / 1_000_000.0)
+    } else if count >= 1_000 {
+        format!("{:.1}k", count as f64 / 1_000.0)
+    } else {
+        count.to_string()
+    }
+}
+
+pub fn format_duration_ms(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else {
+        let total_secs = ms / 1_000;
+        let mins = total_secs / 60;
+        let secs = total_secs % 60;
+        format!("{mins}m {secs:02}s")
+    }
+}
+
 fn push_local_system(tab: &mut SessionTabState, text: String) {
-    let id = format!("local-sys-{}", tab.entries.len() + tab.local_notices.len());
+    let id = format!("local-sys-{}", tab.entries.len());
     tab.entries.push(TranscriptEntryDto::System { id, text });
+    tab.entries_version = tab.entries_version.wrapping_add(1);
 }
 
 fn mark_unread_if_bg(state: &mut AppState, session_id: &str) {
@@ -2946,5 +3476,30 @@ mod tests {
         let filtered = filtered_palette_actions("copy");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].key, "copy-last");
+    }
+
+    #[test]
+    fn tool_summary_and_formatting_helpers_produce_concise_labels() {
+        assert_eq!(
+            summarize_tool_args("code-read_file", r#"{"path":"src/main.rs","limit":10}"#),
+            "src/main.rs"
+        );
+        assert_eq!(
+            summarize_tool_args(
+                "code-shell",
+                r#"{"command":"cargo test --workspace\necho ok"}"#
+            ),
+            "cargo test --workspace"
+        );
+        assert_eq!(
+            summarize_tool_args("code-grep", r#"{"pattern":"AppState"}"#),
+            "AppState"
+        );
+        assert_eq!(format_tokens(950), "950");
+        assert_eq!(format_tokens(12_450), "12.4k");
+        assert_eq!(format_tokens(2_500_000), "2.5M");
+        assert_eq!(format_duration_ms(450), "450ms");
+        assert_eq!(format_duration_ms(4_250), "4.2s");
+        assert_eq!(format_duration_ms(125_000), "2m 05s");
     }
 }

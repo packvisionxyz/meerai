@@ -390,23 +390,23 @@ pub struct ThemeTokensDto {
 impl Default for ThemeTokensDto {
     fn default() -> Self {
         Self {
-            background: "#0a0a0a".to_owned(),
-            surface: "#141414".to_owned(),
-            surface_high: "#1e1e1e".to_owned(),
-            text: "#eeeeee".to_owned(),
-            muted: "#808080".to_owned(),
-            faint: "#4c4c4c".to_owned(),
+            background: "#0b0d10".to_owned(),
+            surface: "#12151a".to_owned(),
+            surface_high: "#1a1f27".to_owned(),
+            text: "#eceef2".to_owned(),
+            muted: "#9aa3b2".to_owned(),
+            faint: "#6b7485".to_owned(),
             accent: "#2dd4bf".to_owned(),
-            interactive: "#7abaff".to_owned(),
-            border: "#484848".to_owned(),
-            error: "#e06c75".to_owned(),
-            warning: "#ff9e64".to_owned(),
-            success: "#7fd88f".to_owned(),
-            info: "#56b6c2".to_owned(),
+            interactive: "#60a5fa".to_owned(),
+            border: "#262c36".to_owned(),
+            error: "#f07178".to_owned(),
+            warning: "#f5a962".to_owned(),
+            success: "#6ee7a0".to_owned(),
+            info: "#56c2d6".to_owned(),
             diff_added: "#4fd6be".to_owned(),
-            diff_removed: "#c53b53".to_owned(),
-            diff_context: "#7d8590".to_owned(),
-            code_function: "#c678dd".to_owned(),
+            diff_removed: "#e06c75".to_owned(),
+            diff_context: "#8892a0".to_owned(),
+            code_function: "#c792ea".to_owned(),
         }
     }
 }
@@ -414,6 +414,8 @@ impl Default for ThemeTokensDto {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThemeOverrideDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_scheme: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -711,7 +713,7 @@ pub enum ViewEvent {
         changes: Vec<FileChangeDto>,
     },
     Reloaded {
-        host_info: HostInfoDto,
+        host_info: Box<HostInfoDto>,
         warnings: Vec<String>,
     },
     ProvidersUpdated,

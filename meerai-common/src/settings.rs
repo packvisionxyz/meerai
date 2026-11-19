@@ -177,6 +177,8 @@ pub struct SandboxSettings {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThemeSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_scheme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub surface: Option<String>,
@@ -228,6 +230,7 @@ impl ThemeSettings {
             };
         }
         overlay!(
+            color_scheme,
             background,
             surface,
             surface_high,
@@ -1262,6 +1265,7 @@ providers:
     #[test]
     fn theme_overlay_copies_every_field() {
         let source = ThemeSettings {
+            color_scheme: Some("dark".to_string()),
             background: Some("#000001".to_string()),
             surface: Some("#000002".to_string()),
             surface_high: Some("#000003".to_string()),
@@ -1284,6 +1288,7 @@ providers:
 
         target.overlay(source.clone());
 
+        assert_eq!(target.color_scheme, source.color_scheme);
         assert_eq!(target.background, source.background);
         assert_eq!(target.surface, source.surface);
         assert_eq!(target.surface_high, source.surface_high);

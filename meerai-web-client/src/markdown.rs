@@ -118,7 +118,7 @@ fn collect_inlines<'a>(node: &'a AstNode<'a>) -> Vec<AnyView> {
 fn collect_inline<'a>(node: &'a AstNode<'a>, out: &mut Vec<AnyView>) {
     let value = &node.data.borrow().value;
     match value {
-        NodeValue::Text(text) => out.push(text.to_owned().into_any()),
+        NodeValue::Text(text) => out.push(text.clone().into_any()),
         NodeValue::SoftBreak => out.push(" ".to_owned().into_any()),
         NodeValue::LineBreak => out.push(view! { <br /> }.into_any()),
         NodeValue::Code(code) => {

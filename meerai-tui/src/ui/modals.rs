@@ -1116,7 +1116,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             let port_area = input_band(frame, port_band_rect, port_focus);
             let (port_text, port_style) = if port_input.is_empty() {
                 (
-                    "(leave blank for OS ephemeral port)".to_string(),
+                    "(leave blank for default port 28860)".to_string(),
                     Style::default().fg(theme::p().faint),
                 )
             } else {
@@ -1149,7 +1149,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             let secret_area = input_band(frame, secret_band_rect, editing_secret);
             let (secret_text, secret_style) = if secret_input.is_empty() {
                 (
-                    "(leave blank to auto-generate & show once)".to_string(),
+                    "(leave blank for default: 12345678)".to_string(),
                     Style::default().fg(theme::p().faint),
                 )
             } else {

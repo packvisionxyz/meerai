@@ -59,8 +59,8 @@ const COMMANDS: &[HelpRow] = &[
         description: "Install a Stop hook with a failure baseline",
     },
     HelpRow {
-        usage: "serve [--port N] [--user NAME] [--auth]",
-        description: "Start the local browser UI server on 127.0.0.1 (Basic auth required)",
+        usage: "serve [--port N] [--user NAME] [--password PASS] [--auth]",
+        description: "Start the local browser UI server on 127.0.0.1:28860 (Basic auth required)",
     },
 ];
 
@@ -172,7 +172,7 @@ pub(crate) fn help_text() -> String {
     meerai auth <list|login|logout>\n  \
     meerai sessions <list|rm|prune|fork>\n  \
     meerai hooks <trust|untrust|status|verify>\n  \
-    meerai serve [--port <PORT>] [--user <NAME>] [--auth] [--continue | --resume <ID> | --fork <ID>]\n\n",
+    meerai serve [--port <PORT>] [--user <NAME>] [--password <PASS>] [--auth] [--continue | --resume <ID> | --fork <ID>]\n\n",
     );
     text.push_str(&help_section("Commands", COMMANDS, &auth_path));
     text.push('\n');
@@ -229,6 +229,7 @@ pub(crate) enum AcpCommand {
 pub(crate) struct ServeCommand {
     pub(crate) port: Option<u16>,
     pub(crate) username: Option<String>,
+    pub(crate) password: Option<String>,
     pub(crate) auth: bool,
 }
 
@@ -584,6 +585,7 @@ where
                 subcommand = Some(CliSubcommand::Serve(ServeCommand {
                     port: None,
                     username: None,
+                    password: None,
                     auth: false,
                 }));
             }
@@ -622,6 +624,27 @@ where
                     bail!("--username can only be used with `serve`");
                 };
                 cmd.username = Some(arg["--username=".len()..].to_string());
+            }
+            "--password" | "--secret" => {
+                let Some(CliSubcommand::Serve(cmd)) = subcommand.as_mut() else {
+                    bail!("{arg} can only be used with `serve`");
+                };
+                let value = iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("missing value for {arg}"))?;
+                cmd.password = Some(value);
+            }
+            _ if arg.starts_with("--password=") => {
+                let Some(CliSubcommand::Serve(cmd)) = subcommand.as_mut() else {
+                    bail!("--password can only be used with `serve`");
+                };
+                cmd.password = Some(arg["--password=".len()..].to_string());
+            }
+            _ if arg.starts_with("--secret=") => {
+                let Some(CliSubcommand::Serve(cmd)) = subcommand.as_mut() else {
+                    bail!("--secret can only be used with `serve`");
+                };
+                cmd.password = Some(arg["--secret=".len()..].to_string());
             }
             "--auth" => {
                 let Some(CliSubcommand::Serve(cmd)) = subcommand.as_mut() else {

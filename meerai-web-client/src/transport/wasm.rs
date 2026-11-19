@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::store::StoreHandle;
+use leptos::prelude::Update;
 use meerai_web_protocol::{
     ApiError, ApplyDefinitionRequest, ApprovalDecisionDto, ApprovalDecisionRequest,
     ApprovalModeDto, BackendKind, ChatGptLoginPasteRequest, ChatGptLoginStartResponse,
@@ -23,10 +24,25 @@ use web_sys::{
 };
 
 use crate::state::{
-    ActiveModal, AppState, ConnectionState, apply_active_detail, apply_created_session,
-    apply_history_response, apply_providers_response, apply_reload_response, apply_shell_output,
-    apply_snapshot, apply_view_event,
+    ActiveModal, AppState, ConnectionState, ProviderModalReturn, SessionPanelAction,
+    SettingsSection, apply_created_session, apply_opened_session, apply_providers_response,
+    apply_reload_response, apply_session_detail, apply_shell_output, apply_snapshot,
+    apply_view_event, open_model_input_for, open_settings, return_from_provider_modal,
+    set_status_notice, sync_diff_modal_on_changes,
 };
+
+struct PendingDelta {
+    session_id: String,
+    item_id: String,
+    is_reasoning: bool,
+    delta: String,
+}
+
+#[derive(Default)]
+struct DeltaQueue {
+    items: Vec<PendingDelta>,
+    scheduled: bool,
+}
 
 struct EventSourceSlot {
     source: Option<EventSource>,
@@ -48,7 +64,7 @@ impl WasmTransport {
             _on_error: None,
         }));
         let transport = Self {
-            handle: handle.clone(),
+            handle,
             slot: slot.clone(),
         };
         spawn_bootstrap(handle, slot, true);
@@ -56,11 +72,11 @@ impl WasmTransport {
     }
 
     pub fn resync(&self) {
-        spawn_bootstrap(self.handle.clone(), self.slot.clone(), true);
+        spawn_bootstrap(self.handle, self.slot.clone(), true);
     }
 
     pub fn post_empty(&self, path: String) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             match fetch_text("POST", &path, Some("{}")).await {
                 Ok((200..=299, _)) => {}
@@ -71,7 +87,7 @@ impl WasmTransport {
     }
 
     pub fn submit_prompt(&self, session_id: String, prompt: String) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/sessions/{session_id}/prompt");
             let payload = match serde_json::to_string(&SubmitPromptRequest { prompt }) {
@@ -93,14 +109,22 @@ impl WasmTransport {
                 }
                 Ok((status, body)) => {
                     let message = format_api_error(status, &body);
+                    let sid = session_id.clone();
                     handle.update(move |state| {
                         state.sending = false;
+                        if let Some(tab) = state.session_tabs.get_mut(&sid) {
+                            tab.pending_submit = None;
+                        }
                         state.error_banner = Some(message);
                     });
                 }
                 Err(err) => {
+                    let sid = session_id.clone();
                     handle.update(move |state| {
                         state.sending = false;
+                        if let Some(tab) = state.session_tabs.get_mut(&sid) {
+                            tab.pending_submit = None;
+                        }
                         state.error_banner = Some(err);
                     });
                 }
@@ -109,7 +133,7 @@ impl WasmTransport {
     }
 
     pub fn steer_prompt(&self, session_id: String, prompt: String) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/sessions/{session_id}/steer");
             let Ok(payload) = serde_json::to_string(&SubmitPromptRequest { prompt }) else {
@@ -126,7 +150,7 @@ impl WasmTransport {
     }
 
     pub fn create_session(&self, backend: Option<BackendKind>) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let payload = serde_json::to_string(&CreateSessionRequest { backend })
                 .unwrap_or_else(|_| "{}".to_owned());
@@ -149,101 +173,95 @@ impl WasmTransport {
         });
     }
 
-    pub fn open_session(&self, session_id: String) {
-        let handle = self.handle.clone();
+    pub fn fetch_session_detail(&self, session_id: String) {
+        let handle = self.handle;
         spawn_local(async move {
-            let path = format!("/api/sessions/{session_id}/open");
-            match fetch_text("POST", &path, Some("{}")).await {
-                Ok((200..=299, body)) => match serde_json::from_str::<SessionDetailDto>(&body) {
-                    Ok(detail) => {
-                        let id = detail.summary.id.clone();
-                        handle.update_with_effects(move |state, tx| {
-                            state.hidden_session_ids.remove(&id);
-                            apply_active_detail(state, detail);
-                            state.active_session_id = Some(id);
-                            state.modal = None;
-                            sync_title(state, tx);
-                            tx.scroll_to_bottom("messages");
-                        });
-                    }
-                    Err(err) => set_error(&handle, format!("Invalid open-session response: {err}")),
-                },
-                Ok((status, body)) => set_error(&handle, format_api_error(status, &body)),
-                Err(err) => set_error(&handle, err),
-            }
+            fetch_session_detail_async(handle, session_id).await;
         });
     }
 
-    pub fn delete_session(&self, session_id: String) {
-        let handle = self.handle.clone();
+    pub fn session_panel_action(&self, action: SessionPanelAction, session_id: String) {
+        let handle = self.handle;
+        if handle.with(|s| s.session_panel.action_pending) {
+            return;
+        }
+        handle.update(|s| {
+            s.session_panel.action_pending = true;
+            s.session_panel.action_error = None;
+            s.session_panel.confirm_delete = None;
+        });
+        let transport = self.clone();
         spawn_local(async move {
             let path = format!("/api/sessions/{session_id}");
-            match fetch_text("DELETE", &path, Some("{}")).await {
-                Ok((200..=299, _)) => {
-                    let deleted = session_id.clone();
-                    handle.update(move |state| {
-                        if let Some(ActiveModal::SessionSelect {
-                            history,
-                            confirm_delete,
-                            ..
-                        }) = &mut state.modal
-                        {
-                            history.retain(|s| s.id != deleted);
-                            *confirm_delete = None;
+            let result = match action {
+                SessionPanelAction::Open => request_opened_session(&format!("{path}/open"), "{}")
+                    .await
+                    .map(Some),
+                SessionPanelAction::Fork => request_opened_session(&format!("{path}/fork"), "{}")
+                    .await
+                    .map(Some),
+                SessionPanelAction::Delete => session_request("DELETE", &path, Some("{}"))
+                    .await
+                    .map(|_| None),
+            };
+            let deleted = matches!(result, Ok(None));
+            handle.update_with_effects(move |state, tx| {
+                state.session_panel.action_pending = false;
+                match result {
+                    Ok(Some(session)) => {
+                        apply_opened_session(state, session);
+                        if state.session_panel.finish_open() && state.modal.is_none() {
+                            tx.focus("composer");
                         }
-                        state.status_notice = Some(format!("Deleted session {deleted}"));
-                    });
+                        sync_title(state, tx);
+                    }
+                    Ok(None) => {
+                        state.session_panel.remove_deleted(&session_id);
+                        set_status_notice(state, format!("Deleted session {session_id}"));
+                    }
+                    Err(error) => state.session_panel.action_error = Some(error),
                 }
-                Ok((status, body)) => set_error(&handle, format_api_error(status, &body)),
-                Err(err) => set_error(&handle, err),
+            });
+            if deleted && handle.with(|s| s.session_panel.open) {
+                transport.fetch_history();
             }
         });
     }
 
     pub fn fork_session(&self, session_id: String, turn_id: Option<String>) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/sessions/{session_id}/fork");
             let payload = serde_json::to_string(&ForkSessionRequest { turn_id })
                 .unwrap_or_else(|_| "{}".to_owned());
-            match fetch_text("POST", &path, Some(&payload)).await {
-                Ok((200..=299, body)) => match serde_json::from_str::<SessionDetailDto>(&body) {
-                    Ok(detail) => {
-                        let id = detail.summary.id.clone();
-                        handle.update_with_effects(move |state, tx| {
-                            state.hidden_session_ids.remove(&id);
-                            apply_active_detail(state, detail);
-                            state.active_session_id = Some(id);
-                            state.modal = None;
-                            sync_title(state, tx);
-                            tx.scroll_to_bottom("messages");
-                        });
-                    }
-                    Err(err) => set_error(&handle, format!("Invalid fork response: {err}")),
-                },
-                Ok((status, body)) => set_error(&handle, format_api_error(status, &body)),
-                Err(err) => set_error(&handle, err),
+            match request_opened_session(&path, &payload).await {
+                Ok(session) => handle.update_with_effects(move |state, tx| {
+                    state.modal = None;
+                    apply_opened_session(state, session);
+                    sync_title(state, tx);
+                }),
+                Err(error) => set_error(&handle, error),
             }
         });
     }
 
     pub fn fetch_history(&self) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
+        let mut request = 0;
+        handle.update(|state| request = state.session_panel.begin_history_request());
         spawn_local(async move {
-            match fetch_text("GET", "/api/sessions/history", None).await {
-                Ok((200..=299, body)) => {
-                    if let Ok(history) = serde_json::from_str::<SessionHistoryResponse>(&body) {
-                        handle.update(move |state| apply_history_response(state, history));
-                    }
-                }
-                Ok((status, body)) => set_error(&handle, format_api_error(status, &body)),
-                Err(err) => set_error(&handle, err),
-            }
+            let result = session_request("GET", "/api/sessions/history", None)
+                .await
+                .and_then(|body| {
+                    serde_json::from_str::<SessionHistoryResponse>(&body)
+                        .map_err(|error| format!("Invalid session history: {error}"))
+                });
+            handle.update(move |state| state.session_panel.finish_history_request(request, result));
         });
     }
 
     pub fn fetch_session_events(&self, session_id: String, for_overlay: bool) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/sessions/{session_id}/events");
             match fetch_text("GET", &path, None).await {
@@ -255,6 +273,7 @@ impl WasmTransport {
                                 tab.child_loading.remove(&session_id);
                                 tab.child_sessions
                                     .insert(session_id.clone(), resp.entries.clone());
+                                tab.entries_version = tab.entries_version.wrapping_add(1);
                             }
                             if for_overlay
                                 && let Some(ActiveModal::SubagentOverlay {
@@ -298,7 +317,7 @@ impl WasmTransport {
     }
 
     pub fn rewind_session(&self, session_id: String, turn_id: String, scope: RewindScopeDto) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/sessions/{session_id}/rewind");
             let Ok(payload) = serde_json::to_string(&RewindRequest { turn_id, scope }) else {
@@ -324,16 +343,18 @@ impl WasmTransport {
     }
 
     pub fn set_model(&self, session_id: String, provider: String, model: String) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/sessions/{session_id}/model");
+            let notice = format!("Model set to {provider}/{model}");
             let Ok(payload) = serde_json::to_string(&SetModelRequest { provider, model }) else {
                 return;
             };
             match fetch_text("POST", &path, Some(&payload)).await {
                 Ok((200..=299, _)) => {
-                    handle.update_with_effects(|state, tx| {
+                    handle.update_with_effects(move |state, tx| {
                         state.modal = None;
+                        set_status_notice(state, notice);
                         sync_title(state, tx);
                     });
                 }
@@ -344,7 +365,7 @@ impl WasmTransport {
     }
 
     pub fn set_mode(&self, session_id: String, mode: ApprovalModeDto) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/sessions/{session_id}/mode");
             let Ok(payload) = serde_json::to_string(&SetModeRequest { mode }) else {
@@ -359,7 +380,7 @@ impl WasmTransport {
     }
 
     pub fn apply_agent(&self, session_id: String, name: String) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/sessions/{session_id}/apply-agent");
             let Ok(payload) = serde_json::to_string(&ApplyDefinitionRequest { name }) else {
@@ -374,7 +395,7 @@ impl WasmTransport {
     }
 
     pub fn apply_skill(&self, session_id: String, name: String) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/sessions/{session_id}/apply-skill");
             let Ok(payload) = serde_json::to_string(&ApplyDefinitionRequest { name }) else {
@@ -395,7 +416,7 @@ impl WasmTransport {
         decision: ApprovalDecisionDto,
         scope: Option<GrantScopeDto>,
     ) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/sessions/{session_id}/approvals/{request_id}");
             let Ok(payload) = serde_json::to_string(&ApprovalDecisionRequest { decision, scope })
@@ -404,7 +425,7 @@ impl WasmTransport {
             };
             match fetch_text("POST", &path, Some(&payload)).await {
                 Ok((200..=299, _)) => {
-                    handle.update_with_effects(|state, tx| sync_title(state, tx));
+                    handle.update_with_effects(sync_title);
                 }
                 Ok((status, body)) => set_error(&handle, format_api_error(status, &body)),
                 Err(err) => set_error(&handle, err),
@@ -419,7 +440,7 @@ impl WasmTransport {
         answers: Vec<QuestionAnswerDto>,
         cancel: bool,
     ) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/sessions/{session_id}/questions/{request_id}");
             let Ok(payload) = serde_json::to_string(&QuestionAnswerRequest { answers, cancel })
@@ -428,7 +449,7 @@ impl WasmTransport {
             };
             match fetch_text("POST", &path, Some(&payload)).await {
                 Ok((200..=299, _)) => {
-                    handle.update_with_effects(|state, tx| sync_title(state, tx));
+                    handle.update_with_effects(sync_title);
                 }
                 Ok((status, body)) => set_error(&handle, format_api_error(status, &body)),
                 Err(err) => set_error(&handle, err),
@@ -437,7 +458,7 @@ impl WasmTransport {
     }
 
     pub fn run_shell(&self, session_id: String, command: String) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/sessions/{session_id}/shell");
             let Ok(payload) = serde_json::to_string(&RunShellRequest { command }) else {
@@ -456,7 +477,7 @@ impl WasmTransport {
     }
 
     pub fn fetch_workspace_files(&self) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             if let Ok((200..=299, body)) = fetch_text("GET", "/api/workspace/files", None).await
                 && let Ok(resp) = serde_json::from_str::<WorkspaceFilesResponse>(&body)
@@ -470,7 +491,7 @@ impl WasmTransport {
     }
 
     pub fn search_workspace(&self, mode: SearchModeDto, query: String) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let mode_str = match mode {
                 SearchModeDto::Files => "files",
@@ -502,14 +523,29 @@ impl WasmTransport {
                         });
                     }
                 }
-                Ok((status, body)) => set_error(&handle, format_api_error(status, &body)),
-                Err(err) => set_error(&handle, err),
+                Ok((status, body)) => {
+                    let msg = format_api_error(status, &body);
+                    handle.update(move |state| {
+                        if let Some(ActiveModal::Search { loading, .. }) = &mut state.modal {
+                            *loading = false;
+                        }
+                        state.error_banner = Some(msg);
+                    });
+                }
+                Err(err) => {
+                    handle.update(move |state| {
+                        if let Some(ActiveModal::Search { loading, .. }) = &mut state.modal {
+                            *loading = false;
+                        }
+                        state.error_banner = Some(err);
+                    });
+                }
             }
         });
     }
 
     pub fn preview_workspace(&self, path: String, line: Option<usize>) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let mut url = format!(
                 "/api/workspace/preview?path={}",
@@ -546,32 +582,40 @@ impl WasmTransport {
     }
 
     pub fn fetch_workspace_changes(&self) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             if let Ok((200..=299, body)) = fetch_text("GET", "/api/workspace/changes", None).await
                 && let Ok(changes) = serde_json::from_str::<Vec<FileChangeDto>>(&body)
             {
                 handle.update(move |state| {
                     state.file_changes = changes;
+                    sync_diff_modal_on_changes(state);
                 });
             }
         });
     }
 
-    pub fn fetch_workspace_diff(&self, path: String) {
-        let handle = self.handle.clone();
+    pub fn fetch_workspace_diff(&self, path: String, status: Option<String>) {
+        let handle = self.handle;
         spawn_local(async move {
-            let url = format!("/api/workspace/diff?path={}", encode_query_component(&path));
+            let mut url = format!("/api/workspace/diff?path={}", encode_query_component(&path));
+            if let Some(status) = status
+                && !status.is_empty()
+            {
+                url.push_str(&format!("&status={}", encode_query_component(&status)));
+            }
             match fetch_text("GET", &url, None).await {
                 Ok((200..=299, body)) => match serde_json::from_str::<FileDiffResponse>(&body) {
                     Ok(resp) => {
                         handle.update(move |state| {
                             if let Some(ActiveModal::DiffView {
+                                selected_path,
                                 diff,
                                 loading,
                                 error,
                                 ..
                             }) = &mut state.modal
+                                && selected_path.as_deref() == Some(path.as_str())
                             {
                                 *diff = Some(resp);
                                 *loading = false;
@@ -579,7 +623,19 @@ impl WasmTransport {
                             }
                         });
                     }
-                    Err(err) => set_error(&handle, format!("Invalid diff response: {err}")),
+                    Err(err) => {
+                        let msg = format!("Invalid diff response: {err}");
+                        handle.update(move |state| {
+                            if let Some(ActiveModal::DiffView { loading, error, .. }) =
+                                &mut state.modal
+                            {
+                                *loading = false;
+                                *error = Some(msg);
+                            } else {
+                                state.error_banner = Some(msg);
+                            }
+                        });
+                    }
                 },
                 Ok((status, body)) => {
                     let msg = format_api_error(status, &body);
@@ -593,13 +649,23 @@ impl WasmTransport {
                         }
                     });
                 }
-                Err(err) => set_error(&handle, err),
+                Err(err) => {
+                    handle.update(move |state| {
+                        if let Some(ActiveModal::DiffView { loading, error, .. }) = &mut state.modal
+                        {
+                            *loading = false;
+                            *error = Some(err);
+                        } else {
+                            state.error_banner = Some(err);
+                        }
+                    });
+                }
             }
         });
     }
 
     pub fn fetch_providers(&self) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             match fetch_text("GET", "/api/providers", None).await {
                 Ok((200..=299, body)) => {
@@ -613,8 +679,14 @@ impl WasmTransport {
         });
     }
 
-    pub fn set_api_key(&self, provider_id: String, api_key: String, base_url: Option<String>) {
-        let handle = self.handle.clone();
+    pub fn set_api_key(
+        &self,
+        provider_id: String,
+        api_key: String,
+        base_url: Option<String>,
+        return_to: ProviderModalReturn,
+    ) {
+        let handle = self.handle;
         spawn_local(async move {
             let trimmed_key = api_key.trim().to_owned();
             if !trimmed_key.is_empty() {
@@ -641,7 +713,16 @@ impl WasmTransport {
                         return;
                     }
                     Err(err) => {
-                        set_error(&handle, err);
+                        handle.update(move |state| {
+                            if let Some(ActiveModal::ApiKeyInput { error, busy, .. }) =
+                                &mut state.modal
+                            {
+                                *busy = false;
+                                *error = Some(err);
+                            } else {
+                                state.error_banner = Some(err);
+                            }
+                        });
                         return;
                     }
                 }
@@ -671,12 +752,15 @@ impl WasmTransport {
                 }
             }
             handle.update(move |state| {
-                state.modal = Some(ActiveModal::ModelInput {
-                    filter: crate::text::TextBuffer::new(""),
-                    provider_id: Some(provider_id.clone()),
-                    selected: 0,
-                });
-                state.status_notice = Some(format!("Updated {provider_id} settings"));
+                if return_to == ProviderModalReturn::SettingsConnections {
+                    open_settings(state, Some(SettingsSection::Connections));
+                    if let Some(ActiveModal::Settings(form)) = &mut state.modal {
+                        form.status = Some(format!("Saved {provider_id} settings."));
+                    }
+                } else {
+                    open_model_input_for(state, Some(provider_id.clone()), return_to);
+                }
+                set_status_notice(state, format!("Updated {provider_id} settings"));
                 if let Some(t) = crate::transport::current() {
                     t.fetch_providers();
                 }
@@ -685,7 +769,7 @@ impl WasmTransport {
     }
 
     pub fn set_provider_base_url(&self, provider_id: String, base_url: Option<String>) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/providers/{provider_id}/base-url");
             let Ok(payload) = serde_json::to_string(&SetProviderBaseUrlRequest { base_url }) else {
@@ -705,16 +789,18 @@ impl WasmTransport {
         });
     }
 
-    pub fn remove_credential(&self, provider_id: String) {
-        let handle = self.handle.clone();
+    pub fn remove_credential(&self, provider_id: String, return_to: ProviderModalReturn) {
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/providers/{provider_id}/credential");
             match fetch_text("DELETE", &path, Some("{}")).await {
                 Ok((200..=299, _)) => {
                     handle.update(move |state| {
-                        state.modal = None;
-                        state.status_notice =
-                            Some(format!("Removed credentials for {provider_id}"));
+                        return_from_provider_modal(state, return_to);
+                        set_status_notice(state, format!("Removed credentials for {provider_id}"));
+                        if let Some(ActiveModal::Settings(form)) = &mut state.modal {
+                            form.status = Some(format!("Removed credentials for {provider_id}."));
+                        }
                         if let Some(t) = crate::transport::current() {
                             t.fetch_providers();
                         }
@@ -727,7 +813,7 @@ impl WasmTransport {
     }
 
     pub fn start_chatgpt_login(&self, provider_id: String) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/providers/{provider_id}/chatgpt/start");
             match fetch_text("POST", &path, Some("{}")).await {
@@ -751,7 +837,17 @@ impl WasmTransport {
                             });
                         }
                         Err(err) => {
-                            set_error(&handle, format!("Invalid OAuth start response: {err}"))
+                            let msg = format!("Invalid OAuth start response: {err}");
+                            handle.update(move |state| {
+                                if let Some(ActiveModal::ChatGptLogin { busy, error, .. }) =
+                                    &mut state.modal
+                                {
+                                    *busy = false;
+                                    *error = Some(msg);
+                                } else {
+                                    state.error_banner = Some(msg);
+                                }
+                            });
                         }
                     }
                 }
@@ -768,13 +864,24 @@ impl WasmTransport {
                         }
                     });
                 }
-                Err(err) => set_error(&handle, err),
+                Err(err) => {
+                    handle.update(move |state| {
+                        if let Some(ActiveModal::ChatGptLogin { busy, error, .. }) =
+                            &mut state.modal
+                        {
+                            *busy = false;
+                            *error = Some(err);
+                        } else {
+                            state.error_banner = Some(err);
+                        }
+                    });
+                }
             }
         });
     }
 
     pub fn paste_chatgpt_login(&self, provider_id: String, attempt_id: String, input: String) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/providers/{provider_id}/chatgpt/{attempt_id}/paste");
             let Ok(payload) = serde_json::to_string(&ChatGptLoginPasteRequest { input }) else {
@@ -798,7 +905,7 @@ impl WasmTransport {
     }
 
     pub fn cancel_chatgpt_login(&self, provider_id: String, attempt_id: String) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/providers/{provider_id}/chatgpt/{attempt_id}/cancel");
             let _ = fetch_text("POST", &path, Some("{}")).await;
@@ -811,7 +918,7 @@ impl WasmTransport {
     }
 
     pub fn update_settings(&self, req: UpdateSettingsRequest) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             let Ok(payload) = serde_json::to_string(&req) else {
                 return;
@@ -827,7 +934,17 @@ impl WasmTransport {
                             }
                         });
                     }
-                    Err(err) => set_error(&handle, format!("Invalid settings response: {err}")),
+                    Err(err) => {
+                        let msg = format!("Invalid settings response: {err}");
+                        handle.update(move |state| {
+                            if let Some(ActiveModal::Settings(form)) = &mut state.modal {
+                                form.busy = false;
+                                form.status = Some(msg);
+                            } else {
+                                state.error_banner = Some(msg);
+                            }
+                        });
+                    }
                 },
                 Ok((status, body)) => {
                     let msg = format_api_error(status, &body);
@@ -840,25 +957,81 @@ impl WasmTransport {
                         }
                     });
                 }
-                Err(err) => set_error(&handle, err),
+                Err(err) => {
+                    handle.update(move |state| {
+                        if let Some(ActiveModal::Settings(form)) = &mut state.modal {
+                            form.busy = false;
+                            form.status = Some(err);
+                        } else {
+                            state.error_banner = Some(err);
+                        }
+                    });
+                }
             }
         });
     }
 
     pub fn reload_config(&self) {
-        let handle = self.handle.clone();
+        let handle = self.handle;
         spawn_local(async move {
             match fetch_text("POST", "/api/reload", Some("{}")).await {
                 Ok((200..=299, body)) => match serde_json::from_str::<ReloadResponse>(&body) {
                     Ok(resp) => {
                         handle.update(move |state| apply_reload_response(state, resp));
                     }
-                    Err(err) => set_error(&handle, format!("Invalid reload response: {err}")),
+                    Err(err) => {
+                        let msg = format!("Invalid reload response: {err}");
+                        handle.update(move |state| {
+                            if let Some(ActiveModal::Settings(form)) = &mut state.modal {
+                                form.busy = false;
+                                form.status = Some(msg);
+                            } else {
+                                state.error_banner = Some(msg);
+                            }
+                        });
+                    }
                 },
-                Ok((status, body)) => set_error(&handle, format_api_error(status, &body)),
-                Err(err) => set_error(&handle, err),
+                Ok((status, body)) => {
+                    let msg = format_api_error(status, &body);
+                    handle.update(move |state| {
+                        if let Some(ActiveModal::Settings(form)) = &mut state.modal {
+                            form.busy = false;
+                            form.status = Some(msg.clone());
+                        } else {
+                            state.error_banner = Some(msg);
+                        }
+                    });
+                }
+                Err(err) => {
+                    handle.update(move |state| {
+                        if let Some(ActiveModal::Settings(form)) = &mut state.modal {
+                            form.busy = false;
+                            form.status = Some(err);
+                        } else {
+                            state.error_banner = Some(err);
+                        }
+                    });
+                }
             }
         });
+    }
+}
+
+async fn fetch_session_detail_async(handle: StoreHandle, session_id: String) {
+    let path = format!("/api/sessions/{session_id}");
+    match fetch_text("GET", &path, None).await {
+        Ok((200..=299, body)) => match serde_json::from_str::<SessionDetailDto>(&body) {
+            Ok(detail) => {
+                handle.update_with_effects(move |state, tx| {
+                    apply_session_detail(state, detail);
+                    sync_title(state, tx);
+                    tx.scroll_to_bottom("messages");
+                });
+            }
+            Err(err) => set_error(&handle, format!("Invalid session detail response: {err}")),
+        },
+        Ok((status, body)) => set_error(&handle, format_api_error(status, &body)),
+        Err(err) => set_error(&handle, err),
     }
 }
 
@@ -874,6 +1047,10 @@ fn spawn_bootstrap(handle: StoreHandle, slot: Rc<RefCell<EventSourceSlot>>, reop
                         sync_title(state, tx);
                         tx.scroll_to_bottom("messages");
                     });
+                    if let Some(t) = crate::transport::current() {
+                        t.fetch_providers();
+                        t.fetch_workspace_changes();
+                    }
                 }
                 Err(err) => {
                     handle.update_with_effects(move |state, tx| {
@@ -905,6 +1082,69 @@ fn spawn_bootstrap(handle: StoreHandle, slot: Rc<RefCell<EventSourceSlot>>, reop
     });
 }
 
+fn flush_pending_deltas(handle: StoreHandle, delta_queue: &Rc<RefCell<DeltaQueue>>) {
+    let items = {
+        let mut guard = delta_queue.borrow_mut();
+        guard.scheduled = false;
+        if guard.items.is_empty() {
+            return;
+        }
+        std::mem::take(&mut guard.items)
+    };
+    handle.update_with_effects(move |state, tx| {
+        let active_id = state.active_session_id.clone();
+        let mut touched_active = false;
+        for item in items {
+            if active_id.as_deref() == Some(item.session_id.as_str()) {
+                touched_active = true;
+            }
+            let ev = if item.is_reasoning {
+                ViewEvent::ReasoningDelta {
+                    session_id: item.session_id,
+                    item_id: item.item_id,
+                    delta: item.delta,
+                }
+            } else {
+                ViewEvent::TextDelta {
+                    session_id: item.session_id,
+                    item_id: item.item_id,
+                    delta: item.delta,
+                }
+            };
+            let _ = apply_view_event(state, ev);
+        }
+        if touched_active {
+            tx.scroll_to_bottom_if_near("messages");
+        }
+    });
+}
+
+fn schedule_delta_flush(handle: StoreHandle, delta_queue: Rc<RefCell<DeltaQueue>>) {
+    let should_schedule = {
+        let mut guard = delta_queue.borrow_mut();
+        if guard.scheduled {
+            false
+        } else {
+            guard.scheduled = true;
+            true
+        }
+    };
+    if !should_schedule {
+        return;
+    }
+    let flush_queue = delta_queue.clone();
+    let callback = Closure::once_into_js(move || {
+        flush_pending_deltas(handle, &flush_queue);
+    });
+    if let Some(window) = web_sys::window()
+        && let Some(func) = callback.dyn_ref::<js_sys::Function>()
+        && window.request_animation_frame(func).is_ok()
+    {
+        return;
+    }
+    flush_pending_deltas(handle, &delta_queue);
+}
+
 fn open_event_stream(
     handle: StoreHandle,
     slot: Rc<RefCell<EventSourceSlot>>,
@@ -930,8 +1170,10 @@ fn open_event_stream(
         }
     };
 
-    let msg_handle = handle.clone();
+    let delta_queue = Rc::new(RefCell::new(DeltaQueue::default()));
+    let msg_handle = handle;
     let msg_slot = slot.clone();
+    let msg_deltas = delta_queue.clone();
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         let Some(raw) = event.data().as_string() else {
             return;
@@ -940,18 +1182,63 @@ fn open_event_stream(
             return;
         };
         let seq = event.last_event_id().parse::<u64>().ok();
+
+        match view_event {
+            ViewEvent::TextDelta {
+                session_id,
+                item_id,
+                delta,
+            } => {
+                if let Some(id) = seq {
+                    msg_handle.state.update(|state| {
+                        state.last_event_id = id;
+                        state.connection = ConnectionState::Connected;
+                    });
+                }
+                msg_deltas.borrow_mut().items.push(PendingDelta {
+                    session_id,
+                    item_id,
+                    is_reasoning: false,
+                    delta,
+                });
+                schedule_delta_flush(msg_handle, msg_deltas.clone());
+                return;
+            }
+            ViewEvent::ReasoningDelta {
+                session_id,
+                item_id,
+                delta,
+            } => {
+                if let Some(id) = seq {
+                    msg_handle.state.update(|state| {
+                        state.last_event_id = id;
+                        state.connection = ConnectionState::Connected;
+                    });
+                }
+                msg_deltas.borrow_mut().items.push(PendingDelta {
+                    session_id,
+                    item_id,
+                    is_reasoning: true,
+                    delta,
+                });
+                schedule_delta_flush(msg_handle, msg_deltas.clone());
+                return;
+            }
+            _ => {}
+        }
+
+        flush_pending_deltas(msg_handle, &msg_deltas);
+
         let is_disconnect = matches!(view_event, ViewEvent::HostDisconnected);
         let is_resync = matches!(view_event, ViewEvent::ResyncRequired);
         let should_scroll = matches!(
             view_event,
-            ViewEvent::UserPromptSubmitted { .. }
-                | ViewEvent::TextDelta { .. }
-                | ViewEvent::EntryCompleted { .. }
+            ViewEvent::UserPromptSubmitted { .. } | ViewEvent::EntryCompleted { .. }
         );
         if is_disconnect && let Some(es) = msg_slot.borrow_mut().source.take() {
             es.close();
         }
-        let resync_handle = msg_handle.clone();
+        let resync_handle = msg_handle;
         let resync_slot = msg_slot.clone();
         msg_handle.update_with_effects(move |state, tx| {
             if let Some(id) = seq {
@@ -963,7 +1250,7 @@ fn open_event_stream(
             let _ = apply_view_event(state, view_event);
             sync_title(state, tx);
             if should_scroll {
-                tx.scroll_to_bottom("messages");
+                tx.scroll_to_bottom_if_near("messages");
             }
         });
         if is_resync {
@@ -971,7 +1258,7 @@ fn open_event_stream(
         }
     });
 
-    let err_handle = handle.clone();
+    let err_handle = handle;
     let err_slot = slot.clone();
     let on_error = Closure::<dyn FnMut(ErrorEvent)>::new(move |_: ErrorEvent| {
         let closed = err_slot
@@ -1012,6 +1299,27 @@ fn set_error(handle: &StoreHandle, message: String) {
     handle.update(move |state| {
         state.error_banner = Some(message);
     });
+}
+
+async fn session_request(
+    method: &str,
+    path: &str,
+    payload: Option<&str>,
+) -> Result<String, String> {
+    match fetch_text(method, path, payload).await? {
+        (200..=299, body) => Ok(body),
+        (status, body) => Err(format_api_error(status, &body)),
+    }
+}
+
+async fn request_opened_session(
+    path: &str,
+    payload: &str,
+) -> Result<meerai_web_protocol::SessionSummaryDto, String> {
+    let body = session_request("POST", path, Some(payload)).await?;
+    serde_json::from_str::<CreateSessionResponse>(&body)
+        .map(|response| response.session)
+        .map_err(|error| format!("Invalid session response: {error}"))
 }
 
 async fn fetch_text(

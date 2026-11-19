@@ -2048,6 +2048,7 @@ fn parses_serve_subcommand_and_flags() {
         Some(CliSubcommand::Serve(ServeCommand {
             port: None,
             username: None,
+            password: None,
             auth: false,
         }))
     );
@@ -2058,6 +2059,7 @@ fn parses_serve_subcommand_and_flags() {
         Some(CliSubcommand::Serve(ServeCommand {
             port: Some(8080),
             username: None,
+            password: None,
             auth: false,
         }))
     );
@@ -2070,6 +2072,8 @@ fn parses_serve_subcommand_and_flags() {
             "--port=9000",
             "--user",
             "alice",
+            "--password",
+            "custompass",
             "--auth",
         ]
         .map(str::to_string),
@@ -2080,6 +2084,7 @@ fn parses_serve_subcommand_and_flags() {
         Some(CliSubcommand::Serve(ServeCommand {
             port: Some(9000),
             username: Some("alice".to_string()),
+            password: Some("custompass".to_string()),
             auth: true,
         }))
     );
@@ -2112,6 +2117,7 @@ fn parses_serve_subcommand_and_flags() {
         Some(CliSubcommand::Serve(ServeCommand {
             port: None,
             username: None,
+            password: None,
             auth: false,
         }))
     );
@@ -2131,6 +2137,7 @@ fn parses_serve_subcommand_and_flags() {
         Some(CliSubcommand::Serve(ServeCommand {
             port: None,
             username: None,
+            password: None,
             auth: false,
         }))
     );
@@ -2164,31 +2171,49 @@ fn parses_serve_subcommand_and_flags() {
 
 #[cfg(feature = "web")]
 #[test]
-fn resolve_serve_auth_requires_basic_auth_and_generates_secret_when_empty() {
-    let default_generated = resolve_serve_auth_with(None, None, None, false, || {
-        panic!("prompt should not run in non-interactive mode")
+fn resolve_serve_auth_defaults_local_credentials_and_allows_overrides() {
+    let default_creds = resolve_serve_auth_with(None, None, None, None, false, || {
+        panic!("prompt should not run unless requested")
     })
     .unwrap();
-    assert!(default_generated.auth.is_enabled());
-    assert!(
-        default_generated
-            .generated_secret
-            .as_deref()
-            .is_some_and(|s| s.len() >= 8)
-    );
+    assert!(default_creds.auth.is_enabled());
+    assert_eq!(default_creds.default_secret.as_deref(), Some("12345678"));
     assert!(matches!(
-        default_generated.auth,
+        default_creds.auth,
         meerai_web::ServeAuth::Basic {
             username: Some(ref u),
             secret: Some(_)
         } if u == "meerai"
     ));
 
-    let from_env = resolve_serve_auth_with(None, None, Some("8-chars!".to_string()), false, || {
-        panic!("prompt should not run when env secret is set")
-    })
+    let from_cli = resolve_serve_auth_with(
+        Some("bob".to_string()),
+        Some("cli-secret-1".to_string()),
+        None,
+        Some("env-ignored".to_string()),
+        false,
+        || panic!("prompt should not run when cli password is set"),
+    )
     .unwrap();
-    assert!(from_env.generated_secret.is_none());
+    assert!(from_cli.default_secret.is_none());
+    assert!(matches!(
+        from_cli.auth,
+        meerai_web::ServeAuth::Basic {
+            username: Some(ref u),
+            secret: Some(_)
+        } if u == "bob"
+    ));
+
+    let from_env = resolve_serve_auth_with(
+        None,
+        None,
+        None,
+        Some("8-chars!".to_string()),
+        false,
+        || panic!("prompt should not run when env secret is set"),
+    )
+    .unwrap();
+    assert!(from_env.default_secret.is_none());
     assert!(matches!(
         from_env.auth,
         meerai_web::ServeAuth::Basic {
@@ -2197,29 +2222,27 @@ fn resolve_serve_auth_requires_basic_auth_and_generates_secret_when_empty() {
         } if u == "meerai"
     ));
 
-    let short_env = resolve_serve_auth_with(None, None, Some("7-chars".to_string()), false, || {
-        Ok(String::new())
-    })
-    .unwrap_err();
+    let short_env =
+        resolve_serve_auth_with(None, None, None, Some("7-chars".to_string()), false, || {
+            Ok(String::new())
+        })
+        .unwrap_err();
     assert!(format!("{short_env:#}").contains("8 characters"));
 
-    let prompt_generated =
-        resolve_serve_auth_with(None, None, Some(String::new()), true, || Ok(String::new()))
-            .unwrap();
-    assert!(prompt_generated.auth.is_enabled());
-    assert!(
-        prompt_generated
-            .generated_secret
-            .as_deref()
-            .is_some_and(|s| s.len() >= 8)
-    );
+    let prompt_default =
+        resolve_serve_auth_with(None, None, None, Some(String::new()), true, || {
+            Ok(String::new())
+        })
+        .unwrap();
+    assert!(prompt_default.auth.is_enabled());
+    assert_eq!(prompt_default.default_secret.as_deref(), Some("12345678"));
 
     let prompt_custom =
-        resolve_serve_auth_with(Some("alice".to_string()), None, None, true, || {
+        resolve_serve_auth_with(Some("alice".to_string()), None, None, None, true, || {
             Ok("pass1234".to_string())
         })
         .unwrap();
-    assert!(prompt_custom.generated_secret.is_none());
+    assert!(prompt_custom.default_secret.is_none());
     assert!(matches!(
         prompt_custom.auth,
         meerai_web::ServeAuth::Basic {
@@ -2229,6 +2252,7 @@ fn resolve_serve_auth_requires_basic_auth_and_generates_secret_when_empty() {
     ));
 
     let prompt_short =
-        resolve_serve_auth_with(None, None, None, true, || Ok("short".to_string())).unwrap_err();
+        resolve_serve_auth_with(None, None, None, None, true, || Ok("short".to_string()))
+            .unwrap_err();
     assert!(format!("{prompt_short:#}").contains("8 characters"));
 }

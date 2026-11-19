@@ -52,7 +52,13 @@ INDEX_HTML = f"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0b0d10">
 <title>meerai</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
 <link rel="stylesheet" href="styles.css">
 <style>
 html,body{{margin:0;width:100%;height:100%;overflow:hidden;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:#0a0a0a;color:#eeeeee}}
@@ -272,6 +278,30 @@ def main() -> int:
     styles = client_dir / "styles" / "app.css"
     if styles.is_file():
         shutil.copy2(styles, next_dir / "styles.css")
+
+    assets_dir = client_dir / "assets"
+    required_assets = (
+        "logo.svg",
+        "favicon.svg",
+        "favicon.ico",
+        "favicon-16x16.png",
+        "favicon-32x32.png",
+        "apple-touch-icon.png",
+    )
+    if not all((assets_dir / name).is_file() for name in required_assets):
+        subprocess.run(
+            [
+                sys.executable,
+                str(repo_root / "scripts" / "generate_favicon.py"),
+                "--out",
+                str(assets_dir),
+            ],
+            check=True,
+        )
+    if assets_dir.is_dir():
+        for asset in assets_dir.iterdir():
+            if asset.is_file():
+                shutil.copy2(asset, next_dir / asset.name)
 
     for stale in out.glob("Inter-*.ttf"):
         stale.unlink(missing_ok=True)

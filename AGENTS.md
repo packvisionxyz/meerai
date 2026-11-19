@@ -14,7 +14,7 @@ implementation detail in `docs/`, not here.
 | Product behavior, milestones, backlog | [docs/harness-spec.md](docs/harness-spec.md) |
 | Target architecture and migration | [docs/architecture.md](docs/architecture.md) |
 | TUI behavior and keybindings | [docs/tui-design.md](docs/tui-design.md) |
-| Planned local browser UI | [docs/browser-ui.md](docs/browser-ui.md) |
+| Local browser UI and parity | [docs/browser-ui.md](docs/browser-ui.md) |
 | Security controls and residual risk | [docs/threat-model.md](docs/threat-model.md) |
 | ACP client and trust boundary | [docs/acp.md](docs/acp.md) |
 
@@ -83,15 +83,20 @@ make verify                                    # fmt --check + clippy + test (al
 - Never describe agent or skill definitions, hooks, or an ACP backend as a security boundary.
   Hooks run unsandboxed host commands; an ACP backend keeps its own tools and policy.
 
-### TUI
+### TUI and Web
 
-- Rebuild the transcript only when its fingerprint changes. Hover is an overlay, never a rebuild.
-  Bump `transcript_version` at every transcript mutation.
+- Always keep `meerai-tui` and `meerai-web` / `meerai-web-client` at feature parity. Every
+  user-facing workflow, slash command, approval/question flow, session action, and live event
+  must work in both clients via `meerai-host` and `meerai-web-protocol`, without duplicating
+  business logic. Update `docs/tui-design.md` and `docs/browser-ui.md` in the same change.
+- Rebuild the TUI transcript only when its fingerprint changes. Hover is an overlay, never a
+  rebuild. Bump `transcript_version` at every transcript mutation.
 - The turn-anchor rail projects the wrapped transcript: draw it after the transcript, and never
   rebuild for rail hover.
 - Open modals block all mouse input except scroll.
-- Keep new dialogs narrow; use the width caps in `docs/tui-design.md`.
-- The TUI never spawns a process. `!` commands go through `SessionOpener::run_user_shell`.
+- Keep new TUI dialogs narrow; use the width caps in `docs/tui-design.md`.
+- Neither UI spawns tool processes: `!` commands go through `SessionOpener::run_user_shell`.
+- `meerai-web-client` reducers carry no DOM types; UI side effects become explicit `UiEffect` values.
 
 ### Docs
 

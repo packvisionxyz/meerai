@@ -42,6 +42,7 @@ pub enum UiEffect {
     Copy(String),
     Focus(String),
     ScrollToBottom(String),
+    ScrollToBottomIfNear(String),
     ScrollIntoView(String),
     SetTitle(String),
     OpenUrl(String),
@@ -71,6 +72,10 @@ impl UiEffects {
 
     pub fn scroll_to_bottom(&mut self, id: &str) {
         self.push(UiEffect::ScrollToBottom(id.to_owned()));
+    }
+
+    pub fn scroll_to_bottom_if_near(&mut self, id: &str) {
+        self.push(UiEffect::ScrollToBottomIfNear(id.to_owned()));
     }
 
     pub fn scroll_into_view(&mut self, id: &str) {

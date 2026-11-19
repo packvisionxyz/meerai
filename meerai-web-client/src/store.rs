@@ -100,13 +100,27 @@ fn apply_effect(effect: UiEffect) {
                 }
             });
         }
+        UiEffect::ScrollToBottomIfNear(id) => {
+            after_frame(move || {
+                if let Some(element) = web_sys::window()
+                    .and_then(|window| window.document())
+                    .and_then(|document| document.get_element_by_id(&id))
+                {
+                    let distance =
+                        element.scroll_height() - element.scroll_top() - element.client_height();
+                    if distance <= 160 {
+                        element.set_scroll_top(element.scroll_height());
+                    }
+                }
+            });
+        }
         UiEffect::ScrollIntoView(id) => {
             after_frame(move || {
                 if let Some(element) = web_sys::window()
                     .and_then(|window| window.document())
                     .and_then(|document| document.get_element_by_id(&id))
                 {
-                    element.scroll_into_view_with_bool(false);
+                    element.scroll_into_view_with_bool(true);
                 }
             });
         }

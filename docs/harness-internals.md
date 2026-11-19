@@ -481,14 +481,17 @@ implementation invariants.
 - Safe shell commands auto-approve: `shell_safety::command_is_safe`
   splits quote-aware on `&&`, `;`, `|` and requires every segment to be a
   read-only program (with per-program restrictions for
-  `find`/`sort`/`date`/`sed`/`awk`/`git`). It rejects `||`, background
-  `&`, redirects, `$()`/`${}`, backticks, env prefixes, absolute paths,
-  `..`, `~`, and pipes into interpreters. The agent converts `Ask` to
-  `Allow` only when the mode is not `plan`, the decision is `Ask`, and no
-  rule matched (`matched_effect` is `None`); an explicit `ask` or `deny`
-  rule always wins. Keep the allowlist conservative. Chaining is
-  preferred over one command per call (each extra call re-sends the
-  conversation).
+  `find`/`sort`/`date`/`sed`/`awk`/`git`/`rustup`/`command`). It rejects
+  `||`, background `&`, redirects, `$()`/`${}`, backticks, env prefixes,
+  absolute paths, `..`, `~`, and pipes into interpreters. `rustup` allows
+  only `show`, `toolchain list`, `toolchain show`, and `target list`;
+  `command` allows only `-v` followed by program names. The agent converts
+  `Ask` to `Allow` only when the mode is not `plan`, the decision is `Ask`,
+  and no rule matched (`matched_effect` is `None`); an explicit `ask` or
+  `deny` rule always wins, so a broad `resource: '*;*'` ask rule in
+  `settings.yml` disables auto-approval for every chain. Keep the
+  allowlist conservative. Chaining is preferred over one command per call
+  (each extra call re-sends the conversation).
 - Unix `sh -c`, Windows `cmd /C`. `scrub_command_env` drops 25 named
   credential variables and 17 secret suffixes (case-insensitive) for
   shell, `sac`, and LSP children. `sandbox.strict_env` clears the child

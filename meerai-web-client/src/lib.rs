@@ -1,5 +1,6 @@
 pub mod state;
 pub mod text;
+pub mod theme;
 pub mod transport;
 
 pub mod store;
@@ -16,8 +17,6 @@ pub mod highlight;
 pub mod keymap;
 #[cfg(target_arch = "wasm32")]
 pub mod markdown;
-#[cfg(target_arch = "wasm32")]
-pub mod theme;
 #[cfg(target_arch = "wasm32")]
 pub mod views;
 
@@ -47,16 +46,18 @@ mod tests {
     use std::collections::BTreeMap;
 
     use meerai_web_protocol::{
-        AgentInfoDto, ApprovalModeDto, BackendKind, HostInfoDto, ModelItemDto, ProvidersResponse,
-        SessionDetailDto, SessionStatus, SessionSummaryDto, SettingsSnapshotDto, SkillInfoDto,
-        SnapshotResponse, TranscriptEntryDto, TurnMetricsDto, UsageDto, ViewEvent,
+        AgentInfoDto, ApprovalModeDto, BackendKind, FileChangeDto, HostInfoDto, ModelItemDto,
+        ProvidersResponse, SessionDetailDto, SessionStatus, SessionSummaryDto, SettingsSnapshotDto,
+        SkillInfoDto, SnapshotResponse, TranscriptEntryDto, TurnMetricsDto, UsageDto, ViewEvent,
     };
 
     use super::*;
     use crate::state::{
-        accept_completion, cycle_approval_mode, detach_tab_view, execute_slash_command,
-        extract_mentions, group_transcript_blocks, reorder_active_tab, select_tab_index,
-        submit_or_queue_composer, update_completion,
+        accept_completion, apply_opened_session, apply_session_detail, cycle_approval_mode,
+        detach_tab_view, drain_next_queued_if_idle, execute_slash_command, extract_mentions,
+        group_transcript_blocks, move_tab_to, open_diff_modal, remove_mention_token,
+        reorder_active_tab, resolved_mention_chips, select_tab_index, submit_or_queue_composer,
+        update_completion,
     };
 
     fn summary(id: &str, status: SessionStatus) -> SessionSummaryDto {
@@ -325,18 +326,35 @@ mod tests {
 
     #[test]
     fn settings_form_validates_hex_and_numeric_bounds() {
+        let mut settings = SettingsSnapshotDto::default();
+        settings.raw_theme.color_scheme = Some("dark".to_owned());
         let info = HostInfoDto {
-            settings: SettingsSnapshotDto::default(),
+            settings,
             ..HostInfoDto::default()
         };
         let mut form = SettingsFormState::from_host(&info);
-        assert!(form.to_request().is_ok());
+        assert_eq!(form.color_scheme.as_deref(), Some("dark"));
+        assert_eq!(
+            form.to_request()
+                .unwrap()
+                .theme
+                .unwrap()
+                .color_scheme
+                .as_deref(),
+            Some("dark")
+        );
 
         form.theme_fields
             .get_mut("accent")
             .unwrap()
             .replace_text("not-a-color");
         assert!(form.to_request().is_err());
+
+        form.theme_fields
+            .get_mut("accent")
+            .unwrap()
+            .replace_text("rebeccapurple");
+        assert!(form.to_request().is_ok());
 
         form.theme_fields
             .get_mut("accent")
@@ -367,5 +385,478 @@ mod tests {
         apply_view_event(&mut state, ViewEvent::SessionOpened { session: acp });
         cycle_approval_mode(&mut state);
         assert!(state.error_banner.is_none());
+    }
+
+    #[test]
+    fn opened_session_hydrates_detail_and_clears_on_reset() {
+        let mut state = AppState {
+            connection: ConnectionState::Connected,
+            ..AppState::default()
+        };
+        apply_opened_session(&mut state, summary("s-1", SessionStatus::Idle));
+        assert_eq!(state.active_session_id.as_deref(), Some("s-1"));
+        assert!(!state.session_tabs.get("s-1").unwrap().hydrated);
+
+        let detail = SessionDetailDto {
+            summary: summary("s-1", SessionStatus::Idle),
+            entries: vec![TranscriptEntryDto::User {
+                id: "u1".to_owned(),
+                turn_id: Some("t1".to_owned()),
+                text: "loaded".to_owned(),
+            }],
+            streaming_item_id: None,
+            streaming_text: String::new(),
+            streaming_reasoning: String::new(),
+            usage: UsageDto {
+                prompt_tokens: Some(120),
+                completion_tokens: Some(45),
+                total_tokens: Some(165),
+                cached_tokens: Some(50),
+                est_cost_usd: Some(0.002),
+            },
+            metrics: TurnMetricsDto {
+                last_turn_ms: Some(1200),
+                tokens_per_sec: Some(37.5),
+                ..TurnMetricsDto::default()
+            },
+            pending_approvals: Vec::new(),
+            pending_questions: Vec::new(),
+        };
+        apply_session_detail(&mut state, detail);
+        let tab = state.session_tabs.get("s-1").unwrap();
+        assert!(tab.hydrated);
+        assert_eq!(tab.entries.len(), 1);
+        assert_eq!(tab.usage.total_tokens, Some(165));
+        assert_eq!(tab.metrics.last_turn_ms, Some(1200));
+
+        apply_view_event(
+            &mut state,
+            ViewEvent::SessionReset {
+                session_id: "s-1".to_owned(),
+            },
+        );
+        let tab = state.session_tabs.get("s-1").unwrap();
+        assert!(tab.entries.is_empty());
+        assert_eq!(tab.usage.total_tokens, None);
+        assert_eq!(tab.metrics.last_turn_ms, None);
+    }
+
+    #[test]
+    fn move_tab_to_reorders_and_background_queue_drains_for_target_session() {
+        let mut state = AppState {
+            connection: ConnectionState::Connected,
+            ..AppState::default()
+        };
+        apply_opened_session(&mut state, summary("s-1", SessionStatus::Idle));
+        apply_opened_session(&mut state, summary("s-2", SessionStatus::Idle));
+        apply_opened_session(&mut state, summary("s-3", SessionStatus::Idle));
+        assert_eq!(state.tab_order, vec!["s-1", "s-2", "s-3"]);
+
+        move_tab_to(&mut state, "s-1", "s-3");
+        assert_eq!(state.tab_order, vec!["s-2", "s-3", "s-1"]);
+
+        state
+            .session_tabs
+            .get_mut("s-1")
+            .unwrap()
+            .pending_queue
+            .push_back("active prompt".to_owned());
+        state
+            .session_tabs
+            .get_mut("s-2")
+            .unwrap()
+            .pending_queue
+            .push_back("bg prompt".to_owned());
+        state.active_session_id = Some("s-1".to_owned());
+        drain_next_queued_if_idle(&mut state, "s-2");
+        assert!(state.sending);
+        assert!(
+            state
+                .session_tabs
+                .get("s-2")
+                .unwrap()
+                .pending_queue
+                .is_empty()
+        );
+        assert_eq!(
+            state.session_tabs.get("s-1").unwrap().pending_queue.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn resolved_mention_chips_resolve_and_remove_tokens() {
+        let mut host = HostInfoDto::default();
+        host.agents.push(AgentInfoDto {
+            id: "reviewer".to_owned(),
+            source: ".agents".to_owned(),
+            description: Some("Reviews code diffs".to_owned()),
+            model: None,
+        });
+        host.skills.push(SkillInfoDto {
+            id: "rust".to_owned(),
+            source: ".agents".to_owned(),
+            description: Some("Rust conventions".to_owned()),
+        });
+        let chips = resolved_mention_chips("check @agent/reviewer and @skill/rust @unknown", &host);
+        assert_eq!(
+            chips,
+            vec![
+                (
+                    MentionCategory::Agent,
+                    "reviewer".to_owned(),
+                    "@agent/reviewer".to_owned(),
+                ),
+                (
+                    MentionCategory::Skill,
+                    "rust".to_owned(),
+                    "@skill/rust".to_owned(),
+                ),
+            ]
+        );
+        let next = remove_mention_token("check @agent/reviewer and @skill/rust", "@agent/reviewer");
+        assert_eq!(next, "check and @skill/rust");
+    }
+
+    #[test]
+    fn steer_draft_when_busy_and_rewind_syncs_tab_draft() {
+        let mut state = AppState {
+            connection: ConnectionState::Connected,
+            ..AppState::default()
+        };
+        apply_opened_session(&mut state, summary("s-1", SessionStatus::Running));
+        state.draft.replace_text("steer this draft");
+        crate::state::steer_or_send_queued(&mut state, 0);
+        assert!(state.draft.text.is_empty());
+        assert_eq!(
+            state.prompt_history.last().map(String::as_str),
+            Some("steer this draft")
+        );
+
+        apply_view_event(
+            &mut state,
+            ViewEvent::SessionRewound {
+                session_id: "s-1".to_owned(),
+                turn_id: "t-1".to_owned(),
+                scope: meerai_web_protocol::RewindScopeDto::Both,
+                restored: Vec::new(),
+                error: None,
+                entries: Some(Vec::new()),
+                restored_prompt: Some("restored draft".to_owned()),
+            },
+        );
+        assert_eq!(state.draft.text, "restored draft");
+        assert_eq!(state.active_tab().unwrap().draft_text, "restored draft");
+
+        let clear_desc = crate::state::SLASH_COMMANDS
+            .iter()
+            .find(|c| c.cmd == "/clear")
+            .unwrap()
+            .desc;
+        let reset_desc = crate::state::SLASH_COMMANDS
+            .iter()
+            .find(|c| c.cmd == "/reset")
+            .unwrap()
+            .desc;
+        assert_ne!(clear_desc, reset_desc);
+
+        let mut send_state = AppState {
+            connection: ConnectionState::Connected,
+            ..AppState::default()
+        };
+        apply_opened_session(&mut send_state, summary("s-send", SessionStatus::Idle));
+        send_state.draft.replace_text("pending hello");
+        submit_or_queue_composer(&mut send_state);
+        assert_eq!(
+            send_state.active_tab().unwrap().pending_submit.as_deref(),
+            Some("pending hello")
+        );
+        apply_view_event(
+            &mut send_state,
+            ViewEvent::UserPromptSubmitted {
+                session_id: "s-send".to_owned(),
+                entry_id: "u-send".to_owned(),
+                text: "pending hello".to_owned(),
+            },
+        );
+        assert!(send_state.active_tab().unwrap().pending_submit.is_none());
+    }
+
+    fn sample_providers() -> ProvidersResponse {
+        use meerai_web_protocol::{AuthKindDto, ProviderItemDto};
+        let mut recent = BTreeMap::new();
+        recent.insert("deepseek".to_owned(), vec!["deepseek-chat".to_owned()]);
+        recent.insert(
+            "anthropic".to_owned(),
+            vec!["claude-opus-4-6".to_owned(), "claude-sonnet-4-5".to_owned()],
+        );
+        ProvidersResponse {
+            default_provider: Some("openai".to_owned()),
+            providers: vec![
+                ProviderItemDto {
+                    id: "deepseek".to_owned(),
+                    display_name: "DeepSeek".to_owned(),
+                    adapter: "deepseek".to_owned(),
+                    auth_kind: AuthKindDto::ApiKey,
+                    configured: false,
+                    status_badge: "not set".to_owned(),
+                    env_vars: vec!["DEEPSEEK_API_KEY".to_owned()],
+                    default_model: None,
+                    base_url: None,
+                    is_custom: false,
+                },
+                ProviderItemDto {
+                    id: "anthropic".to_owned(),
+                    display_name: "Anthropic".to_owned(),
+                    adapter: "anthropic".to_owned(),
+                    auth_kind: AuthKindDto::ApiKey,
+                    configured: true,
+                    status_badge: "saved".to_owned(),
+                    env_vars: vec!["ANTHROPIC_API_KEY".to_owned()],
+                    default_model: None,
+                    base_url: None,
+                    is_custom: false,
+                },
+                ProviderItemDto {
+                    id: "openai".to_owned(),
+                    display_name: "OpenAI".to_owned(),
+                    adapter: "openai_resp".to_owned(),
+                    auth_kind: AuthKindDto::Either,
+                    configured: true,
+                    status_badge: "plan".to_owned(),
+                    env_vars: vec!["OPENAI_API_KEY".to_owned()],
+                    default_model: Some("gpt-5".to_owned()),
+                    base_url: None,
+                    is_custom: false,
+                },
+                ProviderItemDto {
+                    id: "ollama".to_owned(),
+                    display_name: "Ollama (Local)".to_owned(),
+                    adapter: "ollama".to_owned(),
+                    auth_kind: AuthKindDto::None,
+                    configured: true,
+                    status_badge: "local".to_owned(),
+                    env_vars: Vec::new(),
+                    default_model: None,
+                    base_url: Some("http://localhost:11434/v1".to_owned()),
+                    is_custom: false,
+                },
+            ],
+            models: vec![
+                ModelItemDto {
+                    id: "claude-sonnet-4-5".to_owned(),
+                    provider: "anthropic".to_owned(),
+                    display_name: "claude-sonnet-4-5".to_owned(),
+                    context_window_tokens: Some(200_000),
+                    max_output_tokens: None,
+                    supports_reasoning: true,
+                    supports_vision: false,
+                    supports_tools: true,
+                    is_custom: false,
+                },
+                ModelItemDto {
+                    id: "gpt-5".to_owned(),
+                    provider: "openai".to_owned(),
+                    display_name: "gpt-5".to_owned(),
+                    context_window_tokens: Some(400_000),
+                    max_output_tokens: None,
+                    supports_reasoning: true,
+                    supports_vision: false,
+                    supports_tools: true,
+                    is_custom: false,
+                },
+            ],
+            recent_models: recent,
+        }
+    }
+
+    #[test]
+    fn provider_and_model_pickers_sort_include_recent_and_avoid_connection_loop() {
+        use crate::state::{
+            ProviderModalReturn, activate_provider_from_modal, custom_model_candidate,
+            filtered_models_sorted, filtered_providers_sorted, is_removable_credential_badge,
+            open_provider_credential_update, open_provider_model_select, open_settings,
+            resolve_model_input_target, return_from_provider_modal,
+        };
+
+        let mut state = AppState {
+            connection: ConnectionState::Connected,
+            ..AppState::default()
+        };
+        apply_opened_session(&mut state, summary("s-1", SessionStatus::Idle));
+        state.providers = Some(sample_providers());
+
+        let sorted_providers =
+            filtered_providers_sorted(state.providers.as_ref(), Some("anthropic"), "");
+        let provider_ids: Vec<&str> = sorted_providers.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            provider_ids,
+            vec!["anthropic", "openai", "ollama", "deepseek"]
+        );
+
+        let all_models =
+            filtered_models_sorted(state.providers.as_ref(), None, Some("anthropic"), "");
+        let pairs: Vec<(&str, &str)> = all_models
+            .iter()
+            .map(|m| (m.provider.as_str(), m.id.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("anthropic", "claude-opus-4-6"),
+                ("anthropic", "claude-sonnet-4-5"),
+                ("openai", "gpt-5"),
+                ("deepseek", "deepseek-chat"),
+            ]
+        );
+
+        assert_eq!(
+            resolve_model_input_target(&state, Some("deepseek"), "deepseek-reasoner"),
+            Some(("deepseek".to_owned(), "deepseek-reasoner".to_owned()))
+        );
+        assert_eq!(
+            custom_model_candidate(&state, Some("anthropic"), "claude-sonnet-4-5", &all_models),
+            None
+        );
+        assert_eq!(
+            custom_model_candidate(&state, Some("deepseek"), "deepseek-reasoner", &all_models),
+            Some(("deepseek".to_owned(), "deepseek-reasoner".to_owned()))
+        );
+
+        let openai = state
+            .providers
+            .as_ref()
+            .unwrap()
+            .providers
+            .iter()
+            .find(|p| p.id == "openai")
+            .unwrap()
+            .clone();
+        activate_provider_from_modal(
+            &mut state,
+            openai.clone(),
+            ProviderModalReturn::SettingsConnections,
+        );
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::ProviderConnection { ref provider_id, .. }) if provider_id == "openai"
+        ));
+
+        open_provider_model_select(
+            &mut state,
+            "openai".to_owned(),
+            ProviderModalReturn::SettingsConnections,
+        );
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::ModelInput {
+                provider_id: Some(ref pid),
+                return_to: ProviderModalReturn::SettingsConnections,
+                ..
+            }) if pid == "openai"
+        ));
+
+        open_provider_credential_update(
+            &mut state,
+            &openai,
+            ProviderModalReturn::SettingsConnections,
+        );
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::AuthMethodSelect {
+                ref provider_id,
+                return_to: ProviderModalReturn::SettingsConnections,
+                ..
+            }) if provider_id == "openai"
+        ));
+
+        return_from_provider_modal(&mut state, ProviderModalReturn::SettingsConnections);
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::Settings(ref form)) if form.section == SettingsSection::Connections
+        ));
+
+        open_settings(&mut state, None);
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::Settings(ref form)) if form.section == SettingsSection::Connections
+        ));
+
+        assert!(is_removable_credential_badge("saved"));
+        assert!(is_removable_credential_badge("plan"));
+        assert!(!is_removable_credential_badge("env:OPENAI_API_KEY"));
+        assert!(!is_removable_credential_badge("config"));
+        assert!(!is_removable_credential_badge("local"));
+    }
+
+    #[test]
+    fn file_changes_update_syncs_open_diff_modal() {
+        let mut state = AppState::default();
+        open_diff_modal(&mut state, None);
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::DiffView {
+                selected_path: None,
+                loading: false,
+                ..
+            })
+        ));
+
+        apply_view_event(
+            &mut state,
+            ViewEvent::FileChangesUpdated {
+                changes: vec![
+                    FileChangeDto {
+                        status: "M".to_owned(),
+                        path: "src/a.rs".to_owned(),
+                    },
+                    FileChangeDto {
+                        status: "A".to_owned(),
+                        path: "src/b.rs".to_owned(),
+                    },
+                ],
+            },
+        );
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::DiffView {
+                selected_path: Some(ref path),
+                loading: true,
+                ..
+            }) if path == "src/a.rs"
+        ));
+
+        apply_view_event(
+            &mut state,
+            ViewEvent::FileChangesUpdated {
+                changes: vec![FileChangeDto {
+                    status: "A".to_owned(),
+                    path: "src/b.rs".to_owned(),
+                }],
+            },
+        );
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::DiffView {
+                selected_path: Some(ref path),
+                loading: true,
+                ..
+            }) if path == "src/b.rs"
+        ));
+
+        apply_view_event(
+            &mut state,
+            ViewEvent::FileChangesUpdated {
+                changes: Vec::new(),
+            },
+        );
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::DiffView {
+                selected_path: None,
+                loading: false,
+                ..
+            })
+        ));
     }
 }

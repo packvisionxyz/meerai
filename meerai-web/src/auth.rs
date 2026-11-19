@@ -9,6 +9,8 @@ use subtle::ConstantTimeEq;
 use thiserror::Error;
 
 pub const BASIC_USERNAME: &str = "meerai";
+pub const DEFAULT_SERVE_PORT: u16 = 28860;
+pub const DEFAULT_SERVE_SECRET: &str = "12345678";
 pub const MIN_SECRET_CHARS: usize = 8;
 pub const WWW_AUTHENTICATE_VALUE: &str = "Basic realm=\"meerai\", charset=\"UTF-8\"";
 

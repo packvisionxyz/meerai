@@ -820,7 +820,7 @@ fn handle_loop_msg(
                         handle,
                     });
                     let msg = format!(
-                        "Web UI listening at {}\nUsername: meerai\nPassword: {}\nStop with /serve stop (credentials are shown once and never written to disk).",
+                        "Web UI listening at {}\nUsername: meerai\nPassword: {}\nStop with /serve stop.",
                         start.url, start.secret
                     );
                     app.status_notice = Some(format!("Web UI listening at {}", start.url));

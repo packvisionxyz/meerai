@@ -372,7 +372,7 @@ pub fn map_view_event(kind: RegistryEventKind) -> ViewEvent {
             host_info,
             warnings,
         } => ViewEvent::Reloaded {
-            host_info: map_host_info(host_info),
+            host_info: Box::new(map_host_info(host_info)),
             warnings,
         },
         RegistryEventKind::ProvidersUpdated => ViewEvent::ProvidersUpdated,
@@ -499,7 +499,7 @@ pub fn map_host_info(info: HostInfoSnapshot) -> HostInfoDto {
         update_available: info.update_available,
         install_hint: info.install_hint,
         settings: SettingsSnapshotDto {
-            theme: map_theme_tokens(info.settings.theme),
+            theme: map_theme_tokens(info.settings.theme, &info.settings.raw_theme),
             raw_theme: map_theme_override(&info.settings.raw_theme),
             context: ContextSettingsDto {
                 context_window_tokens: info.settings.context.context_window_tokens,
@@ -655,10 +655,19 @@ pub fn map_search_preview(preview: SearchPreview) -> WorkspacePreviewResponse {
     }
 }
 
+fn normalize_color_scheme(value: Option<String>) -> Option<String> {
+    let raw = value?.trim().to_ascii_lowercase();
+    match raw.as_str() {
+        "host" | "system" | "light" | "dark" => Some(raw),
+        _ => None,
+    }
+}
+
 pub fn map_settings_update(req: UpdateSettingsRequest) -> HostSettingsUpdate {
     HostSettingsUpdate {
         reset_theme: req.reset_theme,
         theme: req.theme.map(|t| ThemeSettings {
+            color_scheme: normalize_color_scheme(t.color_scheme),
             background: t.background,
             surface: t.surface,
             surface_high: t.surface_high,
@@ -854,30 +863,41 @@ fn map_metrics(metrics: TurnMetricsSnapshot) -> TurnMetricsDto {
     }
 }
 
-fn map_theme_tokens(tokens: ResolvedThemeHex) -> ThemeTokensDto {
+fn map_theme_tokens(tokens: ResolvedThemeHex, overrides: &ThemeSettings) -> ThemeTokensDto {
+    let defaults = ThemeTokensDto::default();
+    macro_rules! token {
+        ($field:ident) => {
+            if overrides.$field.is_some() {
+                tokens.$field
+            } else {
+                defaults.$field
+            }
+        };
+    }
     ThemeTokensDto {
-        background: tokens.background,
-        surface: tokens.surface,
-        surface_high: tokens.surface_high,
-        text: tokens.text,
-        muted: tokens.muted,
-        faint: tokens.faint,
-        accent: tokens.accent,
-        interactive: tokens.interactive,
-        border: tokens.border,
-        error: tokens.error,
-        warning: tokens.warning,
-        success: tokens.success,
-        info: tokens.info,
-        diff_added: tokens.diff_added,
-        diff_removed: tokens.diff_removed,
-        diff_context: tokens.diff_context,
-        code_function: tokens.code_function,
+        background: token!(background),
+        surface: token!(surface),
+        surface_high: token!(surface_high),
+        text: token!(text),
+        muted: token!(muted),
+        faint: token!(faint),
+        accent: token!(accent),
+        interactive: token!(interactive),
+        border: token!(border),
+        error: token!(error),
+        warning: token!(warning),
+        success: token!(success),
+        info: token!(info),
+        diff_added: token!(diff_added),
+        diff_removed: token!(diff_removed),
+        diff_context: token!(diff_context),
+        code_function: token!(code_function),
     }
 }
 
 fn map_theme_override(settings: &ThemeSettings) -> ThemeOverrideDto {
     ThemeOverrideDto {
+        color_scheme: settings.color_scheme.clone(),
         background: settings.background.clone(),
         surface: settings.surface.clone(),
         surface_high: settings.surface_high.clone(),

@@ -16,17 +16,18 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 meerai-web-protocol = { path = "../meerai-web-protocol" }
 leptos = { version = "0.8", features = ["csr"] }
+serde_json = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 comrak = { workspace = true }
-serde_json = { workspace = true }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = [
   "Window", "Document", "Element", "HtmlElement", "HtmlInputElement",
-  "HtmlTextAreaElement", "KeyboardEvent", "MouseEvent", "Event", "EventTarget",
+  "HtmlTextAreaElement", "HtmlDetailsElement", "KeyboardEvent", "MouseEvent",
+  "DragEvent", "DataTransfer", "Event", "EventTarget", "DomRect", "NodeList",
   "Clipboard", "Navigator", "EventSource", "MessageEvent", "ErrorEvent",
   "Request", "RequestInit", "RequestCredentials", "Headers", "Response",
-  "Location",
+  "Location", "Storage", "MediaQueryList", "MediaQueryList",
 ] }

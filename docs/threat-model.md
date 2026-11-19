@@ -293,11 +293,12 @@ processes cannot write or delete the same live session concurrently;
 ### 2.12 Browser companion server (`meerai-web`, `web` feature)
 
 - **Loopback only:** `meerai serve` and TUI `/serve` bind strictly to
-  `127.0.0.1` (random OS port by default).
+  `127.0.0.1` (default port `28860` unless overridden).
 - **Mandatory launch Basic auth:** Launch surfaces require Basic auth
-  (`ServeAuth::Basic`, constant-time secret compare via `subtle`), generating
-  a random secret when none is supplied and printing it once at launch (never
-  to session logs or browser storage). Server instances configured with
+  (`ServeAuth::Basic`, constant-time secret compare via `subtle`), defaulting to
+  local credentials (`meerai` / `12345678`) unless `--password`,
+  `MEERAI_SERVE_SECRET`, `--auth`, or the `ServeDialog` field sets another
+  password (never written to session logs or browser storage). Server instances configured with
   `ServeAuth::None` fail closed (`401`) on privileged parity endpoints; the
   snapshot, SSE stream, session creation, and prompt routes stay open. Both
   launch surfaces always use `ServeAuth::Basic`.

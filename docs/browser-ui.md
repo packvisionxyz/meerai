@@ -62,39 +62,40 @@ The protocol crate exists because `AgentEvent` lives in `meerai-agents`, which d
 | `store.rs` | `StoreHandle`: an `RwSignal<AppState>` plus an effect queue. `UiEffect` covers copy, focus, scroll, title, and external URL. |
 | `state.rs` | Pure reducers: snapshot, view events, tabs, queue, slash commands, mentions, settings form, transcript grouping, history. |
 | `text.rs` | `TextBuffer` replaces the Rune `TextEdit`; no renderer type remains in state. |
-| `transport.rs`, `transport/wasm.rs` | `fetch` for intents, `EventSource` for events, snapshot-first attach, resync on an expired cursor, and reconnect. |
+| `transport.rs`, `transport/wasm.rs` | `fetch` for intents and session detail hydration, `EventSource` with `requestAnimationFrame` delta coalescing, snapshot-first attach, resync on an expired cursor, and reconnect. |
 | `markdown.rs` | `comrak` AST to Leptos views. HTML blocks and inline HTML render as text. Links are scheme-checked. Images render as links. |
 | `highlight.rs` | Lexical highlighting returns semantic spans; CSS owns colour. |
-| `theme.rs` | Validates `ThemeTokensDto` and emits CSS custom properties. |
-| `keymap.rs` | Normalizes `KeyboardEvent` to app actions and keeps text-field handling separate. |
-| `views/` | `App`, header, tabs, sidebar, transcript, composer, modals, and Settings. |
+| `theme.rs` | Validates `ThemeTokensDto` (hex and CSS named colors), computes `color-scheme` and contrast foregrounds, and manages browser-only `BrowserTheme` (`Host`, `System`, `Light`, `Dark`). |
+| `keymap.rs` | Normalizes `KeyboardEvent.code` to app actions, handles modal navigation and `Tab` focus trapping, and keeps text-field handling separate. |
+| `views/` | `App`, header, tabs, workspace inspector sidebar, transcript, composer, modals, and Settings. |
 
 The client renders:
 
-- Snapshot-first state, SSE cursor resume, resync, and a host-disconnected banner.
-- Tabs with status dots and unread markers, a responsive sidebar, and a numbered turn rail.
-- Collapsed activity digests with the TUI category counts and gerund phrasing.
-- Markdown, highlighted code blocks, copy buttons, and inline unified edit diffs.
+- Snapshot-first state, SSE cursor resume, resync, a manual Reconnect control, and dismissible notice/error banners.
+- Draggable tabs with `+` session creation, status dots, `ACP` tags, unread markers, a workspace inspector sidebar (MCP servers, tools, cost/metrics, changed files, subagents), a mobile drawer, and a numbered turn rail with a jump-to-latest pill.
+- Collapsed activity digests with the TUI category counts, gerund phrasing, and structured tool summaries.
+- Markdown, highlighted code blocks, per-reply and tool-output copy buttons, and inline unified edit diffs.
 - Streaming assistant text and reasoning, system lines, errors, subagent rows, and question results.
-- FIFO composer queue, steering, cancel, compact, and reset.
+- Header model/mode pills, `ACP:<preset>` and update status badges, and a pending request reopen pill.
+- FIFO composer queue, steering (queued items or the active draft), cancel, compact, reset, and resolved `@agent`/`@skill` definition chips.
 - Approval decisions for once, turn, session, decline, decline with reason, and cancel.
-- Question answers with single or multiple choice, free text, Back/Next, submit, and cancel.
-- Session picker, history, fork, rewind, delete, workspace diff, search, and preview.
+- Question answers with single or multiple choice, free text, Back/Next, keyboard navigation, submit, and cancel.
+- Session picker, history, fork, rewind, delete, workspace diff, debounced search with highlighted preview lines, and workspace inspector actions.
 - User shell through `!command`, with a scrollable shell dialog and transcript result.
-- Provider and model pickers, API key entry, base URL, ChatGPT sign-in, removal, and Settings.
-- Command palette, slash commands, `@` mentions, completion, Help, and the subagent overlay.
+- Provider and model pickers (cross-provider or scoped by provider, recent and custom models, active/configured sorting), API key and base URL entry (including independent Base URL edits for keyless or already-configured providers), clickable ChatGPT sign-in, removal of stored credentials, and Settings (`Providers & Models`, `Current session`, grouped `Context & Limits` with model spec suggestions, `Theme` with color swatches, `Retention`, `Sandbox`, `Permissions`) with `config_writable` guards.
+- Command palette, slash commands, `@` mentions, completion, Help, and an auto-refreshing subagent overlay.
 
-The interface is flat and DOM-native: one surface scale, 1px borders, a single teal accent, rounded cards, no gradients, and a transcript column capped at 880 px. Hover and focus states are visible, dialogs trap the first focus target, and the composer is a focused card with hint keys and a primary action. The empty state offers three starter prompts that fill the composer. Light or custom colors come from the host theme tokens; the client validates them and writes CSS custom properties.
+The interface is flat and DOM-native: one surface scale, 1px borders, a single teal accent, rounded cards, no gradients, and a shared transcript and composer column capped at 880 px alongside the left Sessions panel (`Sessions`) and the right inspector sidebar (toggled from the far-right utility cluster). Transcript bubbles, error/system banners, markdown blocks, and subagent cards wrap long content inside the conversation column; subagent entries keep both their Markdown `Report` and child `Messages` collapsible inside `<details>` blocks, and optimistic in-flight or queued prompts render at the bottom of the transcript until committed. Hover and focus states are visible, dialogs trap `Tab` focus and restore focus to the opener on close, and the composer is a focused input card with an inline pending-request reopen bar when needed, anchored completion, an embedded stateful send/queue/stop action, working status animations, and hint keys below the card. The empty state offers three starter prompts that fill the composer. Light, dark, or custom colors come from the browser color scheme selector (`Host theme`, `System`, `Light`, `Dark`) or the host theme tokens; the client validates host tokens, sets `color-scheme` and contrast foregrounds, and writes CSS custom properties.
 
 The base stylesheet is [`meerai-web-client/styles/app.css`](../meerai-web-client/styles/app.css). Theme values become `--m-*` custom properties on the app shell. The layout uses CSS media queries instead of a manual breakpoint constant, and `env(safe-area-inset-*)` for insets.
 
 ### 2.6 Launch and build
 
-`meerai serve` and TUI `/serve` bind to `127.0.0.1` with an OS-chosen port unless `--port` is given. The secret comes from `MEERAI_SERVE_SECRET`, a masked TTY prompt, or a generated value printed once. TUI `/serve` uses a masked field in `ServeDialog`; an empty field generates a secret.
+`meerai serve` and TUI `/serve` bind to `127.0.0.1:28860` unless `--port` or a port in `ServeDialog` is specified. When unspecified, Basic auth defaults to username `meerai` and password `12345678`, overridden by `--password`, `MEERAI_SERVE_SECRET`, `--auth` prompt, or the masked field in `ServeDialog`.
 
-`scripts/build-web.py` builds `meerai-web-client` for `wasm32-unknown-unknown`, runs the matching `wasm-bindgen` CLI, optionally runs `wasm-opt -Oz`, copies `styles/app.css` to `styles.css`, writes `index.html` and `boot.js`, and reports the Wasm size. It has no Rune font step and no WebGPU check. `meerai-web/build.rs` embeds every file under `target/web` (or `MEERAI_WEB_DIR`) into the binary.
+`scripts/generate_favicon.py` generates the SVG brand logo and browser favicons (`logo.svg`, `favicon.svg`, `favicon.ico`, PNG icons, and `apple-touch-icon.png`) under `meerai-web-client/assets/`. `scripts/build-web.py` builds `meerai-web-client` for `wasm32-unknown-unknown`, runs the matching `wasm-bindgen` CLI, optionally runs `wasm-opt -Oz`, copies `styles/app.css` to `styles.css` and copies the SVG/favicon assets, writes `index.html` and `boot.js`, and reports the Wasm size. It has no Rune font step and no WebGPU check. `meerai-web/build.rs` embeds every file under `target/web` (or `MEERAI_WEB_DIR`) into the binary.
 
-`index.html` contains `#app`, the loading overlay, a `styles.css` link, and a module `boot.js` that calls the Wasm `init()`. If initialization fails, the overlay names the error and points at the TUI.
+`index.html` contains `#app`, the loading overlay, favicon `<link>` tags, a `styles.css` link, and a module `boot.js` that calls the Wasm `init()`. If initialization fails, the overlay names the error and points at the TUI.
 
 ### 2.7 Worker and item protocol
 
@@ -116,36 +117,30 @@ The replay projection reconstructs transcript entries from logged events ([`meer
 | Layout, theme, transcript | Implemented: responsive shell, theme tokens, sidebar, turn rail, activity digests, Markdown, highlighted code. |
 | Keyboard, navigation, copy | Implemented for the shortcuts in §4.3. Browser find, selection, zoom, and copy work on the DOM. |
 | Composer and active turns | Implemented: multiline editing, IME, queue, steer, cancel, compact, reset. |
-| Slash commands and palette | Implemented for the dispatcher's current command set. Unknown commands stay errors, never prompts. |
-| Mentions and definitions | Implemented: completion and apply; the raw text stays in the textarea. Definition chips are not rendered yet. |
+| Slash commands and palette | Implemented for the dispatcher's current command set plus `/settings` for in-browser configuration. Unknown commands stay errors, never prompts. |
+| Mentions and definitions | Implemented: completion, apply, and resolved agent/skill chips with remove controls; the raw text stays in the textarea. |
 | Approvals | Implemented: once, turn, session, decline, reason, cancel. A resolved request closes in every client. |
-| Questions | Implemented: single and multiple choice, `Other`, Back/Next, submit, cancel. |
-| Message actions, rewind, fork | Implemented: copy, rewind, fork before a message, and the draft restore on rewind. |
+| Questions | Implemented: single and multiple choice, `Other`, Back/Next, keyboard selection, submit, cancel. |
+| Message actions, rewind, fork | Implemented: copy, rewind (`Both`, `Code`, or `Conversation`), fork before a message, and the draft restore on rewind. |
 | Replay | Implemented through the shared replay projection. Historical items are not marked live. |
-| Tabs and session picker | Implemented: open, resume, reorder, detach, fork, confirmed delete. Tab state stays local. |
-| Workspace review and search | Implemented: changed files, unified diff with a split toggle, file/content search, preview. |
+| Tabs and sessions | Implemented: open, resume, HTML5 drag or shortcut reorder, `+` create, detach, fork, confirmed delete. The left Sessions sidebar lists live and stored sessions; row actions appear on hover or keyboard focus. Tab state stays local. |
+| Workspace review and search | Implemented: changed files, unified diff with a split toggle, debounced file/content search, highlighted preview. |
 | User shell | Implemented through `SessionOpener::run_user_shell`; the dialog and transcript receive the output. |
-| Status and usage | Implemented: workspace, branch, connection, mode, model, turn and session token counters. Browser notifications and update status are not shown yet. |
+| Status and usage | Implemented: workspace, branch, connection, mode, model, live turn timer, active tool, turn/session token counters, cached tokens, cost, throughput, and update status badge. Browser notifications are not shown yet. |
 | Reload | Implemented through `/reload`; it reloads config and reports warnings. |
 | Providers and sign-in | Implemented: provider status, model choice, API key, ChatGPT sign-in, paste, cancel, removal. |
-| ACP | `/acp` creates an ACP session. The header does not render an ACP badge or external-engine warning yet. |
-| Reconnect | Implemented: snapshot, cursor, resync, and no automatic replay of unknown outcomes. |
+| ACP | Implemented: `/acp` creates an ACP session; tabs and header show `ACP` badges with the external-engine warning banner. |
+| Reconnect | Implemented: snapshot, cursor, resync, manual Reconnect action, and no automatic replay of unknown outcomes. |
 
 ## 3. Planned
 
-The remaining work is parity polish and verification, not a renderer migration.
+The remaining work is automation, bundle gating, and manual accessibility sign-off, not a renderer migration.
 
 | Item | Description | Gate |
 | --- | --- | --- |
-| Delta coalescing | Buffer text and reasoning deltas per animation frame instead of applying every event immediately. This protects typing latency on long turns. | Performance measurement on a long fixture turn |
-| Definition chips | Show resolved agent and skill chips without changing the raw draft. | Composer design review |
-| ACP badge | Mark ACP sessions in the header and tabs, and show the external-engine warning. | ACP UI review |
-| Update status | Show the host update check and install hint in the status area. | Host status data |
 | Browser notifications | Optional notifications for turn completion when the tab is hidden. | Permission and privacy review |
-| Settings parity | Complete the remaining field validation and warning copy, especially theme and retention values. | Settings test matrix |
-| Search racing | Explicitly ignore preview and search responses older than the newest query. | Workspace search tests |
-| Subagent refresh | Refresh a running child transcript while its overlay is open. | Subagent UI tests |
-| Accessibility audit | Run VoiceOver and NVDA, verify focus restoration in nested dialogs, and document the browser shortcut matrix. | Audit record |
+| Search request ids | Add explicit client sequence tokens on preview/search requests beyond query/mode matching. | Workspace search tests |
+| Accessibility audit | Run VoiceOver and NVDA across nested dialogs and document screen-reader verification. | Audit record |
 | Browser automation | Add a headless browser suite for mount, snapshot, prompt, approval, and settings flows. | CI browser runner |
 | Bundle budget | The release bundle is about 1.9 MB raw and 547 KB gzip. Enforce a budget in CI. | Release check |
 | CI bundle build | Build the Wasm bundle in CI when `web` is exercised, not only the Wasm check. | CI time budget |
@@ -208,7 +203,7 @@ The launch surfaces always configure Basic auth. The four open rows are a librar
 | With reason | `r` | `DeclineWithReason` | none |
 | Cancel request | `c` | `Cancel` | none |
 
-`Esc` leaves reason editing without a decision and cancels from the action row. A pending request reopens when the session receives another event. Any attached client can resolve it; the first valid decision wins and later decisions are rejected as stale.
+`Esc` leaves reason editing back to the action row without a decision; closing the dialog with `Esc` leaves the request pending so it can be reopened from the pending pill (`c` cancels the request). Any attached client can resolve it; the first valid decision wins and later decisions are rejected as stale.
 
 ### 4.3 Browser shortcuts
 
@@ -222,11 +217,11 @@ The launch surfaces always configure Basic auth. The four open rows are a librar
 | Close tab view | `Alt+W` | Detaches the view; it does not close the worker. Guard against text focus. |
 | Toggle sidebar | `Ctrl+B` | Safe because the app has no `contenteditable` region. |
 | Cycle approval mode | `Alt+M` | `plan` → `ask` → `auto`. |
-| Sessions picker | `Alt+S` | Opens the same modal as `/sessions`. |
+| Sessions sidebar | `Alt+S` | Reveals and focuses the left Sessions panel, the same surface as `/sessions`. |
 | Model picker | `Alt+L` | Opens the same modal as `/models`. |
 | Workspace diff | `Alt+Shift+D` | Opens the same view as `/diff`. |
 | Workspace search | `Alt+Shift+F` | Opens the same view as `/search`. |
-| Steer queued prompt | `Alt+G` | Does not use `Ctrl+G` (find next in some browsers). |
+| Steer queued prompt or draft | `Alt+G` | Steers the oldest queued prompt, or the active draft when the queue is empty; does not use `Ctrl+G`. |
 | Cancel turn | `Alt+X` | Also available as a visible button. |
 | Copy latest answer | `Alt+C` | Requires a user gesture for the Clipboard API. |
 | Help | `?` | Only when focus is not in a text field. |
@@ -259,7 +254,7 @@ The launch surfaces always configure Basic auth. The four open rows are a librar
 | `diff_context` | `--m-diff-context` |
 | `code_function` | `--m-code-function` |
 
-The host sends effective theme strings. The client accepts `#rgb`, `#rrggbb`, or a CSS color name and otherwise keeps the default. Theme values are written as custom properties, never as arbitrary CSS.
+The host sends effective theme strings. The client accepts `#rgb`, `#rrggbb`, or a CSS color name and otherwise keeps the default. Theme values are written as custom properties, never as arbitrary CSS. When `Host theme` is selected, `UiTheme::resolve` also computes `--m-on-accent` and `--m-on-warning` contrast foregrounds from `accent` and `warning`. Selecting `Host theme`, `System`, `Light`, or `Dark` updates `meerai.browser-theme` in `localStorage` and persists `theme.color_scheme` in user `settings.yml` when writable so restarts keep the chosen mode.
 
 ### 4.5 Build commands
 

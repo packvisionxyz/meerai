@@ -1,3 +1,5 @@
+use crate::state::{ProviderModalReturn, SessionPanelAction};
+
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
@@ -104,9 +106,9 @@ impl TransportClient {
         let _ = backend;
     }
 
-    pub fn open_session(&self, session_id: String) {
+    pub fn fetch_session_detail(&self, session_id: String) {
         #[cfg(target_arch = "wasm32")]
-        self.inner.open_session(session_id);
+        self.inner.fetch_session_detail(session_id);
         #[cfg(not(target_arch = "wasm32"))]
         let _ = session_id;
     }
@@ -127,11 +129,11 @@ impl TransportClient {
         let _ = session_id;
     }
 
-    pub fn delete_session(&self, session_id: String) {
+    pub fn session_panel_action(&self, action: SessionPanelAction, session_id: String) {
         #[cfg(target_arch = "wasm32")]
-        self.inner.delete_session(session_id);
+        self.inner.session_panel_action(action, session_id);
         #[cfg(not(target_arch = "wasm32"))]
-        let _ = session_id;
+        let _ = (action, session_id);
     }
 
     pub fn fork_session(&self, session_id: String, turn_id: Option<String>) {
@@ -254,11 +256,11 @@ impl TransportClient {
         self.inner.fetch_workspace_changes();
     }
 
-    pub fn fetch_workspace_diff(&self, path: String) {
+    pub fn fetch_workspace_diff(&self, path: String, status: Option<String>) {
         #[cfg(target_arch = "wasm32")]
-        self.inner.fetch_workspace_diff(path);
+        self.inner.fetch_workspace_diff(path, status);
         #[cfg(not(target_arch = "wasm32"))]
-        let _ = path;
+        let _ = (path, status);
     }
 
     pub fn fetch_providers(&self) {
@@ -266,11 +268,18 @@ impl TransportClient {
         self.inner.fetch_providers();
     }
 
-    pub fn set_api_key(&self, provider_id: String, api_key: String, base_url: Option<String>) {
+    pub fn set_api_key(
+        &self,
+        provider_id: String,
+        api_key: String,
+        base_url: Option<String>,
+        return_to: ProviderModalReturn,
+    ) {
         #[cfg(target_arch = "wasm32")]
-        self.inner.set_api_key(provider_id, api_key, base_url);
+        self.inner
+            .set_api_key(provider_id, api_key, base_url, return_to);
         #[cfg(not(target_arch = "wasm32"))]
-        let _ = (provider_id, api_key, base_url);
+        let _ = (provider_id, api_key, base_url, return_to);
     }
 
     pub fn set_provider_base_url(&self, provider_id: String, base_url: Option<String>) {
@@ -280,11 +289,11 @@ impl TransportClient {
         let _ = (provider_id, base_url);
     }
 
-    pub fn remove_credential(&self, provider_id: String) {
+    pub fn remove_credential(&self, provider_id: String, return_to: ProviderModalReturn) {
         #[cfg(target_arch = "wasm32")]
-        self.inner.remove_credential(provider_id);
+        self.inner.remove_credential(provider_id, return_to);
         #[cfg(not(target_arch = "wasm32"))]
-        let _ = provider_id;
+        let _ = (provider_id, return_to);
     }
 
     pub fn start_chatgpt_login(&self, provider_id: String) {

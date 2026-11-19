@@ -180,12 +180,18 @@ fn spawn_file_changes_watcher(state: &Arc<AppState>, mut stop_rx: watch::Receive
         let SubscribeResult::Replay { mut rx, .. } = registry.subscribe(None) else {
             return;
         };
+        let mut poll = tokio::time::interval(std::time::Duration::from_secs(4));
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        poll.tick().await;
         loop {
             tokio::select! {
                 changed = stop_rx.changed() => {
                     if changed.is_err() || *stop_rx.borrow() {
                         break;
                     }
+                }
+                _ = poll.tick() => {
+                    refresh_file_changes_once(&root, &registry).await;
                 }
                 ev = rx.recv() => {
                     match ev {
@@ -517,6 +523,7 @@ fn extract_provider_chatgpt_action<'a>(path: &'a str, action: &str) -> Option<(&
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_session_id(raw: &str) -> Result<SessionId, Response<RespBody>> {
     raw.parse().map_err(|_| {
         json_error(
@@ -527,6 +534,7 @@ fn parse_session_id(raw: &str) -> Result<SessionId, Response<RespBody>> {
     })
 }
 
+#[allow(clippy::result_large_err)]
 async fn parse_json<T: DeserializeOwned>(req: Request<Incoming>) -> Result<T, Response<RespBody>> {
     let body_bytes = read_json_body(req)
         .await
@@ -540,6 +548,7 @@ async fn parse_json<T: DeserializeOwned>(req: Request<Incoming>) -> Result<T, Re
     })
 }
 
+#[allow(clippy::result_large_err)]
 async fn parse_optional_json<T: DeserializeOwned + Default>(
     req: Request<Incoming>,
 ) -> Result<T, Response<RespBody>> {
@@ -1883,6 +1892,9 @@ fn asset_content_type(rel: &str) -> String {
         Some("ttf") => "font/ttf".to_string(),
         Some("css") => "text/css; charset=utf-8".to_string(),
         Some("json") => "application/json".to_string(),
+        Some("svg") => "image/svg+xml".to_string(),
+        Some("ico") => "image/x-icon".to_string(),
+        Some("png") => "image/png".to_string(),
         _ => mime_guess::from_path(rel)
             .first_or_octet_stream()
             .to_string(),
@@ -1973,6 +1985,9 @@ mod tests {
         );
         assert_eq!(asset_content_type("index.html"), "text/html; charset=utf-8");
         assert_eq!(asset_content_type("font.ttf"), "font/ttf");
+        assert_eq!(asset_content_type("favicon.svg"), "image/svg+xml");
+        assert_eq!(asset_content_type("favicon.ico"), "image/x-icon");
+        assert_eq!(asset_content_type("favicon-32x32.png"), "image/png");
     }
 
     #[test]

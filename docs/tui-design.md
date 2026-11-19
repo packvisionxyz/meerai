@@ -5,10 +5,10 @@ implemented, how it behaves, and what is planned.
 
 | | |
 | --- | --- |
-| **Status** | Verified against the tree on 2026-11-17 |
+| **Status** | Verified against the tree on 2026-11-19 |
 | **Audience** | TUI users and `meerai-tui` contributors |
 | **Scope** | `meerai-tui` (layout, modes, keybindings, overlays, rendering); host seams in `meerai-cli` |
-| **Related** | [harness-spec.md](harness-spec.md) · [architecture.md](architecture.md) · [harness-internals.md](harness-internals.md) · [acp.md](acp.md) |
+| **Related** | [browser-ui.md](browser-ui.md) · [harness-spec.md](harness-spec.md) · [architecture.md](architecture.md) · [harness-internals.md](harness-internals.md) · [acp.md](acp.md) |
 
 ## 1. Overview
 
@@ -20,10 +20,13 @@ mode. Actions are discoverable through slash commands, a command palette,
 and completion popups. File listing and content search go through the
 `WorkspaceQuery` trait so clients can reuse host workspace services.
 
-This document defines terminal behavior. The [local browser parity plan](browser-ui.md#36-parity-inventory)
-maps these workflows to browser controls without copying terminal modes,
-shortcuts, or escape sequences. The browser plan tracks implementation
-status separately.
+This document defines terminal behavior. The TUI and the [local browser companion](browser-ui.md)
+must maintain two-way feature parity across user-facing workflows, slash
+commands, approvals, questions, session actions, and transcript items through
+`meerai-host` and `meerai-web-protocol`, without copying terminal `Normal`/`Insert`
+modes or escape sequences. Client-specific conveniences (`/settings` form and
+browser `Light`/`Dark` scheme in the browser; `settings.yml` editing in the
+TUI) stay documented in each client's spec.
 
 ## 2. Implemented
 

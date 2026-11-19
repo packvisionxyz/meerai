@@ -1436,7 +1436,7 @@ impl AppState {
                         let secret_opt = if secret_input.is_empty() {
                             Ok(None)
                         } else if secret_input.chars().count() < 8 {
-                            Err("Password must be at least 8 characters (or leave blank to auto-generate)"
+                            Err("Password must be at least 8 characters (or leave blank for default)"
                                 .to_string())
                         } else if secret_input.chars().any(char::is_control)
                             || secret_input.trim().is_empty()

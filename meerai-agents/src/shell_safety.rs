@@ -1,7 +1,7 @@
 const SAFE_PROGRAMS: &[&str] = &[
-    "awk", "bat", "cat", "cd", "cmp", "cut", "date", "df", "diff", "du", "echo", "false", "file",
-    "find", "grep", "head", "jq", "ls", "printf", "pwd", "rg", "sed", "sort", "stat", "tail",
-    "tree", "true", "uname", "uniq", "wc", "which", "whoami",
+    "awk", "bat", "cat", "cd", "cmp", "command", "cut", "date", "df", "diff", "du", "echo",
+    "false", "file", "find", "grep", "head", "jq", "ls", "printf", "pwd", "rg", "rustup", "sed",
+    "sort", "stat", "tail", "tree", "true", "uname", "uniq", "wc", "which", "whoami",
 ];
 
 pub fn command_is_safe(command: &str) -> bool {
@@ -125,8 +125,27 @@ fn single_command_is_safe(trimmed: &str) -> bool {
             .any(|arg| arg.starts_with("-s") || arg.starts_with("--set")),
         "sed" => sed_is_safe(&args),
         "awk" => awk_is_safe(trimmed),
+        "rustup" => rustup_is_safe(&args),
+        "command" => command_is_probe(&args),
         _ => true,
     }
+}
+
+fn rustup_is_safe(args: &[&str]) -> bool {
+    match args {
+        ["--version"] | ["-V"] | ["show"] => true,
+        ["toolchain", "list", rest @ ..] => rest.iter().all(|arg| !arg.starts_with('-')),
+        ["toolchain", "show", rest @ ..] => rest.iter().all(|arg| !arg.starts_with('-')),
+        ["target", "list", "--installed"] | ["target", "list"] => true,
+        _ => false,
+    }
+}
+
+fn command_is_probe(args: &[&str]) -> bool {
+    let Some((flag, programs)) = args.split_first() else {
+        return false;
+    };
+    flag == &"-v" && !programs.is_empty() && programs.iter().all(|arg| !arg.starts_with('-'))
 }
 
 fn sed_is_safe(args: &[&str]) -> bool {
@@ -216,7 +235,8 @@ fn git_is_safe(args: &[&str]) -> bool {
     let rest = &args[1..];
     match subcommand {
         "status" | "diff" | "log" | "show" | "blame" | "describe" | "rev-parse" | "ls-files"
-        | "shortlog" | "grep" => true,
+        | "shortlog" | "grep" | "rev-list" | "cat-file" => true,
+        "hash-object" => !rest.contains(&"-w"),
         "branch" => !rest
             .iter()
             .any(|arg| matches!(*arg, "-d" | "-D" | "-m" | "-M" | "--delete" | "--move")),
@@ -260,6 +280,61 @@ mod tests {
             "grep -n \"Message \\\"\\|centered_rect_fixed\" meerai-tui/src/ui.rs | head",
         ] {
             assert!(command_is_safe(command), "expected safe: {command}");
+        }
+    }
+
+    #[test]
+    fn matches_the_observed_session_commands() {
+        for command in [
+            "pwd; git status --short; command -v cargo rustup node python3; ls scripts; uname -a",
+            "rustup toolchain list; git diff --stat HEAD; command -v wasm-bindgen; ls scripts",
+            "git status --short; git diff --check",
+            "git status --short; git log --oneline -3",
+            "git status --short; ls -a | grep -E 'playwright|package' ",
+            "git status --short; rustup toolchain list; ls scripts; ls -a | grep -E 'playwright|package' ",
+            "git status --short; ls; ls meerai-web-client; rg -n 'search|Search|modal' meerai-web-client/src/views/modals.rs; rg -n 'Search|search' meerai-web-client/src/{keymap.rs,transport/wasm.rs}",
+            "cat AGENTS.md; find meerai-web-client -name AGENTS.md; sed -n '1,168p' meerai-web-client/src/views/modals.rs",
+            "sed -n '1,70p' meerai-web-client/src/transport.rs; cat meerai-web-client/Cargo.toml; rustup target list --installed",
+            "git status --short; git diff --stat",
+            "git status --short; cat AGENTS.md; grep -RnE 'SessionSelect|session_select' meerai-web-client/src",
+            "grep -rn 'Sessions' docs/browser-ui.md README.md | head -30",
+            "grep -n 'modal' docs/browser-ui.md | head -40",
+            "grep -rn 'web' .agents/repo/profile.md | sed -n '1,20p'",
+            "grep -n 'sessions' meerai-web-client/src/state.rs | sed -n '1,10p'; echo ---; sed -n '1840,1870p' meerai-web-client/src/state.rs",
+        ] {
+            assert!(command_is_safe(command), "expected safe: {command}");
+        }
+        for command in [
+            "rustup toolchain list; rustup target list --installed; command -v wasm-bindgen; ls /Applications",
+            "git status --short; ls -a; ls meerai-web-client; grep -inE 'search|modal' meerai-web-client/src/views/modals.rs; grep -in search meerai-web-client/src/{keymap.rs,transport/wasm.rs} || true",
+            "grep -n 'leptos_dom\\|set_timeout' ~/.cargo/registry/src/*/leptos-0.8.*/src/lib.rs; uname -a",
+            "cargo check -p meerai-web-client --target wasm32-unknown-unknown --message-format short; git status --short",
+            "cargo fmt --all && cargo clippy -p meerai-web-client --all-targets && cargo test -p meerai-web-client --quiet",
+            "mkdir -p meerai-web-client/src/state; python3 - <<'PY'\nfrom pathlib import Path\nPY\ncat > meerai-web-client/src/views/sessions.rs <<'EOF'\nEOF",
+            "cat >> meerai-web-client/styles/app.css <<'EOF'\n.x { y: z; }\nEOF\ncargo fmt --all",
+            "cargo check -p meerai-web-client --all-targets 2>&1 | tail -40",
+            "cargo test -p meerai-web-client 2>&1 | tail -20",
+            "cargo fmt --all -- --check 2>&1 | head -30; echo '---'; cargo test -p meerai-web-client 2>&1 | tail -8",
+            "cd meerai-web-client && sed -n '3674,3675p' styles/app.css && sed -i '' '3523,3674d' styles/app.css && wc -l styles/app.css",
+            "grep -n 'leptos_dom' ~/.cargo/registry/src/*/leptos-0.8.*/src/lib.rs; uname -a",
+            "cat /etc/passwd",
+            "grep -rn 'retry' /srv/workspace",
+            "command -v",
+            "command -v cargo -x",
+            "command rm -rf target",
+            "rustup run stable cargo test",
+            "rustup target add wasm32-unknown-unknown",
+            "rustup toolchain install nightly",
+            "rustup target list --toolchain nightly",
+            "git hash-object -w file.txt",
+            "git commit -m x",
+            "python3 -c 'print(1)'",
+            "cargo test",
+            "ls && rm -rf target",
+            "cat a > b",
+            "ls &",
+        ] {
+            assert!(!command_is_safe(command), "expected unsafe: {command}");
         }
     }
 
