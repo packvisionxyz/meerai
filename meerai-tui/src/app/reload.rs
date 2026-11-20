@@ -48,7 +48,12 @@ impl AppState {
             Err(_) => load_definitions(&project_root),
         };
         warnings.extend(definitions.warnings.clone());
-        self.agents = definitions.agents.clone();
+        self.agents = definitions
+            .agents
+            .iter()
+            .filter(|agent| agent.mode.selectable_primary())
+            .cloned()
+            .collect();
         self.skills = definitions.skills.clone();
         self.settings = user;
         self.context_temperature = merged

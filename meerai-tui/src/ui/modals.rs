@@ -1682,10 +1682,11 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                     .map(|agent| {
                         ListItem::new(Span::styled(
                             format!(
-                                "agent/{} ({}) ~{} tokens{}",
+                                "agent/{} ({}) ~{} tokens{}{}",
                                 agent.id,
                                 agent.source,
                                 agent.token_estimate,
+                                mode_suffix(agent.mode.as_deref()),
                                 supporting_suffix(&agent.supporting_files)
                             ),
                             Style::default().fg(theme::p().text),
@@ -2891,6 +2892,13 @@ fn invocation_suffix(model_invocable: Option<bool>) -> &'static str {
     }
 }
 
+fn mode_suffix(mode: Option<&str>) -> String {
+    match mode {
+        Some(mode) if mode != "all" => format!(" · {mode}"),
+        _ => String::new(),
+    }
+}
+
 fn blank_as<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     if value.trim().is_empty() {
         fallback
@@ -2901,12 +2909,20 @@ fn blank_as<'a>(value: &'a str, fallback: &'a str) -> &'a str {
 
 #[cfg(test)]
 mod tests {
-    use super::invocation_suffix;
+    use super::{invocation_suffix, mode_suffix};
 
     #[test]
     fn invocation_suffix_marks_model_and_manual_skills() {
         assert_eq!(invocation_suffix(Some(true)), " · model");
         assert_eq!(invocation_suffix(Some(false)), " · manual");
         assert_eq!(invocation_suffix(None), "");
+    }
+
+    #[test]
+    fn mode_suffix_marks_non_default_agent_modes() {
+        assert_eq!(mode_suffix(Some("subagent")), " · subagent");
+        assert_eq!(mode_suffix(Some("primary")), " · primary");
+        assert_eq!(mode_suffix(Some("all")), "");
+        assert_eq!(mode_suffix(None), "");
     }
 }

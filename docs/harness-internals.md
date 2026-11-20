@@ -154,19 +154,22 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   sessions`). A plain TUI start opens one empty session tab, restores the
   saved tabs in the background, and reuses the remembered empty session.
   Manual retention: `sessions prune` (30 days, keep 0 defaults).
-- Definitions: read-only discovery at the project root, `.agents` before
-  `.claude`, duplicate ids keep `.agents` (warning names both paths),
-  sorted by id, symlinks skipped. Frontmatter
-  `name/description/model/steps/mode/disable-model-invocation`;
-  `tools`/`permissions`/`allowed-tools` warn and are ignored; invalid
-  frontmatter warns and skips; missing frontmatter uses the file/directory
-  name. Skills advertise one prompt line each (`id: description`, 8 KiB cap,
+- Definitions: read-only discovery at the project root, `.meerai` before
+  `.agents` before `.claude`, duplicate ids keep `.meerai` (warning names both
+  paths), sorted by id, symlinks skipped. Frontmatter
+  `name/description/model/steps/mode/permissions/disable-model-invocation`;
+  `mode` parses to `AgentMode` and filters `--agent`/pickers/`subagent-run`;
+  `permissions` become agent rules on a child policy and drop `allow` with a
+  warning; `tools`/`allowed-tools` warn and are ignored; invalid frontmatter
+  warns and skips; missing frontmatter uses the file/directory name. Skills
+  advertise one prompt line each (`id: description`, 8 KiB cap,
   screened); `skill-load` reads `SKILL.md` or one supporting file inside the
   skill directory, 16 KiB cap. Explicit `--skill` bodies keep the 16 KiB /
   32 KiB caps. `--agent` takes one id (repeat is a parse error); `--skill` is
   repeatable; unknown ids fail with the available list. Model precedence:
   `--model` → `MEERAI_MODEL` → agent `model` → settings/provider default;
-  a `:` model is ignored with a warning; `steps`/`mode` are note-only.
+  a `:` model is ignored with a warning; `steps` is note-only for a primary
+  agent, and `mode` filters selection.
 - Hooks: user `<config-dir>/hooks.json`; project
   `<project-root>/.meerai/hooks.json` only with
   `MEERAI_TRUST_PROJECT_HOOKS=1|true|yes`, user `hooks.trust_project: true`,
@@ -252,9 +255,8 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
 - Project config is found at the **repository root**, not the CWD; tools,
   sessions, and prompt injection keep the CWD as the workspace. Do not
   "fix" this by resolving the workspace to the project root.
-- Definitions are found at the project root too. There is **no**
-  `.meerai/agents` or `.meerai/skills` discovery; never copy definitions
-  or add an import lock.
+- Definitions are found at the project root too: `.meerai`, then `.agents`,
+  then `.claude`. Never copy definitions or add an import lock.
 - A project `ask` cannot downgrade a user `deny` (user rules match later);
   a project `deny` always adds a denial after user rules. Do not keep
   `allow` or append project `ask` after user rules.

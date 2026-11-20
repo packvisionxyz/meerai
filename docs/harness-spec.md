@@ -671,29 +671,36 @@ implemented. The landed/backlog split and residual risks are owned by
 #### Markdown-defined agents and skills
 
 Read-only discovery at the project root
-(`meerai-common::definitions`): `.agents/agents/*.md` then
-`.claude/agents/*.md`; `.agents/skills/*/SKILL.md` then
-`.claude/skills/*/SKILL.md`. `.agents` wins duplicate ids (warning names
-both paths); output is sorted by id; symlinks are skipped; only `SKILL.md`
-text is read during discovery; `.meerai` is never a definition directory and
-nothing is copied.
+(`meerai-common::definitions`): `.meerai/agents/*.md` then
+`.agents/agents/*.md` then `.claude/agents/*.md`; `.meerai/skills/*/SKILL.md`
+then `.agents/skills/*/SKILL.md` then `.claude/skills/*/SKILL.md`. `.meerai`
+wins a duplicate id, then `.agents`, then `.claude` (warning names both
+paths); output is sorted by id; symlinks are skipped; only `SKILL.md` text is
+read during discovery; nothing is copied.
 
 ```markdown
-<!-- .agents/agents/reviewer.md -->
+<!-- .meerai/agents/reviewer.md -->
 ---
 name: reviewer
 description: Reviews changes for correctness and regressions
 model: gemini-3.1-pro      # optional; a ':' model is ignored (no provider switch)
-steps: 8                   # optional; recorded but not applied
-mode: subagent             # optional; recorded but not applied
+steps: 8                   # optional; note-only for a primary agent
+mode: subagent             # all (default) | primary | subagent
+permissions:               # optional; applied to a subagent, tighten-only
+  - { action: edit, resource: "*", effect: deny }
 ---
 Review the current changes. List findings by severity with file:line references.
 ```
 
-- Frontmatter: `name`, `description`, `model`, `steps`, `mode`, and
-  `disable-model-invocation`. `tools`, `permissions`, and `allowed-tools` warn
-  and are not applied. Invalid frontmatter warns and skips; missing frontmatter
-  uses the file/directory name and the body.
+- Frontmatter: `name`, `description`, `model`, `steps`, `mode`,
+  `permissions`, and `disable-model-invocation`. `mode` filters selection:
+  `primary` hides the agent from `--agent` and the pickers; `subagent` hides it
+  from those and offers it to `subagent-run`; unknown values warn and become
+  `all`. `permissions` become `PermissionRule`s on the child policy after the
+  parent rules; `allow` entries are dropped with a warning and an invalid block
+  is dropped. `tools` and `allowed-tools` warn and are not applied. Invalid
+  frontmatter warns and skips; missing frontmatter uses the file/directory name
+  and the body.
 - Skills load progressively. The system prompt appends a `## Skills` block with
   `<id>: <description>` for each skill that has a description and does not set
   `disable-model-invocation`, capped at 8 KiB and screened as untrusted. The
@@ -709,10 +716,11 @@ Review the current changes. List findings by severity with file:line references.
   ([tui-design.md](tui-design.md) §2.6).
 - Model precedence: `--model` → `MEERAI_MODEL` → agent `model` →
   settings/provider default. A `:` model is ignored with a warning;
-  `steps`/`mode` are note-only.
+  `steps` is note-only for a primary agent, and `mode` filters selection.
 - Definitions are untrusted repository prompt text, screened before insertion.
-  They grant no tools, permissions, scripts, MCP, or sandbox. Tool/permission
-  mapping is planned (§3).
+  They grant no tools, scripts, MCP, or sandbox. An agent `permissions` block
+  tightens a subagent's policy; `allow` entries are dropped. Full tool and
+  permission mapping from definitions is planned (§3).
 
 #### Subagent execution
 
@@ -723,8 +731,10 @@ permission set, and tool subset, exposed as one `subagent-run` tool.
 - Built-ins: `explore` (4 steps, read-only), `plan` (16 steps, read-only),
   `build` (32 steps, write), `general` (16 steps, write). Read-only
   profiles use a fixed tool allowlist and forced `ApprovalMode::Plan`;
-  step budgets clamp to the parent's. Custom definitions run read-only
-  (16 steps) regardless of frontmatter.
+  step budgets clamp to the parent's. Custom definitions run write-capable
+  (16 steps) and are offered only when they are `mode: all` or
+  `mode: subagent`; their `permissions` join the child policy as agent rules,
+  so a definition can deny or ask but never allow.
 - Depth-1 isolation: `ChildToolsetFilter` rejects `subagent-*` tools;
   `question-ask` and `acp-run` are top-level only.
 - The child runs in background; the parent receives

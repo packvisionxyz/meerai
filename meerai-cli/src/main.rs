@@ -146,6 +146,33 @@ fn select_definition<'a, T>(
     bail!("unknown {flag} id '{id}'; available {kind}: {list}")
 }
 
+fn select_agent_definition<'a>(
+    agents: &'a [AgentDefinition],
+    id: &str,
+) -> Result<&'a AgentDefinition> {
+    let id = id.trim();
+    if let Some(agent) = agents
+        .iter()
+        .find(|agent| agent.id == id && agent.mode.selectable_primary())
+    {
+        return Ok(agent);
+    }
+    if agents.iter().any(|agent| agent.id == id) {
+        bail!("agent '{id}' is mode: subagent; run it through subagent-run, not --agent");
+    }
+    let ids: Vec<&str> = agents
+        .iter()
+        .filter(|agent| agent.mode.selectable_primary())
+        .map(|agent| agent.id.as_str())
+        .collect();
+    let list = if ids.is_empty() {
+        "(none)".to_string()
+    } else {
+        ids.join(", ")
+    };
+    bail!("unknown --agent id '{id}'; available agents: {list}")
+}
+
 const MAX_DEFINITION_BYTES: usize = 16 * 1024;
 const MAX_DEFINITION_BLOCK_BYTES: usize = 32 * 1024;
 
@@ -453,13 +480,7 @@ async fn main() -> Result<()> {
 
     let mut selected_agents = Vec::new();
     for id in &cli.agents {
-        selected_agents.push(select_definition(
-            "--agent",
-            "agents",
-            id,
-            &definitions.agents,
-            |agent| agent.id.as_str(),
-        )?);
+        selected_agents.push(select_agent_definition(&definitions.agents, id)?);
     }
     let mut selected_skills = Vec::new();
     for id in &cli.skills {
@@ -472,21 +493,13 @@ async fn main() -> Result<()> {
         )?);
     }
     let selected_agent = selected_agents.first().copied();
-    if let Some(agent) = selected_agent {
-        let mut unapplied = Vec::new();
-        if agent.steps.is_some() {
-            unapplied.push("steps");
-        }
-        if agent.mode.is_some() {
-            unapplied.push("mode");
-        }
-        if !unapplied.is_empty() {
-            eprintln!(
-                "Note: agent '{}' sets {}; those fields are not applied yet",
-                agent.id,
-                unapplied.join(" and ")
-            );
-        }
+    if let Some(agent) = selected_agent
+        && agent.steps.is_some()
+    {
+        eprintln!(
+            "Note: agent '{}' sets steps; that field is not applied yet",
+            agent.id
+        );
     }
 
     if cli.prompt.is_none()
@@ -860,7 +873,11 @@ async fn main() -> Result<()> {
                 approval_mode: opened.approval_mode,
                 initial_transcript: transcript_from_events(&opened.events),
                 initial_events: opened.events,
-                agents: definitions.agents,
+                agents: definitions
+                    .agents
+                    .into_iter()
+                    .filter(|agent| agent.mode.selectable_primary())
+                    .collect(),
                 skills: definitions.skills,
                 session_opener: Some(host),
                 update_available,
@@ -1612,6 +1629,7 @@ impl CliSessionHost {
         let agents = definitions
             .agents
             .into_iter()
+            .filter(|agent| agent.mode.selectable_primary())
             .map(|agent| HostAgentInfo {
                 id: agent.id,
                 source: agent.source.label().to_string(),
@@ -2028,6 +2046,9 @@ impl SessionOpener for CliSessionHost {
             .into_iter()
             .find(|agent| agent.id == name)
             .with_context(|| format!("unknown agent: {name}"))?;
+        if !agent.mode.selectable_primary() {
+            bail!("agent '{name}' is mode: subagent; it cannot be applied as a primary agent");
+        }
         let model_raw = match validate_agent_model(agent.model.as_deref()) {
             Ok(raw) => raw.map(str::to_string),
             Err(rejected) => {
@@ -2258,6 +2279,7 @@ impl SessionOpener for CliSessionHost {
                 path: agent.path.display().to_string(),
                 description: agent.description.clone(),
                 model_invocable: None,
+                mode: Some(agent.mode.label().to_string()),
                 token_estimate: agent.token_estimate,
                 warnings: agent.warnings.clone(),
                 supporting_files: agent.supporting_files.clone(),
@@ -2273,6 +2295,7 @@ impl SessionOpener for CliSessionHost {
                 path: skill.path.display().to_string(),
                 description: skill.description.clone(),
                 model_invocable: Some(skill.model_invocable),
+                mode: None,
                 token_estimate: skill.token_estimate,
                 warnings: skill.warnings.clone(),
                 supporting_files: skill.supporting_files.clone(),

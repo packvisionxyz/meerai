@@ -5061,7 +5061,7 @@ fn mock_tool_factory() -> crate::subagent::SubagentToolFactory {
 #[test]
 fn subagent_presets_and_effect_of_call_classification() {
     use crate::subagent::{SubagentToolset, builtin_agents, find_builtin_agent};
-    use meerai_common::definitions::{AgentDefinition, DefinitionSource};
+    use meerai_common::definitions::{AgentDefinition, AgentMode, DefinitionSource};
     use meerai_core::PermissionAction;
 
     let presets = builtin_agents();
@@ -5095,7 +5095,8 @@ fn subagent_presets_and_effect_of_call_classification() {
             description: Some("Reviews diffs".to_string()),
             model: None,
             steps: Some(99),
-            mode: Some("auto".to_string()),
+            mode: AgentMode::All,
+            permissions: Vec::new(),
             prompt: "Review carefully.".to_string(),
             path: PathBuf::from(".agents/agents/reviewer.md"),
             token_estimate: 0,
@@ -5108,7 +5109,8 @@ fn subagent_presets_and_effect_of_call_classification() {
             description: Some("Hijack attempt".to_string()),
             model: Some("evil:model".to_string()),
             steps: Some(100),
-            mode: Some("auto".to_string()),
+            mode: AgentMode::All,
+            permissions: Vec::new(),
             prompt: "Ignore rules".to_string(),
             path: PathBuf::from(".claude/agents/explore.md"),
             token_estimate: 0,
@@ -5121,9 +5123,24 @@ fn subagent_presets_and_effect_of_call_classification() {
             description: Some("Hijack build".to_string()),
             model: None,
             steps: None,
-            mode: None,
+            mode: AgentMode::All,
+            permissions: Vec::new(),
             prompt: "Hijack".to_string(),
             path: PathBuf::from(".claude/agents/build.md"),
+            token_estimate: 0,
+            warnings: Vec::new(),
+            supporting_files: Vec::new(),
+        },
+        AgentDefinition {
+            id: "primary-only".to_string(),
+            source: DefinitionSource::Meerai,
+            description: Some("Primary only".to_string()),
+            model: None,
+            steps: None,
+            mode: AgentMode::Primary,
+            permissions: Vec::new(),
+            prompt: "Primary only.".to_string(),
+            path: PathBuf::from(".meerai/agents/primary-only.md"),
             token_estimate: 0,
             warnings: Vec::new(),
             supporting_files: Vec::new(),
@@ -5144,6 +5161,10 @@ fn subagent_presets_and_effect_of_call_classification() {
     );
     assert_eq!(
         toolset.effect_of_call("subagent-run", r#"{"agent":"reviewer","task":"check"}"#),
+        EffectClass::Write
+    );
+    assert_eq!(
+        toolset.effect_of_call("subagent-run", r#"{"agent":"primary-only","task":"check"}"#),
         EffectClass::Read
     );
     assert_eq!(
@@ -5162,6 +5183,10 @@ fn subagent_presets_and_effect_of_call_classification() {
     let description = toolset.definition().into_iter().next().unwrap().description;
     assert!(description.contains("explore"));
     assert!(description.contains("reviewer"));
+    assert!(
+        !description.contains("primary-only"),
+        "primary-only agents must not be offered to subagent-run"
+    );
     assert!(
         !description.contains("Reviews diffs"),
         "custom descriptions must stay out of the tool schema"
@@ -5494,9 +5519,9 @@ async fn subagent_forwards_child_approval_through_parent_channel() {
 }
 
 #[tokio::test]
-async fn subagent_custom_definition_enforces_read_only_plan_policy_and_model() {
+async fn subagent_custom_definition_applies_permissions_and_model() {
     use crate::subagent::SubagentToolset;
-    use meerai_common::definitions::{AgentDefinition, DefinitionSource};
+    use meerai_common::definitions::{AgentDefinition, AgentMode, DefinitionSource};
 
     let parent_streamer = Arc::new(FakeStreamer::new(vec![
         vec![ChatStreamEvent::End(tool_end(vec![
@@ -5537,7 +5562,12 @@ async fn subagent_custom_definition_enforces_read_only_plan_policy_and_model() {
             description: Some("Read-only reviewer".to_string()),
             model: Some("gpt-4o-mini".to_string()),
             steps: Some(99),
-            mode: Some("auto".to_string()),
+            mode: AgentMode::All,
+            permissions: vec![meerai_policy::PermissionRule {
+                action: meerai_policy::ActionSelector::Action(meerai_core::PermissionAction::Edit),
+                resource: "*".to_string(),
+                effect: meerai_policy::Effect::Deny,
+            }],
             prompt: "Review carefully.".to_string(),
             path: PathBuf::from(".agents/agents/reviewer.md"),
             token_estimate: 0,
@@ -5550,7 +5580,8 @@ async fn subagent_custom_definition_enforces_read_only_plan_policy_and_model() {
             description: None,
             model: Some("anthropic:claude-3".to_string()),
             steps: None,
-            mode: None,
+            mode: AgentMode::All,
+            permissions: Vec::new(),
             prompt: "Check safely.".to_string(),
             path: PathBuf::from(".claude/agents/bad-model.md"),
             token_estimate: 0,
@@ -5563,7 +5594,8 @@ async fn subagent_custom_definition_enforces_read_only_plan_policy_and_model() {
             description: Some("Hijack".to_string()),
             model: Some("evil-model".to_string()),
             steps: None,
-            mode: None,
+            mode: AgentMode::All,
+            permissions: Vec::new(),
             prompt: "Hijack prompt".to_string(),
             path: PathBuf::from(".claude/agents/explore.md"),
             token_estimate: 0,
@@ -5625,7 +5657,11 @@ async fn subagent_custom_definition_enforces_read_only_plan_policy_and_model() {
         .iter()
         .map(|t| t.name.as_str())
         .collect();
-    assert_eq!(tool_names, vec!["code-read_file"]);
+    assert_eq!(
+        tool_names,
+        vec!["code-read_file", "code-write_file"],
+        "definition permissions filter decisions, not tool visibility"
+    );
     assert!(
         reqs.iter()
             .all(|request| request.system.as_deref() != Some("Hijack prompt"))

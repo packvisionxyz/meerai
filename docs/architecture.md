@@ -131,10 +131,11 @@ Field-level detail: [harness-internals.md](harness-internals.md).
 
 ### 2.5 Agents, skills, and tools (summary)
 
-- Markdown definitions load read-only from `.agents/` then `.claude/` at
-  the project root and apply as prompt text (`--agent`/`--skill`, TUI
-  commands and mentions). They grant no tools or permissions. Custom
-  definitions executed as subagents run read-only.
+- Markdown definitions load read-only from `.meerai/`, then `.agents/`, then
+  `.claude/` at the project root and apply as prompt text (`--agent`/`--skill`,
+  TUI commands and mentions). They grant no new capability. Agent `permissions`
+  tighten a subagent's policy; `allow` entries are dropped. Custom definitions
+  run write-capable under the parent's mode unless a rule denies it.
 - `CodeTools` hand-writes `impl Toolset`; the retrieval toolsets use
   `#[derive(Toolset)]`. Runtime names are `<toolset>-<tool>` (`code-*`,
   `retrieval-repo_map`, `lsp-*`, `sac-run_script`). `sac-run_script`

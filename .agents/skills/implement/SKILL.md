@@ -4,7 +4,7 @@ description: Implement or change code in any layer of a repository — transport
 license: MIT
 compatibility: Works with any agent supporting the Agent Skills standard. Subagent delegation is optional; run inline when the harness has no subagents.
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
   tags: "implementation, backend, frontend, testing"
 ---
 
@@ -84,8 +84,8 @@ it into workstreams and use implementer subagents.
 
 Briefs:
 
-- [`agents/implementer.md`](agents/implementer.md)
-- [`agents/verifier.md`](agents/verifier.md)
+- [`implementer`](../../../.meerai/agents/implementer.md)
+- [`verifier`](../../../.meerai/agents/verifier.md)
 
 Rules:
 
@@ -128,5 +128,5 @@ See [`references/verification.md`](references/verification.md).
 
 - [`references/change-recipes.md`](references/change-recipes.md) — what to check in each layer.
 - [`references/verification.md`](references/verification.md) — finding and reporting the real gate.
-- [`agents/implementer.md`](agents/implementer.md) — implementation subagent brief.
-- [`agents/verifier.md`](agents/verifier.md) — verification subagent brief.
+- [`implementer`](../../../.meerai/agents/implementer.md) — implementation subagent.
+- [`verifier`](../../../.meerai/agents/verifier.md) — verification subagent.

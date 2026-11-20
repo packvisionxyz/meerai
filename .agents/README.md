@@ -44,6 +44,11 @@ from `AGENTS.md`, `README.md`, manifests, and CI.
 
 ## Install
 
+### meerai
+
+Project: copy `skills/` to `<repo>/.agents/skills/`, and the role definitions to
+`<repo>/.meerai/agents/`. meerai scans `.meerai`, then `.agents`, then `.claude`.
+
 ### OpenCode
 
 Project: copy `skills/` to `<repo>/.agents/skills/`.
@@ -75,6 +80,8 @@ cp <bundle>/templates/repo-profile.md .agents/repo/profile.md
 # fill it in
 ```
 
+Add the role definitions from [Subagents](#subagents) under `.meerai/agents/` at the project root.
+
 Minimum viable profile: sections 2 (layout), 3 (commands), 4 (invariants), 7 (verification). Mark the
 rest `Unknown` rather than guessing.
 
@@ -92,23 +99,27 @@ rest `Unknown` rather than guessing.
 
 Skills delegate when the harness supports it and stay runnable inline when it does not.
 
-Role briefs live beside the skill that owns them:
+Role definitions are repo-native, not part of the portable skill body. Install them in the harness
+agent directory that meerai scans, `.meerai/agents/` at the project root:
 
-| Brief | Used by |
+| Definition | Used by |
 | :--- | :--- |
-| `skills/investigate/agents/search.md` | fast read-only lookup, budgeted |
-| `skills/investigate/agents/recon.md` | read-only reconnaissance |
-| `skills/implement/agents/implementer.md` | one implementation workstream |
-| `skills/implement/agents/verifier.md` | post-write verification |
-| `skills/deliver/agents/iac-implementer.md` | one IaC/pipeline workstream |
-| `skills/deliver/agents/infra-reviewer.md` | read-only infra review |
+| `.meerai/agents/search.md` | fast read-only lookup, budgeted |
+| `.meerai/agents/recon.md` | read-only reconnaissance |
+| `.meerai/agents/implementer.md` | one implementation workstream |
+| `.meerai/agents/verifier.md` | post-write verification |
+| `.meerai/agents/infra-implementer.md` | one IaC/pipeline workstream |
+| `.meerai/agents/infra-reviewer.md` | read-only infra review |
 
-Map roles to the harness's agent types; if it has no subagents, run the same steps inline. Never
-delegate commits, pushes, deploys, secret rotation, or destructive git operations.
+Each definition declares `mode: subagent` so it is selectable by `subagent-run` and not by
+`--agent`, plus `permissions` that tighten its policy. Map roles to the harness's agent ids when it
+has subagents; if it has none, run the same steps inline. Never delegate commits, pushes, deploys,
+secret rotation, or destructive git operations.
 
 | Harness | Recon | Implement |
 | :--- | :--- | :--- |
-| OpenCode | `investigate` subagent | `general` subagent |
+| meerai | `recon` / `search` | `implementer` |
+| OpenCode | `recon` / `search` | `implementer` |
 | Claude Code | Explore agent | general-purpose agent |
 | No subagents | inline | inline |
 
@@ -118,10 +129,11 @@ delegate commits, pushes, deploys, secret rotation, or destructive git operation
 - `SKILL.md` frontmatter: `name`, `description`, optional `compatibility`, `metadata`. Avoid
   tool-specific fields so the bundle stays portable.
 - The description must say **what** and **when**; it is the only text advertised before loading.
-- Keep `SKILL.md` focused. Put detail in `references/`, role briefs in `agents/`, scripts in `scripts/`.
+- Keep `SKILL.md` focused. Put detail in `references/`, scripts in `scripts/`. Role definitions
+  belong in the harness agent directory (`.meerai/agents/` for meerai), not in the skill body.
 - Paths inside a skill are relative to the directory containing `SKILL.md`.
-- In subagent briefs, the bundle location is written as `<skills-dir>` and the repository contract is
-  always `.agents/repo/profile.md` at the project root — never hardcode where the bundle is installed.
+- The repository contract is always `.agents/repo/profile.md` at the project root. Do not hardcode
+  where the bundle is installed.
 - Do not add repository-specific paths, commands, or rules to a skill. Add them to the repo profile.
 
 ## Publishing checklist

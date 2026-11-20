@@ -98,16 +98,18 @@ Rules for all shapes:
 
 - `load_definitions(&project_root)` returns a `DefinitionCatalog { agents, skills, warnings }`.
   Discovery is read-only and starts at the project root, not the CWD:
-  `.agents/agents/*.md` then `.claude/agents/*.md`, and
-  `.agents/skills/*/SKILL.md` then `.claude/skills/*/SKILL.md`.
-- `.agents` has priority. A duplicate id keeps the `.agents` entry and appends a warning that names
-  both paths. The catalog is sorted by id. `.meerai/agents` and `.meerai/skills` are never scanned
-  or created; there are no copies and no import lock. Symlinks are skipped with a warning.
+  `.meerai/agents/*.md` then `.agents/agents/*.md` then `.claude/agents/*.md`, and
+  `.meerai/skills/*/SKILL.md` then `.agents/skills/*/SKILL.md` then `.claude/skills/*/SKILL.md`.
+- `.meerai` has priority, then `.agents`, then `.claude`. A duplicate id keeps the higher entry and
+  appends a warning that names both paths. The catalog is sorted by id. Nothing is copied and there
+  is no import lock. Symlinks are skipped with a warning.
 - Id: frontmatter `name`, else the file stem (agent) or directory name (skill). Frontmatter fields:
-  `name`, `description`, `model`, `steps`, `mode`, `disable-model-invocation`. `tools`,
-  `permissions`, and `allowed-tools` warn and are not applied. Invalid frontmatter (unclosed
-  `---`, bad YAML) warns and skips the file. Missing frontmatter uses the fallback name and the
-  whole body.
+  `name`, `description`, `model`, `steps`, `mode`, `permissions`, `disable-model-invocation`.
+  `mode` parses to `AgentMode` (`all`/`primary`/`subagent`, unknown warns and becomes `all`).
+  `permissions` parses to `PermissionRule`s; `allow` entries are dropped with a warning, and an
+  invalid block is dropped. `tools` and `allowed-tools` warn and are not applied. Invalid
+  frontmatter (unclosed `---`, bad YAML) warns and skips the file. Missing frontmatter uses the
+  fallback name and the whole body.
 - Skill loading is progressive. `compose_definition_prompt` appends a `## Skills` block with
   `<id>: <description>` for each skill where `description` is set and `disable-model-invocation`
   is not. The block is capped at 8 KiB and screened. The read-only `skill-load` tool
@@ -119,7 +121,7 @@ Rules for all shapes:
   instructions to the system prompt through `compose_definition_prompt` after
   `compose_system_prompt`. Unknown ids fail with the available ids. Model precedence is `--model`
   → `MEERAI_MODEL` → agent `model` → settings/provider default; an agent model containing `:`
-  warns and is ignored. `steps`/`mode` print a note and are not applied.
+  warns and is ignored. `steps` prints a note for a primary agent; `mode` filters selection.
 - TUI: `/agent <id>` and `/skill <id>` send `AgentCommand::ApplyAgent`/`ApplySkill`. Typing `@`
   opens the Mentions popup (`render_completion_popup`, title `Mentions`): agents first, then
   skills, then files. Agent rows show `<id>|agent` (cyan), skill rows `<id>|skill` (magenta), each
@@ -274,7 +276,9 @@ Rules for all shapes:
   redaction is a guarantee.
 - Retitling a session that already has a user message, or dropping the resume seed for token
   counters (`set_harness`, `session_usage_from_events`).
-- Adding `.meerai/agents`/`.meerai/skills` discovery, copying or importing definitions, or writing
-  an import lock. Discovery is read-only at the project root and `.agents` wins duplicate ids.
-- Applying definition `tools`/`permissions`/`allowed-tools`, honouring `steps`/`mode`, or switching
-  provider from an agent `model` that contains `:`.
+- Adding a second definition directory without updating the precedence chain, copying or importing
+  definitions, or writing an import lock. Discovery is read-only at the project root and `.meerai`
+  wins duplicate ids.
+- Applying definition `tools`/`allowed-tools`, honouring `steps` as a primary-agent budget, letting
+  a definition `permissions` block carry `allow`, or switching provider from an agent `model` that
+  contains `:`.

@@ -78,10 +78,10 @@ make verify                                    # fmt --check + clippy + test (al
 - Redaction keeps no log-only copy of a secret.
 - Keep the shell-safety allowlist conservative.
 - Do not let a project file control session retention.
-- Agent and skill definitions are read-only and supply prompt text only. `skill-load` may read
-  files inside a skill directory; nothing grants tools or permissions. `.meerai` is never a
-  definition directory: do not scan or create `.meerai/agents` or `.meerai/skills`, and never copy
-  definitions.
+- Agent and skill definitions are read-only inputs. They supply prompt text, and an agent
+  definition adds `permissions` that tighten only. `skill-load` may read files inside a skill
+  directory; nothing grants tools or permissions. Discovery order is `.meerai`, then `.agents`,
+  then `.claude`: never copy or import definitions.
 - Never describe agent or skill definitions, hooks, or an ACP backend as a security boundary.
   Hooks run unsandboxed host commands; an ACP backend keeps its own tools and policy.
 

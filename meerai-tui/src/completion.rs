@@ -562,6 +562,7 @@ fn mention_description(source: &DefinitionSource, description: Option<&str>) -> 
     let source = match source {
         DefinitionSource::User => "user".to_string(),
         DefinitionSource::Pack(id) => format!("pack {id}"),
+        DefinitionSource::Meerai => ".meerai".to_string(),
         DefinitionSource::Agents => ".agents".to_string(),
         DefinitionSource::Claude => ".claude".to_string(),
     };
@@ -726,7 +727,8 @@ mod tests {
             description: description.map(str::to_string),
             model: None,
             steps: None,
-            mode: None,
+            mode: meerai_common::definitions::AgentMode::All,
+            permissions: Vec::new(),
             prompt: String::new(),
             path: PathBuf::from(format!(".agents/agents/{id}.md")),
             token_estimate: 0,

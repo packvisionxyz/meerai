@@ -194,6 +194,8 @@ pub struct HostDefinitionInfo {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_invocable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     pub token_estimate: u64,
     pub warnings: Vec<String>,
     pub supporting_files: Vec<String>,

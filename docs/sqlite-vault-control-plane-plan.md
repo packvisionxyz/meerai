@@ -255,9 +255,9 @@ CREATE TABLE usage_ledger (
 ### 3.7 Skills & Declarative Pack Management
 
 - **Modify [definitions.rs](../meerai-common/src/definitions.rs), [hooks.rs](../meerai-common/src/hooks.rs); add `meerai-common/src/packs.rs`:**
-  - Discover definitions across user-global `~/.config/meerai/{skills,agents}`, trusted installed packs in `~/.local/share/meerai/packs/<id>/`, and project `.agents/` / `.claude/` (never `.meerai/agents` or `.meerai/skills` per [AGENTS.md](../AGENTS.md)).
+  - Discover definitions across user-global `~/.config/meerai/{skills,agents}`, trusted installed packs in `~/.local/share/meerai/packs/<id>/`, and project `.meerai/` then `.agents/` / `.claude/` (see [AGENTS.md](../AGENTS.md)).
   - Track diagnostics (`source_path`, `shadowed_by`, `token_estimate`, `parse_warnings`, `supporting_files`).
-  - Keep `tools`, `permissions`, and `allowed-tools` warning-only (prompt-only rule in [AGENTS.md](../AGENTS.md)). Pack hooks and `mcp_servers` declarations are validated and shown in diagnostics, but they are not executed or connected.
+  - Keep `tools` and `allowed-tools` warning-only; agent `permissions` join a subagent's policy and drop `allow`, so a definition tightens only (prompt-only rule in [AGENTS.md](../AGENTS.md)). Pack hooks and `mcp_servers` declarations are validated and shown in diagnostics, but they are not executed or connected.
   - **Version-Controlled Packs (`meerai-pack.yml`):** Declare `name`, `version`, `skills`, `agents`, `hooks`, `mcp_servers`. Manage via `git2` (pinned commit SHA in `installed_packs`) and expose CLI (`meerai pack add|list|update|pin|trust|remove`) + Host/TUI/Web UI.
 
 ### 3.8 Host, Web Protocol, TUI, and Web Client Parity

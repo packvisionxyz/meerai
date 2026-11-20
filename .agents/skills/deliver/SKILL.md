@@ -4,7 +4,7 @@ description: Change delivery and infrastructure — CI/CD pipelines, reusable wo
 license: MIT
 compatibility: Works with any agent supporting the Agent Skills standard. Subagent delegation is optional; run inline when the harness has no subagents.
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
   tags: "cicd, terraform, infrastructure, deployment"
 ---
 
@@ -43,8 +43,8 @@ If the profile is missing, discover:
 
 | Change | Read | Delegate to |
 | :--- | :--- | :--- |
-| Pipeline, job, reusable action, trigger, permissions | [`references/pipeline-review.md`](references/pipeline-review.md) | [`agents/iac-implementer.md`](agents/iac-implementer.md) |
-| Terraform/Pulumi/CDK, environment, state, module | [`references/iac-review.md`](references/iac-review.md) | [`agents/iac-implementer.md`](agents/iac-implementer.md) |
+| Pipeline, job, reusable action, trigger, permissions | [`references/pipeline-review.md`](references/pipeline-review.md) | [`infra-implementer`](../../../.meerai/agents/infra-implementer.md) |
+| Terraform/Pulumi/CDK, environment, state, module | [`references/iac-review.md`](references/iac-review.md) | [`infra-implementer`](../../../.meerai/agents/infra-implementer.md) |
 | Domain, hostname, DNS, access gate | `references/iac-review.md` § Domains | implementer + reviewer |
 | Secret rotation or new credential | both references | reviewer before apply |
 | Release/build artifact | `references/pipeline-review.md` § Release | implementer |
@@ -64,8 +64,8 @@ destructive change also gets a read-only reviewer.
 
 Briefs:
 
-- [`agents/iac-implementer.md`](agents/iac-implementer.md)
-- [`agents/infra-reviewer.md`](agents/infra-reviewer.md)
+- [`infra-implementer`](../../../.meerai/agents/infra-implementer.md)
+- [`infra-reviewer`](../../../.meerai/agents/infra-reviewer.md)
 
 Never let a subagent run `apply`, deploy to a shared environment, rotate a key, or delete state.
 Those require explicit user approval and the sanctioned workflow.
@@ -116,5 +116,5 @@ Stop and ask when a change would:
 
 - [`references/pipeline-review.md`](references/pipeline-review.md)
 - [`references/iac-review.md`](references/iac-review.md)
-- [`agents/iac-implementer.md`](agents/iac-implementer.md)
-- [`agents/infra-reviewer.md`](agents/infra-reviewer.md)
+- [`infra-implementer`](../../../.meerai/agents/infra-implementer.md)
+- [`infra-reviewer`](../../../.meerai/agents/infra-reviewer.md)

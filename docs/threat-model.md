@@ -172,12 +172,14 @@ guarantee (§5.1).
   messages when an authorized tool touches their directory.
 - **Agent and skill definitions.** `load_definitions`
   (`meerai-common/src/definitions.rs`) is read-only discovery at the
-  project root: `.agents/agents/*.md` and `.agents/skills/*/SKILL.md`
-  before `.claude/...`; `.agents` wins duplicate ids; symlinks are skipped
-  with a warning; `.meerai/agents` and `.meerai/skills` are never scanned or
-  created. Definitions are **text only**: frontmatter `tools`, `permissions`,
-  and `allowed-tools` warn and are ignored; no tool registration, permission
-  mapping, script, or sandbox implication. Skill descriptions enter the prompt
+  project root: `.meerai/agents/*.md` and `.meerai/skills/*/SKILL.md`, then
+  `.agents/...`, then `.claude/...`; `.meerai` wins duplicate ids; symlinks
+  are skipped with a warning; nothing is copied or created. Definitions supply
+  **prompt text** and, for agents, `permissions` that join a subagent's policy
+  as agent rules. `allow` entries are dropped with a warning, so a definition
+  tightens but never grants; `tools` and `allowed-tools` warn and are ignored.
+  There is no tool registration, script, or sandbox implication. Skill
+  descriptions enter the prompt
   as an untrusted, screened index capped at 8 KiB. The read-only `skill-load`
   tool returns `SKILL.md` or one supporting file, capped at 16 KiB. It accepts
   only a listed file name, rejects path separators and symlinks, and never
@@ -256,8 +258,12 @@ containment:
   and forced into `ApprovalMode::Plan`. `build` (32 steps) and `general`
   (16 steps) write under the parent's mode. Step budgets clamp to the
   parent's `max_steps_per_turn`.
-- **Custom definitions:** all repository-defined agents run read-only
-  (`Plan`, read-only tools, 16 steps) regardless of frontmatter.
+- **Custom definitions:** a repository-defined agent is offered to
+  `subagent-run` only when its `mode` is `all` or `subagent`. It runs
+  write-capable under the parent's mode, inherits the parent rules, and adds its
+  own `permissions` after them. `allow` entries are dropped, so a definition
+  can tighten but never grant; a definition that denies `edit` stays read-only
+  in practice.
 - **Forwarded approvals and inherited world:** child approvals route to
   the parent overlay; the parent session token cap propagates; child tools
   inherit the parent's `ExecutionWorld`. Usage rolls up into parent

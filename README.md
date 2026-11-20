@@ -129,12 +129,15 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   `python3` or `node`. Shell and script children run in the OS sandbox when one
   is available, with provider secrets removed from the environment.
 - **Agents, skills, and packs:** read-only markdown definitions from user
-  config, trusted packs, `.agents`, then `.claude`. The model sees a skill list
+  config, trusted packs, `.meerai`, `.agents`, then `.claude`. The model sees a
+  skill list
   with one line per described skill and loads a skill on demand. An applied
-  definition adds prompt text only; it cannot grant tools or permissions. See
+  definition adds prompt text; agent `permissions` can tighten a subagent's
+  policy but never grant. See
   [Agents and skills](#agents-and-skills).
 - **Subagents and routing:** isolated child sessions with `explore`, `plan`,
-  `build`, and `general` profiles, forwarded approvals, and usage rollup; task
+  `build`, and `general` profiles, plus custom `mode: subagent` definitions,
+  forwarded approvals, and usage rollup; task
   routes for `default`, `explore`, `plan`, `build`, `review`, `compact`,
   `recovery`, and `memory` with their own model, caps, and concurrency.
 - **Sessions and checkpoints:** an append-only event log, `--continue`,
@@ -384,29 +387,34 @@ as a non-retryable provider error instead of an empty stream.
 
 meerai reads markdown agent and skill definitions from the project root, which is
 the same root used for project config. Agents apply as prompt text. Skills load
-on demand.
+on demand. Agent definitions marked `mode: subagent` are the only ones available
+to the `subagent-run` tool.
 
 | Kind | Paths, in priority order | Id |
 | --- | --- | --- |
-| Agent | user `~/.config/meerai/agents/*.md`, trusted pack agents, `.agents/agents/*.md`, then `.claude/agents/*.md` | frontmatter `name`, else the file name |
-| Skill | user `~/.config/meerai/skills/*/SKILL.md`, trusted pack skills, `.agents/skills/*/SKILL.md`, then `.claude/skills/*/SKILL.md` | frontmatter `name`, else the directory name |
+| Agent | user `~/.config/meerai/agents/*.md`, trusted pack agents, `.meerai/agents/*.md`, `.agents/agents/*.md`, then `.claude/agents/*.md` | frontmatter `name`, else the file name |
+| Skill | user `~/.config/meerai/skills/*/SKILL.md`, trusted pack skills, `.meerai/skills/*/SKILL.md`, `.agents/skills/*/SKILL.md`, then `.claude/skills/*/SKILL.md` | frontmatter `name`, else the directory name |
 
 - Priority is user-global, then enabled and trusted installed packs, then
-  `.agents`, then `.claude`. If two sources define the same id, the higher
-  source wins and a warning plus a shadow entry names both paths. The output is
-  sorted by id.
+  `.meerai`, then `.agents`, then `.claude`. If two sources define the same id,
+  the higher source wins and a warning plus a shadow entry names both paths. The
+  output is sorted by id.
 - Pack definitions load only when the pack is enabled and trusted
   (`meerai pack enable|trust`). Pack hooks and `mcp_servers` declarations are
   validated and listed in diagnostics, but they are not executed or connected.
-- `.meerai` holds configuration and instructions only. meerai does not scan or
-  create `.meerai/agents` or `.meerai/skills`.
+- `.meerai/agents` and `.meerai/skills` are repository-owned definition
+  directories. Use them for this repository's native agents and skills.
 - Discovery is read-only. meerai copies nothing, writes no import lock, and
   never edits the definition files. Symlinks are skipped with a warning.
-- Frontmatter fields: `name`, `description`, `model`, `steps`, `mode`, and
-  `disable-model-invocation`. `tools`, `permissions`, and `allowed-tools` print
-  a per-definition warning and are not applied. Invalid frontmatter prints a
-  warning and skips the file. Without frontmatter, the id comes from the file or
-  directory name and the body is the prompt.
+- Frontmatter fields: `name`, `description`, `model`, `steps`, `mode`,
+  `permissions`, and `disable-model-invocation`. `mode` is `all` (default),
+  `primary`, or `subagent`: a primary-only agent is hidden from `--agent` and
+  the pickers, and a subagent-only agent is offered only to `subagent-run`.
+  `permissions` are applied to a subagent's policy after the parent rules;
+  `allow` entries are dropped with a warning, so a definition tightens only.
+  `tools` and `allowed-tools` print a per-definition warning and are not applied.
+  Invalid frontmatter prints a warning and skips the file. Without frontmatter,
+  the id comes from the file or directory name and the body is the prompt.
 - Skill loading is progressive. The system prompt lists each skill that has a
   description as `<id>: <description>`. The model calls `skill-load` to read
   `SKILL.md`, and calls it again with a file name to read one supporting file.
@@ -417,7 +425,8 @@ on demand.
 - `skill-load` reads only inside the skill directory. It never runs scripts or
   reads files outside that directory.
 - Definitions are repository-controlled prompt text. They cannot run tools,
-  grant permissions, or imply a sandbox. Treat them as untrusted content.
+  grant permissions, or imply a sandbox; agent `permissions` can only tighten a
+  subagent. Treat them as untrusted content.
 
 Startup flags apply definitions to the system prompt:
 
@@ -427,14 +436,14 @@ meerai --skill orchestrate
 ```
 
 - `--agent <ID>` selects one agent. Repeating the flag is an error. The id must
-  exist.
+  exist, and the definition must not be `mode: subagent`.
 - `--skill <ID>` selects a skill and is repeatable. Skill text is appended
   before the agent text.
 - An unknown id fails with the list of available ids.
 - Model precedence is `--model` -> `MEERAI_MODEL` -> the agent `model` -> the
   configured model, then the provider default. An agent model that contains `:`
-  is ignored with a warning because it would switch provider. `steps` and
-  `mode` print a note and are not applied.
+  is ignored with a warning because it would switch provider. `steps` prints a
+  note and is not applied to a primary agent.
 
 TUI commands and mentions:
 
@@ -591,11 +600,11 @@ Session directories are `0700` and database/session files are `0600` on Unix.
 - `<project-root>/.meerai/instructions.md` and `<project-root>/AGENTS.md` —
   prompt instructions. See
   [Prompt and repository instructions](#prompt-and-repository-instructions).
-- `<project-root>/.agents/...` then `<project-root>/.claude/...` — agent and
+- `<project-root>/.meerai/agents/...` and `<project-root>/.meerai/skills/...`, then
+  `<project-root>/.agents/...`, then `<project-root>/.claude/...` — agent and
   skill definitions. See [Agents and skills](#agents-and-skills).
 
-meerai never writes project files, `.meerai/agents`, `.meerai/skills`, or
-project-local sessions.
+meerai never writes project files, definition files, or project-local sessions.
 
 ### Project config
 
@@ -812,11 +821,12 @@ for example `OPENROUTER_API_KEY` (also `OPEN_ROUTER_API_KEY`) and
 - **Repository input is opt-in.** `.env` is not loaded implicitly. `AGENTS.md`
   and `.meerai/instructions.md` are injected into the prompt, so review them
   like code.
-- **Agent and skill definitions are prompt text.** `.agents/agents`,
-  `.agents/skills`, `.claude/agents`, and `.claude/skills` are
-  repository-controlled content that reaches the model as instructions. They
-  cannot run tools, map permissions, or change the sandbox. Review them like
-  code.
+- **Agent and skill definitions are prompt text.** `.meerai/agents`,
+  `.meerai/skills`, `.agents/agents`, `.agents/skills`, `.claude/agents`, and
+  `.claude/skills` are repository-controlled content that reaches the model as
+  instructions. Definition `permissions` can only tighten a subagent's policy:
+  `allow` entries are dropped. Definitions cannot run tools, add capability, or
+  change the sandbox. Review them like code.
 - **Hooks run arbitrary host commands.** Hook entries execute with your
   privileges outside the sandbox. Project hooks stay disabled until you run
   `meerai hooks trust`, accept the one-time TUI prompt, set

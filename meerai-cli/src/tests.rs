@@ -1,5 +1,6 @@
 use meerai_agents::events::{ApprovalDecision, ApprovalKind, ApprovalRequest, RequestId};
 use meerai_agents::{AgentCommand, AgentEvent};
+use meerai_common::definitions::AgentMode;
 use meerai_common::settings::{AppSettings, ContextSettings};
 use meerai_core::EffectClass;
 use meerai_core::env::now_millis;
@@ -147,7 +148,8 @@ fn test_agent(id: &str, model: Option<&str>, steps: Option<usize>) -> AgentDefin
         description: None,
         model: model.map(str::to_string),
         steps,
-        mode: None,
+        mode: AgentMode::All,
+        permissions: Vec::new(),
         prompt: format!("Prompt for {id}."),
         path: std::path::PathBuf::from(format!(".agents/agents/{id}.md")),
         token_estimate: 0,
@@ -169,6 +171,24 @@ fn test_skill(id: &str) -> SkillDefinition {
         warnings: Vec::new(),
         supporting_files: Vec::new(),
     }
+}
+
+#[test]
+fn subagent_only_agents_are_not_selectable_as_primary() {
+    let mut subagent = test_agent("implementer", None, None);
+    subagent.mode = AgentMode::Subagent;
+    let agents = vec![test_agent("reviewer", None, None), subagent];
+
+    let found = select_agent_definition(&agents, "reviewer").unwrap();
+    assert_eq!(found.id, "reviewer");
+
+    let error = select_agent_definition(&agents, "implementer").unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("mode: subagent"));
+    assert!(message.contains("subagent-run"));
+
+    let unknown = select_agent_definition(&agents, "missing").unwrap_err();
+    assert!(unknown.to_string().contains("available agents: reviewer"));
 }
 
 #[test]

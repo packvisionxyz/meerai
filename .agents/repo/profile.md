@@ -52,7 +52,7 @@
 | `meerai-common/` | SQLite-backed `AppSettings`, project-root discovery (`find_project_root`) plus project settings load/merge (`load_project_settings`, `merge_project_settings`), markdown agent/skill discovery (`definitions`: `load_definitions`, `load_definitions_for`, user/pack/project sources, diagnostics), hook configuration (`hooks`: `HookEvent`, `HookEntry`, `load_hooks`), declarative packs (`packs`) |
 | `meerai-client/` | Client-facing provider surface: `ProviderCatalog` + `providers.yml`, `ModelInfo`, `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract, `MemorySecretStore`, auth listing |
 | `meerai-providers/` | `genai` client factory + AEAD `VaultSecretStore` (ChaCha20-Poly1305, OS keychain DEK or Argon2id passphrase); re-exports the client surface |
-| `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig` (+ `TokenPricing`), `AgentEvent`, `intercept` (`Interceptor`/`StepPlan`/`ToolPlan`/`ToolContext`/`ToolOutcome`, async `before_tool`), hook engine (`hooks`: `HookEngine`/`HookContext`/`HookReport`, `HookFired` logging), `question-ask` (`QuestionAsked`/`AnswerQuestion`, not an approval), `skill-load` (`skill_tool`), `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins + read-only custom child runs, `child_session_id` on `SubagentRun`), delegated `acp-run` (`acp_subagent`: `AcpRunToolset`/`AcpSpawner`), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
+| `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig` (+ `TokenPricing`), `AgentEvent`, `intercept` (`Interceptor`/`StepPlan`/`ToolPlan`/`ToolContext`/`ToolOutcome`, async `before_tool`), hook engine (`hooks`: `HookEngine`/`HookContext`/`HookReport`, `HookFired` logging), `question-ask` (`QuestionAsked`/`AnswerQuestion`, not an approval), `skill-load` (`skill_tool`), `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins + custom child runs filtered by `mode` and tightened by definition `permissions`, `child_session_id` on `SubagentRun`), delegated `acp-run` (`acp_subagent`: `AcpRunToolset`/`AcpSpawner`), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
 | `meerai-host/` | UI-neutral host seams (`SessionOpener`, `OpenedSession`, `WorkspaceQuery`/`LocalWorkspace`, `WebServerLauncher`), shared `diff`/`search`/`syntax`/`theme`/`update`, and live `SessionRegistry` event pump/ring |
 | `meerai-web-protocol/` | Serde-only Wasm-safe wire DTOs (`SnapshotResponse`, `ViewEvent`, `HostInfoDto`, `ProvidersResponse`, `SettingsSnapshotDto`, `ApiError`) |
 | `meerai-web/` | Loopback HTTP/SSE server (`hyper` + `subtle` Basic auth, `Host`/`Origin`/JSON checks, parity REST/SSE routes, embedded Wasm bundle serving) |
@@ -200,17 +200,20 @@ Notes:
     and `docs/threat-model.md`. Caveats: signing secrets are operator-configured, and Windows uses
     Phase-1 `HostWorld` guards (see `docs/threat-model.md`).
 21. **Agent/skill definitions are untrusted text (M12):** discovery is read-only and
-    starts at the project root. `.agents/agents/*.md` and `.agents/skills/*/SKILL.md` load before
-    `.claude/...`; a duplicate id keeps `.agents` and the warning names both paths; the catalog is
-    sorted by id. `.meerai` is config, sessions, and instructions only — never scan, create, or copy
-    into `.meerai/agents`/`.meerai/skills`, and add no import lock. Frontmatter is `name`,
-    `description`, `model`, `steps`, `mode`, and `disable-model-invocation`;
-    `tools`/`permissions`/`allowed-tools` warn and are not applied; invalid frontmatter warns and
-    skips. Missing frontmatter uses the file or directory name and the body. Skills with a
+    starts at the project root. `.meerai/agents/*.md` and `.meerai/skills/*/SKILL.md` load first,
+    then `.agents/...`, then `.claude/...`; a duplicate id keeps the higher source and the warning
+    names both paths; the catalog is sorted by id. Nothing is copied and there is no import lock.
+    Frontmatter is `name`, `description`, `model`, `steps`, `mode`, `permissions`, and
+    `disable-model-invocation`. `mode` is `all`, `primary`, or `subagent`: primary-only definitions
+    are hidden from `--agent` and the pickers, subagent-only definitions are hidden from those and
+    offered to `subagent-run`. `permissions` are applied to a subagent's policy after the parent
+    rules, and `allow` entries are dropped with a warning so a definition tightens only.
+    `tools`/`allowed-tools` warn and are not applied; invalid frontmatter warns and skips.
+    Missing frontmatter uses the file or directory name and the body. Skills with a
     description and no `disable-model-invocation` join a screened 8 KiB prompt index; the read-only
     `skill-load` tool returns `SKILL.md` or one listed supporting file inside the skill directory
-    (16 KiB cap), rejecting separators and symlinks. Definitions grant no tools, permissions,
-    scripts, or sandbox, and a `:` in an agent `model` is ignored (no provider switch). Startup
+    (16 KiB cap), rejecting separators and symlinks. Definitions grant no tools, scripts, or
+    sandbox, and a `:` in an agent `model` is ignored (no provider switch). Startup
     `--agent` takes one id (repeating is an error); `--skill` is repeatable; unknown ids fail with
     the available ids. The TUI exposes `/agent`/`/skill`, `/agents`/`/skills` pickers, and a `@`
     Mentions popup (agents, skills, files; ids colored teal for agents and blue for skills; Tab
@@ -323,7 +326,7 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 | Free-fn tool | `#[tool(...)] async fn` generating `<PascalName>Toolset` | `meerai-macros/src/tool/attribute_tool.rs` |
 | Hand-written toolset | `impl Toolset` with `definition`/`contain`/`effect_of`/`invoke_structured` | `meerai-tools/src/code/mod.rs` |
 | Config | `AppSettings` + `find_project_root` + `load_settings_from` + `load_project_settings`/`merge_project_settings` + `${VAR\|default}` expansion | `meerai-common/src/settings.rs` |
-| Definitions | `load_definitions(&project_root)` → `DefinitionCatalog`; `.agents` before `.claude`, duplicate warning, sorted by id | `meerai-common/src/definitions.rs` |
+| Definitions | `load_definitions(&project_root)` → `DefinitionCatalog`; `.meerai` before `.agents` before `.claude`, duplicate warning, sorted by id | `meerai-common/src/definitions.rs` |
 | Secrets | AEAD vault (`vault_secrets`) for API keys and ChatGPT plan OAuth, OS keychain DEK (macOS through `/usr/bin/security`, not a per-app boundary) or `MEERAI_VAULT_PASSPHRASE`, no plaintext fallback | `meerai-providers/src/secrets/vault.rs`, `meerai-store/src/v1.sql` |
 | Redaction | `redact_run` patterns and `[REDACTED:<kind>]` replacement before settle | `meerai-agents/src/redact.rs`, `multi_turn_agent.rs` |
 | Session log | `Session::append` event, `derive_messages` projection | `meerai-session/src/session.rs`, `projection.rs` |
@@ -528,9 +531,10 @@ Detail in [`infra.md`](infra.md). Summary:
   `.meerai/instructions.md` (32 KiB/file, 64 KiB block); scoped `AGENTS.md` injected once per turn
   when a tool touches its directory (16 KiB, max 8 files). The agent appends an `Active model:`
   identity line at request time (refreshed by `set_model`) and logs it with the system prompt.
-- Agent/skill definitions (M12): read-only discovery at the project root from `.agents/agents` and
-  `.agents/skills` first, then `.claude/agents` and `.claude/skills`; `.agents` wins duplicate ids;
-  no `.meerai` definition directories and no copies. Skills with a description and no
+- Agent/skill definitions (M12): read-only discovery at the project root from `.meerai/agents` and
+  `.meerai/skills` first, then `.agents/agents` and `.agents/skills`, then `.claude/agents` and
+  `.claude/skills`; the higher source wins duplicate ids; no copies and no import lock. Skills with
+  a description and no
   `disable-model-invocation` join an 8 KiB screened prompt index; the read-only `skill-load` tool
   returns `SKILL.md` or one listed supporting file inside the skill directory (16 KiB cap).
   Startup `--agent` takes one id (repeating is an error) and repeatable `--skill` append
@@ -542,9 +546,10 @@ Detail in [`infra.md`](infra.md). Summary:
   `@agent/<id>`/`@skill/<id>` stays in the buffer; unknown and partial tokens render as typed. On
   submit the token is applied and stripped from the prompt sent to the model, and a directly
   submitted user message keeps it as the same `<id>` chip (replay shows the stripped prompt).
-  Frontmatter `tools`, `permissions`, and `allowed-tools` are warning-only; `steps`/`mode` are not
-  applied; a `:` model is ignored. Definitions are untrusted prompt text and grant no tools or
-  permissions.
+  Frontmatter `mode` is `all`/`primary`/`subagent` and filters `--agent`, the pickers, and
+  `subagent-run`; `permissions` join a subagent's policy after the parent rules and drop `allow`
+  with a warning; `tools`/`allowed-tools` are warning-only; `steps` is note-only for a primary
+  agent; a `:` model is ignored. Definitions are untrusted prompt text and grant no new capability.
 - OpenAI plan usage uses the official **Sign in with ChatGPT** OSS flow
   (`chatgpt.tokens.use.direct`, `api.openai.com/v1/responses`), not the Codex
   `backend-api`. One `openai` provider serves an API key or an OAuth plan credential. Plan

@@ -4,7 +4,7 @@ description: Plan and orchestrate a multi-area feature or initiative using subag
 license: MIT
 compatibility: Works with any agent supporting the Agent Skills standard. Requires a subagent/delegation tool for parallel execution; otherwise run the phases inline.
 metadata:
-  version: "1.2.0"
+  version: "1.3.0"
   tags: "orchestration, planning, subagents, delivery"
 ---
 
@@ -42,7 +42,7 @@ wrong one.
 ## Phase 1 — Recon
 
 Use the **investigate** skill or spawn read-only recon subagents in parallel, each with one narrow
-question. Brief: [`../investigate/agents/recon.md`](../investigate/agents/recon.md).
+question. Agent: [`recon`](../../../.meerai/agents/recon.md).
 
 Good recon questions:
 
@@ -69,16 +69,18 @@ Template: [`references/planning-template.md`](references/planning-template.md).
 
 Every subagent gets a self-contained brief. Subagents do not see this conversation.
 
-Paths are relative to this skill's directory. Resolve them against the installed skills directory
-before putting a brief into a subagent prompt — subagents start at the repository root.
+Agent definitions live in `.meerai/agents/` at the project root. Pass the id to the harness's
+subagent tool; the definition carries its own model, mode, and permission rules, so do not restate
+or widen them.
 
-| Work | Brief | Agent type |
+| Work | Agent | Notes |
 | :--- | :--- | :--- |
-| Recon | [`../investigate/agents/recon.md`](../investigate/agents/recon.md) | read-only explorer |
-| Code implementation | [`../implement/agents/implementer.md`](../implement/agents/implementer.md) | general |
-| Verification | [`../implement/agents/verifier.md`](../implement/agents/verifier.md) | general |
-| IaC / pipeline | [`../deliver/agents/iac-implementer.md`](../deliver/agents/iac-implementer.md) | general |
-| Infra review | [`../deliver/agents/infra-reviewer.md`](../deliver/agents/infra-reviewer.md) | general |
+| Recon | [`recon`](../../../.meerai/agents/recon.md) | read-only |
+| Fast lookup | [`search`](../../../.meerai/agents/search.md) | read-only, budgeted |
+| Code implementation | [`implementer`](../../../.meerai/agents/implementer.md) | writes the owned paths |
+| Verification | [`verifier`](../../../.meerai/agents/verifier.md) | read-only, runs the gate |
+| IaC / pipeline | [`infra-implementer`](../../../.meerai/agents/infra-implementer.md) | plans, never applies |
+| Infra review | [`infra-reviewer`](../../../.meerai/agents/infra-reviewer.md) | read-only |
 
 Contract: [`references/delegation-contract.md`](references/delegation-contract.md).
 

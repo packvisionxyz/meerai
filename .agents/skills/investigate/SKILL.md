@@ -4,7 +4,7 @@ description: Investigate a codebase and answer questions about implementation, d
 license: MIT
 compatibility: Works with any agent supporting the Agent Skills standard. Subagent delegation is optional; run inline when the harness has no subagents.
 metadata:
-  version: "1.2.0"
+  version: "1.3.0"
   tags: "exploration, architecture, patterns, rules"
 ---
 
@@ -100,18 +100,18 @@ Default behavior: if the request contains more than one independent question, or
 profile and is unfamiliar, spawn one read-only subagent per question before answering. Otherwise
 run inline.
 
-| Situation | Pattern | Brief |
+| Situation | Pattern | Agent |
 | :--- | :--- | :--- |
 | One locate/rule/ownership question | Answer inline, fast-path budget | — |
-| Several independent locate/rule questions | One search subagent each, in parallel | [`agents/search.md`](agents/search.md) |
-| Two or more independent trace/pattern questions | One read-only recon subagent per question, in parallel | [`agents/recon.md`](agents/recon.md) |
-| Broad unfamiliar repo | One subagent for layout, one for the specific flow | [`agents/recon.md`](agents/recon.md) |
+| Several independent locate/rule questions | One search subagent each, in parallel | [`search`](../../../.meerai/agents/search.md) |
+| Two or more independent trace/pattern questions | One read-only recon subagent per question, in parallel | [`recon`](../../../.meerai/agents/recon.md) |
+| Broad unfamiliar repo | One subagent for layout, one for the specific flow | [`recon`](../../../.meerai/agents/recon.md) |
 | Follow-up depends on earlier findings | Continue the same subagent session | — |
 
-- Map the search agent to the harness's fastest explorer and its lowest thoroughness setting. The
+- Run `search` for the narrow cases and `recon` for traces, patterns, and blast radius. The search
   budget is what makes it fast; do not remove it to "be safe".
-- Map "read-only recon" to the harness's exploration agent. If there is none, use a general agent and
-  state **do not edit files** in the brief.
+- Each definition already declares `mode: subagent` and its `permissions`. Apply it by id; do not
+  restate or widen its constraints.
 - Subagents do not see your conversation; the brief must stand alone.
 - Require `path:line` evidence and labelled claims.
 - Keep recon read-only. Editing is the implement skill's job.
@@ -146,5 +146,5 @@ Answer first. The user wants the conclusion, not a travel log.
 
 - [`references/recon-playbook.md`](references/recon-playbook.md) — entry points by question type,
   tracing method, and what to read first in an unknown stack.
-- [`agents/search.md`](agents/search.md) — fast read-only search subagent brief, budgeted.
-- [`agents/recon.md`](agents/recon.md) — read-only recon subagent brief.
+- [`search`](../../../.meerai/agents/search.md) — fast read-only search subagent, budgeted.
+- [`recon`](../../../.meerai/agents/recon.md) — read-only recon subagent.

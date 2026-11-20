@@ -3,10 +3,13 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use meerai_policy::{Effect, PermissionRule};
 use serde::Deserialize;
 
 use crate::packs::{PACK_AGENTS_DIR, PACK_SKILLS_DIR, load_pack};
 
+const MEERAI_AGENTS_DIR: &str = ".meerai/agents";
+const MEERAI_SKILLS_DIR: &str = ".meerai/skills";
 const AGENTS_AGENTS_DIR: &str = ".agents/agents";
 const AGENTS_SKILLS_DIR: &str = ".agents/skills";
 const CLAUDE_AGENTS_DIR: &str = ".claude/agents";
@@ -21,6 +24,7 @@ const MAX_SKILL_DESCRIPTION_CHARS: usize = 1024;
 pub enum DefinitionSource {
     User,
     Pack(String),
+    Meerai,
     Agents,
     Claude,
 }
@@ -30,9 +34,45 @@ impl DefinitionSource {
         match self {
             Self::User => "user".to_string(),
             Self::Pack(id) => format!("pack:{id}"),
+            Self::Meerai => ".meerai".to_string(),
             Self::Agents => ".agents".to_string(),
             Self::Claude => ".claude".to_string(),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AgentMode {
+    #[default]
+    All,
+    Primary,
+    Subagent,
+}
+
+impl AgentMode {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "all" => Some(Self::All),
+            "primary" => Some(Self::Primary),
+            "subagent" => Some(Self::Subagent),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Primary => "primary",
+            Self::Subagent => "subagent",
+        }
+    }
+
+    pub fn selectable_primary(self) -> bool {
+        matches!(self, Self::All | Self::Primary)
+    }
+
+    pub fn runnable_as_subagent(self) -> bool {
+        matches!(self, Self::All | Self::Subagent)
     }
 }
 
@@ -52,8 +92,9 @@ pub struct AgentDefinition {
     pub source: DefinitionSource,
     pub description: Option<String>,
     pub model: Option<String>,
+    pub mode: AgentMode,
     pub steps: Option<usize>,
-    pub mode: Option<String>,
+    pub permissions: Vec<PermissionRule>,
     pub prompt: String,
     pub path: PathBuf,
     pub token_estimate: u64,
@@ -199,13 +240,19 @@ pub fn load_definitions_with_sources(
         }
     }
 
-    for source in [DefinitionSource::Agents, DefinitionSource::Claude] {
+    for source in [
+        DefinitionSource::Meerai,
+        DefinitionSource::Agents,
+        DefinitionSource::Claude,
+    ] {
         let agents_dir = match source {
+            DefinitionSource::Meerai => MEERAI_AGENTS_DIR,
             DefinitionSource::Agents => AGENTS_AGENTS_DIR,
             DefinitionSource::Claude => CLAUDE_AGENTS_DIR,
             _ => unreachable!(),
         };
         let skills_dir = match source {
+            DefinitionSource::Meerai => MEERAI_SKILLS_DIR,
             DefinitionSource::Agents => AGENTS_SKILLS_DIR,
             DefinitionSource::Claude => CLAUDE_SKILLS_DIR,
             _ => unreachable!(),
@@ -318,19 +365,81 @@ fn parse_agent_file(
         .and_then(|stem| stem.to_str())
         .unwrap_or_default();
     let id = definition_id(parsed.meta.name.as_deref(), fallback)?;
+    let mode = parse_agent_mode(parsed.meta.mode.as_deref(), path, warnings, &mut local);
+    let permissions = parse_agent_permissions(parsed.meta.permissions, path, warnings, &mut local);
     Some(AgentDefinition {
         id,
         source,
         description: parsed.meta.description,
         model: parsed.meta.model,
+        mode,
         steps: parsed.meta.steps,
-        mode: parsed.meta.mode,
+        permissions,
         token_estimate: token_estimate(&parsed.body),
         warnings: local,
         supporting_files: Vec::new(),
         prompt: parsed.body,
         path: path.to_path_buf(),
     })
+}
+
+fn parse_agent_mode(
+    raw: Option<&str>,
+    path: &Path,
+    warnings: &mut Vec<String>,
+    local: &mut Vec<String>,
+) -> AgentMode {
+    let Some(raw) = raw else {
+        return AgentMode::All;
+    };
+    AgentMode::parse(raw).unwrap_or_else(|| {
+        let warning = format!(
+            "{}: unknown agent mode '{raw}'; expected all, primary, or subagent (using all)",
+            path.display()
+        );
+        warnings.push(warning.clone());
+        local.push(warning);
+        AgentMode::All
+    })
+}
+
+fn parse_agent_permissions(
+    raw: Option<serde_yaml::Value>,
+    path: &Path,
+    warnings: &mut Vec<String>,
+    local: &mut Vec<String>,
+) -> Vec<PermissionRule> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    let rules: Vec<PermissionRule> = match serde_yaml::from_value(raw) {
+        Ok(rules) => rules,
+        Err(err) => {
+            let warning = format!(
+                "{}: invalid agent permissions dropped: {err}",
+                path.display()
+            );
+            warnings.push(warning.clone());
+            local.push(warning);
+            return Vec::new();
+        }
+    };
+    let mut applied = Vec::with_capacity(rules.len());
+    for rule in rules {
+        if rule.effect == Effect::Allow {
+            let warning = format!(
+                "{}: agent permission allow rule for {} {} is not applied; definitions tighten only",
+                path.display(),
+                String::from(rule.action),
+                rule.resource
+            );
+            warnings.push(warning.clone());
+            local.push(warning);
+            continue;
+        }
+        applied.push(rule);
+    }
+    applied
 }
 
 fn parse_skill_file(
@@ -350,6 +459,14 @@ fn parse_skill_file(
     let text = read_text(path, warnings)?;
     let mut local = Vec::new();
     let parsed = parse_markdown(&text, path, warnings, &mut local)?;
+    if parsed.meta.permissions.is_some() {
+        let warning = format!(
+            "{}: skill permission fields are warning-only and are not applied",
+            path.display()
+        );
+        warnings.push(warning.clone());
+        local.push(warning);
+    }
     let directory = path.parent().map(Path::to_path_buf).unwrap_or_default();
     let fallback = directory
         .file_name()
@@ -436,9 +553,9 @@ fn parse_markdown(
         },
     };
 
-    if meta.tools.is_some() || meta.permissions.is_some() || meta.allowed_tools.is_some() {
+    if meta.tools.is_some() || meta.allowed_tools.is_some() {
         let warning = format!(
-            "{}: agent tool/permission fields are warning-only and are not applied",
+            "{}: agent tool fields are warning-only and are not applied",
             path.display()
         );
         warnings.push(warning.clone());
@@ -683,7 +800,7 @@ mod tests {
             Some("openrouter:deepseek-v4.1#high")
         );
         assert_eq!(agent.steps, Some(8));
-        assert_eq!(agent.mode.as_deref(), Some("subagent"));
+        assert_eq!(agent.mode, AgentMode::Subagent);
         assert_eq!(
             agent.prompt,
             "Review the changes.\n\nList findings by severity."
@@ -962,7 +1079,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_and_permission_fields_warn_but_still_load() {
+    fn tool_fields_warn_but_permissions_apply() {
         let dir = temp_dir("tool_fields");
         write_file(
             &dir.join(".claude/agents/locked.md"),
@@ -972,11 +1089,101 @@ mod tests {
         let catalog = load_definitions(&dir);
 
         assert_eq!(catalog.agents.len(), 1);
-        assert_eq!(catalog.agents[0].prompt, "Read only.");
+        let agent = &catalog.agents[0];
+        assert_eq!(agent.prompt, "Read only.");
+        assert_eq!(agent.permissions.len(), 1);
+        assert_eq!(agent.permissions[0].effect, Effect::Deny);
+        assert_eq!(agent.permissions[0].resource, "*");
         assert_eq!(catalog.warnings.len(), 1);
-        assert!(catalog.warnings[0].contains("warning-only"));
-        assert_eq!(catalog.agents[0].warnings.len(), 1);
-        assert!(catalog.agents[0].warnings[0].contains("warning-only"));
+        assert!(catalog.warnings[0].contains("tool fields"));
+        assert_eq!(agent.warnings.len(), 1);
+        assert!(agent.warnings[0].contains("tool fields"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn permission_allow_rules_are_dropped_with_a_warning() {
+        let dir = temp_dir("permission_allow");
+        write_file(
+            &dir.join(".meerai/agents/partial.md"),
+            "---\nname: partial\npermissions:\n  - { action: shell, resource: \"*\", effect: allow }\n  - { action: edit, resource: \"src/**\", effect: ask }\n---\nBody.\n",
+        );
+
+        let catalog = load_definitions(&dir);
+
+        assert_eq!(catalog.agents.len(), 1);
+        let agent = &catalog.agents[0];
+        assert_eq!(agent.permissions.len(), 1);
+        assert_eq!(agent.permissions[0].effect, Effect::Ask);
+        assert_eq!(agent.permissions[0].resource, "src/**");
+        assert_eq!(catalog.warnings.len(), 1);
+        assert!(catalog.warnings[0].contains("allow rule"));
+        assert!(catalog.warnings[0].contains("tighten only"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_agent_permissions_are_dropped() {
+        let dir = temp_dir("permission_invalid");
+        write_file(
+            &dir.join(".meerai/agents/broken.md"),
+            "---\nname: broken\npermissions: not-a-list\n---\nBody.\n",
+        );
+
+        let catalog = load_definitions(&dir);
+
+        assert_eq!(catalog.agents.len(), 1);
+        assert!(catalog.agents[0].permissions.is_empty());
+        assert_eq!(catalog.warnings.len(), 1);
+        assert!(catalog.warnings[0].contains("invalid agent permissions"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_mode_parses_and_rejects_unknown_values() {
+        let dir = temp_dir("agent_mode");
+        write_file(
+            &dir.join(".meerai/agents/sub.md"),
+            "---\nname: sub\nmode: subagent\n---\nBody.\n",
+        );
+        write_file(
+            &dir.join(".meerai/agents/primary.md"),
+            "---\nname: primary\nmode: primary\n---\nBody.\n",
+        );
+        write_file(
+            &dir.join(".meerai/agents/plain.md"),
+            "---\nname: plain\n---\nBody.\n",
+        );
+        write_file(
+            &dir.join(".meerai/agents/odd.md"),
+            "---\nname: odd\nmode: sometimes\n---\nBody.\n",
+        );
+
+        let catalog = load_definitions(&dir);
+        let mode = |id: &str| {
+            catalog
+                .agents
+                .iter()
+                .find(|agent| agent.id == id)
+                .map(|agent| agent.mode)
+                .unwrap()
+        };
+
+        assert_eq!(mode("sub"), AgentMode::Subagent);
+        assert!(!mode("sub").selectable_primary());
+        assert!(mode("sub").runnable_as_subagent());
+        assert_eq!(mode("primary"), AgentMode::Primary);
+        assert!(mode("primary").selectable_primary());
+        assert!(!mode("primary").runnable_as_subagent());
+        assert_eq!(mode("plain"), AgentMode::All);
+        assert!(mode("plain").selectable_primary());
+        assert!(mode("plain").runnable_as_subagent());
+        assert_eq!(mode("odd"), AgentMode::All);
+        assert_eq!(catalog.warnings.len(), 1);
+        assert!(catalog.warnings[0].contains("unknown agent mode"));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -996,24 +1203,49 @@ mod tests {
     }
 
     #[test]
-    fn meerai_definition_directories_are_ignored() {
-        let dir = temp_dir("meerai_ignored");
+    fn meerai_directories_are_project_definitions_with_highest_priority() {
+        let dir = temp_dir("meerai_native");
         write_file(
             &dir.join(".meerai/agents/reviewer.md"),
-            "---\nname: reviewer\n---\nNative prompt.\n",
+            "---\nname: reviewer\ndescription: Native\nmode: subagent\n---\nNative prompt.\n",
         );
         write_file(
             &dir.join(".meerai/skills/fix/SKILL.md"),
-            "---\nname: fix\n---\nNative body.\n",
+            "---\nname: fix\ndescription: Native fix\n---\nNative body.\n",
+        );
+        write_file(
+            &dir.join(".agents/agents/reviewer.md"),
+            "---\nname: reviewer\ndescription: Agents\n---\nAgents prompt.\n",
+        );
+        write_file(
+            &dir.join(".claude/agents/reviewer.md"),
+            "---\nname: reviewer\ndescription: Claude\n---\nClaude prompt.\n",
+        );
+        write_file(
+            &dir.join(".agents/skills/fix/SKILL.md"),
+            "---\nname: fix\ndescription: Agents fix\n---\nAgents body.\n",
         );
 
         let catalog = load_definitions(&dir);
 
-        assert!(catalog.agents.is_empty());
-        assert!(catalog.skills.is_empty());
-        assert!(catalog.warnings.is_empty());
+        assert_eq!(catalog.agents.len(), 1);
+        assert_eq!(catalog.agents[0].source, DefinitionSource::Meerai);
+        assert_eq!(catalog.agents[0].prompt, "Native prompt.");
+        assert_eq!(catalog.agents[0].mode, AgentMode::Subagent);
+        assert_eq!(catalog.skills.len(), 1);
+        assert_eq!(catalog.skills[0].source, DefinitionSource::Meerai);
+        assert_eq!(catalog.skills[0].body, "Native body.");
+        assert_eq!(catalog.shadows.len(), 3);
+        assert_eq!(catalog.warnings.len(), 3);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn meerai_source_labels_are_stable() {
+        assert_eq!(DefinitionSource::Meerai.label(), ".meerai");
+        assert_eq!(DefinitionSource::Agents.label(), ".agents");
+        assert_eq!(DefinitionSource::Claude.label(), ".claude");
     }
 
     #[test]

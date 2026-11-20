@@ -139,6 +139,7 @@ pub fn map_definitions(diagnostics: HostDefinitionsDiagnostics) -> DefinitionsDi
         path: info.path,
         description: info.description,
         model_invocable: info.model_invocable,
+        mode: info.mode,
         token_estimate: info.token_estimate,
         warnings: info.warnings,
         supporting_files: info.supporting_files,

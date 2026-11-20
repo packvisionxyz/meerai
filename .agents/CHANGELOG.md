@@ -2,6 +2,17 @@
 
 All notable changes to the skill bundle. Versions follow the `metadata.version` in each `SKILL.md`.
 
+## 1.3.0
+
+- Moved the role briefs out of `skills/*/agents/` into `.meerai/agents/` as native harness agent
+  definitions. Each definition declares `mode: subagent` and its `permissions`, so the harness can
+  select it by id and enforce the tightening rules.
+- `investigate` and `orchestrate` reference the `search`, `recon`, `implementer`, `verifier`,
+  `infra-implementer`, and `infra-reviewer` definitions by id.
+- `implement` and `deliver` reference their role definitions by id.
+- The bundle no longer ships `agents/` directories; install the definitions into
+  `.meerai/agents/` at the project root.
+
 ## 1.2.0
 
 - `investigate`: added a fast path — Locate, Rule, and Ownership questions are answered within a

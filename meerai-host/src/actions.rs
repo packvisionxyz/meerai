@@ -633,8 +633,15 @@ pub fn render_definitions(diagnostics: &HostDefinitionsDiagnostics) -> String {
     );
     for agent in &diagnostics.agents {
         out.push_str(&format!(
-            "\n- agent/{} ({}) ~{} tokens",
-            agent.id, agent.source, agent.token_estimate
+            "\n- agent/{} ({}) ~{} tokens{}",
+            agent.id,
+            agent.source,
+            agent.token_estimate,
+            agent
+                .mode
+                .as_deref()
+                .map(|mode| format!(" [{mode}]"))
+                .unwrap_or_default()
         ));
     }
     for skill in &diagnostics.skills {

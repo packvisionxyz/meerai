@@ -2985,8 +2985,12 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                                     Some(false) => " · manual",
                                     None => "",
                                 };
+                                let mode = match def.mode.as_deref() {
+                                    Some(mode) if mode != "all" => format!(" · {mode}"),
+                                    _ => String::new(),
+                                };
                                 view! {
-                                    <div class="panel-row"><span class="panel-title">{format!("{}/{}", def.kind, def.id)}</span><span class="panel-meta">{format!("{} · ~{} tokens{}", def.source, def.token_estimate, invocation)}</span></div>
+                                    <div class="panel-row"><span class="panel-title">{format!("{}/{}", def.kind, def.id)}</span><span class="panel-meta">{format!("{} · ~{} tokens{}{}", def.source, def.token_estimate, invocation, mode)}</span></div>
                                 }.into_any()
                             }).collect::<Vec<_>>();
                             let store_for_input = store;

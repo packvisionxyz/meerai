@@ -224,14 +224,21 @@ impl ResolvedAgent<'_> {
     fn effect(&self) -> EffectClass {
         match self {
             Self::Builtin(agent) => agent.effect,
-            Self::Custom(_) => EffectClass::Read,
+            Self::Custom(_) => EffectClass::Write,
         }
     }
 
     fn read_only(&self) -> bool {
         match self {
             Self::Builtin(agent) => agent.read_only,
-            Self::Custom(_) => true,
+            Self::Custom(_) => false,
+        }
+    }
+
+    fn agent_rules(&self) -> Vec<PermissionRule> {
+        match self {
+            Self::Builtin(_) => Vec::new(),
+            Self::Custom(agent) => agent.permissions.clone(),
         }
     }
 
@@ -288,6 +295,14 @@ fn intersect_allowed_tools(
         (Some(preset), None) => Some(preset),
         (None, requested) => requested,
     }
+}
+
+fn subagent_agents(agents: Vec<AgentDefinition>) -> Vec<AgentDefinition> {
+    agents
+        .into_iter()
+        .filter(|agent| agent.mode.runnable_as_subagent())
+        .filter(|agent| find_builtin_agent(&agent.id).is_none())
+        .collect()
 }
 
 fn subagent_task_type(agent_id: &str) -> meerai_common::settings::TaskType {
@@ -410,10 +425,7 @@ impl SubagentToolset {
     }
 
     pub fn with_custom_agents(mut self, agents: Vec<AgentDefinition>) -> Self {
-        self.custom_agents = agents
-            .into_iter()
-            .filter(|agent| find_builtin_agent(&agent.id).is_none())
-            .collect();
+        self.custom_agents = subagent_agents(agents);
         self
     }
 
@@ -732,7 +744,8 @@ impl Toolset for SubagentToolset {
             child_mode = clamp_mode(parsed.approval_mode, bridge.parent_policy_mode, read_only);
             let child_policy = PolicyEngine::new(child_mode)
                 .with_workspace_root(bridge.workspace_root.clone())
-                .with_rules(bridge.parent_policy_rules.clone());
+                .with_rules(bridge.parent_policy_rules.clone())
+                .with_agent_rules(resolved.agent_rules());
             for grant in &bridge.parent_policy_grants {
                 child_policy.record_grant(grant.clone());
             }
@@ -1060,5 +1073,61 @@ mod lenient_tests {
             serde_json::from_str(r#"{"agent":"explore","task":"x","fork_session":"true"}"#)
                 .unwrap();
         assert_eq!(args.fork_session, Some(true));
+    }
+
+    fn definition(id: &str, mode: meerai_common::definitions::AgentMode) -> AgentDefinition {
+        use meerai_common::definitions::DefinitionSource;
+
+        AgentDefinition {
+            id: id.to_string(),
+            source: DefinitionSource::Meerai,
+            description: None,
+            model: None,
+            mode,
+            steps: None,
+            permissions: Vec::new(),
+            prompt: String::new(),
+            path: PathBuf::from(format!(".meerai/agents/{id}.md")),
+            token_estimate: 0,
+            warnings: Vec::new(),
+            supporting_files: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn only_subagent_mode_definitions_run_as_subagents() {
+        use meerai_common::definitions::AgentMode;
+
+        let agents = subagent_agents(vec![
+            definition("all", AgentMode::All),
+            definition("sub", AgentMode::Subagent),
+            definition("primary", AgentMode::Primary),
+            definition("explore", AgentMode::All),
+        ]);
+
+        let ids: Vec<&str> = agents.iter().map(|agent| agent.id.as_str()).collect();
+        assert_eq!(ids, ["all", "sub"]);
+    }
+
+    #[test]
+    fn custom_agents_are_writable_and_keep_their_rules() {
+        use meerai_common::definitions::AgentMode;
+
+        let mut agent = definition("implementer", AgentMode::Subagent);
+        agent.permissions = vec![PermissionRule {
+            action: meerai_policy::ActionSelector::Action(PermissionAction::Edit),
+            resource: "src/generated/**".to_string(),
+            effect: meerai_policy::Effect::Deny,
+        }];
+        let resolved = ResolvedAgent::Custom(&agent);
+
+        assert!(!resolved.read_only());
+        assert_eq!(resolved.effect(), EffectClass::Write);
+        assert_eq!(resolved.agent_rules(), agent.permissions);
+        assert!(
+            ResolvedAgent::Builtin(find_builtin_agent("explore").unwrap())
+                .agent_rules()
+                .is_empty()
+        );
     }
 }
