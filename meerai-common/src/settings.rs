@@ -173,6 +173,8 @@ pub struct ContextSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps_per_turn: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_progress_fail_steps: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_limit_continuations: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_timeout_ms: Option<u64>,
@@ -682,6 +684,11 @@ fn merge_context(
         recovery_model: same_provider_model(project.recovery_model).or(user.recovery_model),
         // Match the harness defaults when the user has not set these limits.
         max_steps_per_turn: tighten_limit(user.max_steps_per_turn, project.max_steps_per_turn, 32),
+        no_progress_fail_steps: tighten_limit(
+            user.no_progress_fail_steps,
+            project.no_progress_fail_steps,
+            12,
+        ),
         step_limit_continuations: tighten_limit(
             user.step_limit_continuations,
             project.step_limit_continuations,

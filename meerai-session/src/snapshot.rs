@@ -29,8 +29,14 @@ pub struct RestoreReport {
 
 #[derive(Clone, Debug)]
 enum AppliedOp {
-    Restored { target: PathBuf, content: Vec<u8> },
-    Deleted,
+    Restored {
+        target: PathBuf,
+        content: Vec<u8>,
+    },
+    Deleted {
+        target: PathBuf,
+        content: Option<Vec<u8>>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -142,10 +148,13 @@ impl SnapshotStore {
         content: Option<Vec<u8>>,
     ) -> Result<()> {
         self.store.immediate(|tx| {
+            // Concurrent captures of the same path must not turn into a constraint error; the first
+            // capture of a turn wins.
             tx.execute(
                 "INSERT INTO session_snapshots
                     (session_id, turn_id, rel_path, existed, content_zstd, created_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(session_id, turn_id, rel_path) DO NOTHING",
                 params![
                     self.session_id.as_str(),
                     turn_id.as_str(),
@@ -211,17 +220,42 @@ fn apply_entry(
 ) -> Result<()> {
     let target = safe_join(workspace, &row.rel_path)?;
     if !row.existed {
-        match fs::remove_file(&target) {
-            Ok(()) => {
-                report.deleted.push(target.clone());
-                applied.push(AppliedOp::Deleted);
+        // Keep the bytes that this restore removes so a later failure can put the file back.
+        let removed = match fs::read(&target) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match fs::remove_file(&target) {
+                    Ok(()) => {
+                        report.deleted.push(target.clone());
+                        applied.push(AppliedOp::Deleted {
+                            target,
+                            content: None,
+                        });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("failed to remove {}", target.display()));
+                    }
+                }
+                return Ok(());
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
+            Err(error) if error.kind() == std::io::ErrorKind::IsADirectory => {
                 return Err(error)
                     .with_context(|| format!("failed to remove {}", target.display()));
             }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to read {}", target.display()));
+            }
+        };
+        if let Err(error) = fs::remove_file(&target) {
+            return Err(error).with_context(|| format!("failed to remove {}", target.display()));
         }
+        report.deleted.push(target.clone());
+        applied.push(AppliedOp::Deleted {
+            target,
+            content: Some(removed),
+        });
         return Ok(());
     }
 
@@ -295,10 +329,21 @@ fn roll_back(error: anyhow::Error, applied: &[AppliedOp]) -> anyhow::Error {
 fn rollback(applied: &[AppliedOp]) -> Vec<String> {
     let mut failures = Vec::new();
     for op in applied.iter().rev() {
-        if let AppliedOp::Restored { target, content } = op
-            && let Err(error) = fs::write(target, content)
-        {
-            failures.push(format!("{}: {error}", target.display()));
+        match op {
+            AppliedOp::Restored { target, content } => {
+                if let Err(error) = fs::write(target, content) {
+                    failures.push(format!("{}: {error}", target.display()));
+                }
+            }
+            AppliedOp::Deleted {
+                target,
+                content: Some(content),
+            } => {
+                if let Err(error) = stage_into_place(target, content) {
+                    failures.push(format!("{}: {error}", target.display()));
+                }
+            }
+            AppliedOp::Deleted { content: None, .. } => {}
         }
     }
     failures
@@ -428,6 +473,60 @@ mod tests {
             .filter(|name| name.contains("meerai-restore"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+
+        fs::remove_dir_all(&workspace).ok();
+    }
+
+    #[tokio::test]
+    async fn rollback_puts_back_files_that_the_restore_deleted() {
+        let workspace = temp_dir("rollback-delete");
+        let store = snapshot_store();
+        let turn = TurnId::new();
+        store
+            .capture(&turn, &workspace, Path::new("a.txt"))
+            .await
+            .unwrap();
+        fs::write(workspace.join("a.txt"), "keep-me").unwrap();
+        fs::write(workspace.join("b.txt"), "original-b").unwrap();
+        store
+            .capture(&turn, &workspace, Path::new("b.txt"))
+            .await
+            .unwrap();
+        fs::remove_file(workspace.join("b.txt")).unwrap();
+        fs::create_dir(workspace.join("b.txt")).unwrap();
+
+        let error = store.restore(&turn, &workspace).await.unwrap_err();
+        assert!(format!("{error:#}").contains("b.txt"));
+        assert_eq!(
+            fs::read_to_string(workspace.join("a.txt")).unwrap(),
+            "keep-me"
+        );
+
+        fs::remove_dir_all(&workspace).ok();
+    }
+
+    #[tokio::test]
+    async fn capturing_the_same_path_twice_keeps_the_first_capture() {
+        let workspace = temp_dir("recapture");
+        let store = snapshot_store();
+        let turn = TurnId::new();
+        fs::write(workspace.join("a.txt"), "first").unwrap();
+
+        store
+            .capture(&turn, &workspace, Path::new("a.txt"))
+            .await
+            .unwrap();
+        fs::write(workspace.join("a.txt"), "second").unwrap();
+        store
+            .capture(&turn, &workspace, Path::new("a.txt"))
+            .await
+            .unwrap();
+
+        store.restore(&turn, &workspace).await.unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.join("a.txt")).unwrap(),
+            "first"
+        );
 
         fs::remove_dir_all(&workspace).ok();
     }

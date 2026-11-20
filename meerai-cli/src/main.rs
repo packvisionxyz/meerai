@@ -1820,6 +1820,33 @@ impl SessionOpener for CliSessionHost {
         }
     }
 
+    async fn open_in_editor(&self, path: &std::path::Path, line: Option<u32>) -> Result<()> {
+        if self.approval_mode == ApprovalMode::Plan {
+            anyhow::bail!("opening an editor is disabled in plan mode");
+        }
+        let editor = std::env::var("MEERAI_EDITOR")
+            .or_else(|_| std::env::var("VISUAL"))
+            .or_else(|_| std::env::var("EDITOR"))
+            .map_err(|_| anyhow::anyhow!("set EDITOR to open files from the transcript"))?;
+        let mut argv = editor.split_whitespace();
+        let program = argv.next().context("EDITOR is empty")?;
+        let mut args: Vec<String> = argv.map(str::to_string).collect();
+        if let Some(line) = line {
+            args.push(format!("+{line}"));
+        }
+        args.push(path.display().to_string());
+        let status = tokio::process::Command::new(program)
+            .args(&args)
+            .current_dir(&self.workspace_root)
+            .status()
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to start {program}: {error}"))?;
+        if !status.success() {
+            anyhow::bail!("{program} exited with {status}");
+        }
+        Ok(())
+    }
+
     async fn delete_session(&self, id: &SessionId) -> Result<bool> {
         let root = self.session_config.root.clone();
         let id = id.clone();

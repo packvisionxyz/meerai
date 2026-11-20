@@ -4,7 +4,7 @@ Design and phased execution plan for adding an AEAD credential vault, embedded S
 
 | | |
 | --- | --- |
-| **Status** | Implemented through Phase 5 (2026-11-20), with the prompt-only definition decision. Definitions and trusted packs load prompt text from user-global paths and installed packs; frontmatter `tools`/`permissions`/`allowed-tools` stay warning-only, and pack hooks plus `mcp_servers` are diagnostics only. Legacy JSONL sessions, `meta.json`, file blobs/snapshots, and `open-tabs.json` are removed. Remaining work is listed in [§6 Follow-ups](#6-follow-ups). |
+| **Status** | Implemented through Phase 5 (2026-11-20), with the prompt-only definition decision. Definitions and trusted packs load prompt text from user-global paths and installed packs; frontmatter `tools`/`permissions`/`allowed-tools` stay warning-only, and pack hooks plus `mcp_servers` are diagnostics only. Legacy JSONL sessions, `meta.json`, file blobs/snapshots, and `open-tabs.json` are removed. Durability review fixes landed with this document revision ([§6 Durability](#durability)). Remaining work is listed in [§6 Follow-ups](#6-follow-ups). |
 | **Audience** | Contributors, harness/UI authors, security reviewers |
 | **Scope** | `meerai-store` (new), `meerai-providers`, `meerai-common`, `meerai-session`, `meerai-agents`, `meerai-host`, `meerai-web-protocol`, `meerai-web`, `meerai-web-client`, `meerai-tui`, `meerai-cli` |
 | **Related** | [architecture.md](architecture.md) · [harness-spec.md](harness-spec.md) · [harness-internals.md](harness-internals.md) · [tui-design.md](tui-design.md) · [browser-ui.md](browser-ui.md) · [threat-model.md](threat-model.md) · [AGENTS.md](../AGENTS.md) |
@@ -27,9 +27,9 @@ Concretely, this plan covers seven integrated capabilities:
 
 ### Key Design Decisions
 
-1. **Embedded Database Engine (`rusqlite` bundled vs. `redb`):** This plan proposes **`rusqlite` with `features = ["bundled"]`** (MIT-compatible with [deny.toml](../deny.toml)). SQLite gives WAL concurrent reads for TUI + `meerai serve`, relational indexes over turns/sessions/memories, and built-in **FTS5** full-text search for messages and cross-session memory. The trade-off is compiling bundled C SQLite (`~1.2 MB` binary growth). Switching to pure-Rust `redb` is the alternative if zero C code is preferred (no SQL/FTS5).
+1. **Embedded Database Engine (`rusqlite` bundled vs. `redb`):** Shipped as **`rusqlite` with `features = ["bundled"]`** (MIT-compatible with [deny.toml](../deny.toml)). SQLite gives WAL concurrent reads for TUI + `meerai serve`, relational indexes over turns/sessions/memories, and built-in **FTS5** full-text search for messages and cross-session memory. The trade-off is compiling bundled C SQLite (`~1.2 MB` binary growth). The rejected alternative was pure-Rust `redb`: no C code, but no SQL and no FTS5.
 2. **Config Storage Split (SQLite vs. YAML):** User config, routing tables, provider base URLs/recent models, and UI state move into SQLite (`user_config`, `model_routes`), editable directly from TUI/Web Settings and via `meerai config export|import`. Project overlays (`<project-root>/.meerai/settings.yml`, `.meerai/hooks.json`, `AGENTS.md`, `.agents/`, `.claude/`) **remain plain files on disk** so teams can commit them to Git and enforce tighten-only rules ([harness-spec.md](harness-spec.md)).
-3. **Keychainless / Headless Linux Fallback:** When no OS keychain is available (headless SSH Linux without D-Bus/Secret Service or `MEERAI_DISABLE_KEYCHAIN=1`), this plan defaults to **requiring `MEERAI_VAULT_PASSPHRASE`** (Argon2id-wrapped DEK) and failing closed rather than silently downgrading to plaintext.
+3. **Keychainless / Headless Linux Fallback:** When no OS keychain is available (headless SSH Linux without D-Bus/Secret Service or `MEERAI_DISABLE_KEYCHAIN=1`), the vault **requires `MEERAI_VAULT_PASSPHRASE`** (Argon2id-wrapped DEK) and fails closed. It never downgrades to plaintext, and there is no keyfile fallback.
 4. **Plugin Scope:** Per [architecture.md](architecture.md), dynamic in-process binary/JS plugins remain a non-goal. "Plugins" in this plan are **version-pinned declarative packs** (skills, agents, hooks, and out-of-process MCP servers) installed from local paths or Git repositories via a lockfile.
 
 ### Breaking Changes (Accepted Per "No Legacy Migration" Scope)
@@ -37,13 +37,15 @@ Concretely, this plan covers seven integrated capabilities:
 - Existing `~/.local/share/meerai/sessions/*.jsonl`, `meta.json`, `open-tabs.json`, `~/.config/meerai/auth.json`, and `~/.config/meerai/settings.yml` will **not** be auto-migrated.
 - `SessionEvent`, `AgentEvent`, `AgentCommand`, `SessionItem`, and `meerai-web-protocol` DTOs gain new fields/variants. All consumers (CLI, TUI, Host, Web server, Leptos client, replay) update in lockstep.
 
-### Open Questions
+### Resolved Questions
 
-1. **Headless Linux Vault Mode:** If D-Bus `secret-tool` is absent, prefer `MEERAI_VAULT_PASSPHRASE` (fail-closed without passphrase) or an opt-in keyfile (`~/.local/share/meerai/vault.key` at `0600`)?
-2. **User YAML Import/Export:** Even without automatic migration, should `meerai config import <path.yml>` / `export` be included for convenience?
-3. **Subagent Concurrency Default:** Is a default global cap of `4` concurrent subagent turns (plus per-provider overrides in routing config) appropriate?
+All three questions were decided during implementation. The answers are shipped behavior, not open items.
 
-## 3. Proposed Architecture & Crate Changes
+1. **Headless Linux Vault Mode — passphrase only, fail closed.** When the OS keychain is absent, the DEK is wrapped with Argon2id under `MEERAI_VAULT_PASSPHRASE`. There is no keyfile fallback: an opt-in `vault.key` file would be a second plaintext-at-rest secret next to the database it protects. The key source is recorded in `meta` under `vault.key.v1`, and `meerai auth reset-vault` rebuilds it.
+2. **User YAML Import/Export — included.** `meerai config export` and `meerai config import <PATH>` exist ([cli.rs](../meerai-cli/src/cli.rs)). They are a convenience for a human, not a migration path: the import validates the payload and writes the store.
+3. **Subagent Concurrency Default — `4`, per-provider overrides optional.** `DEFAULT_GLOBAL_CONCURRENCY = 4` ([routing.rs](../meerai-agents/src/routing.rs)) caps the shared global semaphore. A route may set `max_concurrency` to add a per-provider semaphore on top. The global cap holds even when no route is configured.
+
+## 3. Architecture & Crate Changes (as built)
 
 A new crate `meerai-store` sits directly above `meerai-core` so `meerai-common`, `meerai-providers`, and `meerai-session` can all share the embedded SQLite database without dependency cycles. `meerai-tui` remains decoupled from `meerai-providers` and `meerai-tools`, and `meerai-web-protocol` / `meerai-web-client` remain pure Wasm-safe crates.
 
@@ -263,7 +265,7 @@ CREATE TABLE usage_ledger (
 ### 3.8 Host, Web Protocol, TUI, and Web Client Parity
 
 - **Modify [meerai-host/src/session.rs](../meerai-host/src/session.rs) & [registry.rs](../meerai-host/src/registry.rs):** Add `SessionOpener` methods for memories, routes, packs, definitions diagnostics, spill blobs, and open tabs; update `SessionRegistry` live view & `LiveEntry::Subagent`.
-- **Modify [meerai-web-protocol/src/lib.rs](../meerai-web-protocol/src/lib.rs), [meerai-web/src/server.rs](../meerai-web/src/server.rs), [mapper.rs](../meerai-web/src/mapper.rs):** Add Wasm-safe DTOs, `ViewEvent` variants, and authenticated loopback HTTP endpoints (`/api/memories`, `/api/routes`, `/api/packs`, `/api/definitions/diagnostics`, `/api/sessions/{id}/context`, `/api/sessions/{id}/compact`, `/api/sessions/{id}/subagents`).
+- **Landed in [meerai-web-protocol/src/lib.rs](../meerai-web-protocol/src/lib.rs), [meerai-web/src/server.rs](../meerai-web/src/server.rs), [mapper.rs](../meerai-web/src/mapper.rs):** Wasm-safe DTOs, `ViewEvent` variants, and authenticated loopback HTTP endpoints. The read routes are `GET /api/memories`, `GET /api/routes`, `GET /api/packs`, `GET /api/definitions/diagnostics`, and `GET /api/sessions/{id}/context`. Compaction is `POST /api/sessions/{id}/compact`. There is no `/api/sessions/{id}/subagents` route: subagent control is a `POST /api/actions` action (see [§6](#6-follow-ups)).
 - **Modify `meerai-tui` & `meerai-web-client`:** Deliver matching interactive modals/panels for:
   1. `/context` — token breakdown vs. watermark, projection toggles, blob viewer, turn pinning, focused `/compact`, `Summarize from here`.
   2. `/memory` & `/remember` — search, pin, edit, delete project memories.
@@ -293,8 +295,9 @@ cargo check -p meerai-cli --no-default-features
 cargo check -p meerai-tui --no-default-features
 cargo check -p meerai-web-client --target wasm32-unknown-unknown
 python3 scripts/build-web.py
-cargo deny check
 ```
+
+`cargo deny check` is a separate CI job, not part of `make verify`. Run it locally only if `cargo-deny` is installed ([ci.yml](../.github/workflows/ci.yml) runs `EmbarkStudios/cargo-deny-action@v2` against [deny.toml](../deny.toml)).
 
 Add targeted test suites for:
 - `meerai-store`: WAL concurrency, FTS5 search (`session_events_fts`, `project_memories_fts`), cascade deletes, `0600` file permissions.
@@ -315,12 +318,16 @@ Add targeted test suites for:
 | --- | --- | --- |
 | Format | `cargo fmt --all -- --check` | pass |
 | Lint | `cargo clippy --workspace --all-targets` | pass; warnings only |
-| Tests | `cargo test --workspace` | pass |
+| Tests | `cargo test --workspace --no-fail-fast` | 1094 pass, 11 fail (all loopback-blocked, see below) |
 | Headless surface | `cargo check -p meerai-cli --no-default-features` | pass |
 | TUI without update | `cargo check -p meerai-tui --no-default-features` | pass |
 | Wasm client | `cargo check -p meerai-web-client --target wasm32-unknown-unknown` | pass |
 | Browser bundle | `python3 scripts/build-web.py` | pass |
-| Dependency audit | `cargo deny check` | not run (`cargo-deny` not installed) |
+| Dependency audit | `cargo deny check` (CI job) | not run locally; `cargo-deny` is not installed here |
+
+All eleven failures are the same sandbox limit: the process may not bind a loopback socket, including port `0`. Two are in `meerai-providers` (`oauth::callback`), seven in `meerai-web/tests/server_baseline.rs`, and two in a second `meerai-web` test file. Each panics on `TcpListener::bind` with `Operation not permitted (os error 1)`. The code is not at fault. A plain `cargo test --workspace` stops at the first failing crate, so use `--no-fail-fast` to see the full picture.
+
+The state gate itself is tested without a socket. `evaluate_request` returns a `CallbackOutcome` — the reply bytes plus an optional result — and six plain `#[test]` cases cover the `200`, the `400` on a state mismatch, the `400` on a rejected sign-in, the `404` on an unrelated path, the `404` on an empty query, and a callback that omits the state. `wait_for_redirect` keeps only the `accept`/`read`/`write_all` loop. The two loopback tests remain as the end-to-end check and pass on any runner that allows loopback binds.
 
 ## 6. Follow-ups
 
@@ -336,14 +343,24 @@ The plan is implemented. These items remain and are out of the current change.
 ### Data model
 
 - `sessions.project_root` stores the workspace path, not the repository root.
-- `usage_ledger` is written per step but not read back. The USD cap is per-process, so a restart resets the routing spend counter.
-- Fork copies the preserved events in one transaction. The child `sessions` row is inserted before that transaction, so a failure can leave an empty child.
-- `session_events_fts` is queried by `Session::search_events`. No CLI, TUI, or Web surface calls it yet.
+- `usage_ledger` is written per step ([turn.rs](../meerai-agents/src/multi_turn_agent/turn.rs), [mod.rs](../meerai-agents/src/multi_turn_agent/mod.rs)) but never read back. `UsageRepo::list` and `UsageRepo::total_cost` have no caller outside their own tests, and no CLI, TUI, or Web surface shows the ledger. The USD cap is per-process, so a restart resets the routing spend counter. `usage_ledger.session_id` cascades on session delete, so the ledger disappears with the session it describes — decide whether history should survive before adding a reader.
+- `session_events_fts` is written and queried by `Session::search_events` ([session.rs](../meerai-session/src/session.rs)). No CLI, TUI, or Web surface calls it yet.
+
+### Durability
+
+These were fixed in this change. The plan text above describes the target behavior; the list records what the fix changed.
+
+- Fork: the child `sessions` row and the copied events land in one `immediate` transaction through `fill_forked`, and a failure discards the half-built session. A failure no longer leaves an empty child.
+- Child sessions: `create_child` uses the same `link_child` transaction and discards the session on error.
+- Rewind: the closing turns and the `RewindApplied` marker append in one `append_batch` transaction.
+- Session delete: the directory is removed before the row. A failed removal can no longer leave files behind a row that reports deletion.
+- Snapshot restore: `rollback` now restores files that the restore deleted, not only files it overwrote. Capturing the same path twice in a turn is a no-op instead of a constraint error.
+- Store open: `create_parents` treats an existing data directory as success. `Store::open_default` no longer fails with `EEXIST` on a second run.
 
 ### Wire contracts
 
 - Subagent progress uses `EntryUpdated`. `ViewEvent::SubagentProgressed`, `MemoriesUpdated`, `RoutesUpdated`, and `PacksUpdated` are not separate variants.
-- Resource mutations use the shared `POST /api/actions` executor. `/api/memories`, `/api/routes`, `/api/packs`, `/api/sessions/{id}/subagents`, and `/api/sessions/{id}/context-policy` are not dedicated REST routes.
+- Reads use dedicated GET routes (`/api/memories`, `/api/routes`, `/api/packs`, `/api/definitions/diagnostics`, `/api/sessions/{id}/context`). Every resource mutation goes through the shared `POST /api/actions` executor. There are no dedicated mutation routes, and no `/api/sessions/{id}/subagents` or `/api/sessions/{id}/context-policy` route.
 
 ### Definitions and packs
 
@@ -353,5 +370,6 @@ The plan is implemented. These items remain and are out of the current change.
 
 ### Verification gaps
 
-- `cargo deny check` was not run here because `cargo-deny` is not installed.
+- `cargo deny check` was not run here because `cargo-deny` is not installed. The CI job still covers it.
+- The two `oauth::callback` tests cannot run in a sandbox that blocks loopback binds. They are honest failures, not skips. A CI runner with loopback passes them.
 - No live-provider run and no manual TUI or browser session was performed in this change.

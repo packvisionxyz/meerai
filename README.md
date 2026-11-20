@@ -108,7 +108,7 @@ when it finishes; `q` closes the dialog. Long commands use the shell timeout
 In the TUI: `/sessions`, `/new`, `/close`, `/connect`, `/models`, `/mode`,
 `/agent`, `/skill`, `/compact`, `/context`, `/diagnose`, `/memory`, `/remember`,
 `/routing`, `/subagent`, `/packs`, `/definitions`, `/effort`, `/sampling`,
-`/temperature`, `/vault-reset`, `/diff`, `/rewind`, `/fork`, `/help`.
+`/temperature`, `/vault-reset`, `/open`, `/diff`, `/rewind`, `/fork`, `/help`.
 
 Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 `AgentEvent` per line and requires `--prompt`. The default approval mode is
@@ -658,7 +658,8 @@ context:
 - **`context`** — overrides field by field (`context_window_tokens`,
   `high_watermark_pct`, `spill_max_inline_tokens`, `verbatim_window_turns`,
   `reasoning_pruning`, `prompt_caching`, `max_steps_per_turn`,
-  `step_limit_continuations`, `auto_memory`, `memory_prompt_bytes`,
+  `no_progress_fail_steps`, `step_limit_continuations`, `auto_memory`,
+  `memory_prompt_bytes`,
   `tool_timeout_ms`, `max_session_tokens`, `max_turn_secs`, `summarizer_model`,
   `temperature`). The budget caps
   `max_session_tokens` and `max_turn_secs` are clamped against user values: a

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -316,6 +316,12 @@ pub trait SessionOpener: Send + Sync {
     }
     async fn run_user_shell(&self, _command: &str) -> Result<String> {
         Err(anyhow::anyhow!("user shell commands are not supported"))
+    }
+
+    async fn open_in_editor(&self, _path: &Path, _line: Option<u32>) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "opening files in an editor is not supported"
+        ))
     }
 
     async fn ensure_credentials(&self) -> Result<()> {

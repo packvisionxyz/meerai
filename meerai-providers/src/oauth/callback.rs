@@ -53,51 +53,70 @@ pub async fn wait_for_redirect(
             Err(_) => continue,
         };
         let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
-        let target = request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or_default()
-            .to_string();
-        let (path, query) = match target.split_once('?') {
-            Some((path, query)) => (path, query),
-            None => (target.as_str(), ""),
+        let outcome = evaluate_request(&request, expected_state);
+        let reply = match &outcome {
+            CallbackOutcome::Continue(reply) => reply,
+            CallbackOutcome::Finish { reply, .. } => reply,
         };
-        if path != CALLBACK_PATH {
-            let _ = socket.write_all(not_found().as_bytes()).await;
-            let _ = socket.shutdown().await;
-            continue;
-        }
-        let parsed = match callback_from_query(query) {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                if query.is_empty() {
-                    let _ = socket.write_all(not_found().as_bytes()).await;
-                    let _ = socket.shutdown().await;
-                    continue;
-                }
-                let _ = socket
-                    .write_all(error_page(&err.to_string()).as_bytes())
-                    .await;
-                let _ = socket.shutdown().await;
-                return Err(err);
-            }
-        };
-        if let Err(err) = verify_state(expected_state, parsed.state.as_deref()) {
-            let _ = socket
-                .write_all(error_page(&err.to_string()).as_bytes())
-                .await;
-            let _ = socket.shutdown().await;
-            return Err(err);
-        }
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{CALLBACK_BODY}",
-            CALLBACK_BODY.len()
-        );
-        let _ = socket.write_all(response.as_bytes()).await;
+        let _ = socket.write_all(reply.as_bytes()).await;
         let _ = socket.shutdown().await;
-        return Ok(parsed);
+        match outcome {
+            CallbackOutcome::Continue(_) => {}
+            CallbackOutcome::Finish { result, .. } => return result,
+        }
     }
+}
+
+enum CallbackOutcome {
+    Continue(String),
+    Finish {
+        reply: String,
+        result: Result<CallbackQuery>,
+    },
+}
+
+fn evaluate_request(request: &str, expected_state: &str) -> CallbackOutcome {
+    let target = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or_default();
+    let (path, query) = match target.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (target, ""),
+    };
+    if path != CALLBACK_PATH {
+        return CallbackOutcome::Continue(not_found());
+    }
+    let parsed = match callback_from_query(query) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            if query.is_empty() {
+                return CallbackOutcome::Continue(not_found());
+            }
+            return CallbackOutcome::Finish {
+                reply: error_page(&err.to_string()),
+                result: Err(err),
+            };
+        }
+    };
+    if let Err(err) = verify_state(expected_state, parsed.state.as_deref()) {
+        return CallbackOutcome::Finish {
+            reply: error_page(&err.to_string()),
+            result: Err(err),
+        };
+    }
+    CallbackOutcome::Finish {
+        reply: ok_page(),
+        result: Ok(parsed),
+    }
+}
+
+fn ok_page() -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{CALLBACK_BODY}",
+        CALLBACK_BODY.len()
+    )
 }
 
 fn error_page(message: &str) -> String {
@@ -318,6 +337,78 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("access_denied"));
+    }
+
+    fn outcome(request: &str, state: &str) -> (String, Option<Result<CallbackQuery>>) {
+        match evaluate_request(request, state) {
+            CallbackOutcome::Continue(reply) => (reply, None),
+            CallbackOutcome::Finish { reply, result } => (reply, Some(result)),
+        }
+    }
+
+    #[test]
+    fn accepts_a_matching_state_with_a_200_page() {
+        let (reply, result) = outcome(
+            "GET /auth/callback?code=abc&state=expected&client_id=oaiapp_1 HTTP/1.1\r\nHost: local\r\n\r\n",
+            "expected",
+        );
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        let parsed = result.unwrap().unwrap();
+        assert_eq!(parsed.code, "abc");
+        assert_eq!(parsed.client_id.as_deref(), Some("oaiapp_1"));
+    }
+
+    #[test]
+    fn rejects_a_mismatched_state_with_a_400_page() {
+        let (reply, result) = outcome(
+            "GET /auth/callback?code=abc&state=wrong HTTP/1.1\r\nHost: local\r\n\r\n",
+            "expected",
+        );
+        assert!(reply.starts_with("HTTP/1.1 400"), "{reply}");
+        assert!(reply.contains("did not complete"), "{reply}");
+        let err = result.unwrap().unwrap_err();
+        assert!(err.to_string().contains("state"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_callback_without_a_state() {
+        let (reply, result) = outcome(
+            "GET /auth/callback?code=abc HTTP/1.1\r\nHost: local\r\n\r\n",
+            "expected",
+        );
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(result.unwrap().is_ok());
+    }
+
+    #[test]
+    fn answers_an_unrelated_path_with_404_and_keeps_waiting() {
+        let (reply, result) = outcome(
+            "GET /favicon.ico HTTP/1.1\r\nHost: local\r\n\r\n",
+            "expected",
+        );
+        assert!(reply.starts_with("HTTP/1.1 404"), "{reply}");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn answers_an_empty_query_with_404_and_keeps_waiting() {
+        let (reply, result) = outcome(
+            "GET /auth/callback HTTP/1.1\r\nHost: local\r\n\r\n",
+            "expected",
+        );
+        assert!(reply.starts_with("HTTP/1.1 404"), "{reply}");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn reports_a_rejected_sign_in_as_a_400() {
+        let (reply, result) = outcome(
+            "GET /auth/callback?error=access_denied&error_description=no HTTP/1.1\r\nHost: local\r\n\r\n",
+            "expected",
+        );
+        assert!(reply.starts_with("HTTP/1.1 400"), "{reply}");
+        let err = result.unwrap().unwrap_err();
+        assert!(err.to_string().contains("access_denied"), "{err}");
     }
 
     #[tokio::test]

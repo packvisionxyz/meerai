@@ -1064,20 +1064,30 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
         ActiveModal::QueuedEdit {
             index,
             input,
+            cursor,
             error,
         } => {
-            let popup = centered_rect_fixed(area, 64, 9);
+            let popup_width = area.width.saturating_sub(2).min(64);
+            let editor_width = popup_width.saturating_sub(8).max(1) as usize;
+            let wrapped = wrap_queued_editor(&input, editor_width);
+            let editor_lines = wrapped.len() as u16;
+            let popup_height = (editor_lines + 6)
+                .clamp(8, 14)
+                .min(area.height.saturating_sub(2));
+            let popup = centered_rect_fixed(area, popup_width, popup_height);
             dim_backdrop(frame, area, popup);
             let inner = dialog_frame(frame, app, popup, "Edit queued message", true);
 
-            let rows = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(1),
-            ])
-            .split(inner);
+            let has_error = error.is_some();
+            let mut constraints = vec![Constraint::Length(1), Constraint::Min(1)];
+            if has_error {
+                constraints.push(Constraint::Length(1));
+            }
+            constraints.push(Constraint::Length(1));
+            let rows = Layout::vertical(constraints).split(inner);
+            let editor_area = rows[1];
+            let error_area = has_error.then(|| rows[2]);
+            let hint_area = rows[rows.len() - 1];
 
             frame.render_widget(
                 Paragraph::new(Span::styled(
@@ -1087,32 +1097,55 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 rows[0],
             );
 
-            let text = if input.is_empty() {
-                Span::styled("Type a new message", Style::default().fg(theme::p().faint))
-            } else {
-                Span::styled(input.clone(), Style::default().fg(theme::p().text))
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("› ", Style::default().fg(theme::p().accent)),
-                    text,
-                ])),
-                rows[1],
-            );
+            let text_style = Style::default().fg(theme::p().text);
+            let cursor_style = Style::default()
+                .fg(theme::p().surface)
+                .bg(theme::p().accent)
+                .add_modifier(Modifier::BOLD);
+            let (cursor_row, cursor_col) = queued_editor_cursor(&wrapped, &input, cursor);
+            let visible = editor_area.height as usize;
+            let scroll = cursor_row.saturating_sub(visible.saturating_sub(1));
+            for (offset, (start, end)) in wrapped.iter().enumerate().skip(scroll).take(visible) {
+                let y = editor_area.y + (offset - scroll) as u16;
+                let line_rect = Rect::new(editor_area.x, y, editor_area.width, 1);
+                let mut spans = vec![Span::styled("› ", Style::default().fg(theme::p().accent))];
+                let body = &input[*start..*end];
+                if offset == cursor_row {
+                    let before: String = body.chars().take(cursor_col).collect();
+                    let mut after = body.chars().skip(cursor_col);
+                    spans.push(Span::styled(before, text_style));
+                    match after.next() {
+                        Some(ch) => {
+                            spans.push(Span::styled(ch.to_string(), cursor_style));
+                            let rest: String = after.collect();
+                            if !rest.is_empty() {
+                                spans.push(Span::styled(rest, text_style));
+                            }
+                        }
+                        None => spans.push(Span::styled(" ", cursor_style)),
+                    }
+                } else {
+                    spans.push(Span::styled(body.to_string(), text_style));
+                }
+                frame.render_widget(Paragraph::new(Line::from(spans)), line_rect);
+            }
 
-            if let Some(message) = error {
+            if let Some(message) = error
+                && let Some(error_area) = error_area
+            {
                 frame.render_widget(
-                    Paragraph::new(Span::styled(
-                        message.clone(),
-                        Style::default().fg(theme::p().error),
-                    )),
-                    rows[2],
+                    Paragraph::new(Span::styled(message, Style::default().fg(theme::p().error))),
+                    error_area,
                 );
             }
 
             frame.render_widget(
-                Paragraph::new(key_hints_line(&[("Enter", "save"), ("Esc", "cancel")])),
-                rows[4],
+                Paragraph::new(key_hints_line(&[
+                    ("Enter", "save"),
+                    ("alt+enter", "newline"),
+                    ("Esc", "cancel"),
+                ])),
+                hint_area,
             );
         }
         ActiveModal::ServeDialog {
@@ -2914,6 +2947,61 @@ fn blank_as<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     } else {
         value
     }
+}
+
+fn wrap_queued_editor(text: &str, width: usize) -> Vec<(usize, usize)> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut line_start = 0usize;
+    for segment in text.split('\n') {
+        let seg_end = line_start + segment.len();
+        let mut start = line_start;
+        if start == seg_end {
+            lines.push((start, start));
+        }
+        while start < seg_end {
+            let mut end = start;
+            let mut last_space = None;
+            for (used, (offset, ch)) in text[start..seg_end].char_indices().enumerate() {
+                if used == width {
+                    break;
+                }
+                if ch == ' ' && offset > 0 {
+                    last_space = Some(start + offset);
+                }
+                end = start + offset + ch.len_utf8();
+            }
+            if end < seg_end
+                && !text[end..].starts_with(' ')
+                && let Some(space) = last_space
+            {
+                end = space;
+            }
+            lines.push((start, end));
+            start = end;
+            while start < seg_end && text[start..].starts_with(' ') {
+                start += 1;
+            }
+        }
+        line_start = seg_end + 1;
+    }
+    if lines.is_empty() {
+        lines.push((0, 0));
+    }
+    lines
+}
+
+fn queued_editor_cursor(lines: &[(usize, usize)], text: &str, cursor: usize) -> (usize, usize) {
+    let cursor = cursor.min(text.len());
+    for (row, (start, end)) in lines.iter().enumerate() {
+        if cursor >= *start && cursor <= *end {
+            let col = text[*start..cursor].chars().count();
+            return (row, col);
+        }
+    }
+    let last = lines.len().saturating_sub(1);
+    let start = lines.get(last).map(|(start, _)| *start).unwrap_or(0);
+    (last, text[start..cursor].chars().count())
 }
 
 #[cfg(test)]

@@ -57,6 +57,15 @@ fn prepare_db_file(path: &Path) -> Result<()> {
 }
 
 fn create_parents(dir: &Path) -> Result<()> {
+    // A store root that already exists is normal. Do not report it as a failure: the caller inspects
+    // the entry afterwards to reject a non-directory or a symlink.
+    match fs::symlink_metadata(dir) {
+        Ok(_) => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err).with_context(|| format!("inspect SQLite directory {}", dir.display()));
+        }
+    }
     let mut builder = DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -64,9 +73,11 @@ fn create_parents(dir: &Path) -> Result<()> {
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(DIR_MODE);
     }
-    builder
-        .create(dir)
-        .with_context(|| format!("create SQLite directory {}", dir.display()))
+    match builder.create(dir) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("create SQLite directory {}", dir.display())),
+    }
 }
 
 pub(crate) fn harden_sidecars(path: &Path) -> Result<()> {

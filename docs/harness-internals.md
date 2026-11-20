@@ -132,7 +132,8 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   `high_watermark_pct` (75), `spill_max_inline_tokens` (12 500),
   `verbatim_window_turns` (4), `reasoning_pruning` (true),
   `prompt_caching` (true), `rollback_on_verify_failure` (false),
-  `recovery_model`, `max_steps_per_turn` (32), `tool_timeout_ms`
+  `recovery_model`, `max_steps_per_turn` (32), `no_progress_fail_steps` (12),
+  `tool_timeout_ms`
   (120 000), `max_session_tokens` (unset), `max_turn_secs` (1800),
   `summarizer_model`, `post_edit_diagnostics` (false), `temperature`
   (0.0..=2.0; `Temperature::effective` drops out-of-range values, so the
@@ -416,6 +417,12 @@ implementation invariants.
   Only the absolute final step logs `STEP_LIMIT_NOTICE` and strips tools.
   Subagents set `step_limit_continuations = 0`, so their preset caps stay
   exact.
+- No-progress breaker: `no_progress_fail_steps` (default 12) fails the turn
+  when that many consecutive steps make no file change and delegate no
+  subagent. At two thirds of the threshold the loop logs a
+  `CircuitBreaker` diagnostic and injects `NO_PROGRESS_NOTICE`. The value is
+  clamped to at least 3 so the notice always stays reachable. Read-only turns
+  never trip it.
 - Context telemetry: `ContextBreakdown` is computed from the projected
   event log plus `tool_schema_tokens` and the system/memory prompt split.
   `MultiTurnAgent` emits `AgentEvent::ContextUpdated` after each step,

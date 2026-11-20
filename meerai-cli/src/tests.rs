@@ -591,6 +591,7 @@ fn harness_config_uses_defaults_and_context_overrides() {
         prompt_caching: Some(false),
         rollback_on_verify_failure: Some(true),
         max_steps_per_turn: Some(48),
+        no_progress_fail_steps: Some(24),
         tool_timeout_ms: Some(60_000),
         max_session_tokens: Some(2_000_000),
         max_turn_secs: Some(600),
@@ -1608,8 +1609,10 @@ async fn build_workspace_toolsets_blocks_sensitive_files_and_attaches_execution_
 #[tokio::test]
 async fn cli_session_host_lists_creates_and_opens_sessions() {
     let root = std::env::temp_dir().join(format!("meerai-cli-host-{}", SessionId::new()));
+    let config_root = root.join("config");
     let sessions_root = root.join("sessions");
     let workspace_root = root.join("workspace");
+    std::fs::create_dir_all(&config_root).unwrap();
     std::fs::create_dir_all(&workspace_root).unwrap();
 
     let settings = AppSettings::default();
@@ -1634,7 +1637,7 @@ async fn cli_session_host_lists_creates_and_opens_sessions() {
         secrets,
         user_settings: std::sync::Mutex::new(settings.clone()),
         settings,
-        config_dir: None,
+        config_dir: Some(config_root.clone()),
         data_dir: None,
         client,
         approval_mode: ApprovalMode::Ask,

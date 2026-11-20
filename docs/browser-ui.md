@@ -188,7 +188,7 @@ The remaining work is automation, bundle gating, and manual accessibility sign-o
 | POST | `/api/providers/{id}/chatgpt/start` | Start a ChatGPT sign-in | Basic; 401 if auth is disabled |
 | POST | `/api/providers/{id}/chatgpt/{attempt}/paste` | Paste a redirect URL | Basic; 401 if auth is disabled |
 | POST | `/api/providers/{id}/chatgpt/{attempt}/cancel` | Cancel a sign-in attempt | Basic; 401 if auth is disabled |
-| POST | `/api/actions` | Run a host action such as `/memory`, `/routing`, `/packs`, `/context`, `/pin-turn`, `/context-policy`, `/summarize`, or `/subagent` | Basic; 401 if auth is disabled |
+| POST | `/api/actions` | Run a host action such as `/memory`, `/routing`, `/packs`, `/context`, `/pin-turn`, `/context-policy`, `/summarize`, `/subagent`, or `/open` | Basic; 401 if auth is disabled |
 | GET | `/api/memories` | List or search project memories (`?query=`) | Basic; 401 if auth is disabled |
 | GET | `/api/routes` | List task model routes | Basic; 401 if auth is disabled |
 | GET | `/api/packs` | List installed packs | Basic; 401 if auth is disabled |

@@ -52,6 +52,7 @@ fn initializes_v1_and_refuses_unknown_versions() -> Result<()> {
             ("synchronous", 1),
             ("foreign_keys", 1),
             ("busy_timeout", 5000),
+            ("recursive_triggers", 1),
         ] {
             let value: i64 = conn.pragma_query_value(None, pragma, |row| row.get(0))?;
             assert_eq!(value, expected, "{pragma}");

@@ -651,16 +651,44 @@ fn render_queued_panel(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     app.queued_hit_zones.clear();
     app.queued_panel_area = Rect::default();
     let queued = app.tab().queued.clone();
-    if queued.is_empty() || area.width < 32 || area.y < 4 || app.completion.is_active() {
+    if queued.is_empty() || area.width < 40 || area.y < 6 || app.completion.is_active() {
         return;
     }
-    let max_rows = 4u16;
-    let shown = queued.len().min(max_rows as usize);
-    let height = shown as u16;
+
+    let panel_w = ((area.width as u32 * 30 / 100) as u16)
+        .clamp(24, 56)
+        .min(area.width.saturating_sub(2));
+    let first_text_w = panel_w.saturating_sub(11) as usize;
+    let next_text_w = panel_w.saturating_sub(4) as usize;
+    let max_height = area.y.saturating_sub(2).min(12);
+
+    let mut blocks: Vec<(usize, Vec<String>)> = Vec::new();
+    let mut height = 0u16;
+    for (idx, text) in queued.iter().enumerate() {
+        let lines = wrap_queued_preview(text, first_text_w, next_text_w, 3);
+        let block_h = lines.len() as u16;
+        if height + block_h > max_height {
+            if blocks.is_empty() {
+                let mut lines = lines;
+                lines.truncate(max_height.max(1) as usize);
+                height += lines.len() as u16;
+                blocks.push((idx, lines));
+            }
+            break;
+        }
+        height += block_h;
+        blocks.push((idx, lines));
+    }
+    if blocks.is_empty() {
+        return;
+    }
+
     let panel = Rect {
-        x: area.x.saturating_add(2),
+        x: area
+            .x
+            .saturating_add(area.width.saturating_sub(panel_w.saturating_add(1))),
         y: area.y.saturating_sub(height),
-        width: area.width.saturating_sub(4),
+        width: panel_w,
         height,
     };
     app.queued_panel_area = panel;
@@ -671,39 +699,29 @@ fn render_queued_panel(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     );
 
     let hovered = app.hovered_queued;
-    for row in 0..height {
-        let idx = row as usize;
-        let Some(text) = queued.get(idx) else {
-            break;
-        };
-        let rect = Rect::new(panel.x, panel.y + row, panel.width, 1);
+    let mut row = panel.y + panel.height;
+    for (idx, lines) in blocks {
+        let block_h = lines.len() as u16;
+        row -= block_h;
         let edit = QueuedHitKind::Edit(idx);
         let remove = QueuedHitKind::Remove(idx);
-        let remove_w = 3u16;
-        let edit_x = panel.x + panel.width.saturating_sub(remove_w + 5);
-        let edit_rect = Rect::new(edit_x, rect.y, 5, 1);
-        let remove_rect = Rect::new(
-            panel.x + panel.width.saturating_sub(remove_w),
-            rect.y,
-            remove_w,
-            1,
-        );
-
-        let preview_w = edit_x.saturating_sub(panel.x).saturating_sub(1) as usize;
-        let preview =
-            meerai_core::text::truncate_single_line(text, preview_w.saturating_sub(2).max(2));
+        let edit_rect = Rect::new(panel.x + panel.width.saturating_sub(7), row, 4, 1);
+        let remove_rect = Rect::new(panel.x + panel.width.saturating_sub(2), row, 1, 1);
         let label_style = if hovered == Some(edit) || hovered == Some(remove) {
             Style::default().fg(theme::p().text)
         } else {
             Style::default().fg(theme::p().muted)
         };
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("↳ ", Style::default().fg(theme::p().warning)),
-                Span::styled(preview, label_style),
-            ])),
-            Rect::new(rect.x, rect.y, preview_w as u16, 1),
-        );
+        for (line_idx, line) in lines.iter().enumerate() {
+            let prefix = if line_idx == 0 { "↳ " } else { "  " };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(theme::p().warning)),
+                    Span::styled(line.clone(), label_style),
+                ])),
+                Rect::new(panel.x + 1, row + line_idx as u16, panel.width - 2, 1),
+            );
+        }
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "edit",
@@ -740,4 +758,55 @@ fn render_queued_panel(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
             kind: remove,
         });
     }
+}
+
+fn wrap_queued_preview(text: &str, first_w: usize, next_w: usize, max_lines: usize) -> Vec<String> {
+    let width_for = |line: usize| -> usize {
+        if line == 0 {
+            first_w.max(4)
+        } else {
+            next_w.max(4)
+        }
+    };
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch == '\n' {
+            lines.push(std::mem::take(&mut current));
+            continue;
+        }
+        if current.chars().count() < width_for(lines.len()) {
+            current.push(ch);
+            continue;
+        }
+        match current.char_indices().rfind(|(_, c)| *c == ' ') {
+            Some((idx, _)) if ch != ' ' => {
+                let tail = current[idx + 1..].to_string();
+                current.truncate(idx);
+                lines.push(std::mem::take(&mut current));
+                current = tail;
+                current.push(ch);
+            }
+            _ => {
+                lines.push(std::mem::take(&mut current));
+                if ch != ' ' {
+                    current.push(ch);
+                }
+            }
+        }
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        let limit = width_for(max_lines.saturating_sub(1));
+        if let Some(last) = lines.last_mut() {
+            while last.chars().count() >= limit {
+                last.pop();
+            }
+            last.push('…');
+        }
+    }
+    lines
 }

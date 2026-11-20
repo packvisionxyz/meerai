@@ -283,7 +283,7 @@ Notes:
 32. **Host actions:** `meerai_host::parse_host_action` and
     `execute_host_action` are the single implementation of `/context`,
     `/memory`, `/remember`, `/forget`, `/pin`, `/routing`, `/packs`, `/pack`,
-    `/definitions`, and `/subagent`. The TUI dispatches them through
+    `/definitions`, `/subagent`, and `/open`. The TUI dispatches them through
     `PendingSessionAction::HostAction`; the web server dispatches
     `POST /api/actions`. Do not fork the parsing or formatting into a UI.
 33. **Context telemetry:** `ContextBreakdown` is emitted after each step and

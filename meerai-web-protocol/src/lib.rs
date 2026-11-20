@@ -541,6 +541,8 @@ pub struct ContextSettingsDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps_per_turn: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_progress_fail_steps: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_limit_continuations: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_timeout_ms: Option<u64>,

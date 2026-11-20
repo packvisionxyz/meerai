@@ -134,6 +134,7 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
         "Spawn or cancel a manual subagent (/subagent <agent> <task>)",
         true,
     ),
+    ("/open", "Open a workspace file in $EDITOR", true),
     (
         "/vault-reset",
         "Delete every saved credential and reinitialize the vault",

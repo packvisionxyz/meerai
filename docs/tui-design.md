@@ -157,11 +157,14 @@ selects text and copies it on release. There is no keyboard Select mode.
 - A double-click within 400 ms on the same cell selects the word under the
   cursor and copies it on release (`register_click`,
   `composer_word_bounds_at`).
-- The queued panel sits directly above the composer and shows up to four
-  queued messages, each with `edit` and `✕` hit zones
-  (`render_queued_panel`, `ui/composer.rs`). It is hidden below 32 columns.
-  `✕` drops the message; `edit` opens the narrow queued-edit dialog, and
-  `Enter` commits the new text in place.
+- The queued panel anchors to the bottom-right, directly above the composer,
+  at about 30% of the conversation width (24–56 columns, hidden below 40).
+  Each message wraps to at most three rows, and the oldest message sits
+  lowest. Every message keeps `edit` and `✕` hit zones on its first row
+  (`render_queued_panel`, `ui/composer.rs`). `✕` drops the message; `edit`
+  opens the queued-edit dialog, a wrapped multi-line editor with a visible
+  cursor: arrows, Home, and End move it, Backspace and Delete edit around it,
+  `alt+enter` inserts a newline, and `Enter` commits the new text in place.
 - The composer footer shows the input-mode badge (`INS`/`NOR`), approval
   mode badge, model, provider, and the effective temperature with its tier
   (`temp 0.20 · medium`), driven by `context.effort` and
@@ -198,6 +201,7 @@ Typing `/` opens completion. The implemented handler set
 | `/subagent` | Spawn form: agent, task, model, mode, steps, tokens, cost, tool subset |
 | `/subagent <agent> <task>`, `/subagent cancel <item>` | Direct spawn or cancel |
 | `/vault-reset` | Confirmation dialog; typing `reset` deletes all saved credentials and reinitializes the vault |
+| `/open <path>[:line]` | Open a workspace file in `$EDITOR` at the given line. Absolute paths and `..` are rejected |
 | `/search [query]` (aliases `/tv`, `/find`), `/grep [query]` | File/content search |
 | `/diff [path]` | Diff review |
 | `/sidebar` | Toggle the sidebar |

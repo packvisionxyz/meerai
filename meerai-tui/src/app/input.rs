@@ -83,8 +83,15 @@ impl AppState {
                             }
                             panel.error = None;
                         }
-                        ActiveModal::QueuedEdit { input, error, .. } => {
-                            input.push_str(&clean);
+                        ActiveModal::QueuedEdit {
+                            input,
+                            cursor,
+                            error,
+                            ..
+                        } => {
+                            let at = (*cursor).min(input.len());
+                            input.insert_str(at, &clean);
+                            *cursor = at + clean.len();
                             *error = None;
                         }
                         ActiveModal::Approval {
@@ -1264,6 +1271,7 @@ impl AppState {
                 if let Some(text) = self.tab().queued.get(idx).cloned() {
                     self.modal = Some(ActiveModal::QueuedEdit {
                         index: idx,
+                        cursor: text.len(),
                         input: text,
                         error: None,
                     });

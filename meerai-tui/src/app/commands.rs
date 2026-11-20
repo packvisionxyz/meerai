@@ -538,6 +538,10 @@ impl AppState {
                 Some(action) => self.queue_host_action(action),
                 None => self.host_action_usage(command),
             },
+            "/open" => match parse_host_action(command) {
+                Some(action) => self.queue_host_action(action),
+                None => self.host_action_usage(command),
+            },
             "/vault-reset" | "/vault" => {
                 self.modal = Some(ActiveModal::VaultReset {
                     input: String::new(),
@@ -800,6 +804,7 @@ fn format_help_text() -> String {
             }
             "/pack" => "/pack <add|enable|disable|trust|untrust|pin|remove> <id> [rev]".to_string(),
             "/subagent" => "/subagent <agent> <task> | /subagent cancel <item-id>".to_string(),
+            "/open" => "/open <path>[:line]".to_string(),
             "/vault-reset" => "/vault-reset (type reset to confirm)".to_string(),
             other => (*other).to_string(),
         })

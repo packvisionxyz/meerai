@@ -1395,62 +1395,89 @@ impl AppState {
             ActiveModal::QueuedEdit {
                 index,
                 mut input,
+                mut cursor,
                 mut error,
-            } => match key.code {
-                KeyCode::Esc => {
-                    self.modal = None;
-                }
-                KeyCode::Backspace => {
-                    input.pop();
-                    error = None;
-                    self.modal = Some(ActiveModal::QueuedEdit {
-                        index,
-                        input,
-                        error,
-                    });
-                }
-                KeyCode::Enter => {
-                    let text = input.trim().to_string();
-                    if text.is_empty() {
-                        self.modal = Some(ActiveModal::QueuedEdit {
-                            index,
-                            input,
-                            error: Some("Message is required".to_string()),
-                        });
-                    } else {
-                        let updated = {
-                            let tab = self.tab_mut();
-                            match tab.queued.get_mut(index) {
-                                Some(slot) => {
-                                    *slot = text.clone();
-                                    true
-                                }
-                                None => false,
-                            }
-                        };
-                        if updated {
-                            self.status_notice = Some("Queued message updated".to_string());
-                        }
+            } => {
+                let mut keep_open = true;
+                match key.code {
+                    KeyCode::Esc => {
                         self.modal = None;
+                        keep_open = false;
                     }
+                    KeyCode::Enter if !has_alt => {
+                        let text = input.trim().to_string();
+                        if text.is_empty() {
+                            error = Some("Message is required".to_string());
+                        } else {
+                            let updated = {
+                                let tab = self.tab_mut();
+                                match tab.queued.get_mut(index) {
+                                    Some(slot) => {
+                                        *slot = text.clone();
+                                        true
+                                    }
+                                    None => false,
+                                }
+                            };
+                            if updated {
+                                self.status_notice = Some("Queued message updated".to_string());
+                            }
+                            self.modal = None;
+                            keep_open = false;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        cursor = cursor.min(input.len());
+                        input.insert(cursor, '\n');
+                        cursor += 1;
+                        error = None;
+                    }
+                    KeyCode::Backspace => {
+                        let start = queued_prev_boundary(&input, cursor);
+                        input.drain(start..cursor.min(input.len()));
+                        cursor = start;
+                        error = None;
+                    }
+                    KeyCode::Delete => {
+                        let end = queued_next_boundary(&input, cursor);
+                        input.drain(cursor.min(input.len())..end);
+                        error = None;
+                    }
+                    KeyCode::Left => {
+                        cursor = queued_prev_boundary(&input, cursor);
+                    }
+                    KeyCode::Right => {
+                        cursor = queued_next_boundary(&input, cursor);
+                    }
+                    KeyCode::Home => {
+                        cursor = input[..cursor.min(input.len())]
+                            .rfind('\n')
+                            .map(|idx| idx + 1)
+                            .unwrap_or(0);
+                    }
+                    KeyCode::End => {
+                        cursor = input[cursor.min(input.len())..]
+                            .find('\n')
+                            .map(|idx| idx + cursor.min(input.len()))
+                            .unwrap_or(input.len());
+                    }
+                    KeyCode::Char(c) if !has_ctrl && !has_alt => {
+                        cursor = cursor.min(input.len());
+                        input.insert(cursor, c);
+                        cursor += c.len_utf8();
+                        error = None;
+                    }
+                    _ => {}
                 }
-                KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                    input.push(c);
-                    error = None;
+                if keep_open {
                     self.modal = Some(ActiveModal::QueuedEdit {
                         index,
                         input,
+                        cursor,
                         error,
                     });
                 }
-                _ => {
-                    self.modal = Some(ActiveModal::QueuedEdit {
-                        index,
-                        input,
-                        error,
-                    });
-                }
-            },
+            }
             ActiveModal::ServeDialog {
                 mut port_input,
                 mut secret_input,
@@ -3243,4 +3270,22 @@ fn typing_effort_keyword(temperature: &str) -> bool {
         .chars()
         .next()
         .is_some_and(|c| c.is_ascii_alphabetic())
+}
+
+fn queued_prev_boundary(text: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(text.len());
+    text[..cursor]
+        .chars()
+        .next_back()
+        .map(|c| cursor - c.len_utf8())
+        .unwrap_or(0)
+}
+
+fn queued_next_boundary(text: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(text.len());
+    text[cursor..]
+        .chars()
+        .next()
+        .map(|c| cursor + c.len_utf8())
+        .unwrap_or(cursor)
 }

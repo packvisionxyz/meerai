@@ -2,9 +2,11 @@
 
 mod language;
 mod lex;
+mod paths;
 mod tree;
 
 pub use language::Language;
+pub use paths::{PathRef, detect_path_reference, format_path_reference};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenKind {

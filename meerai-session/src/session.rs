@@ -652,16 +652,37 @@ impl Session {
         let cwd = source_meta.cwd.clone();
 
         let session = Self::open_or_create(config, SessionId::new(), cwd).await?;
-        session.append_preserved(&prefix).await?;
+        if let Err(error) = Self::fill_forked(
+            &session,
+            source_id,
+            inherited_event_count,
+            &prefix,
+            approval_mode,
+        )
+        .await
+        {
+            discard_session(&session).await;
+            return Err(error);
+        }
+
+        Ok(session)
+    }
+
+    async fn fill_forked(
+        session: &Session,
+        source_id: &SessionId,
+        inherited_event_count: u64,
+        prefix: &[LoggedEvent],
+        approval_mode: Option<String>,
+    ) -> Result<()> {
+        session.append_preserved(prefix).await?;
         session
             .update_meta(|meta| {
                 meta.forked_from = Some(source_id.clone());
                 meta.inherited_event_count = Some(inherited_event_count);
                 meta.approval_mode = approval_mode;
             })
-            .await?;
-
-        Ok(session)
+            .await
     }
 
     pub fn latest_closed_turn(&self) -> Option<TurnId> {
@@ -685,6 +706,19 @@ impl Session {
             Some(config) => Self::open_or_create(config, SessionId::new(), cwd).await?,
             None => Self::memory(SessionId::new(), cwd),
         };
+        if let Err(error) = Self::link_child(&child, parent_id, model, title).await {
+            discard_session(&child).await;
+            return Err(error);
+        }
+        Ok(child)
+    }
+
+    async fn link_child(
+        child: &Session,
+        parent_id: SessionId,
+        model: Option<String>,
+        title: Option<String>,
+    ) -> Result<()> {
         child
             .update_meta(|meta| {
                 meta.parent_session_id = Some(parent_id);
@@ -695,8 +729,7 @@ impl Session {
                     meta.title = title;
                 }
             })
-            .await?;
-        Ok(child)
+            .await
     }
 
     pub async fn rewind(
@@ -705,40 +738,84 @@ impl Session {
         scope: RewindScope,
         restored: Vec<PathBuf>,
     ) -> Result<()> {
-        let replaced = if matches!(scope, RewindScope::Both | RewindScope::Conversation) {
-            let events = self.events();
-            let start = turn_start(&events, turn_id)
-                .ok_or_else(|| anyhow::anyhow!("unknown turn: {turn_id}"))?;
-            for open in open_turns(&events) {
-                self.append(SessionEvent::TurnEnded {
+        let events = self.events();
+        let start = turn_start(&events, turn_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown turn: {turn_id}"))?;
+        let close_conversation = matches!(scope, RewindScope::Both | RewindScope::Conversation);
+        let closing: Vec<SessionEvent> = if close_conversation {
+            open_turns(&events)
+                .into_iter()
+                .map(|open| SessionEvent::TurnEnded {
                     turn_id: open,
                     reason: TurnEndReason::Aborted {
                         cause: AbortCause::User,
                     },
                 })
-                .await?;
-            }
-            let end_inclusive = self
-                .events()
-                .last()
-                .map(|logged| logged.seq)
-                .unwrap_or(start);
-            Some(SeqRange {
-                start,
-                end_inclusive,
-            })
+                .collect()
         } else {
-            None
+            Vec::new()
         };
+        let replaced = close_conversation.then(|| SeqRange {
+            start,
+            end_inclusive: Seq(
+                events.last().map_or(start.0, |logged| logged.seq.0) + closing.len() as u64
+            ),
+        });
+        // One batch: the closing turns and the rewind marker land together or not at all.
+        self.append_batch(
+            &closing,
+            Some(SessionEvent::RewindApplied {
+                turn_id: turn_id.clone(),
+                scope,
+                restored,
+                replaced,
+            }),
+        )
+        .await
+    }
 
-        self.append(SessionEvent::RewindApplied {
-            turn_id: turn_id.clone(),
-            scope,
-            restored,
-            replaced,
+    async fn append_batch(&self, first: &[SessionEvent], last: Option<SessionEvent>) -> Result<()> {
+        let guard = self.inner.write_guard.clone().lock_owned().await;
+        let store = self.inner.store.clone();
+        let inner = self.inner.clone();
+        let first = first.to_vec();
+        storage::blocking(move || {
+            let _guard = guard;
+            let mut next = inner.next_seq.load(Ordering::Relaxed);
+            let mut logged = Vec::with_capacity(first.len() + usize::from(last.is_some()));
+            for event in first.into_iter().chain(last) {
+                logged.push(LoggedEvent {
+                    seq: Seq(next),
+                    event,
+                });
+                next += 1;
+            }
+            let mut meta = None;
+            if logged
+                .iter()
+                .any(|event| matches!(event.event, SessionEvent::TurnEnded { .. }))
+            {
+                let mut updated = read_lock(&inner.meta).clone();
+                updated.updated_at_ms = now_millis();
+                meta = Some(updated);
+            }
+            store.immediate(|tx| {
+                for event in &logged {
+                    storage::insert_event(tx, &inner.id, event)?;
+                }
+                if let Some(meta) = &meta {
+                    storage::update_meta(tx, meta)?;
+                }
+                Ok(())
+            })?;
+            inner.next_seq.store(next, Ordering::Relaxed);
+            write_lock(&inner.events).extend(logged);
+            if let Some(meta) = meta {
+                *write_lock(&inner.meta) = meta;
+            }
+            Ok(())
         })
         .await
-        .map(|_| ())
     }
 
     async fn close_open_turns(&self) -> Result<()> {
@@ -830,6 +907,16 @@ fn fts_query(query: &str) -> Option<String> {
         .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
         .collect();
     (!tokens.is_empty()).then(|| tokens.join(" "))
+}
+
+// A half-built fork or child must not survive in the session list. Removal is best effort: the
+// original error is always the one reported.
+async fn discard_session(session: &Session) {
+    if let Some(config) = session.config() {
+        let root = config.root.clone();
+        let id = session.id().clone();
+        let _ = storage::blocking(move || delete_session(&root, &id)).await;
+    }
 }
 
 fn latest_closed_turn_in_events(events: &[LoggedEvent]) -> Option<TurnId> {
@@ -963,20 +1050,26 @@ pub fn delete_session(root: &Path, id: &SessionId) -> Result<bool> {
     storage::validate_dir(&dir)?;
     perms::create_private_dir_blocking(&dir)?;
     let lock = SessionLock::acquire(&dir, id)?;
-    let store = storage::open(root)?;
-    let deleted = store.immediate(|tx| storage::delete(tx, id))?;
     #[cfg(windows)]
     drop(lock);
-    let result = match std::fs::remove_dir_all(&dir) {
+    // Remove the directory before the row: a failure must not report a deleted session that still
+    // has files. The reverse order destroys the row and then fails to remove the files.
+    let removed_dir = match std::fs::remove_dir_all(&dir) {
         Ok(()) => Ok(true),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(deleted),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(err) => {
             Err(anyhow::Error::from(err).context(format!("failed to delete {}", dir.display())))
         }
     };
     #[cfg(not(windows))]
-    drop(lock);
-    result
+    let removed_dir = {
+        drop(lock);
+        removed_dir
+    };
+    let removed_dir = removed_dir?;
+    let store = storage::open(root)?;
+    let deleted = store.immediate(|tx| storage::delete(tx, id))?;
+    Ok(deleted || removed_dir)
 }
 
 fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {

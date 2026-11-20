@@ -317,9 +317,7 @@ fn code_block_style() -> Style {
 }
 
 fn inline_code_style() -> Style {
-    Style::default()
-        .fg(theme::p().warning)
-        .bg(theme::p().surface_high)
+    Style::default().fg(theme::p().warning)
 }
 
 #[cfg(test)]
@@ -354,7 +352,8 @@ mod tests {
             .iter()
             .find(|span| span.content == "cargo test")
             .expect("inline code span");
-        assert_eq!(code.style.bg, Some(theme::p().surface_high));
+        assert_eq!(code.style.fg, Some(theme::p().warning));
+        assert_eq!(code.style.bg, None);
 
         let stop = lines
             .iter()
@@ -425,7 +424,7 @@ mod tests {
             .flat_map(|line| line.spans.iter())
             .find(|span| span.content == "src/main.rs")
             .expect("table path");
-        assert_eq!(path.style.bg, Some(theme::p().surface_high));
+        assert_eq!(path.style.bg, None);
         assert_eq!(path.style.fg, Some(theme::p().warning));
 
         assert!(

@@ -3008,3 +3008,43 @@ fn queued_panel_tracks_hover_and_edits_or_removes_items() {
     assert!(app.modal.is_none());
     assert_eq!(app.tab().queued, vec!["first task!".to_string()]);
 }
+
+#[test]
+fn queued_panel_anchors_bottom_right_and_wraps_text() {
+    let mut app = test_app();
+    app.tab_mut().is_running = true;
+    app.tab_mut().queued = vec![
+        "a long queued message that wraps over several narrow rows in the panel".to_string(),
+        "second task".to_string(),
+    ];
+
+    render_to_string(&mut app);
+
+    let panel = app.queued_panel_area;
+    let composer = app.composer_block_area;
+    let expected_width = ((composer.width as u32 * 30 / 100) as u16)
+        .clamp(24, 56)
+        .min(composer.width.saturating_sub(2));
+    assert_eq!(panel.width, expected_width);
+    assert_eq!(panel.x + panel.width + 1, composer.x + composer.width);
+    assert_eq!(panel.y + panel.height, composer.y);
+    assert!(panel.height > 2, "long queued text should wrap");
+    assert!(panel.width < composer.width / 2);
+}
+
+#[test]
+fn queued_edit_dialog_wraps_and_keeps_the_cursor_visible() {
+    let mut app = test_app();
+    app.tab_mut().queued = vec!["first".to_string()];
+    let long = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega";
+    app.modal = Some(crate::app::ActiveModal::QueuedEdit {
+        index: 0,
+        input: long.to_string(),
+        cursor: long.len(),
+        error: None,
+    });
+
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.matches('›').count() > 1, "text should wrap");
+    assert!(rendered.contains("omega"), "cursor tail should be visible");
+}

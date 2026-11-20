@@ -196,6 +196,7 @@ pub enum ActiveModal {
     QueuedEdit {
         index: usize,
         input: String,
+        cursor: usize,
         error: Option<String>,
     },
     Context(ContextPanel),

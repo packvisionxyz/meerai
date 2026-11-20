@@ -283,7 +283,9 @@ refuses `--acp` and denies `acp-run`. Full boundary: [acp.md](acp.md) §5.
 
 `max_steps_per_turn` (default 32) and `step_limit_continuations` (default 2,
 so 96 steps; the absolute final step strips tools and asks for a summary;
-subagents get no continuations), per-tool timeout (default 120 s), per-turn wall clock
+subagents get no continuations), `no_progress_fail_steps` (default 12; a
+turn that makes no file change for that many consecutive steps fails, with a
+diagnostic notice at two thirds), per-tool timeout (default 120 s), per-turn wall clock
 (`max_turn_secs`, default 1800, `0` disables; a subagent child gets the
 parent's remaining turn time minus a 5 s margin, with a 1 s minimum, so it
 normally fails its own turn first), and an optional session token cap with a

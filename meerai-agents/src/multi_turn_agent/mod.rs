@@ -77,9 +77,8 @@ const MAX_PROVIDER_ATTEMPTS: usize = 3;
 const PROVIDER_BACKOFF_MS: u64 = 250;
 const MAX_PRESSURE_COMPACTIONS_PER_TURN: usize = 2;
 const MAX_RECOVERY_ATTEMPTS: usize = 1;
-const NO_PROGRESS_DIAGNOSTIC_STEPS: usize = 8;
 const NO_PROGRESS_FAIL_STEPS: usize = 12;
-const NO_PROGRESS_NOTICE: &str = "No file change in the last 8 steps. Make a concrete edit, run a check, or end the turn with what you have.";
+const NO_PROGRESS_NOTICE: &str = "No file change in the last few steps. Make a concrete edit, run a check, or end the turn with what you have.";
 
 const STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(120);

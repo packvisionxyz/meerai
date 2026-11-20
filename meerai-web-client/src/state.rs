@@ -571,6 +571,10 @@ impl SettingsFormState {
             ("spill_max_inline", opt_u64(c.spill_max_inline_tokens)),
             ("verbatim_window_turns", opt_usize(c.verbatim_window_turns)),
             ("max_steps_per_turn", opt_usize(c.max_steps_per_turn)),
+            (
+                "no_progress_fail_steps",
+                opt_usize(c.no_progress_fail_steps),
+            ),
             ("tool_timeout_ms", opt_u64(c.tool_timeout_ms)),
             ("max_session_tokens", opt_u64(c.max_session_tokens)),
             ("max_turn_secs", opt_u64(c.max_turn_secs)),
@@ -725,6 +729,7 @@ impl SettingsFormState {
                 rollback_on_verify_failure: Some(self.rollback_on_verify_failure),
                 recovery_model: opt_str("recovery_model"),
                 max_steps_per_turn: parse_usize("max steps/turn", "max_steps_per_turn")?,
+                no_progress_fail_steps: parse_usize("no-progress steps", "no_progress_fail_steps")?,
                 step_limit_continuations: None,
                 tool_timeout_ms: parse_u64("tool timeout ms", "tool_timeout_ms")?,
                 max_session_tokens: parse_u64("max session tokens", "max_session_tokens")?,
@@ -2509,7 +2514,7 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
                 error: None,
             });
         }
-        "/remember" | "/forget" | "/pin" | "/pack" => {
+        "/remember" | "/forget" | "/pin" | "/pack" | "/open" => {
             if let Some(transport) = crate::transport::current() {
                 transport.run_host_action(trimmed.to_string());
             } else {

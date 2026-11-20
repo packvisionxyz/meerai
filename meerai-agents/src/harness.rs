@@ -26,6 +26,7 @@ pub struct HarnessConfig {
     pub rollback_on_verify_failure: bool,
     pub recovery_model: Option<String>,
     pub max_steps_per_turn: usize,
+    pub no_progress_fail_steps: usize,
     pub step_limit_continuations: usize,
     pub auto_memory: bool,
     pub tool_timeout_ms: u64,
@@ -51,6 +52,7 @@ impl Default for HarnessConfig {
             rollback_on_verify_failure: false,
             recovery_model: None,
             max_steps_per_turn: 32,
+            no_progress_fail_steps: 12,
             step_limit_continuations: 2,
             auto_memory: true,
             tool_timeout_ms: 120_000,
@@ -97,6 +99,10 @@ impl HarnessConfig {
             if !trimmed.is_empty() {
                 cfg.recovery_model = Some(trimmed.to_string());
             }
+        }
+        if let Some(value) = context.no_progress_fail_steps {
+            // The diagnostic notice must still fire before the turn fails.
+            cfg.no_progress_fail_steps = value.max(3);
         }
         if let Some(value) = context.max_steps_per_turn {
             cfg.max_steps_per_turn = value;
@@ -217,5 +223,26 @@ mod tests {
     fn plan_usage_defaults_off() {
         assert!(!HarnessConfig::default().plan_usage);
         assert!(!HarnessConfig::from_context_settings(None).plan_usage);
+    }
+
+    #[test]
+    fn no_progress_limit_flows_from_context_settings() {
+        assert_eq!(HarnessConfig::default().no_progress_fail_steps, 12);
+        let config = HarnessConfig::from_context_settings(Some(&ContextSettings {
+            no_progress_fail_steps: Some(30),
+            ..ContextSettings::default()
+        }));
+        assert_eq!(config.no_progress_fail_steps, 30);
+    }
+
+    #[test]
+    fn no_progress_limit_keeps_room_for_the_diagnostic() {
+        for requested in [0, 1, 2] {
+            let config = HarnessConfig::from_context_settings(Some(&ContextSettings {
+                no_progress_fail_steps: Some(requested),
+                ..ContextSettings::default()
+            }));
+            assert_eq!(config.no_progress_fail_steps, 3, "requested {requested}");
+        }
     }
 }

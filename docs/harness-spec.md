@@ -388,6 +388,7 @@ Per-model context comes from `ProviderCatalog`. Knobs (`context` in
 | `reasoning_pruning` | true | strip settled-step reasoning from projections |
 | `prompt_caching` | true | request-level `CacheControl::Ephemeral`; cache counts reported |
 | `max_steps_per_turn` | 32 | final step strips tools and asks for a summary |
+| `no_progress_fail_steps` | 12 | fail the turn after this many steps with no file change; the diagnostic notice fires at two thirds |
 | `tool_timeout_ms` | 120 000 | per-tool wall clock |
 | `max_turn_secs` | 1800 | per-turn wall clock; `0` disables |
 | `max_session_tokens` | unset | session token cap with a Spend approval pause |
@@ -631,7 +632,9 @@ a pass clears the baseline. With `context.rollback_on_verify_failure` in
 #### Budgets and circuit breakers
 
 - `max_steps_per_turn` (default 32; the final step strips tools and asks
-  for a text summary), per-tool timeouts, per-turn wall clock
+  for a text summary), `no_progress_fail_steps` (default 12; the turn fails
+  after that many steps with no file change, with a diagnostic at two
+  thirds), per-tool timeouts, per-turn wall clock
   (`max_turn_secs`, also bounding streams, summarization, and tool
   batches), and a session token cap with a Spend approval pause
   (`Accept` raises the cap by one context window; `AcceptForSession`

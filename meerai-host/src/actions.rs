@@ -80,6 +80,10 @@ pub enum HostAction {
     CancelSubagent {
         item_id: String,
     },
+    OpenInEditor {
+        path: String,
+        line: Option<u32>,
+    },
     ResetVault,
 }
 
@@ -119,9 +123,19 @@ pub fn parse_host_action(raw: &str) -> Option<HostAction> {
         "/pack" => parse_pack(rest),
         "/definitions" | "/skills" => Some(HostAction::Definitions),
         "/subagent" | "/subagents" => parse_subagent(rest),
+        "/open" => parse_open(rest),
         "/vault-reset" if rest.trim() == "reset" => Some(HostAction::ResetVault),
         _ => None,
     }
+}
+
+fn parse_open(rest: &str) -> Option<HostAction> {
+    let token = rest.split_whitespace().next()?;
+    let reference = meerai_syntax::detect_path_reference(token)?;
+    Some(HostAction::OpenInEditor {
+        path: reference.path,
+        line: reference.line,
+    })
 }
 
 fn parse_id(rest: &str) -> Option<String> {
@@ -319,6 +333,27 @@ fn parse_subagent(rest: &str) -> Option<HostAction> {
     Some(HostAction::SpawnSubagent { spec })
 }
 
+fn resolve_editor_target(project_root: &Path, raw: &str) -> Result<std::path::PathBuf> {
+    use anyhow::bail;
+    let token = raw.trim();
+    if token.contains('\\') || Path::new(token).is_absolute() || token.starts_with('/') {
+        bail!("open only accepts workspace-relative paths");
+    }
+    if token.split(['/', '\\']).any(|part| part == "..") {
+        bail!("open rejects paths that leave the workspace");
+    }
+    let reference = meerai_syntax::detect_path_reference(token)
+        .context("that is not a file path the editor can open")?;
+    if reference.path.split('/').any(|part| part == "..") {
+        bail!("open rejects paths that leave the workspace");
+    }
+    let target = project_root.join(&reference.path);
+    if !target.is_file() {
+        bail!("no such file in the workspace: {}", reference.path);
+    }
+    Ok(target)
+}
+
 pub async fn execute_host_action(ctx: HostActionContext<'_>, action: HostAction) -> Result<String> {
     match action {
         HostAction::InspectContext => {
@@ -511,6 +546,14 @@ pub async fn execute_host_action(ctx: HostActionContext<'_>, action: HostAction)
             let agent = spec.agent.clone();
             let _ = cmd_tx.send(AgentCommand::SpawnSubagent { spec });
             Ok(format!("Subagent {agent} started."))
+        }
+        HostAction::OpenInEditor { path, line } => {
+            let target = resolve_editor_target(ctx.project_root, &path)?;
+            ctx.opener.open_in_editor(&target, line).await?;
+            Ok(match line {
+                Some(line) => format!("Opened {}:{line}", path),
+                None => format!("Opened {path}"),
+            })
         }
         HostAction::ResetVault => {
             let removed = ctx.opener.reset_vault().await?;
@@ -789,5 +832,69 @@ mod tests {
             render_definitions(&HostDefinitionsDiagnostics::default()),
             "Definitions: 0 agents, 0 skills"
         );
+    }
+
+    fn workspace() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        std::fs::create_dir_all(dir.path().join("src")).expect("src dir");
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").expect("file");
+        std::fs::write(dir.path().join("secret.txt"), "hidden").expect("file");
+        dir
+    }
+
+    #[test]
+    fn parses_open_with_and_without_a_line() {
+        assert_eq!(
+            parse_host_action("/open src/main.rs:12"),
+            Some(HostAction::OpenInEditor {
+                path: "src/main.rs".to_string(),
+                line: Some(12),
+            })
+        );
+        assert_eq!(
+            parse_host_action("/open src/main.rs"),
+            Some(HostAction::OpenInEditor {
+                path: "src/main.rs".to_string(),
+                line: None,
+            })
+        );
+        assert_eq!(parse_host_action("/open"), None);
+        assert_eq!(parse_host_action("/open not a path"), None);
+    }
+
+    #[test]
+    fn resolves_a_workspace_file() {
+        let dir = workspace();
+        let target = resolve_editor_target(dir.path(), "src/main.rs:3").expect("resolved");
+        assert_eq!(target, dir.path().join("src/main.rs"));
+    }
+
+    #[test]
+    fn rejects_absolute_and_parent_paths() {
+        let dir = workspace();
+        let absolute = resolve_editor_target(dir.path(), "/etc/passwd").unwrap_err();
+        assert!(
+            absolute.to_string().contains("workspace-relative"),
+            "{absolute}"
+        );
+        let parent = resolve_editor_target(dir.path(), "../src/main.rs").unwrap_err();
+        assert!(
+            parent.to_string().contains("leave the workspace"),
+            "{parent}"
+        );
+        let nested = resolve_editor_target(dir.path(), "src/../../src/main.rs").unwrap_err();
+        assert!(
+            nested.to_string().contains("leave the workspace"),
+            "{nested}"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_files_and_non_paths() {
+        let dir = workspace();
+        let missing = resolve_editor_target(dir.path(), "src/absent.rs").unwrap_err();
+        assert!(missing.to_string().contains("no such file"), "{missing}");
+        assert!(resolve_editor_target(dir.path(), "cargo").is_err());
+        assert!(resolve_editor_target(dir.path(), "https://example.com/a.rs").is_err());
     }
 }

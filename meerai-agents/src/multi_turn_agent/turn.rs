@@ -392,6 +392,14 @@ impl MultiTurnAgent {
             });
         let mut no_progress_steps = 0usize;
         let mut no_progress_diagnosed = false;
+        let no_progress_fail_steps = self
+            .harness
+            .as_ref()
+            .map_or(NO_PROGRESS_FAIL_STEPS, |harness| {
+                harness.config.no_progress_fail_steps
+            })
+            .max(3);
+        let no_progress_diagnostic_steps = (no_progress_fail_steps * 2 / 3).max(1);
         let mut write_attempted = false;
         let mut stop_hook_used = false;
         let mut last_tool_signature: Option<String> = None;
@@ -833,7 +841,7 @@ impl MultiTurnAgent {
                     no_progress_diagnosed = false;
                 } else {
                     no_progress_steps += 1;
-                    if no_progress_steps == NO_PROGRESS_DIAGNOSTIC_STEPS && !no_progress_diagnosed {
+                    if no_progress_steps == no_progress_diagnostic_steps && !no_progress_diagnosed {
                         no_progress_diagnosed = true;
                         self.log_event(
                             event_tx,
@@ -852,7 +860,7 @@ impl MultiTurnAgent {
                         )
                         .await;
                     }
-                    if no_progress_steps >= NO_PROGRESS_FAIL_STEPS {
+                    if no_progress_steps >= no_progress_fail_steps {
                         self.log_event(
                             event_tx,
                             SessionEvent::CircuitBreaker {
