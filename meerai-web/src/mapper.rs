@@ -258,6 +258,7 @@ pub fn map_entry(entry: LiveEntry) -> TranscriptEntryDto {
                 completion_tokens: usage.completion_tokens,
                 total_tokens: usage.total_tokens,
                 cached_tokens: usage.cached_tokens,
+                cache_creation_tokens: usage.cache_creation_tokens,
                 est_cost_usd,
             },
             est_cost_usd,
@@ -355,6 +356,7 @@ pub fn map_stored_events(events: &[LoggedEvent]) -> (Vec<TranscriptEntryDto>, Us
             completion_tokens: u.completion_tokens,
             total_tokens: u.total_tokens,
             cached_tokens: u.cached_tokens,
+            cache_creation_tokens: u.cache_creation_tokens,
             est_cost_usd: None,
         },
         None => UsageDto::default(),
@@ -1007,6 +1009,7 @@ fn map_usage(usage: UsageStatsSnapshot) -> UsageDto {
         completion_tokens: usage.completion_tokens,
         total_tokens: usage.total_tokens,
         cached_tokens: usage.cached_tokens,
+        cache_creation_tokens: usage.cache_creation_tokens,
         est_cost_usd: usage.est_cost_usd,
     }
 }
@@ -1019,6 +1022,7 @@ fn map_metrics(metrics: TurnMetricsSnapshot) -> TurnMetricsDto {
         session_completion_tokens: metrics.session_completion_tokens,
         session_total_tokens: metrics.session_total_tokens,
         session_cached_tokens: metrics.session_cached_tokens,
+        session_cache_creation_tokens: metrics.session_cache_creation_tokens,
         last_turn_ms: metrics.last_turn_ms,
         tokens_per_sec: metrics.tokens_per_sec,
     }

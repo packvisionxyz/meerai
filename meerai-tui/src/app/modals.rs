@@ -2070,7 +2070,9 @@ impl AppState {
                         error: None,
                     });
                 }
-                KeyCode::Left | KeyCode::Right | KeyCode::Char('l' | 'm' | 'h') if field == 0 => {
+                KeyCode::Left | KeyCode::Right | KeyCode::Char('l' | 'm' | 'h')
+                    if field == 0 || !typing_effort_keyword(&temperature) =>
+                {
                     effort = Some(match key.code {
                         KeyCode::Char('l') => EffortLevel::Low,
                         KeyCode::Char('h') => EffortLevel::High,
@@ -2094,7 +2096,7 @@ impl AppState {
                         error: None,
                     });
                 }
-                KeyCode::Char(c) if field == 1 && (c.is_ascii_digit() || c == '.') => {
+                KeyCode::Char(c) if field == 1 && (c.is_ascii_alphanumeric() || c == '.') => {
                     temperature.push(c);
                     self.modal = Some(ActiveModal::Sampling {
                         effort,
@@ -2547,6 +2549,22 @@ impl AppState {
             (ActiveModal::RewindMenu { turn_id, .. }, ModalHitKind::ListItem(idx)) => {
                 self.apply_rewind_choice(turn_id, idx);
             }
+            (
+                ActiveModal::Sampling {
+                    temperature,
+                    field,
+                    error,
+                    ..
+                },
+                ModalHitKind::EffortTier(tier),
+            ) => {
+                self.modal = Some(ActiveModal::Sampling {
+                    effort: Some(tier),
+                    temperature,
+                    field,
+                    error,
+                });
+            }
             (ActiveModal::Terminal { running, .. }, ModalHitKind::Close) => {
                 self.modal = None;
                 if running {
@@ -2981,6 +2999,38 @@ impl AppState {
         }
     }
 
+    pub(super) fn toggle_diagnose_panel(&mut self) {
+        if self.is_sidebar_visible() {
+            self.sidebar_diagnose_open = !self.sidebar_diagnose_open;
+        } else {
+            self.show_sidebar = true;
+            self.sidebar_diagnose_open = true;
+            if self.terminal_width < MIN_SIDEBAR_WIDTH {
+                self.status_notice = Some(format!(
+                    "Diagnose needs a terminal width >= {MIN_SIDEBAR_WIDTH} cols"
+                ));
+            }
+        }
+    }
+
+    pub(super) fn click_sidebar_diagnose_at(&mut self, column: u16, row: u16) -> bool {
+        if self.modal.is_some() || !self.is_sidebar_visible() {
+            return false;
+        }
+        let area = self.sidebar_diagnose_head_area;
+        if area.width == 0
+            || area.height == 0
+            || column < area.x
+            || column >= area.x + area.width
+            || row < area.y
+            || row >= area.y + area.height
+        {
+            return false;
+        }
+        self.sidebar_diagnose_open = !self.sidebar_diagnose_open;
+        true
+    }
+
     pub(super) fn activate_provider_only(&mut self, provider_id: &str) {
         let canonical = canonical_provider_id(provider_id);
         let current_model = self.tab().model.clone();
@@ -3186,4 +3236,11 @@ fn parse_optional<T: std::str::FromStr>(raw: &str) -> Option<Option<T>> {
     } else {
         raw.parse().ok().map(Some)
     }
+}
+
+fn typing_effort_keyword(temperature: &str) -> bool {
+    temperature
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic())
 }

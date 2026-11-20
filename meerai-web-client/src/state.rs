@@ -250,6 +250,12 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         takes_arg: false,
     },
     SlashCommandSpec {
+        cmd: "/diagnose",
+        args: "",
+        desc: "Show or hide cache, context, and memory diagnostics",
+        takes_arg: false,
+    },
+    SlashCommandSpec {
         cmd: "/clear",
         args: "",
         desc: "Clear visible chat transcript",
@@ -422,6 +428,11 @@ pub const PALETTE_ACTIONS: &[PaletteActionSpec] = &[
         hint: "Ctrl+B",
     },
     PaletteActionSpec {
+        key: "toggle-diagnose",
+        label: "Toggle diagnose block",
+        hint: "/diagnose",
+    },
+    PaletteActionSpec {
         key: "open-diff",
         label: "Inspect workspace diff",
         hint: "Alt+Shift+D",
@@ -490,6 +501,7 @@ pub fn execute_palette_action(state: &mut AppState, tx: &mut UiEffects, key: &st
             }
         }
         "toggle-sidebar" => state.sidebar_open = !state.sidebar_open,
+        "toggle-diagnose" => toggle_diagnose(state),
         "open-diff" => open_diff_modal(state, None),
         "open-search" => open_search_modal(state, meerai_web_protocol::SearchModeDto::Content, ""),
         "open-settings" => open_settings(state, None),
@@ -958,6 +970,7 @@ pub struct AppState {
     pub completion: CompletionState,
     pub sidebar_open: bool,
     pub sidebar_tools_expanded: bool,
+    pub sidebar_diagnose_open: bool,
     pub modal: Option<ActiveModal>,
     pub sending: bool,
     pub reset_confirm_pending: bool,
@@ -990,6 +1003,7 @@ impl Default for AppState {
             completion: CompletionState::default(),
             sidebar_open: true,
             sidebar_tools_expanded: false,
+            sidebar_diagnose_open: false,
             modal: None,
             sending: false,
             reset_confirm_pending: false,
@@ -2337,6 +2351,15 @@ pub fn apply_host_action_result(state: &mut AppState, text: String) {
     tab.unread = false;
 }
 
+pub fn toggle_diagnose(state: &mut AppState) {
+    if state.sidebar_open {
+        state.sidebar_diagnose_open = !state.sidebar_diagnose_open;
+    } else {
+        state.sidebar_open = true;
+        state.sidebar_diagnose_open = true;
+    }
+}
+
 pub fn execute_slash_command(state: &mut AppState, raw: &str) {
     let trimmed = raw.trim();
     let mut parts = trimmed.splitn(2, char::is_whitespace);
@@ -2534,6 +2557,9 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
         }
         "/sidebar" => {
             state.sidebar_open = !state.sidebar_open;
+        }
+        "/diagnose" => {
+            toggle_diagnose(state);
         }
         "/clear" => {
             if let Some(tab) = state.active_tab_mut() {
@@ -3936,6 +3962,18 @@ pub fn format_tokens(count: u64) -> String {
     } else {
         count.to_string()
     }
+}
+
+pub fn format_ratio(part: u64, whole: u64) -> String {
+    if whole == 0 {
+        return "n/a".to_owned();
+    }
+    format!(
+        "{:.1}% {}/{}",
+        part as f64 * 100.0 / whole as f64,
+        format_tokens(part),
+        format_tokens(whole)
+    )
 }
 
 pub fn format_duration_ms(ms: u64) -> String {

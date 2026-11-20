@@ -1069,20 +1069,14 @@ async fn creates_sessions_and_handles_missing_and_static_routes() {
         b"",
     )
     .await;
-    let has_bundle = std::env::var_os("MEERAI_WEB_DIR")
-        .filter(|dir| !dir.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .join("target")
-                .join("web")
-        })
-        .join("app_bg.wasm")
-        .is_file();
-    if has_bundle {
-        assert_eq!(root.status, 200);
+    // The bundle is either embedded at build time or served from a runtime
+    // `target/web`; without either the route reports 503.
+    assert!(
+        root.status == 200 || root.status == 503,
+        "unexpected static root status: {}",
+        root.status
+    );
+    if root.status == 200 {
         assert!(
             root.headers
                 .get("content-type")
@@ -1101,8 +1095,6 @@ async fn creates_sessions_and_handles_missing_and_static_routes() {
             wasm.headers.get("content-type").map(String::as_str),
             Some("application/wasm")
         );
-    } else {
-        assert_eq!(root.status, 503);
     }
 
     let traversal = send_raw_request(

@@ -106,9 +106,9 @@ when it finishes; `q` closes the dialog. Long commands use the shell timeout
 (120 s).
 
 In the TUI: `/sessions`, `/new`, `/close`, `/connect`, `/models`, `/mode`,
-`/agent`, `/skill`, `/compact`, `/context`, `/memory`, `/remember`, `/routing`,
-`/subagent`, `/packs`, `/definitions`, `/effort`, `/sampling`, `/temperature`,
-`/vault-reset`, `/diff`, `/rewind`, `/fork`, `/help`.
+`/agent`, `/skill`, `/compact`, `/context`, `/diagnose`, `/memory`, `/remember`,
+`/routing`, `/subagent`, `/packs`, `/definitions`, `/effort`, `/sampling`,
+`/temperature`, `/vault-reset`, `/diff`, `/rewind`, `/fork`, `/help`.
 
 Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 `AgentEvent` per line and requires `--prompt`. The default approval mode is
@@ -284,10 +284,25 @@ tokens: prompt=1234 completion=567 total=1801 cached=800
 `cached=<n>` appears only when the provider reports prompt-cache reads. Prompt
 caching is on by default; set `context.prompt_caching: false` to disable it.
 
-The TUI statusline shows the current turn (`↑… ↓… Σ…`) and the running session
-totals (`session ↑… ↓… Σ…`). `--json` reports the same numbers. Counters are
-cumulative for the session, so a resumed run continues from the last value. USD
-cost appears only when the provider catalog has pricing for the model.
+The provider reports token counters, never a cache percentage. meerai computes
+the hit ratio as `cached_tokens / prompt_tokens`. That ratio is exact because
+the provider adds cached tokens to `prompt_tokens` on every supported route.
+Cache writes come from `cache_creation_tokens`. The sidebar `DIAGNOSE` block
+(`/diagnose`) shows the last request's hit ratio and cache writes, the session
+hit ratio, the context use, and the memory and tool-schema tokens.
+
+On Anthropic routes meerai sets one ephemeral breakpoint on the system block,
+which ends with the project-memory section. The cache therefore covers the
+system prompt and the tool schemas, not the conversation history. OpenAI and
+Gemini cache the prefix automatically, so their session ratio rises with the
+transcript.
+
+The TUI statusline shows the workspace, branch, approval mode, model,
+provider, temperature, throughput, and the active tool. Token counters live
+in the sidebar `DIAGNOSE` block, not the statusline. `--json` reports the raw
+counters. Counters are cumulative for the session, so a resumed run continues
+from the last value. USD cost appears only when the provider catalog has
+pricing for the model.
 
 Old tool results leave the working context but stay in the session log.
 `context.verbatim_window_turns` (default 4) keeps the newest N turns verbatim.
@@ -338,8 +353,11 @@ Parity highlights:
 
 Set `context.temperature` in the user settings, or in the project
 `.meerai/settings.yml` (which overrides it field by field). In the TUI, use
-`/sampling` or `/temperature`; the browser uses Settings → Context. Edit user
-settings with `meerai config export`, an edit, then `meerai config import <PATH>`:
+`/sampling` or `/temperature`; the browser uses Settings → Context. In the
+sampling panel, `l`/`m`/`h` and Left/Right set the effort tier from either
+field, the tier row is clickable, and typing `default` clears the override.
+Edit user settings with `meerai config export`, an edit, then
+`meerai config import <PATH>`:
 
 ```yaml
 context:
@@ -453,14 +471,16 @@ TUI commands and mentions:
 | `/agents` | Open the Mentions popup filtered to agents |
 | `/skill <id>` | Apply a skill by id |
 | `/skills` | Show discovered skills, warnings, token estimates, and whether the model can load the skill |
-| `@` | Open the Mentions popup: agents, then skills, then files |
+| `@` | Open the Mentions popup: agents and skills interleaved, then files |
 | `@agent/<id>` | Apply an agent, then send the rest of the prompt |
 | `@skill/<id>` | Apply a skill, then send the rest of the prompt |
 
-Typing `@` opens one **Mentions** popup: agents first, then skills, then files.
-Up/Down or ctrl+p/ctrl+n move the selection; Tab accepts; Enter accepts the
-highlighted row without sending; Esc dismisses. Accepting inserts the mention
-and one trailing space, so a second Enter sends the prompt.
+Typing `@` opens one **Mentions** popup: agent and skill rows interleaved, then
+files, so a skill stays visible when the project has many agents. A typed
+query groups agents before skills. Up/Down or ctrl+p/ctrl+n move the selection;
+Tab accepts; Enter accepts the highlighted row without sending; Esc dismisses.
+Accepting inserts the mention and one trailing space, so a second Enter sends
+the prompt.
 
 A known `@agent/<id>` or `@skill/<id>` shows as a compact chip in the composer.
 The model and the session log receive the stripped prompt. Unknown ids stay as

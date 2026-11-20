@@ -74,6 +74,7 @@ pub struct UsageStatsSnapshot {
     pub completion_tokens: Option<i32>,
     pub total_tokens: Option<i32>,
     pub cached_tokens: Option<i32>,
+    pub cache_creation_tokens: Option<i32>,
     pub est_cost_usd: Option<f64>,
 }
 
@@ -85,6 +86,7 @@ pub struct TurnMetricsSnapshot {
     pub session_completion_tokens: u64,
     pub session_total_tokens: u64,
     pub session_cached_tokens: u64,
+    pub session_cache_creation_tokens: u64,
     pub last_turn_ms: Option<u64>,
     pub tokens_per_sec: Option<f64>,
 }
@@ -2156,6 +2158,8 @@ fn apply_agent_event(
                 record.metrics.session_total_tokens = session_total;
                 record.metrics.session_cached_tokens =
                     cumulative.cached_tokens.unwrap_or(0).max(0) as u64;
+                record.metrics.session_cache_creation_tokens =
+                    cumulative.cache_creation_tokens.unwrap_or(0).max(0) as u64;
                 if let (Some(started), Some(tokens)) =
                     (record.turn_started_instant, usage.completion_tokens)
                 {
@@ -2169,6 +2173,7 @@ fn apply_agent_event(
                     completion_tokens: usage.completion_tokens,
                     total_tokens: usage.total_tokens,
                     cached_tokens: usage.cached_tokens,
+                    cache_creation_tokens: usage.cache_creation_tokens,
                     est_cost_usd,
                 };
                 (record.usage.clone(), record.metrics.clone())
@@ -2565,6 +2570,7 @@ fn cumulative_metrics_from_usage(usage: Option<&Usage>) -> TurnMetricsSnapshot {
         session_completion_tokens: completion,
         session_total_tokens: total,
         session_cached_tokens: cached,
+        session_cache_creation_tokens: u.cache_creation_tokens.unwrap_or(0).max(0) as u64,
         last_turn_ms: None,
         tokens_per_sec: None,
     }
@@ -2736,6 +2742,21 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         panic!("condition not satisfied before timeout");
+    }
+
+    #[test]
+    fn cumulative_metrics_carry_cache_read_and_write_tokens() {
+        let usage = Usage {
+            prompt_tokens: Some(200),
+            completion_tokens: Some(20),
+            total_tokens: Some(220),
+            cached_tokens: Some(150),
+            cache_creation_tokens: Some(40),
+        };
+        let metrics = cumulative_metrics_from_usage(Some(&usage));
+        assert_eq!(metrics.session_prompt_tokens, 200);
+        assert_eq!(metrics.session_cached_tokens, 150);
+        assert_eq!(metrics.session_cache_creation_tokens, 40);
     }
 
     #[tokio::test]

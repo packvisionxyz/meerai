@@ -609,7 +609,7 @@ fn push_user_mention_spans(
 fn user_mention_chip_style(kind: MentionKind) -> Style {
     let color = match kind {
         MentionKind::Agent => theme::p().accent,
-        MentionKind::Skill => theme::p().interactive,
+        MentionKind::Skill => theme::p().warning,
     };
     Style::default()
         .fg(color)

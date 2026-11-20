@@ -312,6 +312,11 @@ impl AppState {
                     self.doc_selection = None;
                     return true;
                 }
+                if self.click_sidebar_diagnose_at(mouse.column, mouse.row) {
+                    self.selection = None;
+                    self.doc_selection = None;
+                    return true;
+                }
                 if self.modal.is_none() && self.click_file_change_at(mouse.column, mouse.row) {
                     self.selection = None;
                     self.doc_selection = None;
@@ -429,14 +434,21 @@ impl AppState {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.composer_drag_anchor = None;
-                if self
-                    .composer_selection
-                    .is_some_and(|(start, end)| start >= end)
-                {
-                    self.composer_selection = None;
-                }
-                if self.composer_selection.is_some() {
-                    return true;
+                if let Some((start, end)) = self.composer_selection {
+                    if start >= end {
+                        self.composer_selection = None;
+                    } else {
+                        let text = self
+                            .tab()
+                            .input
+                            .get(start..end)
+                            .unwrap_or_default()
+                            .to_string();
+                        if !text.is_empty() {
+                            self.copy_text_to_clipboard(&text);
+                        }
+                        return true;
+                    }
                 }
                 let mut was_click = true;
                 if let Some(mut sel) = self.doc_selection.take()
@@ -1270,6 +1282,13 @@ impl AppState {
         self.composer_drag_anchor = Some(cursor);
         self.tab_mut().cursor = cursor;
         self.mode = InputMode::Insert;
+        if self.register_click(column, row) >= 2
+            && let Some((start, end)) = self.composer_word_bounds_at(cursor)
+        {
+            self.composer_selection = Some((start, end));
+            self.composer_drag_anchor = Some(start);
+            self.tab_mut().cursor = end;
+        }
         self.update_completion();
         true
     }
@@ -1285,6 +1304,18 @@ impl AppState {
         {
             return None;
         }
+        self.composer_cursor_in_block(column, row)
+    }
+
+    fn composer_cursor_clamped(&self, column: u16, row: u16) -> Option<usize> {
+        let block = self.composer_block_area;
+        if block.width == 0 || block.height == 0 {
+            return None;
+        }
+        self.composer_cursor_in_block(column, row)
+    }
+
+    fn composer_cursor_in_block(&self, column: u16, row: u16) -> Option<usize> {
         let area = self.composer_input_area;
         if area.width == 0 || area.height == 0 {
             return Some(self.tab().cursor);
@@ -1292,9 +1323,10 @@ impl AppState {
         let input = self.tab().input.clone();
         let lines: Vec<&str> = input.split('\n').collect();
         let visual_row = if row < area.y {
-            0
+            self.composer_scroll
         } else {
-            self.composer_scroll + (row - area.y) as usize
+            let relative = (row - area.y) as usize;
+            self.composer_scroll + relative.min(area.height.saturating_sub(1) as usize)
         };
         let display_col = column.saturating_sub(area.x) as usize;
         let (logical_line, logical_start) = crate::ui::composer::composer_row_start(
@@ -1325,8 +1357,35 @@ impl AppState {
         Some((line_start + byte_in_line).min(input.len()))
     }
 
+    fn composer_word_bounds_at(&self, cursor: usize) -> Option<(usize, usize)> {
+        let input = self.tab().input.as_str();
+        if input.is_empty() {
+            return None;
+        }
+        let cursor = cursor.min(input.len());
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let mut start = cursor;
+        while let Some((idx, c)) = input[..start].char_indices().next_back() {
+            if !is_word(c) {
+                break;
+            }
+            start = idx;
+        }
+        let mut end = cursor;
+        for (idx, c) in input[cursor..].char_indices() {
+            if !is_word(c) {
+                break;
+            }
+            end = cursor + idx + c.len_utf8();
+        }
+        (start < end).then_some((start, end))
+    }
+
     fn extend_composer_drag(&mut self, anchor: usize, column: u16, row: u16) {
-        let head = self.composer_cursor_at(column, row).unwrap_or(anchor);
+        let head = self
+            .composer_cursor_at(column, row)
+            .or_else(|| self.composer_cursor_clamped(column, row))
+            .unwrap_or(anchor);
         let (start, end) = if anchor <= head {
             (anchor, head)
         } else {

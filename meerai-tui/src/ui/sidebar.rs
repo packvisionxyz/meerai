@@ -1,4 +1,4 @@
-use super::statusline::{display_model, key_status_style};
+use super::statusline::{display_model, format_compact_tokens, key_status_style};
 use super::*;
 
 pub(super) fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
@@ -149,6 +149,127 @@ pub(super) fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, are
     }
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+pub(super) fn render_sidebar_diagnose(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::p().surface)),
+        area,
+    );
+    let inner = pad_rect(area, 2, 1);
+    if inner.width == 0 || inner.height == 0 {
+        app.sidebar_diagnose_head_area = Rect::default();
+        return;
+    }
+    let width = inner.width as usize;
+    let header_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    app.sidebar_diagnose_head_area = header_area;
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "DIAGNOSE ",
+                Style::default()
+                    .fg(theme::p().text)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                if app.sidebar_diagnose_open {
+                    "[hide]"
+                } else {
+                    "[show]"
+                },
+                Style::default().fg(theme::p().faint),
+            ),
+        ])),
+        header_area,
+    );
+    if !app.sidebar_diagnose_open || inner.height < 2 {
+        return;
+    }
+    let rows_area = Rect::new(
+        inner.x,
+        inner.y.saturating_add(1),
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    frame.render_widget(Paragraph::new(diagnose_lines(app, width)), rows_area);
+}
+
+fn diagnose_lines(app: &AppState, width: usize) -> Vec<Line<'static>> {
+    let tab = app.tab();
+    let field =
+        |name: &str| Span::styled(format!("{name:<10}"), Style::default().fg(theme::p().muted));
+    let value = |text: String| {
+        Span::styled(
+            truncate_single_line(&text, width.saturating_sub(10)),
+            theme::text(),
+        )
+    };
+    let ratio = |part: u64, whole: u64| {
+        if whole == 0 {
+            return "n/a".to_string();
+        }
+        let percent = format!("{:.1}%", part as f64 * 100.0 / whole as f64);
+        let raw = format!(
+            " {}/{}",
+            format_compact_tokens(part),
+            format_compact_tokens(whole)
+        );
+        if percent.chars().count() + raw.chars().count() <= width.saturating_sub(10) {
+            format!("{percent}{raw}")
+        } else {
+            percent
+        }
+    };
+
+    let prompt = tab.usage.prompt_tokens.unwrap_or(0).max(0) as u64;
+    let completion = tab.usage.completion_tokens.unwrap_or(0).max(0) as u64;
+    let hit = match tab.usage.cached_tokens {
+        Some(cached) => ratio(cached.max(0) as u64, prompt),
+        None => "n/a".to_string(),
+    };
+    let write = match tab.usage.cache_creation_tokens {
+        Some(written) => format_compact_tokens(written.max(0) as u64),
+        None => "n/a".to_string(),
+    };
+    let metrics = &tab.metrics;
+    let (context, memory, tools) = match tab.context.as_ref() {
+        Some(context) => (
+            ratio(
+                context.estimated_total_tokens,
+                context.context_window_tokens,
+            ),
+            format!("{} tokens", format_compact_tokens(context.memory_tokens)),
+            format!(
+                "{} tokens",
+                format_compact_tokens(context.tool_schemas_tokens)
+            ),
+        ),
+        None => ("n/a".to_string(), "n/a".to_string(), "n/a".to_string()),
+    };
+
+    vec![
+        Line::from(vec![
+            field("tokens"),
+            value(format!(
+                "↑{} ↓{}",
+                format_compact_tokens(prompt),
+                format_compact_tokens(completion)
+            )),
+        ]),
+        Line::from(vec![field("hit"), value(hit)]),
+        Line::from(vec![field("write"), value(write)]),
+        Line::from(vec![
+            field("session"),
+            value(ratio(
+                metrics.session_cached_tokens,
+                metrics.session_prompt_tokens,
+            )),
+        ]),
+        Line::from(vec![field("context"), value(context)]),
+        Line::from(vec![field("memory"), value(memory)]),
+        Line::from(vec![field("tools"), value(tools)]),
+    ]
 }
 
 fn display_workspace(path: &std::path::Path) -> String {

@@ -1769,38 +1769,47 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             .split(inner);
             let effort = effort.unwrap_or_default();
             let tiers = [EffortLevel::Low, EffortLevel::Medium, EffortLevel::High];
-            let tier_line = tiers
-                .iter()
-                .map(|tier| {
-                    let label = format!(" {} ", tier.label());
-                    if *tier == effort {
-                        format!("[{label}]")
-                    } else {
-                        label
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
+            let focused = field == 0;
+            let mut tier_spans: Vec<Span<'static>> = Vec::new();
+            let mut tier_x = rows[0].x;
+            for (index, tier) in tiers.iter().enumerate() {
+                if index > 0 {
+                    tier_spans.push(Span::raw(" "));
+                    tier_x = tier_x.saturating_add(1);
+                }
+                let label = format!(" {} ", tier.label());
+                let selected = *tier == effort;
+                let chunk = if selected {
+                    format!("[{label}]")
+                } else {
+                    label
+                };
+                let width = chunk.chars().count() as u16;
+                let mut style = Style::default().fg(if selected {
+                    theme::p().interactive
+                } else {
+                    theme::p().text
+                });
+                if focused || selected {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                if app.hovered_modal_hit == Some(ModalHitKind::EffortTier(*tier)) {
+                    style = style.fg(theme::p().accent).add_modifier(Modifier::BOLD);
+                }
+                tier_spans.push(Span::styled(chunk, style));
+                app.modal_hit_zones.push(ModalHitZone {
+                    rect: Rect::new(tier_x, rows[0].y.saturating_add(1), width, 1),
+                    kind: ModalHitKind::EffortTier(*tier),
+                });
+                tier_x = tier_x.saturating_add(width);
+            }
             frame.render_widget(
                 Paragraph::new(vec![
                     Line::from(Span::styled(
                         "Reasoning effort",
                         Style::default().fg(theme::p().muted),
                     )),
-                    Line::from(Span::styled(
-                        tier_line,
-                        Style::default()
-                            .fg(if field == 0 {
-                                theme::p().interactive
-                            } else {
-                                theme::p().text
-                            })
-                            .add_modifier(if field == 0 {
-                                Modifier::BOLD
-                            } else {
-                                Modifier::empty()
-                            }),
-                    )),
+                    Line::from(tier_spans),
                     Line::from(Span::styled(
                         "Left/Right or l/m/h",
                         Style::default().fg(theme::p().faint),

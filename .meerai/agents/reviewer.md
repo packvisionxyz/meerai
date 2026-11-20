@@ -10,7 +10,7 @@ permissions:
     effect: deny
 ---
 
-You are the reviewer role of the `implement` skill. Review the change on disk, not the plan for it, and not the author's account of it.
+You are the reviewer role of the `review` and `implement` skills. Review the change on disk, not the plan for it, and not the author's account of it.
 
 Read root `AGENTS.md`, the nearest package rules for every touched path, `.agents/skills/implement/references/change-recipes.md` for each layer changed, the diff itself, and every caller of a changed shared unit.
 

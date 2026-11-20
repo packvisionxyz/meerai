@@ -443,6 +443,7 @@ pub enum ModalHitKind {
     ServeField(bool),
     ApprovalAction(ApprovalClickAction),
     SearchModeToggle,
+    EffortTier(EffortLevel),
     Close,
 }
 
@@ -572,6 +573,7 @@ pub struct UsageStats {
     pub completion_tokens: Option<i32>,
     pub total_tokens: Option<i32>,
     pub cached_tokens: Option<i32>,
+    pub cache_creation_tokens: Option<i32>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -581,6 +583,7 @@ pub struct TurnMetrics {
     pub session_completion_tokens: u64,
     pub session_total_tokens: u64,
     pub session_cached_tokens: u64,
+    pub session_cache_creation_tokens: u64,
     pub turn_started_at: Option<Instant>,
     pub first_token_at: Option<Instant>,
     pub last_ttft_ms: Option<u64>,
@@ -1186,6 +1189,8 @@ pub struct AppState {
     pub login_cancel: Option<tokio::sync::oneshot::Sender<()>>,
     pub spinner_tick: usize,
     pub show_sidebar: bool,
+    pub sidebar_diagnose_open: bool,
+    pub sidebar_diagnose_head_area: Rect,
     pub terminal_width: u16,
     pub file_changes: Vec<FileChangeEntry>,
     pub mcp_servers: Vec<String>,
@@ -1358,6 +1363,8 @@ impl AppState {
             login_cancel: None,
             spinner_tick: 0,
             show_sidebar: true,
+            sidebar_diagnose_open: false,
+            sidebar_diagnose_head_area: Rect::default(),
             terminal_width: 120,
             file_changes: Vec::new(),
             mcp_servers: Vec::new(),

@@ -62,14 +62,6 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
             Style::default().fg(theme::p().muted),
         ));
     }
-    let usage_str = format_usage_compact(app);
-    if usage_str != "-" {
-        spans.push(Span::styled(
-            format!(" · {usage_str}"),
-            Style::default().fg(theme::p().muted),
-        ));
-    }
-
     if let Some(latest) = app.update_available.clone() {
         let label = format!(" · update v{latest} (/update)");
         let offset: usize = spans.iter().map(|span| span.content.chars().count()).sum();
@@ -90,13 +82,6 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
             web_server_hit = Some(Rect::new(x, area.y, width, 1));
             spans.push(Span::styled(label, Style::default().fg(theme::p().accent)));
         }
-    }
-
-    if let Some(session_usage) = format_session_usage(app) {
-        spans.push(Span::styled(
-            format!(" · {session_usage}"),
-            Style::default().fg(theme::p().faint),
-        ));
     }
 
     if let Some(speed) = tab.metrics.last_tokens_per_sec {
@@ -236,55 +221,6 @@ pub(super) fn format_compact_ms(ms: u64) -> String {
     } else {
         format!("{ms}ms")
     }
-}
-
-fn format_usage_compact(app: &AppState) -> String {
-    let usage = &app.tab().usage;
-    let p = usage.prompt_tokens.map(|v| v.max(0) as u64);
-    let c = usage.completion_tokens.map(|v| v.max(0) as u64);
-    let t = usage
-        .total_tokens
-        .map(|v| v.max(0) as u64)
-        .or_else(|| match (p, c) {
-            (Some(pv), Some(cv)) => Some(pv + cv),
-            _ => None,
-        });
-
-    match (p, c, t) {
-        (Some(pv), Some(cv), Some(tv)) => format!(
-            "↑{} ↓{} Σ{}",
-            format_compact_tokens(pv),
-            format_compact_tokens(cv),
-            format_compact_tokens(tv)
-        ),
-        (_, _, Some(tv)) => format!("Σ{}", format_compact_tokens(tv)),
-        (Some(pv), Some(cv), None) => format!(
-            "↑{} ↓{}",
-            format_compact_tokens(pv),
-            format_compact_tokens(cv)
-        ),
-        _ => "-".to_string(),
-    }
-}
-
-fn format_session_usage(app: &AppState) -> Option<String> {
-    let metrics = &app.tab().metrics;
-    let total = metrics.session_total_tokens;
-    if total == 0 {
-        return None;
-    }
-    let cached = if metrics.session_cached_tokens > 0 {
-        format!(" ↻{}", format_compact_tokens(metrics.session_cached_tokens))
-    } else {
-        String::new()
-    };
-    Some(format!(
-        "session ↑{} ↓{} Σ{}{}",
-        format_compact_tokens(metrics.session_prompt_tokens),
-        format_compact_tokens(metrics.session_completion_tokens),
-        format_compact_tokens(total),
-        cached
-    ))
 }
 
 pub(super) fn key_status_style(status: &KeyStatus) -> (String, Color) {

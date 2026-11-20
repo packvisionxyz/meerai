@@ -1535,6 +1535,54 @@ fn vault_reset_requires_the_word_reset_and_clears_credentials() {
 }
 
 #[test]
+fn sampling_effort_keys_work_from_the_temperature_field() {
+    let (mut app, _rx, _secrets) = test_app();
+    submit(&mut app, "/temperature");
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::Sampling { field: 1, .. })
+    ));
+
+    app.handle_key_event(key(KeyCode::Char('h')));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::Sampling {
+            effort: Some(EffortLevel::High),
+            ..
+        })
+    ));
+    app.handle_key_event(key(KeyCode::Char('m')));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::Sampling {
+            effort: Some(EffortLevel::Medium),
+            ..
+        })
+    ));
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert!(app.modal.is_none());
+    let context = app.settings.context.as_ref().unwrap();
+    assert_eq!(context.effort, Some(EffortLevel::Medium));
+    assert_eq!(app.context_effort, Some(EffortLevel::Medium));
+}
+
+#[test]
+fn sampling_temperature_field_accepts_the_default_keyword() {
+    let (mut app, _rx, _secrets) = test_app();
+    submit(&mut app, "/temperature");
+    for ch in "default".chars() {
+        app.handle_key_event(key(KeyCode::Char(ch)));
+    }
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert!(app.modal.is_none());
+    let context = app.settings.context.as_ref().unwrap();
+    assert_eq!(context.temperature, None, "default must clear the override");
+    assert_eq!(app.context_effort, Some(EffortLevel::Medium));
+}
+
+#[test]
 fn sampling_panel_sets_effort_and_temperature_together() {
     let (mut app, _rx, _secrets) = test_app();
     submit(&mut app, "/sampling");

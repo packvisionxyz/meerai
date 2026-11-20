@@ -10,8 +10,8 @@ use leptos::ev;
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::AnyView;
 use meerai_web_protocol::{
-    ApprovalModeDto, BackendKind, FileChangeDto, McpServerInfoDto, SessionStatus, TurnMetricsDto,
-    UsageDto,
+    ApprovalModeDto, BackendKind, ContextBreakdownDto, FileChangeDto, McpServerInfoDto,
+    SessionStatus, TurnMetricsDto, UsageDto,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -20,10 +20,10 @@ use crate::keymap::open_command_palette;
 use crate::state::{
     ActiveModal, CompletionKind, ConnectionState, MentionCategory, SlashCommandSpec,
     accept_completion, activate_and_switch_session, detach_tab_view, format_duration_ms,
-    format_tokens, move_tab_to, open_diff_modal, open_diff_modal_with_status, open_model_input,
-    open_provider_select, open_search_modal, open_settings, remove_mention_token,
+    format_ratio, format_tokens, move_tab_to, open_diff_modal, open_diff_modal_with_status,
+    open_model_input, open_provider_select, open_search_modal, open_settings, remove_mention_token,
     reopen_pending_request, resolved_mention_chips, set_approval_mode, set_status_notice,
-    submit_or_queue_composer, update_completion,
+    submit_or_queue_composer, toggle_diagnose, update_completion,
 };
 use crate::store::StoreHandle;
 use crate::theme::{BrowserTheme, UiTheme};
@@ -564,26 +564,6 @@ fn StatusLine(store: StoreHandle) -> impl IntoView {
                 crate::state::effort_label(effort)
             ));
 
-            let prompt_tok = usage.prompt_tokens.unwrap_or(0).max(0) as u64;
-            let comp_tok = usage.completion_tokens.unwrap_or(0).max(0) as u64;
-            let total_tok = usage.total_tokens.unwrap_or(0).max(0) as u64;
-            let cached_tok = usage.cached_tokens.unwrap_or(0).max(0) as u64;
-
-            if total_tok > 0 || prompt_tok > 0 {
-                let mut tok_str = format!(
-                    "↑{} ↓{} Σ{}",
-                    format_tokens(prompt_tok),
-                    format_tokens(comp_tok),
-                    format_tokens(total_tok)
-                );
-                if cached_tok > 0 {
-                    tok_str.push_str(&format!(" ↻{}", format_tokens(cached_tok)));
-                }
-                parts.push(tok_str);
-            } else {
-                parts.push("↑0 ↓0 Σ0".to_owned());
-            }
-
             if let Some(cost) = usage.est_cost_usd
                 && cost > 0.0
             {
@@ -1017,6 +997,8 @@ struct SidebarSnapshot {
     backend: Option<BackendKind>,
     metrics: TurnMetricsDto,
     usage: UsageDto,
+    context: Option<ContextBreakdownDto>,
+    diagnose_open: bool,
     subagents: Vec<(String, String, String, Option<String>)>,
 }
 
@@ -1029,6 +1011,7 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                 .map(|t| t.metrics.clone())
                 .unwrap_or_default();
             let usage = s.active_tab().map(|t| t.usage.clone()).unwrap_or_default();
+            let context = s.active_tab().and_then(|t| t.context.clone());
             let subagents = s
                 .active_tab()
                 .map(|tab| {
@@ -1066,6 +1049,8 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                 backend: s.active_session().map(|x| x.backend.clone()),
                 metrics,
                 usage,
+                context,
+                diagnose_open: s.sidebar_diagnose_open,
                 subagents,
             }
         })
@@ -1087,6 +1072,8 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                 backend,
                 metrics,
                 usage,
+                context,
+                diagnose_open,
                 subagents,
             } = sidebar_memo.get();
             if !open {
@@ -1099,6 +1086,41 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                 None => "—".to_owned(),
             };
             let tool_count = enabled_tools.len();
+            let diagnose_rows: Vec<(String, String)> = {
+                let prompt = usage.prompt_tokens.unwrap_or(0).max(0) as u64;
+                let hit = usage
+                    .cached_tokens
+                    .map_or_else(|| "n/a".to_owned(), |c| format_ratio(c.max(0) as u64, prompt));
+                let write = usage
+                    .cache_creation_tokens
+                    .map_or_else(|| "n/a".to_owned(), |c| format_tokens(c.max(0) as u64));
+                let mut rows = vec![
+                    ("Cache hit".to_owned(), hit),
+                    ("Cache write".to_owned(), write),
+                    (
+                        "Session hit".to_owned(),
+                        format_ratio(
+                            metrics.session_cached_tokens,
+                            metrics.session_prompt_tokens,
+                        ),
+                    ),
+                ];
+                if let Some(c) = context.as_ref() {
+                    rows.push((
+                        "Context used".to_owned(),
+                        format_ratio(c.estimated_total_tokens, c.context_window_tokens),
+                    ));
+                    rows.push((
+                        "Memory".to_owned(),
+                        format!("{} tokens", format_tokens(c.memory_tokens)),
+                    ));
+                    rows.push((
+                        "Tool schemas".to_owned(),
+                        format!("{} tokens", format_tokens(c.tool_schemas_tokens)),
+                    ));
+                }
+                rows
+            };
 
             view! {
                 <aside class="sidebar open" aria-label="Workspace inspector" inert=move || sessions::background_inert(store)>
@@ -1137,6 +1159,32 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                         {usage.est_cost_usd.filter(|c| *c > 0.0).map(|cost| view! {
                             <div class="side-meta">{format!("Estimated cost: ${cost:.4}")}</div>
                         }.into_any())}
+                    </section>
+                    <section class="side-section">
+                        <div class="side-head">
+                            <h2>"Diagnose"</h2>
+                            <button
+                                class="btn tiny"
+                                on:click=move |_| store.update(toggle_diagnose)
+                            >
+                                {if diagnose_open { "Hide" } else { "Show" }}
+                            </button>
+                        </div>
+                        {if diagnose_open {
+                            AnyView::from(Fragment::new(
+                                diagnose_rows
+                                    .into_iter()
+                                    .map(|(label, value)| view! {
+                                        <div class="side-kv">
+                                            <span class="side-stat-label">{label}</span>
+                                            <span class="side-row-text">{value}</span>
+                                        </div>
+                                    }.into_any())
+                                    .collect::<Vec<_>>(),
+                            ))
+                        } else {
+                            view! { <div class="side-meta">"Cache hit ratio, context use, and memory size"</div> }.into_any()
+                        }}
                     </section>
                     <section class="side-section">
                         <div class="side-head">

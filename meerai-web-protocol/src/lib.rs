@@ -244,6 +244,8 @@ pub struct UsageDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub est_cost_usd: Option<f64>,
 }
 
@@ -262,6 +264,8 @@ pub struct TurnMetricsDto {
     pub session_total_tokens: u64,
     #[serde(default)]
     pub session_cached_tokens: u64,
+    #[serde(default)]
+    pub session_cache_creation_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_turn_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

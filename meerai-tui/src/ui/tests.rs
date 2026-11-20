@@ -199,7 +199,8 @@ fn composer_drag_selects_text_and_delete_removes_it() {
         .buffer()
         .cell((input_area.x, input_area.y))
         .unwrap();
-    assert_eq!(cell.bg, theme::p().surface_high);
+    assert_eq!(cell.bg, theme::p().accent);
+    assert_eq!(cell.fg, theme::p().background);
 
     assert!(app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
     assert_eq!(app.tab().input, "world");
@@ -215,6 +216,127 @@ fn sidebar_shows_the_workspace_without_duplicated_metrics() {
     assert!(!rendered.contains("tokens "));
     assert!(!rendered.contains("speed "));
     assert!(!rendered.contains("state "));
+}
+
+#[test]
+fn clicking_a_sampling_tier_sets_the_effort() {
+    use meerai_common::settings::EffortLevel;
+
+    let mut app = test_app();
+    app.modal = Some(ActiveModal::Sampling {
+        effort: None,
+        temperature: String::new(),
+        field: 1,
+        error: None,
+    });
+    render_to_string(&mut app);
+    let zone = app
+        .modal_hit_zones
+        .iter()
+        .find(|zone| zone.kind == ModalHitKind::EffortTier(EffortLevel::Medium))
+        .copied()
+        .expect("medium tier hit zone");
+    assert!(app.handle_mouse_event(mouse(
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        zone.rect.x,
+        zone.rect.y,
+    )));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::Sampling {
+            effort: Some(EffortLevel::Medium),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn opening_diagnose_keeps_the_session_block_visible() {
+    let mut app = test_app();
+    app.sidebar_diagnose_open = true;
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("DIAGNOSE [hide]"));
+    assert!(rendered.contains("SESSION"));
+    assert!(rendered.contains("AGENTS"));
+    assert!(rendered.contains("TOOLS"));
+}
+
+#[test]
+fn diagnose_block_reports_cache_hit_and_context_use() {
+    use crate::app::UsageStats;
+
+    let mut app = test_app();
+    app.tab_mut().usage = UsageStats {
+        prompt_tokens: Some(200),
+        ..UsageStats::default()
+    };
+    app.sidebar_diagnose_open = true;
+    let unreported = render_to_string(&mut app);
+    assert!(
+        unreported.contains("hit       n/a"),
+        "a provider that reports no cache must not read as a 0% hit"
+    );
+    assert!(unreported.contains("write     n/a"));
+
+    app.tab_mut().usage = UsageStats {
+        prompt_tokens: Some(200),
+        cached_tokens: Some(150),
+        cache_creation_tokens: Some(20),
+        ..UsageStats::default()
+    };
+    app.tab_mut().metrics.session_prompt_tokens = 400;
+    app.tab_mut().metrics.session_cached_tokens = 100;
+    app.tab_mut().context = Some(meerai_session::ContextBreakdown {
+        estimated_total_tokens: 500,
+        context_window_tokens: 1000,
+        memory_tokens: 120,
+        tool_schemas_tokens: 340,
+        ..meerai_session::ContextBreakdown::default()
+    });
+
+    app.sidebar_diagnose_open = false;
+    let collapsed = render_to_string(&mut app);
+    assert!(collapsed.contains("DIAGNOSE [show]"));
+    assert!(!collapsed.contains("75.0%"));
+
+    app.sidebar_diagnose_open = true;
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("DIAGNOSE [hide]"));
+    assert!(rendered.contains("75.0% 150/200"));
+    assert!(rendered.contains("20"));
+    assert!(rendered.contains("25.0% 100/400"));
+    assert!(rendered.contains("50.0% 500/1k"));
+    assert!(rendered.contains("120 tokens"));
+    assert!(rendered.contains("340 tokens"));
+}
+
+#[test]
+fn clicking_the_diagnose_header_toggles_the_block() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    let mut app = test_app();
+    let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("draw sidebar");
+
+    let head = app.sidebar_diagnose_head_area;
+    assert!(head.width > 0 && head.height == 1);
+    assert!(!app.sidebar_diagnose_open);
+
+    assert!(app.handle_mouse_event(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        head.x,
+        head.y
+    )));
+    assert!(app.sidebar_diagnose_open);
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("redraw expanded sidebar");
+    let head = app.sidebar_diagnose_head_area;
+    assert!(app.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), head.x, head.y)));
+    assert!(app.sidebar_diagnose_open, "release must not toggle again");
 }
 
 #[test]
@@ -926,13 +1048,12 @@ fn renders_transcript_completion_and_statusline() {
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
     assert!(app.completion.is_active());
+    app.sidebar_diagnose_open = true;
 
-    let rendered = render_to_string(&mut app);
+    let rendered = render_to_string_with_size(&mut app, 120, 40);
     assert!(rendered.contains("INS"));
     assert!(rendered.contains("gemini / gemini-3.8-flash"));
     assert!(rendered.contains("[saved]"));
-    assert!(rendered.contains("↑100 ↓25 Σ125"));
-    assert!(rendered.contains("session ↑100 ↓25 Σ125 ↻40"));
     assert!(rendered.contains("42.5 tok/s"));
     assert!(rendered.contains("1.4s"));
     assert!(rendered.contains("meerai"));
@@ -943,6 +1064,14 @@ fn renders_transcript_completion_and_statusline() {
     assert!(rendered.contains("AGENTS"));
     assert!(rendered.contains("TOOLS"));
     assert!(rendered.contains("File Changes"));
+    assert!(rendered.contains("DIAGNOSE [hide]"));
+    assert!(rendered.contains("↑100 ↓25"));
+    assert!(rendered.contains("40.0% 40/100"));
+    assert!(
+        !rendered.contains("session ↑"),
+        "token totals belong to the diagnose block only"
+    );
+    assert!(!rendered.contains("Σ125"));
 }
 
 #[test]
@@ -987,12 +1116,10 @@ fn renders_agent_and_skill_mention_badges() {
     let rendered = render_to_string(&mut app);
     assert!(rendered.contains("Mentions"));
     assert!(rendered.contains("reviewer"));
-    assert!(!rendered.contains("agent reviewer"));
-    assert!(!rendered.contains("skill reviewer"));
-    assert!(
-        rendered.contains(".agents — Reviews changes and reports the highest-risk findings first.")
-    );
-    assert!(rendered.contains(".claude — Plans a change and verifies the final result."));
+    assert!(rendered.contains("agent reviewer"));
+    assert!(rendered.contains("skill reviewer"));
+    assert!(rendered.contains(".agents — Reviews changes"));
+    assert!(rendered.contains(".claude — Plans a change"));
     assert!(!rendered.contains("@agent/reviewer"));
     assert!(!rendered.contains("@skill/reviewer"));
 }
@@ -1013,7 +1140,7 @@ fn composer_renders_known_mention_chips() {
     let (spans, cursor) = render_composer_line("@skill/deliver", Some(14), &agents, &skills);
     assert_eq!(spans.len(), 1);
     assert_eq!(spans[0].content, "deliver");
-    assert_eq!(spans[0].style.fg, Some(theme::p().interactive));
+    assert_eq!(spans[0].style.fg, Some(theme::p().warning));
     assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
     assert_eq!(cursor, 7);
 
@@ -1052,7 +1179,7 @@ fn composer_renders_multiple_chips_and_surrounding_text() {
     let texts: Vec<String> = spans.iter().map(|span| span.content.to_string()).collect();
     assert_eq!(texts, vec!["run ", "deliver", " then ", "reviewer", " now"]);
     assert_eq!(span_text(&spans), "run deliver then reviewer now");
-    assert_eq!(spans[1].style.fg, Some(theme::p().interactive));
+    assert_eq!(spans[1].style.fg, Some(theme::p().warning));
     assert_eq!(spans[3].style.fg, Some(theme::p().accent));
 }
 

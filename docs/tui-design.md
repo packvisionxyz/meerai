@@ -40,22 +40,34 @@ composer, and a one-row statusline.
 │ Conversation & tool stream                      │ Sidebar (ctrl+b)         │
 │                                                 │  session / provider /    │
 │ > You                                           │  model / auth / dir      │
-│   Refactor the agent loop                       │  ─────────────────────── │
-│ ▸ 1 command · 2 reads · 1 edit                  │  File changes            │
-│ ◆ Assistant                                     │  src/loop.rs  +18 -9     │
+│   Refactor the agent loop                       │  MCP / agents / tools    │
+│ ▸ 1 command · 2 reads · 1 edit                  │  ─────────────────────── │
+│ ◆ Assistant                                     │  DIAGNOSE [show]         │
+│                                                 │  ─────────────────────── │
+│                                                 │  File changes            │
+│                                                 │  src/loop.rs  +18 -9     │
 ├─────────────────────────────────────────────────┴──────────────────────────┤
 │ Composer (INS) — @ mentions, / commands                                    │
 │ INS · ASK · model · provider · temp 0.70                                   │
 ├────────────────────────────────────────────────────────────────────────────┤
-│ ~/code/repo  main  ↑12k ↓2k Σ14k ↻8k  42 tok/s  ⠋ Ran code-shell          │
+│ ~/code/repo  main  42 tok/s  ⠋ Ran code-shell                              │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - The sidebar hides below `MIN_SIDEBAR_WIDTH` and returns on resize.
-  `ctrl+b` toggles it. It is two panels: `surface` for the session block
-  (`session`, `provider`, `model`, `auth`, `dir` with `~` shortening) and
-  `surface_high` for file changes. Running state, tokens, and speed belong
-  to the statusline, not the sidebar.
+  `ctrl+b` toggles it. It has three panels on `surface`: the session
+  overview (`session`, `provider`, `model`, `auth`, `dir` with `~`
+  shortening, then MCP servers, agents, and tools), the `DIAGNOSE` panel,
+  and the file-changes panel.
+- Each panel has its own height, so expanding `DIAGNOSE` never pushes the
+  session block out. The overview keeps at least 11 content rows. On a short
+  terminal the file-changes panel gives up height first.
+- `DIAGNOSE` is collapsed by default and takes three rows (header only).
+  `/diagnose` or a click on the header expands it to ten rows. The rows are
+  last-request tokens (`↑prompt ↓completion`), cache hit ratio
+  (`cached_tokens / prompt_tokens` from the provider, not an estimate), cache
+  write tokens, session hit ratio, context use, memory tokens, and tool
+  schema tokens. A provider that reports no cache details shows `n/a`.
 - The file list pages with a clickable `… and N more` footer (next page,
   back to top at the end) and scrolls with the mouse wheel. Clicking a
   changed file opens the diff modal.
@@ -137,11 +149,14 @@ selects text and copies it on release. There is no keyboard Select mode.
   a completion; `Esc` dismisses completion, then returns to `NOR` without
   discarding the draft.
 - Composer clicks move the cursor and start a drag selection. Drag paints
-  the selection with the accent background and background-colored text;
-  Backspace/Delete or typing deletes it. Unlike the transcript, composer
-  drag selection does not auto-copy. A double-click within 400 ms on the
-  same cell selects the word under the cursor (`register_click`,
-  `word_bounds_at`).
+  the selection with the accent background and background-colored text, and
+  the release copies it, like the transcript. The drag target is clamped to
+  the composer, so moving the pointer past the box still selects to the line
+  end or the last visible row. Backspace/Delete or typing deletes the
+  selection.
+- A double-click within 400 ms on the same cell selects the word under the
+  cursor and copies it on release (`register_click`,
+  `composer_word_bounds_at`).
 - The queued panel sits directly above the composer and shows up to four
   queued messages, each with `edit` and `✕` hit zones
   (`render_queued_panel`, `ui/composer.rs`). It is hidden below 32 columns.
@@ -167,7 +182,7 @@ Typing `/` opens completion. The implemented handler set
 | `/models`, `/model [name]` | Pick or set the model |
 | `/effort [low\|medium\|high]` | Set the reasoning tier, or open the sampling panel with no argument |
 | `/sampling` | Sampling panel: reasoning effort and temperature override together |
-| `/temperature` | Sampling panel focused on the temperature override |
+| `/temperature` | Sampling panel focused on the temperature override. `l`/`m`/`h` and Left/Right set the tier from either field; the tier row is clickable. Type `default` to clear the override. |
 | `/agent <id>`, `/skill <id>` | Apply a markdown definition |
 | `/agents` | Mentions popup filtered to agents |
 | `/skills` | Definitions panel filtered to skills |
@@ -186,6 +201,7 @@ Typing `/` opens completion. The implemented handler set
 | `/search [query]` (aliases `/tv`, `/find`), `/grep [query]` | File/content search |
 | `/diff [path]` | Diff review |
 | `/sidebar` | Toggle the sidebar |
+| `/diagnose` | Show or hide the sidebar diagnose block (cache hit ratio, cache write, context use, memory, tool schemas) |
 | `/sessions [id]` | Session picker or switch |
 | `/new`, `/close` | Open / close a session tab |
 | `/rewind` | Rewind menu for the latest turn (§2.9) |
@@ -207,10 +223,15 @@ discoverable from the statusline hint.
 
 ### 2.6 Mentions popup and chips
 
-Typing `@` opens one Mentions popup: agents first, then skills, then files.
-Agent rows show the id in the teal accent color, skill rows in the blue
-interactive color, each with source and description; file rows show the
-path in the normal text color. Rows show the bare id, not the `@agent/` or
+Typing `@` opens one Mentions popup: agent and skill rows interleaved, then
+files. Interleaving keeps a skill visible on the first screen even when the
+project defines many agents. A typed query groups agents before skills.
+The list shows up to 12 rows and scrolls with the selection.
+Every row starts with a fixed-width kind column: a faint `agent`, `skill`,
+or `file`. The kind column keeps the labels aligned. Agent rows show the id
+in the teal accent color, skill rows in the amber warning color, and file
+rows in the normal text color; each row also shows its source and
+description. Rows show the bare id, not the `@agent/` or
 `@skill/` prefix. One id can appear as both an agent and a skill.
 
 - Filtering matches `@agent/<id>`, `@skill/<id>`, the bare id, and fuzzy
@@ -369,11 +390,11 @@ are the clipboard programs (§2.3).
 ### 2.15 Statusline
 
 One monochrome row, left to right: workspace path, git branch (when the
-workspace is a git repo), an optional sandbox warning, the `ACP:agy` badge on ACP tabs, a clickable `web :<port>` badge while `/serve` is running, a backgrounded `shell <cmd>` segment, current-turn usage
-(`↑prompt ↓completion Σtotal`), a clickable `update vX (/update)` hint,
-session totals with `↻cached` when cache reads exist, throughput after the
-first measured stream, and a braille spinner with the active tool or
-running agent names. Short notices replace the right side temporarily.
+workspace is a git repo), an optional sandbox warning, the `ACP:agy` badge on ACP tabs, a clickable `web :<port>` badge while `/serve` is running, a backgrounded `shell <cmd>` segment, a clickable `update vX (/update)` hint,
+throughput after the first measured stream, and a braille spinner with the
+active tool or running agent names. Token and cache counters belong to the
+sidebar `DIAGNOSE` panel, so the statusline stays one row of state, not a
+second usage report. Short notices replace the right side temporarily.
 
 While `subagent-run` is active the statusline names the running agents.
 Clicking that segment opens a `SubagentOverlay` above the composer; a row

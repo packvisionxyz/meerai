@@ -71,6 +71,11 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
         "Toggle right status and file changes sidebar",
         false,
     ),
+    (
+        "/diagnose",
+        "Show or hide cache, context, and memory diagnostics",
+        false,
+    ),
     ("/clear", "Clear visible chat transcript", false),
     ("/reset", "Clear transcript and reset agent history", false),
     ("/cancel", "Cancel the active agent turn", false),
@@ -155,9 +160,10 @@ pub enum CompletionItemKind {
 impl CompletionItemKind {
     pub fn badge(self) -> Option<&'static str> {
         match self {
-            CompletionItemKind::Plain | CompletionItemKind::File => None,
+            CompletionItemKind::Plain => None,
             CompletionItemKind::Agent => Some("agent"),
             CompletionItemKind::Skill => Some("skill"),
+            CompletionItemKind::File => Some("file"),
         }
     }
 
@@ -578,15 +584,37 @@ fn build_mention_candidates(
     files: &[String],
     query: &str,
 ) -> Vec<CompletionItem> {
-    let mut candidates = build_definition_candidates(agents, query, CompletionItemKind::Agent);
-    candidates.extend(build_definition_candidates(
-        skills,
-        query,
-        CompletionItemKind::Skill,
-    ));
+    let agent_items = build_definition_candidates(agents, query, CompletionItemKind::Agent);
+    let skill_items = build_definition_candidates(skills, query, CompletionItemKind::Skill);
+    let mut candidates = if query.trim().is_empty() {
+        interleave_definitions(agent_items, skill_items)
+    } else {
+        let mut items = agent_items;
+        items.extend(skill_items);
+        items
+    };
     candidates.extend(build_file_candidates(files, query));
     candidates.truncate(MAX_VISIBLE_ITEMS);
     candidates
+}
+
+fn interleave_definitions(
+    agents: Vec<CompletionItem>,
+    skills: Vec<CompletionItem>,
+) -> Vec<CompletionItem> {
+    let mut agents = agents.into_iter();
+    let mut skills = skills.into_iter();
+    let mut items = Vec::with_capacity(agents.len() + skills.len());
+    loop {
+        let agent = agents.next();
+        let skill = skills.next();
+        if agent.is_none() && skill.is_none() {
+            break;
+        }
+        items.extend(agent);
+        items.extend(skill);
+    }
+    items
 }
 
 fn build_definition_candidates(
@@ -836,7 +864,7 @@ mod tests {
             .find(|item| item.label == "agent/report.md")
             .expect("file candidate must be present");
         assert_eq!(file.item_kind, CompletionItemKind::File);
-        assert_eq!(file.item_kind.badge(), None);
+        assert_eq!(file.item_kind.badge(), Some("file"));
         assert_eq!(file.insert_text, "@agent/report.md ");
         assert_eq!(
             items
@@ -901,6 +929,42 @@ mod tests {
         engine.update("@write", 6);
         assert_eq!(engine.items()[0].label, "writer");
         assert_eq!(engine.items()[0].item_kind, CompletionItemKind::Agent);
+    }
+
+    #[test]
+    fn bare_at_interleaves_agents_and_skills_before_files() {
+        let ws = TempWorkspace::new("mention_interleave");
+        let mut engine = CompletionEngine::new(ws.root.clone());
+        engine.set_definitions(
+            &[
+                agent_definition("alpha", DefinitionSource::Agents, None),
+                agent_definition("bravo", DefinitionSource::Agents, None),
+                agent_definition("delta", DefinitionSource::Agents, None),
+            ],
+            &[
+                skill_definition("charlie", DefinitionSource::Agents, None),
+                skill_definition("echo", DefinitionSource::Agents, None),
+            ],
+        );
+
+        engine.update("@", 1);
+        let kinds: Vec<CompletionItemKind> = engine
+            .items()
+            .iter()
+            .take(5)
+            .map(|item| item.item_kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                CompletionItemKind::Agent,
+                CompletionItemKind::Skill,
+                CompletionItemKind::Agent,
+                CompletionItemKind::Skill,
+                CompletionItemKind::Agent,
+            ],
+            "a skill must be visible on the first screen of a bare @"
+        );
     }
 
     #[test]
@@ -972,7 +1036,7 @@ mod tests {
         assert_eq!(engine.items().len(), 1);
         assert_eq!(engine.items()[0].label, "src/app.rs");
         assert_eq!(engine.items()[0].item_kind, CompletionItemKind::File);
-        assert_eq!(engine.items()[0].item_kind.badge(), None);
+        assert_eq!(engine.items()[0].item_kind.badge(), Some("file"));
         let (accepted, cursor) = engine.accept(input, input.len()).unwrap();
         assert_eq!(accepted, "@src/app.rs ");
         assert_eq!(cursor, "@src/app.rs ".len());

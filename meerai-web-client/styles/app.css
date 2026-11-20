@@ -137,7 +137,8 @@ input[type="checkbox"] {
 }
 
 ::selection {
-  background: color-mix(in srgb, var(--m-accent) 30%, transparent);
+  background: var(--m-accent);
+  color: var(--m-bg);
 }
 
 .app {
@@ -3054,11 +3055,19 @@ button.settings-row:hover {
 }
 
 .def-chip.agent {
-  border-color: color-mix(in srgb, var(--m-info) 45%, transparent);
+  border-color: color-mix(in srgb, var(--m-accent) 55%, transparent);
+}
+
+.def-chip.agent .def-chip-kind {
+  color: var(--m-accent);
 }
 
 .def-chip.skill {
-  border-color: var(--accent-line);
+  border-color: color-mix(in srgb, var(--m-warning) 55%, transparent);
+}
+
+.def-chip.skill .def-chip-kind {
+  color: var(--m-warning);
 }
 
 .def-chip-kind {
@@ -3123,13 +3132,13 @@ button.settings-row:hover {
 }
 
 .cat-badge.agent {
-  border-color: color-mix(in srgb, var(--m-info) 45%, transparent);
-  color: var(--m-info);
+  border-color: color-mix(in srgb, var(--m-accent) 55%, transparent);
+  color: var(--m-accent);
 }
 
 .cat-badge.skill {
-  border-color: var(--accent-line);
-  color: var(--m-accent);
+  border-color: color-mix(in srgb, var(--m-warning) 55%, transparent);
+  color: var(--m-warning);
 }
 
 .side-head {

@@ -55,9 +55,9 @@ mod tests {
     use crate::state::{
         accept_completion, apply_opened_session, apply_session_detail, cycle_approval_mode,
         detach_tab_view, dispatch_prompt_text, drain_next_queued_if_idle, execute_slash_command,
-        extract_mentions, group_transcript_blocks, mention_segments, move_tab_to, open_diff_modal,
-        remove_mention_token, reorder_active_tab, resolved_mention_chips, select_tab_index,
-        submit_or_queue_composer, update_completion,
+        extract_mentions, format_ratio, group_transcript_blocks, mention_segments, move_tab_to,
+        open_diff_modal, remove_mention_token, reorder_active_tab, resolved_mention_chips,
+        select_tab_index, submit_or_queue_composer, update_completion,
     };
 
     fn summary(id: &str, status: SessionStatus) -> SessionSummaryDto {
@@ -313,6 +313,13 @@ mod tests {
 
         execute_slash_command(&mut state, "/sidebar");
         assert!(!state.sidebar_open);
+        execute_slash_command(&mut state, "/diagnose");
+        assert!(state.sidebar_open);
+        assert!(state.sidebar_diagnose_open);
+        execute_slash_command(&mut state, "/diagnose");
+        assert!(!state.sidebar_diagnose_open);
+        assert_eq!(format_ratio(150, 200), "75.0% 150/200");
+        assert_eq!(format_ratio(5, 0), "n/a");
         execute_slash_command(&mut state, "/bogus");
         assert!(
             state
@@ -413,6 +420,7 @@ mod tests {
                 completion_tokens: Some(45),
                 total_tokens: Some(165),
                 cached_tokens: Some(50),
+                cache_creation_tokens: None,
                 est_cost_usd: Some(0.002),
             },
             metrics: TurnMetricsDto {

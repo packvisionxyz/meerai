@@ -76,17 +76,40 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
         .split(main_area);
         let sidebar = cols[3];
         let gap = 1u16.min(sidebar.height);
-        let body = sidebar.height.saturating_sub(gap);
-        let top = (body as u32 * 55 / 100) as u16;
-        let bottom = body.saturating_sub(top);
+        let diagnose_height = if app.sidebar_diagnose_open { 10 } else { 3 };
+        let leftover = sidebar
+            .height
+            .saturating_sub(diagnose_height)
+            .saturating_sub(gap.saturating_mul(2));
+        let overview_min = 13.min(leftover);
+        let changes_min = 3.min(leftover.saturating_sub(overview_min));
+        let top = ((leftover as u32 * 55 / 100) as u16)
+            .clamp(overview_min, leftover.saturating_sub(changes_min));
+        let middle = leftover.saturating_sub(top);
         let overview_area = Rect::new(sidebar.x, sidebar.y, sidebar.width, top);
-        let changes_area = Rect::new(sidebar.x, sidebar.y + top + gap, sidebar.width, bottom);
+        let diagnose_area = Rect::new(
+            sidebar.x,
+            sidebar.y.saturating_add(top).saturating_add(gap),
+            sidebar.width,
+            diagnose_height,
+        );
+        let changes_area = Rect::new(
+            sidebar.x,
+            diagnose_area
+                .y
+                .saturating_add(diagnose_height)
+                .saturating_add(gap),
+            sidebar.width,
+            middle,
+        );
 
         sidebar::render_sidebar_overview(frame, app, overview_area);
+        sidebar::render_sidebar_diagnose(frame, app, diagnose_area);
         sidebar::render_sidebar_changes(frame, app, changes_area);
         cols[0]
     } else {
         app.sidebar_changes_inner_area = Rect::default();
+        app.sidebar_diagnose_head_area = Rect::default();
         app.visible_file_change_rows = 0;
         app.file_change_more_hit = None;
         app.hovered_file_change = None;

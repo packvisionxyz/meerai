@@ -2,6 +2,13 @@
 
 All notable changes to the skill bundle. Versions follow the `metadata.version` in each `SKILL.md`.
 
+## 1.4.0
+
+- Added the `review` skill: review a pull request, a local change, or a document against the codebase
+  and its rules, with severity-ranked findings and `path:line` evidence. Read-only by design.
+- `review` ships two references: `references/review-playbook.md` for diff acquisition and category
+  checks, and `references/doc-drift.md` for auditing document claims against code.
+
 ## 1.3.0
 
 - Moved the role briefs out of `skills/*/agents/` into `.meerai/agents/` as native harness agent

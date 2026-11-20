@@ -145,6 +145,13 @@ pub(crate) const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: PaletteAction::Slash("/sidebar"),
     },
     PaletteCommand {
+        section: "View",
+        label: "Toggle diagnose block",
+        hint: "/diagnose",
+        keywords: "diagnose cache hit ratio context memory tokens prompt",
+        action: PaletteAction::Slash("/diagnose"),
+    },
+    PaletteCommand {
         section: "Turn",
         label: "Cycle reasoning effort",
         hint: "/effort",

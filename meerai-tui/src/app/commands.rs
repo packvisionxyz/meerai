@@ -203,6 +203,9 @@ impl AppState {
             "/sidebar" => {
                 self.toggle_sidebar();
             }
+            "/diagnose" => {
+                self.toggle_diagnose_panel();
+            }
             "/search" | "/tv" | "/find" => {
                 self.open_search_modal(SearchMode::Files, arg);
             }

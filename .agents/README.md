@@ -1,6 +1,6 @@
 # Agent Skills
 
-A portable bundle of five role skills for coding agents. The skills are repository-agnostic: each one
+A portable bundle of six role skills for coding agents. The skills are repository-agnostic: each one
 reads a per-repository profile instead of hardcoding paths, commands, or rules.
 
 ```
@@ -12,6 +12,7 @@ reads a per-repository profile instead of hardcoding paths, commands, or rules.
 │   ├── implement/    implement in any layer
 │   ├── deliver/      CI/CD and infrastructure-as-code
 │   ├── specify/      brainstorm and write requirements
+│   ├── review/       review a PR, a change, or a document
 │   └── orchestrate/  orchestrate a multi-area change with subagents
 ├── templates/
 │   └── repo-profile.md
@@ -93,6 +94,7 @@ rest `Unknown` rather than guessing.
 | `implement` | Writing a feature, fix, endpoint, migration, command, route, query, or component |
 | `deliver` | Changing pipelines, reusable workflow components, IaC, environments, secrets, domains, releases |
 | `specify` | Brainstorming an idea or writing a requirement/initiative document |
+| `review` | Reviewing a pull request, a local change, or a document against the code and rules |
 | `orchestrate` | A change spans several surfaces and needs a plan, delegation, and integration |
 
 ## Subagents

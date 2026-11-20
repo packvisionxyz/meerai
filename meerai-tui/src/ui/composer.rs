@@ -169,7 +169,8 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: R
         let input = app.tab().input.clone();
         let (start_line, start_col) = wrapped.position(&input, start, &app.agents, &app.skills);
         let (end_line, end_col) = wrapped.position(&input, end, &app.agents, &app.skills);
-        let highlight = theme::p().surface_high;
+        let highlight = theme::p().accent;
+        let highlight_fg = theme::p().background;
         let buf = frame.buffer_mut();
         for line in start_line..=end_line {
             if line < scroll_y || line >= scroll_y + content.height as usize {
@@ -185,6 +186,7 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: R
             for col in from..to {
                 if let Some(cell) = buf.cell_mut((content.x + col as u16, y)) {
                     cell.set_bg(highlight);
+                    cell.set_fg(highlight_fg);
                 }
             }
         }
@@ -501,7 +503,7 @@ fn push_composer_text(
 fn mention_chip_style(kind: MentionKind) -> Style {
     let color = match kind {
         MentionKind::Agent => theme::p().accent,
-        MentionKind::Skill => theme::p().interactive,
+        MentionKind::Skill => theme::p().warning,
     };
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
@@ -521,7 +523,7 @@ pub(super) fn render_completion_popup(
         return;
     }
 
-    let max_visible = (transcript_area.height.saturating_sub(2) as usize).clamp(1, 8);
+    let max_visible = (transcript_area.height.saturating_sub(2) as usize).clamp(1, 12);
     let height = items.len().min(max_visible) as u16 + 2;
     let (width, x) = if app.completion.kind() == Some(CompletionKind::File) {
         (transcript_area.width, transcript_area.x)
@@ -575,7 +577,10 @@ pub(super) fn render_completion_popup(
             let label = truncate_single_line(&item.label, label_width);
             let label_len = label.chars().count();
             let pad = label_width.saturating_sub(label_len) + 2;
-            let max_desc = (inner.width as usize).saturating_sub(2 + label_len + pad + 2);
+            let badge = item.item_kind.badge();
+            let badge_width = badge.map_or(0, |_| 6);
+            let max_desc =
+                (inner.width as usize).saturating_sub(2 + badge_width + label_len + pad + 2);
 
             let lead = if is_selected { "▸ " } else { "  " };
             let mut spans = vec![Span::styled(
@@ -586,9 +591,15 @@ pub(super) fn render_completion_popup(
                     theme::p().faint
                 }),
             )];
+            if let Some(badge) = badge {
+                spans.push(Span::styled(
+                    format!("{badge:<5} "),
+                    Style::default().fg(theme::p().faint),
+                ));
+            }
             let label_color = match item.item_kind {
                 CompletionItemKind::Agent => theme::p().accent,
-                CompletionItemKind::Skill => theme::p().interactive,
+                CompletionItemKind::Skill => theme::p().warning,
                 CompletionItemKind::Plain | CompletionItemKind::File => theme::p().text,
             };
             spans.push(Span::styled(
