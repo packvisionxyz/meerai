@@ -20,6 +20,7 @@ meerai-common = { path = "../meerai-common/" }
 meerai-core = { path = "../meerai-core/" }
 meerai-policy = { path = "../meerai-policy/" }
 meerai-session = { path = "../meerai-session/" }
+meerai-store = { path = "../meerai-store/" }
 meerai-syntax = { path = "../meerai-syntax/" }
 
 anyhow = { workspace = true }

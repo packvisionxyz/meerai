@@ -101,7 +101,7 @@ Active in any mode unless a modal is open.
 
 Tabs also reorder by mouse: press switches immediately, dragging more than
 two columns arms the drag, and release drops the tab on the target. The
-order persists in `open-tabs.json`.
+order persists in the `user_config` table (`ui_tabs`).
 
 ### 2.3 Normal mode (`NOR`)
 
@@ -165,11 +165,24 @@ Typing `/` opens completion. The implemented handler set
 | `/auth` | Credential sources |
 | `/connect`, `/provider` | Configure or switch provider |
 | `/models`, `/model [name]` | Pick or set the model |
-| `/effort [low\|medium\|high]` | Show, set, or cycle the reasoning tier (§2.4) |
+| `/effort [low\|medium\|high]` | Set the reasoning tier, or open the sampling panel with no argument |
+| `/sampling` | Sampling panel: reasoning effort and temperature override together |
+| `/temperature` | Sampling panel focused on the temperature override |
 | `/agent <id>`, `/skill <id>` | Apply a markdown definition |
-| `/agents`, `/skills` | Mentions popup filtered to that kind |
+| `/agents` | Mentions popup filtered to agents |
+| `/skills` | Definitions panel filtered to skills |
 | `/mode [plan\|ask\|auto]` | Show or set the approval mode |
 | `/compact` | Request context compaction |
+| `/context` | Context panel: token buckets, watermark, projection toggles, turn pin/unpin, summarize-from-here, blob viewer, scroll, refresh |
+| `/memory [query]` | Memory panel: list, search, pin, delete |
+| `/remember <note>` | Save a project memory |
+| `/forget <id>`, `/pin <id> [off]` | Delete or pin a project memory |
+| `/routing [set <task> <provider::model> ...]` | Routing panel or a route change |
+| `/packs`, `/pack <verb> <id> [rev]` | Packs and definitions panel, or a pack change |
+| `/definitions` | Definitions tab: agents, skills, token estimates, warnings, and a `model`/`manual` marker for skills |
+| `/subagent` | Spawn form: agent, task, model, mode, steps, tokens, cost, tool subset |
+| `/subagent <agent> <task>`, `/subagent cancel <item>` | Direct spawn or cancel |
+| `/vault-reset` | Confirmation dialog; typing `reset` deletes all saved credentials and reinitializes the vault |
 | `/search [query]` (aliases `/tv`, `/find`), `/grep [query]` | File/content search |
 | `/diff [path]` | Diff review |
 | `/sidebar` | Toggle the sidebar |
@@ -301,7 +314,7 @@ being replayed.
   There is no dot or spinner glyph.
 - Closing a tab quits its worker but keeps the session on disk.
 - `meerai-tui/src/tabs.rs` persists session ids, the active index, and the
-  reusable empty session per workspace to `<data>/open-tabs.json`. On a plain
+  reusable empty session per workspace to the `ui_tabs` row in SQLite. On a plain
   TUI start the CLI opens one empty session tab and restores the saved sessions
   in the background, so the empty tab stays active. The saved empty session is
   reused instead of creating another; closing an empty tab keeps it for the

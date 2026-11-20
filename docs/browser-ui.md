@@ -117,7 +117,7 @@ The replay projection reconstructs transcript entries from logged events ([`meer
 | Layout, theme, transcript | Implemented: responsive shell, theme tokens, sidebar, turn rail, activity digests, Markdown, highlighted code. |
 | Keyboard, navigation, copy | Implemented for the shortcuts in §4.3. Browser find, selection, zoom, and copy work on the DOM. |
 | Composer and active turns | Implemented: multiline editing, IME, queue, steer, cancel, compact, reset. Queued prompts show `Steer`, `Edit`, and `Remove`; `Edit` opens the narrow queued-edit dialog and saves the new text in place. |
-| Slash commands and palette | Implemented for the dispatcher's current command set plus `/settings` for in-browser configuration. Unknown commands stay errors, never prompts. |
+| Slash commands and palette | Implemented for the dispatcher's current command set plus `/settings` for in-browser configuration. `/effort` with no argument and `/sampling` open Settings → Context, where effort and temperature are edited together. Unknown commands stay errors, never prompts. |
 | Mentions and definitions | Implemented: completion, apply, and resolved agent/skill chips with remove controls; the raw text stays in the textarea. |
 | Approvals | Implemented: once, turn, session, decline, reason, cancel. A resolved request closes in every client. |
 | Questions | Implemented: single and multiple choice, `Other`, Back/Next, keyboard selection, submit, cancel. |
@@ -128,6 +128,7 @@ The replay projection reconstructs transcript entries from logged events ([`meer
 | User shell | Implemented through `SessionOpener::run_user_shell`; the dialog and transcript receive the output. |
 | Status and usage | Implemented: workspace, branch, connection, mode, model, effective temperature with its tier (`temp 0.20 · medium`), live turn timer, active tool, turn/session token counters, cached tokens, cost, throughput, and update status badge. Browser notifications are not shown yet. |
 | Reload | Implemented through `/reload`; it reloads config and reports warnings. |
+| Context, memory, routing, packs, subagents | Implemented as one tabbed Control panel: `/context`, `/memory`, `/routing`, `/packs`, `/definitions`, and `/subagent` open the matching tab. The Context tab shows the token breakdown, projection toggles, turn pin/unpin, summarize-from-here, the summary-focus input, and a blob viewer. The Subagent tab exposes agent, task, model, mode, steps, tokens, cost, and tool subset. The Packs tab installs, pins, enables, trusts, and removes packs and lists definition diagnostics with a `model`/`manual` marker for skills. The panel fetches `GET /api/memories`, `/api/routes`, `/api/packs`, and `/api/definitions/diagnostics`; mutations and spawns call `POST /api/actions`, which runs the same `meerai-host` executor as the TUI. Context arrives through `ContextUpdated`; blobs use `GET /api/sessions/{id}/blobs/{key}`. `/vault-reset` opens a confirmation panel that calls the shared reset action. |
 | Providers and sign-in | Implemented: provider status, model choice, API key, ChatGPT sign-in, paste, cancel, removal. |
 | ACP | Implemented: `/acp` creates an ACP session; tabs and header show `ACP` badges with the external-engine warning banner. |
 | Reconnect | Implemented: snapshot, cursor, resync, manual Reconnect action, and no automatic replay of unknown outcomes. |
@@ -187,6 +188,13 @@ The remaining work is automation, bundle gating, and manual accessibility sign-o
 | POST | `/api/providers/{id}/chatgpt/start` | Start a ChatGPT sign-in | Basic; 401 if auth is disabled |
 | POST | `/api/providers/{id}/chatgpt/{attempt}/paste` | Paste a redirect URL | Basic; 401 if auth is disabled |
 | POST | `/api/providers/{id}/chatgpt/{attempt}/cancel` | Cancel a sign-in attempt | Basic; 401 if auth is disabled |
+| POST | `/api/actions` | Run a host action such as `/memory`, `/routing`, `/packs`, `/context`, `/pin-turn`, `/context-policy`, `/summarize`, or `/subagent` | Basic; 401 if auth is disabled |
+| GET | `/api/memories` | List or search project memories (`?query=`) | Basic; 401 if auth is disabled |
+| GET | `/api/routes` | List task model routes | Basic; 401 if auth is disabled |
+| GET | `/api/packs` | List installed packs | Basic; 401 if auth is disabled |
+| GET | `/api/definitions/diagnostics` | Agent and skill diagnostics | Basic; 401 if auth is disabled |
+| GET | `/api/sessions/{id}/context` | Latest context breakdown | Basic; 401 if auth is disabled |
+| GET | `/api/sessions/{id}/blobs/{key}` | Read a spilled tool-output blob | Basic; 401 if auth is disabled |
 | POST | `/api/settings` | Update settings | Basic; 401 if auth is disabled |
 | POST | `/api/reload` | Reload configuration | Basic; 401 if auth is disabled |
 

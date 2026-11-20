@@ -1,5 +1,6 @@
 mod blob;
 mod compaction;
+mod context;
 mod event;
 mod ids;
 mod perms;
@@ -11,6 +12,7 @@ mod storage;
 
 pub use blob::*;
 pub use compaction::*;
+pub use context::*;
 pub use event::*;
 pub use ids::*;
 pub use projection::*;

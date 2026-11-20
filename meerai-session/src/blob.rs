@@ -1,47 +1,88 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use meerai_core::env::now_millis;
 use meerai_core::text::{ceil_char_boundary, floor_char_boundary};
+use meerai_store::Store;
+use rusqlite::{OptionalExtension, params};
 
-pub(crate) const BLOB_DIR_NAME: &str = "blobs";
+use crate::ids::SessionId;
 
 #[derive(Clone)]
 pub struct BlobStore {
-    dir: PathBuf,
+    store: Store,
+    session_id: SessionId,
 }
 
 impl BlobStore {
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+    pub fn new(store: Store, session_id: SessionId) -> Self {
+        Self { store, session_id }
     }
 
-    pub fn for_session(session_dir: impl Into<PathBuf>) -> Self {
-        Self {
-            dir: session_dir.into().join(BLOB_DIR_NAME),
-        }
+    pub fn put(&self, content: &str) -> Result<String> {
+        let key = blob_key(content);
+        let compressed =
+            zstd::stream::encode_all(content.as_bytes(), 3).context("compress spilled output")?;
+        let byte_len = i64::try_from(content.len())?;
+        self.store.immediate(|tx| {
+            tx.execute(
+                "INSERT INTO session_blobs (session_id, blob_key, byte_len, content_zstd, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(session_id, blob_key) DO UPDATE SET
+                    byte_len = excluded.byte_len,
+                    content_zstd = excluded.content_zstd,
+                    created_at_ms = excluded.created_at_ms",
+                params![
+                    self.session_id.as_str(),
+                    key,
+                    byte_len,
+                    compressed,
+                    now_millis() as i64
+                ],
+            )?;
+            Ok(())
+        })?;
+        Ok(key)
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.dir
+    pub fn get(&self, key: &str) -> Result<Option<String>> {
+        let stored: Option<Vec<u8>> = self.store.read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT content_zstd FROM session_blobs WHERE session_id = ?1 AND blob_key = ?2",
+                    params![self.session_id.as_str(), key],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        })?;
+        stored
+            .map(|bytes| {
+                let decoded = zstd::stream::decode_all(bytes.as_slice())
+                    .context("decompress spilled output")?;
+                String::from_utf8(decoded).context("spilled output is not valid UTF-8")
+            })
+            .transpose()
     }
 
-    pub fn put(&self, content: &str) -> Result<PathBuf> {
-        crate::perms::create_private_dir_blocking(&self.dir)?;
-        let mut hasher = DefaultHasher::new();
-        content.hash(&mut hasher);
-        let name = format!("{:016x}-{}.txt", hasher.finish(), content.len());
-        let path = self.dir.join(name);
-        crate::perms::write_private_blocking(&path, content.as_bytes())?;
-        Ok(path)
+    pub fn list(&self) -> Result<Vec<(String, u64)>> {
+        self.store.read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT blob_key, byte_len FROM session_blobs
+                 WHERE session_id = ?1 ORDER BY created_at_ms DESC, blob_key",
+            )?;
+            let rows = stmt.query_map([self.session_id.as_str()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
     }
 }
 
 pub struct SpillOutcome {
     pub retained: String,
     pub bytes_omitted: u64,
-    pub blob_path: Option<PathBuf>,
+    pub blob_key: Option<String>,
     pub warning: Option<String>,
 }
 
@@ -54,7 +95,7 @@ pub async fn apply_spill(text: &str, budget_tokens: u64, blobs: &BlobStore) -> S
         return SpillOutcome {
             retained: text.to_string(),
             bytes_omitted: 0,
-            blob_path: None,
+            blob_key: None,
             warning: None,
         };
     }
@@ -67,7 +108,7 @@ pub async fn apply_spill(text: &str, budget_tokens: u64, blobs: &BlobStore) -> S
         return SpillOutcome {
             retained: text.to_string(),
             bytes_omitted: 0,
-            blob_path: None,
+            blob_key: None,
             warning: None,
         };
     }
@@ -81,11 +122,10 @@ pub async fn apply_spill(text: &str, budget_tokens: u64, blobs: &BlobStore) -> S
     .await;
 
     match stored {
-        Ok(Ok(path)) => {
+        Ok(Ok(key)) => {
             let notice = format!(
-                "(Omitted {bytes_omitted} bytes. Full result stored at: {} — use read_file with \
-                 offset/limit, or grep this path, to inspect it.)",
-                path.display()
+                "(Omitted {bytes_omitted} bytes. Full result stored as blob {key}; open the context \
+                 blob viewer to inspect it.)"
             );
             let mut retained =
                 String::with_capacity(head_end + notice.len() + text.len() - tail_start);
@@ -99,23 +139,29 @@ pub async fn apply_spill(text: &str, budget_tokens: u64, blobs: &BlobStore) -> S
             SpillOutcome {
                 retained,
                 bytes_omitted,
-                blob_path: Some(path),
+                blob_key: Some(key),
                 warning: None,
             }
         }
         Ok(Err(err)) => SpillOutcome {
             retained: text.to_string(),
             bytes_omitted: 0,
-            blob_path: None,
+            blob_key: None,
             warning: Some(format!("failed to store spilled output: {err}")),
         },
         Err(err) => SpillOutcome {
             retained: text.to_string(),
             bytes_omitted: 0,
-            blob_path: None,
+            blob_key: None,
             warning: Some(format!("failed to store spilled output: {err}")),
         },
     }
+}
+
+fn blob_key(content: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    format!("{:016x}-{}.txt", hasher.finish(), content.len())
 }
 
 fn head_boundary(text: &str, limit: usize) -> usize {
@@ -151,16 +197,27 @@ fn tail_boundary(text: &str, limit: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::SessionId;
-
-    fn temp_root(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("meerai-blob-{label}-{}", SessionId::new()))
-    }
 
     fn sample(lines: usize) -> String {
         (0..lines)
             .map(|index| format!("line {index} with some padded content for spilling\n"))
             .collect()
+    }
+
+    fn blob_store() -> BlobStore {
+        let store = Store::open(":memory:").unwrap();
+        let session = SessionId::new();
+        store
+            .immediate(|tx| {
+                tx.execute(
+                    "INSERT INTO sessions (id, project_root, cwd, created_at_ms, updated_at_ms)
+                     VALUES (?1, '/w', '/w', 0, 0)",
+                    [session.as_str()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        BlobStore::new(store, session)
     }
 
     #[test]
@@ -173,22 +230,20 @@ mod tests {
 
     #[tokio::test]
     async fn small_results_pass_through_untouched() {
-        let root = temp_root("small");
-        let blobs = BlobStore::for_session(&root);
+        let blobs = blob_store();
         let text = "short output\n";
 
         let outcome = apply_spill(text, 64, &blobs).await;
 
         assert_eq!(outcome.retained, text);
         assert_eq!(outcome.bytes_omitted, 0);
-        assert!(outcome.blob_path.is_none());
+        assert!(outcome.blob_key.is_none());
         assert!(outcome.warning.is_none());
     }
 
     #[tokio::test]
     async fn large_results_keep_head_and_tail_and_store_blob() {
-        let root = temp_root("large");
-        let blobs = BlobStore::for_session(&root);
+        let blobs = blob_store();
         let text = sample(400);
 
         let outcome = apply_spill(&text, 40, &blobs).await;
@@ -202,36 +257,33 @@ mod tests {
                 .trim_end()
                 .ends_with("content for spilling")
         );
-        let path = outcome.blob_path.as_ref().unwrap();
-        assert!(path.starts_with(blobs.dir()));
-        assert!(
-            outcome
-                .retained
-                .contains(&format!("(Omitted {} bytes. Full result stored at: {} — use read_file with offset/limit, or grep this path, to inspect it.)", outcome.bytes_omitted, path.display()))
-        );
-        let stored = std::fs::read_to_string(path).unwrap();
-        assert_eq!(stored, text);
-
-        std::fs::remove_dir_all(&root).unwrap();
+        let key = outcome.blob_key.as_ref().unwrap();
+        assert!(outcome.retained.contains(&format!(
+            "(Omitted {} bytes. Full result stored as blob {}",
+            outcome.bytes_omitted, key
+        )));
+        assert_eq!(blobs.get(key).unwrap().as_deref(), Some(text.as_str()));
+        assert_eq!(blobs.list().unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn storage_failure_fails_open() {
-        let root = temp_root("failure");
-        std::fs::create_dir_all(&root).unwrap();
-        let blocked = root.join("blocked");
-        std::fs::write(&blocked, "not a directory").unwrap();
-        let blobs = BlobStore::new(&blocked);
+        let store = Store::open(":memory:").unwrap();
+        store
+            .immediate(|tx| {
+                tx.execute("DROP TABLE session_blobs", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let blobs = BlobStore::new(store, SessionId::new());
         let text = sample(400);
 
         let outcome = apply_spill(&text, 40, &blobs).await;
 
         assert_eq!(outcome.retained, text);
         assert_eq!(outcome.bytes_omitted, 0);
-        assert!(outcome.blob_path.is_none());
+        assert!(outcome.blob_key.is_none());
         assert!(outcome.warning.is_some());
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

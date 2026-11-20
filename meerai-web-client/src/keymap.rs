@@ -639,6 +639,24 @@ fn handle_modal_key(
                 _ => false,
             }
         }
+        ActiveModal::VaultReset { .. } => {
+            if key == "Escape" {
+                store.update(|s| s.modal = None);
+                ev.prevent_default();
+                true
+            } else {
+                false
+            }
+        }
+        ActiveModal::WorkspacePanel { .. } => {
+            if key == "Escape" {
+                store.update(|s| s.modal = None);
+                ev.prevent_default();
+                true
+            } else {
+                false
+            }
+        }
         _ => false,
     }
 }

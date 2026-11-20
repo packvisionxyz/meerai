@@ -80,10 +80,13 @@ Rules for all shapes:
   the default is the session model, and summarizer usage counts toward `max_session_tokens`.
 - Environment expansion supports `${VAR}` / `${VAR|default}` and `{env:VAR}`
   (`settings::expand_config_secret`).
-- Credentials use `KeychainSecretStore` (macOS `/usr/bin/security`, Linux `secret-tool`, disabled via
-  `MEERAI_DISABLE_KEYCHAIN`) under service `meerai`, migrating stale entries out of `auth.json`. When
-  unavailable or failing, it falls back to `FileSecretStore` (`auth.json` in the app data dir,
-  written by `meerai auth login`, `0600` on Unix).
+- Credentials use the AEAD `VaultSecretStore` (`vault_secrets`) with a per-database DEK under
+  service `meerai`. macOS reads and writes the DEK through `/usr/bin/security`, so the keychain
+  grant survives rebuilds and upgrades but covers the tool, not meerai: it is not a per-application
+  boundary. Linux uses `secret-tool`, Windows the Credential Manager, and `MEERAI_DISABLE_KEYCHAIN`
+  skips the keychain. Without a keychain the vault requires `MEERAI_VAULT_PASSPHRASE` (Argon2id)
+  and fails closed; there is no plaintext fallback. Resolution: stored credential → configured
+  `api_key` → provider environment variables.
 - Tool-output redaction is `redact_run` in `meerai-agents/src/redact.rs`. It runs in the agent after
   the tool run and before spill, session log, UI items, or model text. Patterns: OpenAI/OpenRouter
   `sk-`, Anthropic `sk-ant-`, Google `AIza`, GitHub `ghp_`/`github_pat_`, AWS `AKIA`, Slack `xox*`,
@@ -101,10 +104,17 @@ Rules for all shapes:
   both paths. The catalog is sorted by id. `.meerai/agents` and `.meerai/skills` are never scanned
   or created; there are no copies and no import lock. Symlinks are skipped with a warning.
 - Id: frontmatter `name`, else the file stem (agent) or directory name (skill). Frontmatter fields:
-  `name`, `description`, `model`, `steps`, `mode`. `tools`, `permissions`, and `allowed-tools` warn
-  and are not applied. Invalid frontmatter (unclosed `---`, bad YAML) warns and skips the file.
-  Missing frontmatter uses the fallback name and the whole body.
-- A skill uses only its `SKILL.md` text; supporting files in the directory are not read.
+  `name`, `description`, `model`, `steps`, `mode`, `disable-model-invocation`. `tools`,
+  `permissions`, and `allowed-tools` warn and are not applied. Invalid frontmatter (unclosed
+  `---`, bad YAML) warns and skips the file. Missing frontmatter uses the fallback name and the
+  whole body.
+- Skill loading is progressive. `compose_definition_prompt` appends a `## Skills` block with
+  `<id>: <description>` for each skill where `description` is set and `disable-model-invocation`
+  is not. The block is capped at 8 KiB and screened. The read-only `skill-load` tool
+  (`meerai-agents/src/skill_tool.rs`) returns the `SKILL.md` body and the supporting file names;
+  with `file`, it returns one listed file. Reads stay inside the skill directory, reject path
+  separators and symlinks, and cap text at 16 KiB. A skill without a description is not
+  advertised but still works with `/skill`/`--skill`.
 - Startup: `--agent <ID>` takes one id (repeating is an error); `--skill <ID>` is repeatable. Both append
   instructions to the system prompt through `compose_definition_prompt` after
   `compose_system_prompt`. Unknown ids fail with the available ids. Model precedence is `--model`
@@ -125,9 +135,10 @@ Rules for all shapes:
   mention as an `<id>` chip (bold cyan agent, bold magenta skill) while the raw
   `@agent/<id>`/`@skill/<id>` stays in the input buffer and submit detection; unknown ids and
   partial tokens render as typed, and cursor columns use the chip display width. The composer title
-  says `@ mentions`. `/agents` and `/skills` do not exist and there is no definition editor.
+  says `@ mentions`. `/agents` and `/skills` open the Mentions and definitions panels; there is no
+  definition editor.
 - Security: definitions are untrusted repository prompt text. No tool execution, permission/tool
-  mapping, scripts, sandbox, MCP, or supporting-file loading.
+  mapping, scripts, sandbox, or MCP. `skill-load` only reads files inside the skill directory.
 
 ## Session log (`meerai-session`)
 
@@ -265,5 +276,5 @@ Rules for all shapes:
   counters (`set_harness`, `session_usage_from_events`).
 - Adding `.meerai/agents`/`.meerai/skills` discovery, copying or importing definitions, or writing
   an import lock. Discovery is read-only at the project root and `.agents` wins duplicate ids.
-- Applying definition `tools`/`permissions`/`allowed-tools`, honouring `steps`/`mode`, switching
-  provider from an agent `model` that contains `:`, or reading skill supporting files.
+- Applying definition `tools`/`permissions`/`allowed-tools`, honouring `steps`/`mode`, or switching
+  provider from an agent `model` that contains `:`.

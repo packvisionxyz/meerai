@@ -44,12 +44,11 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   `async_trait`, `schemars::JsonSchema`. `doctest = false`.
 - `meerai-macros` — `#[tool]` and `#[derive(Toolset)]` (darling + syn +
   quote; test-only deps are dev-dependencies).
-- `meerai-session` — append-only `SessionEvent` log
-  (`session.v<N>.jsonl`, size-rotated at 8 MiB and sealed to
-  `.jsonl.zstd`), `meta.json`, crash recovery, idempotent healing,
+- `meerai-session` — append-only `SessionEvent` log in SQLite
+  (`session_events`, FTS5 `session_events_fts`), crash recovery, idempotent healing,
   `derive_messages`, replay, fork/rewind (`latest_closed_turn`,
-  `fork_latest`, `create_child`), snapshot store
-  (`snapshots/<turn-id>/manifest.json` + blobs), blob store, spill,
+  `fork_latest`, `create_child`), SQLite snapshot store
+  (`session_snapshots`), SQLite blob store (`session_blobs`), spill,
   compaction primitives, listing/deletion/pruning.
 - `meerai-policy` — `PolicyEngine`: ordered action/resource/effect rules
   (globset, last match wins over default → user → agent), `ApprovalMode`,
@@ -59,22 +58,28 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   `workspace_search`), `repo_map` (`retrieval-repo_map`, tree-sitter +
   PageRank, `#[derive(Toolset)]`), `lsp` (`lsp-*` stdio JSON-RPC),
   `search_as_code` (`sac-run_script`), `world` (`ExecutionWorld`).
-- `meerai-common` — `AppSettings`, `find_project_root`,
+- `meerai-store` — embedded SQLite (`meerai.db`): WAL, FTS5, schema v1,
+  typed repositories (`ConfigRepo`, `MemoryRepo`, `PackRepo`, `RoutesRepo`,
+  `UsageRepo`), and private-file permissions.
+- `meerai-common` — SQLite-backed `AppSettings`, `find_project_root`,
   `load_project_settings`/`merge_project_settings`, `definitions`
-  (`load_definitions`, `AgentDefinition`, `SkillDefinition`,
-  `DefinitionSource`), `hooks` (`HookEvent`, `HookEntry`, `load_hooks`).
+  (`load_definitions`, `load_definitions_for`, `AgentDefinition`,
+  `SkillDefinition`, `DefinitionSource`, shadow diagnostics), `packs`
+  (`meerai-pack.yml`, install/pin/trust state), `hooks` (`HookEvent`,
+  `HookEntry`, `load_hooks`).
 - `meerai-client` — `ProviderCatalog` + bundled `providers.yml`,
   per-model metadata (`models:` entries: `context_window`,
   `input_cost_per_mtok`, `output_cost_per_mtok`; `model_info`),
   `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract,
   `MemorySecretStore`, auth listing.
-- `meerai-providers` — genai client factory plus native secret stores
-  (keychain, `auth.json`); re-exports the client surface.
+- `meerai-providers` — genai client factory plus the AEAD `VaultSecretStore`
+  (OS keychain DEK or `MEERAI_VAULT_PASSPHRASE` Argon2id fallback); re-exports
+  the client surface.
 - `meerai-agents` — `MultiTurnAgent`, `AgentHarness`/`HarnessConfig`
   (including `TokenPricing`), `AgentEvent`/`AgentCommand`, `intercept`
   (`Interceptor`, `StepPlan`, `ToolPlan`, `ToolContext`, `ToolOutcome`,
   `StepAction`, `TurnStopAction`, async `before_tool`), hook engine
-  (`HookEngine`, `HookContext`, `HookReport`), `question-ask`,
+  (`HookEngine`, `HookContext`, `HookReport`), `question-ask`, `skill-load`,
   `prompt::{BASE_SYSTEM_PROMPT, compose_system_prompt}`, `spawn_worker`,
   `subagent` runtime, delegated `acp-run` (`acp_subagent`), `redact`,
   `screen`, `shell_safety`.
@@ -152,11 +157,13 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
 - Definitions: read-only discovery at the project root, `.agents` before
   `.claude`, duplicate ids keep `.agents` (warning names both paths),
   sorted by id, symlinks skipped. Frontmatter
-  `name/description/model/steps/mode`; `tools`/`permissions`/
-  `allowed-tools` warn and are ignored; invalid frontmatter warns and
-  skips; missing frontmatter uses the file/directory name. Only
-  `SKILL.md` is read. Startup caps: 16 KiB per definition, 32 KiB total.
-  `--agent` takes one id (repeat is a parse error); `--skill` is
+  `name/description/model/steps/mode/disable-model-invocation`;
+  `tools`/`permissions`/`allowed-tools` warn and are ignored; invalid
+  frontmatter warns and skips; missing frontmatter uses the file/directory
+  name. Skills advertise one prompt line each (`id: description`, 8 KiB cap,
+  screened); `skill-load` reads `SKILL.md` or one supporting file inside the
+  skill directory, 16 KiB cap. Explicit `--skill` bodies keep the 16 KiB /
+  32 KiB caps. `--agent` takes one id (repeat is a parse error); `--skill` is
   repeatable; unknown ids fail with the available list. Model precedence:
   `--model` → `MEERAI_MODEL` → agent `model` → settings/provider default;
   a `:` model is ignored with a warning; `steps`/`mode` are note-only.
@@ -209,19 +216,24 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   render reads `theme::p()`. There is no separate working-directory
   overlay: a CWD that holds `.meerai/settings.yml` is itself the project
   root, so its theme applies through the project merge.
-- Keys: keychain first for API keys (`security` on macOS, `secret-tool` on
-  Linux), `auth.json` fallback (`0600`, data dir), `MEERAI_DISABLE_KEYCHAIN`
-  forces the file. ChatGPT plan OAuth credentials stay in `auth.json` and are
-  refreshed under `auth.json.lock`; the access token is resolved like a key.
-  Resolution: stored credential → configured `api_key` → provider `env_vars`
-  from the bundled catalog. `${VAR|default}` and `{env:VAR}` expansion in config
+- Keys: the AEAD vault encrypts API keys and ChatGPT plan OAuth credentials in
+  `vault_secrets`. The 256-bit DEK lives in the OS keychain (`/usr/bin/security`
+  on macOS, `secret-tool` on Linux, Credential Manager on Windows) under a
+  per-database `vault-master-key-v1-<id>` account; without a keychain,
+  `MEERAI_VAULT_PASSPHRASE` derives the key with Argon2id and the vault fails
+  closed. The macOS CLI keeps the keychain grant across rebuilds, but the grant
+  covers `/usr/bin/security` rather than meerai, so it is not a per-application
+  boundary. OAuth refresh uses one `BEGIN IMMEDIATE` transaction. Resolution:
+  stored credential → configured `api_key` → provider `env_vars` from the
+  bundled catalog. `${VAR|default}` and `{env:VAR}` expansion in config
   secrets.
-- Sessions root: `$XDG_DATA_HOME/meerai/sessions` or `MEERAI_SESSION_DIR`;
-  `auth.json` and `open-tabs.json` share the data root. Dirs `0700`, files
-  `0600` on Unix. `meta.json`: cwd, git branch/SHA, title, model,
-  approval mode, `parent_session_id`, `harness`, `remote_session_id`,
-  timestamps. `--continue` picks the most recently updated non-child
-  session (falls back to the newest overall when only children exist).
+- Sessions live in `$XDG_DATA_HOME/meerai/meerai.db` (`MEERAI_DB_PATH` overrides
+  the file). `sessions`, `session_events`, `session_events_fts`,
+  `session_blobs`, and `session_snapshots` hold metadata, the append-only event
+  log, spilled output, and checkpoints. Only `session.lock` remains in
+  `sessions/<id>/`. Dirs `0700`, files `0600` on Unix. `--continue` picks the
+  most recently updated non-child session (falls back to the newest overall
+  when only children exist).
 - `sac-run_script` registers only when `ScriptRuntime::detect()` finds
   `python3` (preferred) or `node`. Inline `script` or `path` (validated
   via `resolve_for_read`); 15 s default timeout clamped to 60 s; 64 KiB
@@ -264,7 +276,7 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   never invented in the bundled catalog.
 - `-p` is **provider**, not prompt; headless input is `--prompt`/`--print`,
   and `--json` requires it.
-- Approval mode is stored per session in `meta.json`. Precedence:
+- Approval mode is stored per session in the `sessions` row. Precedence:
   `--mode` > stored session mode > `settings.approval_mode` > `ask`.
   `/mode` persists through `SetPermissionMode`; forks inherit the source
   mode; restored tabs load each session's own mode. A model switch
@@ -301,7 +313,9 @@ implementation invariants.
   `ChatRequest::with_system`; scoped `AGENTS.md` (16 KiB, max 8/turn) is
   injected as `RuntimeContext` user messages once per turn. An
   `Active model:` identity line is appended at request time and refreshed
-  by `set_model`. Startup `--skill`/`--agent` append to the system prompt;
+  by `set_model`. It carries the bare model id, not the provider adapter
+  prefix: an Alibaba model on the `openai` adapter reports the model id, not
+  `openai::<id>`. Startup `--skill`/`--agent` append to the system prompt;
   TUI apply commands use System-sourced messages at the next step
   boundary.
 - Projection clearing is a rule, not a rewrite:
@@ -312,8 +326,12 @@ implementation invariants.
   clearing. Never clear at log-write time or delete a result.
   `ProjectionPolicy` fields: `strip_ephemera`, `prune_reasoning`,
   `verbatim_window_turns`, `clear_old_tool_results`,
-  `include_system_messages` (the harness sets the last to false; the
-  config knob is `reasoning_pruning`).
+  `include_system_messages`, and `pinned_turns` (the harness sets
+  `include_system_messages` to false; the config knob is
+  `reasoning_pruning`). `SessionEvent::ContextTurnPinned` persists pins;
+  `derive_messages` keeps a pinned turn's tool results verbatim even
+  outside the window. `SetProjectionOverrides` also carries in-memory
+  overrides and logs the pin change.
 - Compaction is cache-aware: with no `summarizer_model`, the summary
   request reuses the parent system, tools, and projected history with
   `SUMMARY_INSTRUCTION` as the last user message. A distinct summarizer
@@ -360,7 +378,9 @@ implementation invariants.
   call `Session::open` from a read path, and never heal at projection
   time.
 - `max_turn_secs` defaults to 1800 with a harness (`0` disables; without
-  a harness the deadline is 0; subagent children force 0). Provider
+  a harness the deadline is 0; subagent children get the parent's remaining
+  deadline minus a 5 s margin, minimum 1 s, and normally fail their own turn
+  first). Provider
   retries: 3 attempts, 250/500 ms + up to 50% jitter, status-classified
   (408/409/425/429 and 5xx transient; other 4xx permanent; message
   blocklist fallback). Stream requests set a 30 s header timeout and a
@@ -386,6 +406,44 @@ implementation invariants.
 - Spend approval at the session token cap: `Accept` raises the cap by one
   context window, `AcceptForSession` removes it, `Decline` fails the turn
   with `Budget`.
+- Step budget: `max_steps_per_turn` (default 32) is the first budget.
+  `step_limit_continuations` (default 2) grants that many automatic
+  continuations, so a turn gets 96 steps by default. At each continuation
+  boundary the loop logs `STEP_CONTINUE_NOTICE` ("Continue now and finish
+  the task... Do not summarize or list next steps") and keeps the tools.
+  Only the absolute final step logs `STEP_LIMIT_NOTICE` and strips tools.
+  Subagents set `step_limit_continuations = 0`, so their preset caps stay
+  exact.
+- Context telemetry: `ContextBreakdown` is computed from the projected
+  event log plus `tool_schema_tokens` and the system/memory prompt split.
+  `MultiTurnAgent` emits `AgentEvent::ContextUpdated` after each step,
+  after compaction, and on `InspectContext`. `ContextBreakdown` includes
+  per-bucket tokens, watermark/headroom, spilled blobs, cleared results,
+  pinned turns, verbatim turns, and cached prompt tokens. The TUI stores
+  the latest breakdown per tab; the host registry stores it per live
+  session and rebroadcasts `RegistryEventKind::ContextUpdated`.
+- Routing and spend: `HarnessConfig::routing` holds `ModelRoute` entries.
+  `RoutingCoordinator` owns a global and per-provider semaphore from
+  `max_concurrency`, plus a USD ledger from `note_cost` and a cap from the
+  default route's `max_cost_usd`. `collect_stream` holds a permit for one
+  provider stream; compaction does the same. A spent cap raises
+  `ApprovalKind::Spend` before the next step. Route `effort` and
+  `max_tokens_per_turn` override the request options; an explicit
+  `summarizer_model` wins over the `compact` route.
+- Project memory: `MemoryToolset` exposes `memory-search` (Read),
+  `memory-save`, and `memory-delete` (Write). `MemoryCapture` writes a
+  `Progress` row and one `Decision` row per key decision after a successful
+  compaction when `HarnessConfig::auto_memory` is true. `compose_system_prompt_with_memory`
+  appends the store's bounded `prompt_block` under `## Project memory` and
+  screens it with `screen_untrusted_text`. The block is stable for the turn,
+  so the prompt-cache prefix stays warm.
+- Manual subagents: `SpawnSubagent` and `CancelSubagent` run through the
+  same `SubagentToolset` runtime as `subagent-run`, with an explicit
+  `item_id`. Approval modes are clamped to the parent (`plan` forces
+  read-only), tools can only narrow the preset, and step/token/cost caps
+  are bounded by the parent. `SubagentRun` carries model, mode, steps,
+  usage, cost, and active tool; `ItemDelta::SubagentProgress` streams
+  changes to both UIs.
 
 #### Extension points
 
@@ -533,7 +591,8 @@ Controls and residual risks are owned by
 blocks, `plan` hard read-only, approval gates, headless fail-fast, env
 scrub, best-effort redaction and screening, session permissions,
 user-controlled retention, budgets, `ExecutionWorld` with `HostWorld`
-fallback, keychain with `auth.json` fallback, `cargo-deny` CI audit, and
+fallback, AEAD credential vault (keychain DEK or passphrase, fail-closed),
+`cargo-deny` CI audit, and
 conditional release signing are implemented. Hooks run unsandboxed host
 commands behind an explicit trust gate. ACP backends are outside local
 policy. Remaining gaps: signing secrets are operator-configured, Windows

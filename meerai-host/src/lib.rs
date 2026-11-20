@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod diff;
 pub mod registry;
 pub mod search;
@@ -7,10 +8,18 @@ pub mod theme;
 pub mod update;
 pub mod workspace;
 
+pub use actions::{
+    HostAction, HostActionContext, execute_host_action, parse_host_action, render_context,
+    render_definitions, render_memories, render_packs, render_routes,
+};
 pub use diff::{
     DiffCell, DiffRow, DiffRowKind, FileChangeEntry, FileDiffView, UnifiedLine, UnifiedLineKind,
     build_edit_diff, build_file_diff, current_branch, diff_counts, diff_texts, list_git_changes,
     parse_unified_diff, tool_edit_diff,
+};
+pub use meerai_store::{
+    InstalledPack, ModelRoute, NewProjectMemory, PackSourceKind, ProjectMemory, ProjectMemoryKind,
+    RoutingSettings, TaskType,
 };
 pub use registry::{
     ChatGptLoginStatus, HostError, LiveEntry, LiveSessionDetail, LiveSessionSummary, RegistryEvent,
@@ -24,11 +33,11 @@ pub use search::{
 };
 pub use session::{
     AcpPresetInfo, Backend, ChatGptLogin, ChatGptLoginOutcome, ForgetModel, HostAgentInfo,
-    HostAuthKind, HostInfoSnapshot, HostMcpServerInfo, HostModelItem, HostProviderItem,
-    HostProvidersSnapshot, HostReloadOutcome, HostReloadPayload, HostSettingsUpdate,
-    HostSettingsView, HostSkillInfo, OpenedSession, ResolvedAgentApplication,
-    ResolvedModelSelection, ResolvedSkillApplication, SessionOpener, WebServerHandle,
-    WebServerLauncher, WebServerStart,
+    HostAuthKind, HostDefinitionInfo, HostDefinitionsDiagnostics, HostInfoSnapshot,
+    HostMcpServerInfo, HostModelItem, HostProviderItem, HostProvidersSnapshot, HostReloadOutcome,
+    HostReloadPayload, HostSettingsUpdate, HostSettingsView, HostShadowedDefinition, HostSkillInfo,
+    OpenedSession, ResolvedAgentApplication, ResolvedModelSelection, ResolvedSkillApplication,
+    SessionOpener, WebServerHandle, WebServerLauncher, WebServerStart, definition_token_estimate,
 };
 pub use theme::{HostColor, HostPalette, NamedColor, ResolvedThemeHex};
 pub use workspace::{LocalWorkspace, WorkspaceMatch, WorkspaceQuery, local_workspace};

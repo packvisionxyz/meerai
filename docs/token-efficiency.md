@@ -182,7 +182,7 @@ Completion can be gated on an external verifier, and loops are bounded.
   parameter schema and asks for corrected arguments
   (`multi_turn_agent/tools.rs`).
 - `context.recovery_model` selects the model for the recovery turn; the
-  session model is restored afterward and `meta.json` keeps the session
+  session model is restored afterward and the `sessions` row keeps the session
   model (`meerai-common/src/settings.rs`, `multi_turn_agent/worker.rs`). A
   project value containing `:` is dropped so it cannot redirect the
   provider.

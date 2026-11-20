@@ -10,10 +10,11 @@ use meerai_common::settings::{
 use meerai_core::EffectClass;
 use meerai_host::{
     Backend, ChatGptLoginStatus, DiffRowKind, FileChangeEntry, FileDiffView, ForgetModel,
-    HostAuthKind, HostError, HostInfoSnapshot, HostProvidersSnapshot, HostSettingsUpdate,
-    LiveEntry, LiveSessionDetail, LiveSessionSummary, RegistryEventKind, RegistrySnapshot,
-    ResolvedThemeHex, SearchMatch, SearchMode, SearchPreview, SessionStatus as HostSessionStatus,
-    TurnMetricsSnapshot, UnifiedLine, UnifiedLineKind, UsageStatsSnapshot,
+    HostAuthKind, HostDefinitionsDiagnostics, HostError, HostInfoSnapshot, HostProvidersSnapshot,
+    HostSettingsUpdate, InstalledPack, LiveEntry, LiveSessionDetail, LiveSessionSummary,
+    ModelRoute, ProjectMemory, RegistryEventKind, RegistrySnapshot, ResolvedThemeHex, SearchMatch,
+    SearchMode, SearchPreview, SessionStatus as HostSessionStatus, TurnMetricsSnapshot,
+    UnifiedLine, UnifiedLineKind, UsageStatsSnapshot,
 };
 use meerai_policy::ApprovalMode;
 use meerai_session::replay::{
@@ -23,15 +24,16 @@ use meerai_session::{ApprovalDecision, ApprovalKind, GrantScope, LoggedEvent};
 use meerai_web_protocol::{
     AcpPresetDto, AgentInfoDto, ApiError, ApiErrorCode, ApprovalDecisionDto, ApprovalKindDto,
     ApprovalModeDto, ApprovalRequestDto, AuthKindDto, BackendKind, ChatGptLoginStateDto,
-    ContextSettingsDto, DiffCellDto, DiffRowDto, DiffRowKindDto, EffectClassDto, EffortDto,
-    FileChangeDto, FileDiffResponse, GrantScopeDto, HostInfoDto, McpServerInfoDto, ModelItemDto,
-    ProviderItemDto, ProvidersResponse, QuestionAnswerDto, QuestionOptionDto, QuestionPromptDto,
-    QuestionRequestDto, RewindScopeDto, SandboxSettingsDto, SearchModeDto, SessionDetailDto,
-    SessionSettingsDto, SessionStatus, SessionSummaryDto, SettingsSnapshotDto, SkillInfoDto,
-    SnapshotResponse, ThemeOverrideDto, ThemeTokensDto, TranscriptEntryDto, TurnMetricsDto,
-    UnifiedLineDto, UnifiedLineKindDto, UpdateSettingsRequest, UsageDto, ViewEvent,
-    WorkspacePreviewLineDto, WorkspacePreviewResponse, WorkspaceSearchMatchDto,
-    WorkspaceSearchResponse,
+    ContextBreakdownDto, ContextSettingsDto, DefinitionInfoDto, DefinitionsDiagnosticsDto,
+    DiffCellDto, DiffRowDto, DiffRowKindDto, EffectClassDto, EffortDto, FileChangeDto,
+    FileDiffResponse, GrantScopeDto, HostInfoDto, McpServerInfoDto, MemoryDto, ModelItemDto,
+    PackDto, ProviderItemDto, ProvidersResponse, QuestionAnswerDto, QuestionOptionDto,
+    QuestionPromptDto, QuestionRequestDto, RewindScopeDto, RouteDto, SandboxSettingsDto,
+    SearchModeDto, SessionDetailDto, SessionSettingsDto, SessionStatus, SessionSummaryDto,
+    SettingsSnapshotDto, ShadowedDefinitionDto, SkillInfoDto, SnapshotResponse, ThemeOverrideDto,
+    ThemeTokensDto, TranscriptEntryDto, TurnMetricsDto, UnifiedLineDto, UnifiedLineKindDto,
+    UpdateSettingsRequest, UsageDto, ViewEvent, WorkspacePreviewLineDto, WorkspacePreviewResponse,
+    WorkspaceSearchMatchDto, WorkspaceSearchResponse,
 };
 use serde::Serialize;
 
@@ -88,6 +90,109 @@ pub fn map_detail(detail: LiveSessionDetail) -> SessionDetailDto {
             .collect(),
         usage: map_usage(detail.usage),
         metrics: map_metrics(detail.metrics),
+        context: detail.context.map(map_context_breakdown),
+    }
+}
+
+pub fn map_memory(memory: ProjectMemory) -> MemoryDto {
+    MemoryDto {
+        id: memory.id,
+        project_root: memory.project_root,
+        kind: memory.kind.as_str().to_string(),
+        title: memory.title,
+        body: memory.body,
+        source_session_id: memory.source_session_id,
+        pinned: memory.pinned,
+        created_at_ms: memory.created_at_ms,
+        updated_at_ms: memory.updated_at_ms,
+    }
+}
+
+pub fn map_route(route: ModelRoute) -> RouteDto {
+    RouteDto {
+        task_type: route.task_type.as_key(),
+        provider: route.provider,
+        model: route.model,
+        effort: route.effort,
+        max_tokens_per_turn: route.max_tokens_per_turn,
+        max_cost_usd: route.max_cost_usd,
+        max_concurrency: route.max_concurrency,
+    }
+}
+
+pub fn map_pack(pack: InstalledPack) -> PackDto {
+    PackDto {
+        id: pack.id,
+        source_kind: pack.source_kind.as_str().to_string(),
+        source_uri: pack.source_uri,
+        pinned_rev: pack.pinned_rev,
+        enabled: pack.enabled,
+        trusted: pack.trusted,
+    }
+}
+
+pub fn map_definitions(diagnostics: HostDefinitionsDiagnostics) -> DefinitionsDiagnosticsDto {
+    let map = |info: meerai_host::HostDefinitionInfo| DefinitionInfoDto {
+        id: info.id,
+        kind: info.kind,
+        source: info.source,
+        path: info.path,
+        description: info.description,
+        model_invocable: info.model_invocable,
+        token_estimate: info.token_estimate,
+        warnings: info.warnings,
+        supporting_files: info.supporting_files,
+    };
+    DefinitionsDiagnosticsDto {
+        agents: diagnostics.agents.into_iter().map(map).collect(),
+        skills: diagnostics.skills.into_iter().map(map).collect(),
+        warnings: diagnostics.warnings,
+        shadows: diagnostics
+            .shadows
+            .into_iter()
+            .map(|shadow| ShadowedDefinitionDto {
+                id: shadow.id,
+                kind: shadow.kind,
+                source: shadow.source,
+                path: shadow.path,
+                kept_source: shadow.kept_source,
+                kept_path: shadow.kept_path,
+            })
+            .collect(),
+    }
+}
+
+pub fn map_context_breakdown(breakdown: meerai_session::ContextBreakdown) -> ContextBreakdownDto {
+    ContextBreakdownDto {
+        context_window_tokens: breakdown.context_window_tokens,
+        high_watermark_tokens: breakdown.high_watermark_tokens,
+        estimated_total_tokens: breakdown.estimated_total_tokens,
+        system_prompt_tokens: breakdown.system_prompt_tokens,
+        tool_schemas_tokens: breakdown.tool_schemas_tokens,
+        memory_tokens: breakdown.memory_tokens,
+        user_messages_tokens: breakdown.user_messages_tokens,
+        assistant_tokens: breakdown.assistant_tokens,
+        tool_results_tokens: breakdown.tool_results_tokens,
+        reasoning_tokens: breakdown.reasoning_tokens,
+        compaction_summary_tokens: breakdown.compaction_summary_tokens,
+        spilled_blob_count: breakdown.spilled_blob_count,
+        cleared_tool_results_count: breakdown.cleared_tool_results_count,
+        pinned_turn_ids: breakdown
+            .pinned_turn_ids
+            .into_iter()
+            .map(|turn| turn.to_string())
+            .collect(),
+        turns_in_verbatim_window: breakdown.turns_in_verbatim_window,
+        turn_ids: breakdown
+            .turn_ids
+            .into_iter()
+            .map(|turn| turn.to_string())
+            .collect(),
+        verbatim_window_turns: breakdown.verbatim_window_turns,
+        reasoning_pruning: breakdown.reasoning_pruning,
+        clear_old_tool_results: breakdown.clear_old_tool_results,
+        spilled_blobs: breakdown.spilled_blobs,
+        last_prompt_cached_tokens: breakdown.last_prompt_cached_tokens,
     }
 }
 
@@ -130,12 +235,32 @@ pub fn map_entry(entry: LiveEntry) -> TranscriptEntryDto {
             status,
             report,
             child_session_id,
+            model,
+            approval_mode,
+            steps_used,
+            max_steps,
+            usage,
+            est_cost_usd,
+            active_tool,
         } => TranscriptEntryDto::Subagent {
             id,
             agent,
             status,
             report,
             child_session_id,
+            model,
+            approval_mode,
+            steps_used,
+            max_steps,
+            usage: UsageDto {
+                prompt_tokens: usage.prompt_tokens,
+                completion_tokens: usage.completion_tokens,
+                total_tokens: usage.total_tokens,
+                cached_tokens: usage.cached_tokens,
+                est_cost_usd,
+            },
+            est_cost_usd,
+            active_tool,
         },
         LiveEntry::Question {
             id,
@@ -201,6 +326,13 @@ pub fn map_stored_events(events: &[LoggedEvent]) -> (Vec<TranscriptEntryDto>, Us
                 .to_string(),
                 report: sub.report,
                 child_session_id: sub.child_session_id,
+                model: None,
+                approval_mode: "ask".to_string(),
+                steps_used: 0,
+                max_steps: 0,
+                usage: UsageDto::default(),
+                est_cost_usd: None,
+                active_tool: None,
             },
             ReplayEntry::Question(q) => TranscriptEntryDto::Question {
                 id: q.request_id,
@@ -236,6 +368,13 @@ pub fn map_view_event(kind: RegistryEventKind) -> ViewEvent {
         },
         RegistryEventKind::SessionUpdated { session } => ViewEvent::SessionUpdated {
             session: map_summary(session),
+        },
+        RegistryEventKind::ContextUpdated {
+            session_id,
+            breakdown,
+        } => ViewEvent::ContextUpdated {
+            session_id: session_id.to_string(),
+            breakdown: map_context_breakdown(breakdown),
         },
         RegistryEventKind::SessionActivated { session_id } => ViewEvent::SessionActivated {
             session_id: session_id.to_string(),
@@ -512,11 +651,14 @@ pub fn map_host_info(info: HostInfoSnapshot) -> HostInfoDto {
                 rollback_on_verify_failure: info.settings.context.rollback_on_verify_failure,
                 recovery_model: info.settings.context.recovery_model,
                 max_steps_per_turn: info.settings.context.max_steps_per_turn,
+                step_limit_continuations: info.settings.context.step_limit_continuations,
                 tool_timeout_ms: info.settings.context.tool_timeout_ms,
                 max_session_tokens: info.settings.context.max_session_tokens,
                 max_turn_secs: info.settings.context.max_turn_secs,
                 summarizer_model: info.settings.context.summarizer_model,
                 post_edit_diagnostics: info.settings.context.post_edit_diagnostics,
+                auto_memory: info.settings.context.auto_memory,
+                memory_prompt_bytes: info.settings.context.memory_prompt_bytes,
                 temperature: info.settings.context.temperature.map(|t| t.value()),
                 effort: info.settings.context.effort.map(|e| match e {
                     EffortLevel::Low => EffortDto::Low,
@@ -702,11 +844,14 @@ pub fn map_settings_update(req: UpdateSettingsRequest) -> HostSettingsUpdate {
             rollback_on_verify_failure: c.rollback_on_verify_failure,
             recovery_model: c.recovery_model,
             max_steps_per_turn: c.max_steps_per_turn,
+            step_limit_continuations: c.step_limit_continuations,
             tool_timeout_ms: c.tool_timeout_ms,
             max_session_tokens: c.max_session_tokens,
             max_turn_secs: c.max_turn_secs,
             summarizer_model: c.summarizer_model,
             post_edit_diagnostics: c.post_edit_diagnostics,
+            auto_memory: c.auto_memory,
+            memory_prompt_bytes: c.memory_prompt_bytes,
             temperature: c.temperature.map(Temperature::new),
             effort: c.effort.map(|e| match e {
                 EffortDto::Low => EffortLevel::Low,

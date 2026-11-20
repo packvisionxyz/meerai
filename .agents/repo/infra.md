@@ -119,9 +119,12 @@ checksum, and install into a user bin directory.
 CI, release, and Pages work without repository secrets by default (release signing steps are conditional on `APPLE_CERTIFICATE` and `WINDOWS_CERTIFICATE`).
 
 Provider API keys are runtime configuration, not CI secrets. Resolution order per provider is
-credential store (native OS keychain via `KeychainSecretStore`, falling back to `auth.json`) → configured `api_key` → provider environment variables.
+credential store (AEAD `VaultSecretStore` with an OS keychain DEK) → configured `api_key` → provider environment variables.
 
-- Native OS keychain (macOS `/usr/bin/security`, Linux `secret-tool`, disabled via `MEERAI_DISABLE_KEYCHAIN`), or `auth.json` (`0600` on Unix) in the app data dir as fallback.
+- Native OS keychain (macOS through `/usr/bin/security`, Linux `secret-tool`, Windows Credential
+  Manager, disabled via `MEERAI_DISABLE_KEYCHAIN`). The macOS grant covers Apple's tool, not meerai,
+  so it survives rebuilds but is not a per-application boundary. Without a keychain the vault
+  requires `MEERAI_VAULT_PASSPHRASE` and fails closed; there is no `auth.json` fallback.
 - Environment variables from the bundled `meerai-common/providers.yml`, for example
   `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`.
 - `MEERAI_PROVIDER` / `MEERAI_MODEL` select defaults; `MEERAI_SESSION_DIR` overrides the session

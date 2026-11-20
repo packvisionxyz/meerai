@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -28,9 +28,9 @@ use meerai_policy::{
 };
 use meerai_session::{
     ApprovalPreview, BreakerAction, BreakerKind, CompactionId, CompactionResult, CompactionTrigger,
-    ContentBlock, InputSource, ProjectionPolicy, PromptSection, SessionEvent, StepFinish, StepId,
-    StreamDigest, Usage, apply_spill, derive_messages, estimate_tokens, has_open_compaction,
-    plan_compaction_boundary, summary_message,
+    ContentBlock, ContextBreakdown, InputSource, ProjectionPolicy, PromptSection, SessionEvent,
+    StepFinish, StepId, StreamDigest, Usage, apply_spill, context_breakdown, derive_messages,
+    estimate_tokens, has_open_compaction, plan_compaction_boundary, summary_message,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -38,7 +38,7 @@ use tokio_util::sync::CancellationToken;
 use crate::events::{
     AbortCause, AgentCommand, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalRequest, CallId,
     ErrorCode, GrantScope, ItemDelta, ItemId, ItemStatus, QuestionRequest, RequestId, RewindScope,
-    SessionItem, TurnEndReason, TurnId, TurnTrigger,
+    SessionItem, SubagentSpec, TurnEndReason, TurnId, TurnTrigger,
 };
 use crate::harness::AgentHarness;
 use crate::hooks::{HookContext, HookEngine, HookReport};
@@ -46,9 +46,14 @@ use crate::intercept::{
     SharedInterceptor, StepAction, StepPlan, ToolContext, ToolOutcome, ToolPlan, TurnStopAction,
 };
 use crate::redact::{redact_run, redact_text};
+use crate::subagent::{
+    SUBAGENT_BRIDGE, SubagentBridge, SubagentBudgetUpdate, SubagentToolFactory, SubagentToolset,
+};
 
 const STEP_LIMIT_NOTICE: &str =
     "Step limit reached. Provide a final summary of what was done and what remains.";
+const STEP_CONTINUE_NOTICE: &str = "Step budget reached. Continue now and finish the task: make \
+    the concrete change, run the check, and report the result. Do not summarize or list next steps.";
 
 const SUMMARY_INSTRUCTION: &str = "Summarize the transcript below as a compact state block. Use \
     exactly these headings, each followed by terse bullets: Goal, Completed progress, Modified \
@@ -60,6 +65,7 @@ const SUMMARY_MESSAGE_TOKEN_LIMIT: u64 = 2_000;
 const COMPACTION_EMPTY_SKIP: &str = "no compactable range";
 const COMPACTION_EMPTY_SUMMARY: &str = "compaction summary was empty";
 const TOKEN_BUDGET_DECLINED: &str = "session token budget declined";
+const SPEND_CAP_DECLINED: &str = "session spend cap declined";
 const LOOP_DETECTED: &str = "loop detected: repeated identical tool failures";
 const NO_APPROVAL_CHANNEL: &str = "no approval channel available; call declined";
 const USER_DECLINED: &str = "declined by user";
@@ -288,6 +294,15 @@ pub(super) fn tool_call_item(
     }
 }
 
+const MEMORY_SECTION_MARKER: &str = "## Project memory";
+
+fn split_memory_prompt(prompt: &str) -> (String, String) {
+    match prompt.find(MEMORY_SECTION_MARKER) {
+        Some(index) => (prompt[..index].to_string(), prompt[index..].to_string()),
+        None => (prompt.to_string(), String::new()),
+    }
+}
+
 pub(super) fn provider_of(model: &str) -> String {
     match model.split_once(':') {
         Some((provider, _)) if !provider.is_empty() => provider.to_string(),
@@ -364,6 +379,20 @@ impl std::fmt::Display for TurnError {
 
 impl std::error::Error for TurnError {}
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct PendingCompaction {
+    pub(super) focus: Option<String>,
+    pub(super) from_turn_id: Option<TurnId>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct ProjectionOverrides {
+    pub(super) verbatim_window_turns: Option<usize>,
+    pub(super) reasoning_pruning: Option<bool>,
+    pub(super) clear_old_tool_results: Option<bool>,
+    pub(super) pinned_turns: Option<Vec<TurnId>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct MultiTurnAgentConfig {
     pub max_cycles: usize,
@@ -408,7 +437,7 @@ pub struct MultiTurnAgent {
     projection_cache: Option<ProjectionCache>,
     pub(super) pressure_wasted: bool,
     pub(super) pending_steers: VecDeque<String>,
-    pub(super) pending_compact: bool,
+    pub(super) pending_compact: Option<PendingCompaction>,
     pub(in crate::multi_turn_agent) failure_tracker: FailureTracker,
     pub(super) injected_instruction_dirs: HashSet<PathBuf>,
     pub(super) outside_grants: HashSet<PathBuf>,
@@ -417,6 +446,12 @@ pub struct MultiTurnAgent {
     pub(super) hooks: Arc<HookEngine>,
     pub(super) post_edit_diagnostics: bool,
     pub(super) session_started: bool,
+    pub(super) projection_overrides: ProjectionOverrides,
+    pub(super) task_type: meerai_common::settings::TaskType,
+    pub(super) subagent_factory: Option<SubagentToolFactory>,
+    pub(super) subagent_agents: Vec<meerai_common::definitions::AgentDefinition>,
+    pub(super) active_subagents: HashMap<ItemId, CancellationToken>,
+    pub(super) memory_capture: Option<crate::memory::MemoryCapture>,
 }
 
 impl std::fmt::Debug for MultiTurnAgent {
@@ -493,7 +528,7 @@ impl MultiTurnAgent {
             projection_cache: None,
             pressure_wasted: false,
             pending_steers: VecDeque::new(),
-            pending_compact: false,
+            pending_compact: None,
             failure_tracker: FailureTracker::default(),
             injected_instruction_dirs: HashSet::new(),
             outside_grants: HashSet::new(),
@@ -502,6 +537,12 @@ impl MultiTurnAgent {
             hooks: Arc::new(HookEngine::default()),
             post_edit_diagnostics: false,
             session_started: false,
+            projection_overrides: ProjectionOverrides::default(),
+            task_type: meerai_common::settings::TaskType::Default,
+            subagent_factory: None,
+            subagent_agents: Vec::new(),
+            active_subagents: HashMap::new(),
+            memory_capture: None,
         }
     }
 
@@ -531,6 +572,288 @@ impl MultiTurnAgent {
 
     pub fn set_hooks(&mut self, hooks: Arc<HookEngine>) {
         self.hooks = hooks;
+    }
+
+    pub fn set_memory_capture(&mut self, capture: crate::memory::MemoryCapture) {
+        self.memory_capture = Some(capture);
+    }
+
+    pub fn set_task_type(&mut self, task_type: meerai_common::settings::TaskType) {
+        self.task_type = task_type;
+    }
+
+    pub fn set_subagent_support(
+        &mut self,
+        factory: SubagentToolFactory,
+        custom_agents: Vec<meerai_common::definitions::AgentDefinition>,
+    ) {
+        self.subagent_factory = Some(factory);
+        self.subagent_agents = custom_agents;
+    }
+
+    pub fn set_projection_overrides(
+        &mut self,
+        verbatim_window_turns: Option<usize>,
+        reasoning_pruning: Option<bool>,
+        clear_old_tool_results: Option<bool>,
+        pin_turns: Option<Vec<TurnId>>,
+    ) {
+        if verbatim_window_turns.is_some() {
+            self.projection_overrides.verbatim_window_turns = verbatim_window_turns;
+        }
+        if reasoning_pruning.is_some() {
+            self.projection_overrides.reasoning_pruning = reasoning_pruning;
+        }
+        if clear_old_tool_results.is_some() {
+            self.projection_overrides.clear_old_tool_results = clear_old_tool_results;
+        }
+        if pin_turns.is_some() {
+            self.projection_overrides.pinned_turns = pin_turns;
+        }
+        self.projection_cache = None;
+    }
+
+    pub(crate) async fn apply_projection_overrides(
+        &mut self,
+        verbatim_window_turns: Option<usize>,
+        reasoning_pruning: Option<bool>,
+        clear_old_tool_results: Option<bool>,
+        pin_turns: Option<Vec<TurnId>>,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        let previous = self
+            .projection_overrides
+            .pinned_turns
+            .clone()
+            .unwrap_or_default();
+        self.set_projection_overrides(
+            verbatim_window_turns,
+            reasoning_pruning,
+            clear_old_tool_results,
+            pin_turns,
+        );
+        let Some(next) = self.projection_overrides.pinned_turns.clone() else {
+            return;
+        };
+        for turn in previous.iter().filter(|turn| !next.contains(turn)) {
+            self.log_event(
+                event_tx,
+                SessionEvent::ContextTurnPinned {
+                    turn_id: turn.clone(),
+                    pinned: false,
+                },
+            )
+            .await;
+        }
+        for turn in next.iter().filter(|turn| !previous.contains(turn)) {
+            self.log_event(
+                event_tx,
+                SessionEvent::ContextTurnPinned {
+                    turn_id: turn.clone(),
+                    pinned: true,
+                },
+            )
+            .await;
+        }
+    }
+
+    pub(crate) async fn set_turn_pinned(
+        &mut self,
+        turn_id: TurnId,
+        pinned: bool,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        let mut pinned_turns = self
+            .projection_overrides
+            .pinned_turns
+            .clone()
+            .unwrap_or_default();
+        if pinned {
+            if !pinned_turns.contains(&turn_id) {
+                pinned_turns.push(turn_id.clone());
+            }
+        } else {
+            pinned_turns.retain(|turn| turn != &turn_id);
+        }
+        self.projection_overrides.pinned_turns = Some(pinned_turns);
+        self.log_event(
+            event_tx,
+            SessionEvent::ContextTurnPinned { turn_id, pinned },
+        )
+        .await;
+        self.emit_context_updated(event_tx);
+    }
+
+    pub fn cancel_subagent(&mut self, item_id: &ItemId) {
+        if let Some(cancel) = self.active_subagents.get(item_id) {
+            cancel.cancel();
+        }
+    }
+
+    pub(crate) async fn spawn_manual_subagent(
+        &mut self,
+        spec: SubagentSpec,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+        cmd_rx: &mut mpsc::UnboundedReceiver<AgentCommand>,
+        deferred: &mut VecDeque<AgentCommand>,
+    ) {
+        if spec.task.trim().is_empty() {
+            let _ = event_tx.send(AgentEvent::Error {
+                code: ErrorCode::Config,
+                message: "subagent task must not be empty".to_string(),
+            });
+            return;
+        }
+        let Some(factory) = self.subagent_factory.clone() else {
+            let _ = event_tx.send(AgentEvent::Error {
+                code: ErrorCode::Config,
+                message: "manual subagents need an attached subagent toolset".to_string(),
+            });
+            return;
+        };
+        let Some(harness) = self.harness.as_ref() else {
+            let _ = event_tx.send(AgentEvent::Error {
+                code: ErrorCode::Config,
+                message: "manual subagents need an active session".to_string(),
+            });
+            return;
+        };
+
+        let item_id = ItemId::new();
+        let cancel = CancellationToken::new();
+        self.active_subagents
+            .insert(item_id.clone(), cancel.clone());
+
+        let (approval_tx, mut approval_rx) = mpsc::unbounded_channel();
+        let (usage_tx, mut usage_rx) = mpsc::unbounded_channel();
+        let (grant_tx, mut grant_rx) = mpsc::unbounded_channel();
+        let (budget_tx, mut budget_rx) = mpsc::unbounded_channel();
+        let bridge = SubagentBridge {
+            event_tx: event_tx.clone(),
+            approval_tx,
+            usage_tx,
+            grant_tx,
+            budget_tx,
+            cancel: cancel.clone(),
+            turn_deadline: None,
+            parent_session: Some(harness.session.clone()),
+            parent_policy_mode: harness.policy.mode(),
+            parent_policy_rules: harness.policy.rules().to_vec(),
+            parent_policy_grants: harness.policy.grants(),
+            workspace_root: harness.policy.workspace_root().to_path_buf(),
+            parent_harness_config: harness.config.clone(),
+            parent_used_tokens: self.cumulative_usage_tokens(),
+            routing: harness.routing.clone(),
+        };
+
+        let toolset =
+            SubagentToolset::new(self.streamer.clone(), self.shared_model.clone(), factory)
+                .with_custom_agents(self.subagent_agents.clone())
+                .with_hooks(self.hooks.clone());
+
+        let mut args = serde_json::json!({
+            "agent": spec.agent,
+            "task": spec.task,
+            "item_id": item_id.to_string(),
+        });
+        if let Some(model) = spec.model {
+            args["model"] = serde_json::Value::String(model);
+        }
+        if let Some(mode) = spec.approval_mode {
+            args["approval_mode"] = serde_json::Value::String(mode.label().to_string());
+        }
+        if let Some(tools) = spec.allowed_tools {
+            args["allowed_tools"] = serde_json::json!(tools);
+        }
+        if let Some(steps) = spec.max_steps {
+            args["max_steps"] = serde_json::json!(steps);
+        }
+        if let Some(tokens) = spec.max_tokens {
+            args["max_tokens"] = serde_json::json!(tokens);
+        }
+        if let Some(cost) = spec.max_cost_usd {
+            args["max_cost_usd"] = serde_json::json!(cost);
+        }
+        let args = args.to_string();
+
+        let mut run = std::pin::pin!(
+            SUBAGENT_BRIDGE.scope(bridge, toolset.invoke_structured("subagent-run", &args))
+        );
+
+        loop {
+            tokio::select! {
+                result = &mut run => {
+                    if let Err(error) = result {
+                        let _ = event_tx.send(AgentEvent::Error {
+                            code: ErrorCode::Tool,
+                            message: format!("manual subagent failed: {error:?}"),
+                        });
+                    }
+                    break;
+                }
+                Some(request) = approval_rx.recv() => {
+                    let request_id = request.request.request_id.clone();
+                    let _ = event_tx.send(AgentEvent::ApprovalRequested {
+                        request: request.request.clone(),
+                    });
+                    self.log_event(
+                        event_tx,
+                        SessionEvent::ApprovalRequested {
+                            request_id: request_id.clone(),
+                            kind: request.request.kind,
+                            preview: request.request.preview.clone(),
+                        },
+                    )
+                    .await;
+                    let outcome = self
+                        .await_decision(&request_id, event_tx, &cancel, Some(cmd_rx))
+                        .await;
+                    let _ = request.reply.send((outcome.decision, outcome.scope));
+                }
+                Some(usage) = usage_rx.recv() => {
+                    self.cumulative_usage.add(usage);
+                    let est_cost_usd = self.estimated_cost(self.cumulative_usage);
+                    self.note_routing_cost(est_cost_usd);
+                    self.record_usage_row(None, &usage, est_cost_usd).await;
+                    let _ = event_tx.send(AgentEvent::UsageUpdated {
+                        usage,
+                        cumulative: self.cumulative_usage,
+                        est_cost_usd,
+                    });
+                }
+                Some(grant) = grant_rx.recv() => {
+                    if let Some(harness) = self.harness.as_mut() {
+                        harness.policy.record_grant(grant);
+                    }
+                }
+                Some(update) = budget_rx.recv() => {
+                    if let Some(harness) = self.harness.as_mut() {
+                        match update {
+                            SubagentBudgetUpdate::Unlimited => {
+                                harness.config.max_session_tokens = None;
+                            }
+                            SubagentBudgetUpdate::Increase(delta) => {
+                                if let Some(cap) = harness.config.max_session_tokens {
+                                    harness.config.max_session_tokens =
+                                        Some(cap.saturating_add(delta));
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(command) = cmd_rx.recv() => {
+                    match command {
+                        AgentCommand::CancelSubagent { item_id: id } if id == item_id => {
+                            cancel.cancel();
+                        }
+                        AgentCommand::Cancel | AgentCommand::Quit => cancel.cancel(),
+                        other => deferred.push_back(other),
+                    }
+                }
+            }
+        }
+
+        self.active_subagents.remove(&item_id);
     }
 
     pub fn set_post_edit_diagnostics(&mut self, enabled: bool) {
@@ -734,6 +1057,33 @@ impl MultiTurnAgent {
         report
     }
 
+    pub(super) fn note_routing_cost(&self, cost: Option<f64>) {
+        if let Some(coordinator) = self
+            .harness
+            .as_ref()
+            .and_then(|harness| harness.routing.clone())
+            && let Some(cost) = cost
+        {
+            coordinator.note_cost(cost);
+        }
+    }
+
+    pub(super) async fn record_usage_row(
+        &self,
+        turn_id: Option<&meerai_session::TurnId>,
+        usage: &Usage,
+        est_cost_usd: Option<f64>,
+    ) {
+        let Some(harness) = self.harness.as_ref() else {
+            return;
+        };
+        let provider = crate::routing::provider_of(&self.model);
+        let _ = harness
+            .session
+            .record_usage(turn_id, &provider, &self.model, None, usage, est_cost_usd)
+            .await;
+    }
+
     pub(super) fn estimated_cost(&self, usage: Usage) -> Option<f64> {
         let pricing = self.harness.as_ref()?.config.token_pricing?;
         let prompt = usage.prompt_tokens.unwrap_or(0).max(0) as f64;
@@ -872,15 +1222,27 @@ impl MultiTurnAgent {
             let token_pricing = harness.config.token_pricing;
             let plan_usage = harness.config.plan_usage;
             let context_window = harness.config.context_window_tokens;
+            let routing = harness.config.routing.clone();
             harness.config = HarnessConfig::from_context_settings(context.as_ref());
             harness.config.token_pricing = token_pricing;
             harness.config.plan_usage = plan_usage;
+            harness.config.routing = routing;
             if context
                 .as_ref()
                 .and_then(|context| context.context_window_tokens)
                 .is_none()
             {
                 harness.config.context_window_tokens = context_window;
+            }
+            if let Some(coordinator) = &harness.routing {
+                coordinator.set_provider_limits(&harness.config.routing);
+                coordinator.set_cap(
+                    harness
+                        .config
+                        .routing
+                        .route(&meerai_common::settings::TaskType::Default)
+                        .and_then(|route| route.max_cost_usd),
+                );
             }
         }
         self.post_edit_diagnostics = context
@@ -930,7 +1292,7 @@ impl MultiTurnAgent {
     fn clear_rewind_state(&mut self) {
         self.chat_history.clear();
         self.pending_steers.clear();
-        self.pending_compact = false;
+        self.pending_compact = None;
         self.failure_tracker = FailureTracker::default();
         self.injected_instruction_dirs.clear();
         self.outside_grants.clear();
@@ -942,7 +1304,7 @@ impl MultiTurnAgent {
         self.session_id = generate_opencode_session_id();
         self.cumulative_usage = Usage::default();
         self.pending_steers.clear();
-        self.pending_compact = false;
+        self.pending_compact = None;
         self.failure_tracker = FailureTracker::default();
         self.injected_instruction_dirs.clear();
         self.outside_grants.clear();
@@ -984,18 +1346,63 @@ impl MultiTurnAgent {
         match &self.harness {
             Some(harness) => ProjectionPolicy {
                 strip_ephemera: true,
-                prune_reasoning: harness.config.reasoning_pruning,
-                verbatim_window_turns: harness.config.verbatim_window_turns,
-                clear_old_tool_results: true,
+                prune_reasoning: self
+                    .projection_overrides
+                    .reasoning_pruning
+                    .unwrap_or(harness.config.reasoning_pruning),
+                verbatim_window_turns: self
+                    .projection_overrides
+                    .verbatim_window_turns
+                    .unwrap_or(harness.config.verbatim_window_turns),
+                clear_old_tool_results: self
+                    .projection_overrides
+                    .clear_old_tool_results
+                    .unwrap_or(true),
                 include_system_messages: false,
+                pinned_turns: self
+                    .projection_overrides
+                    .pinned_turns
+                    .clone()
+                    .unwrap_or_default(),
             },
             None => ProjectionPolicy {
                 strip_ephemera: true,
-                prune_reasoning: true,
-                verbatim_window_turns: 4,
-                clear_old_tool_results: true,
+                prune_reasoning: self.projection_overrides.reasoning_pruning.unwrap_or(true),
+                verbatim_window_turns: self.projection_overrides.verbatim_window_turns.unwrap_or(4),
+                clear_old_tool_results: self
+                    .projection_overrides
+                    .clear_old_tool_results
+                    .unwrap_or(true),
                 include_system_messages: true,
+                pinned_turns: self
+                    .projection_overrides
+                    .pinned_turns
+                    .clone()
+                    .unwrap_or_default(),
             },
+        }
+    }
+
+    pub fn context_breakdown(&self) -> Option<ContextBreakdown> {
+        let harness = self.harness.as_ref()?;
+        let policy = self.projection_policy();
+        let mut breakdown = context_breakdown(
+            &harness.session.events(),
+            &policy,
+            harness.config.context_window_tokens,
+            harness.config.high_watermark_pct,
+        );
+        let (prompt, memory) = split_memory_prompt(&self.effective_system_prompt());
+        breakdown.system_prompt_tokens = estimate_tokens(&prompt);
+        breakdown.memory_tokens = estimate_tokens(&memory);
+        breakdown.tool_schemas_tokens = self.tool_schema_tokens;
+        breakdown.recompute_total();
+        Some(breakdown)
+    }
+
+    pub fn emit_context_updated(&self, event_tx: &mpsc::UnboundedSender<AgentEvent>) {
+        if let Some(breakdown) = self.context_breakdown() {
+            let _ = event_tx.send(AgentEvent::ContextUpdated { breakdown });
         }
     }
 

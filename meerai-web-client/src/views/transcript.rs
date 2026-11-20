@@ -701,10 +701,29 @@ fn render_subagent(
         status,
         report,
         child_session_id,
+        model,
+        approval_mode,
+        steps_used,
+        max_steps,
+        usage,
+        est_cost_usd,
+        active_tool,
     } = entry
     else {
         return view! { <div></div> }.into_any();
     };
+    let cost = est_cost_usd.or(usage.est_cost_usd);
+    let telemetry = format!(
+        "{} · {} · {}/{} steps · ↑{} ↓{} · {} · {}",
+        model.as_deref().unwrap_or("parent model"),
+        approval_mode,
+        steps_used,
+        max_steps,
+        usage.prompt_tokens.unwrap_or(0),
+        usage.completion_tokens.unwrap_or(0),
+        cost.map_or_else(|| "cost n/a".to_string(), |cost| format!("${cost:.4}")),
+        active_tool.as_deref().unwrap_or("idle")
+    );
     let child = child_session_id
         .as_ref()
         .and_then(|child| tab.child_sessions.get(child));
@@ -809,6 +828,7 @@ fn render_subagent(
                 <span class=format!("tab-dot {}", if status == "running" { "running" } else { "idle" })></span>
                 <span class="subagent-name">{agent.clone()}</span>
                 <span class="subagent-status">{status.clone()}</span>
+                <span class="subagent-telemetry">{telemetry.clone()}</span>
                 <button class="btn tiny" on:click=move |_| {
                     let child = child_id.clone();
                     store.update(|s| {

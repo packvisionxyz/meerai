@@ -8,7 +8,8 @@ use crossterm::event::EventStream;
 use futures::StreamExt;
 use meerai_agents::{AgentEvent, SessionItem};
 use meerai_host::{
-    LiveEntry, LiveSessionDetail, RegistryEvent, RegistryEventKind, SubscribeResult,
+    HostActionContext, LiveEntry, LiveSessionDetail, RegistryEvent, RegistryEventKind,
+    SubscribeResult, execute_host_action,
 };
 use meerai_session::{LoggedEvent, SessionId, SessionSummary};
 use tokio::sync::{broadcast, mpsc};
@@ -80,6 +81,19 @@ enum LoopMsg {
     },
     WebServerStarted(Result<(Arc<dyn WebServerHandle>, WebServerStart)>),
     WebServerStopped,
+    HostActionDone {
+        tab_id: u64,
+        result: Result<String>,
+    },
+    BlobLoaded {
+        key: String,
+        result: Result<String>,
+    },
+    MemoriesLoaded(Result<Vec<meerai_host::ProjectMemory>>),
+    RoutesLoaded(Result<meerai_host::RoutingSettings>),
+    PacksLoaded(Result<Vec<meerai_host::InstalledPack>>),
+    DefinitionsLoaded(Result<meerai_host::HostDefinitionsDiagnostics>),
+    ModalError(String),
 }
 
 pub async fn run_event_loop(
@@ -585,6 +599,233 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
                     });
                 });
             }
+            PendingSessionAction::LoadMemories { query } => {
+                let Some(opener) = opener.clone() else {
+                    let _ = loop_tx.send(LoopMsg::ModalError(
+                        "Host actions need a session host.".to_string(),
+                    ));
+                    changed = true;
+                    continue;
+                };
+                let workspace = app.workspace_root.clone();
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let project = workspace.display().to_string();
+                    let result = match query {
+                        Some(query) => opener.search_memories(&project, &query).await,
+                        None => opener.list_memories(&project).await,
+                    };
+                    let _ = tx.send(LoopMsg::MemoriesLoaded(result));
+                });
+                changed = true;
+            }
+            PendingSessionAction::LoadRoutes => {
+                let Some(opener) = opener.clone() else {
+                    let _ = loop_tx.send(LoopMsg::ModalError(
+                        "Host actions need a session host.".to_string(),
+                    ));
+                    changed = true;
+                    continue;
+                };
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(LoopMsg::RoutesLoaded(opener.routes().await));
+                });
+                changed = true;
+            }
+            PendingSessionAction::LoadPacks => {
+                let Some(opener) = opener.clone() else {
+                    let _ = loop_tx.send(LoopMsg::ModalError(
+                        "Host actions need a session host.".to_string(),
+                    ));
+                    changed = true;
+                    continue;
+                };
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(LoopMsg::PacksLoaded(opener.list_packs().await));
+                });
+                changed = true;
+            }
+            PendingSessionAction::LoadDefinitions => {
+                let Some(opener) = opener.clone() else {
+                    let _ = loop_tx.send(LoopMsg::ModalError(
+                        "Host actions need a session host.".to_string(),
+                    ));
+                    changed = true;
+                    continue;
+                };
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(LoopMsg::DefinitionsLoaded(
+                        opener.definitions_diagnostics().await,
+                    ));
+                });
+                changed = true;
+            }
+            PendingSessionAction::MemoryAction { action, id } => {
+                let Some(opener) = opener.clone() else {
+                    let _ = loop_tx.send(LoopMsg::ModalError(
+                        "Host actions need a session host.".to_string(),
+                    ));
+                    changed = true;
+                    continue;
+                };
+                let workspace = app.workspace_root.clone();
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let project = workspace.display().to_string();
+                    let result = match action {
+                        crate::app::MemoryModalAction::Delete => {
+                            opener.delete_memory(&project, &id).await.map(|_| ())
+                        }
+                        crate::app::MemoryModalAction::TogglePin => {
+                            match opener.list_memories(&project).await {
+                                Ok(memories) => {
+                                    let pinned = memories
+                                        .iter()
+                                        .find(|memory| memory.id == id)
+                                        .map(|memory| memory.pinned)
+                                        .unwrap_or(false);
+                                    opener
+                                        .set_memory_pinned(&project, &id, !pinned)
+                                        .await
+                                        .map(|_| ())
+                                }
+                                Err(error) => Err(error),
+                            }
+                        }
+                    };
+                    match result {
+                        Ok(()) => {
+                            let _ = tx.send(LoopMsg::MemoriesLoaded(
+                                opener.list_memories(&project).await,
+                            ));
+                        }
+                        Err(error) => {
+                            let _ = tx.send(LoopMsg::ModalError(format!("{error:#}")));
+                        }
+                    }
+                });
+                changed = true;
+            }
+            PendingSessionAction::RouteAction { task_type } => {
+                let Some(opener) = opener.clone() else {
+                    let _ = loop_tx.send(LoopMsg::ModalError(
+                        "Host actions need a session host.".to_string(),
+                    ));
+                    changed = true;
+                    continue;
+                };
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    match opener.delete_route(&task_type).await {
+                        Ok(_) => {
+                            let _ = tx.send(LoopMsg::RoutesLoaded(opener.routes().await));
+                        }
+                        Err(error) => {
+                            let _ = tx.send(LoopMsg::ModalError(format!("{error:#}")));
+                        }
+                    }
+                });
+                changed = true;
+            }
+            PendingSessionAction::PackAction { action, id } => {
+                let Some(opener) = opener.clone() else {
+                    let _ = loop_tx.send(LoopMsg::ModalError(
+                        "Host actions need a session host.".to_string(),
+                    ));
+                    changed = true;
+                    continue;
+                };
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let result = match opener.list_packs().await {
+                        Ok(packs) => {
+                            let pack = packs.iter().find(|pack| pack.id == id);
+                            match (action, pack) {
+                                (crate::app::PackModalAction::ToggleEnabled, Some(pack)) => {
+                                    opener.set_pack_enabled(&id, !pack.enabled).await
+                                }
+                                (crate::app::PackModalAction::ToggleTrusted, Some(pack)) => {
+                                    opener.set_pack_trusted(&id, !pack.trusted).await
+                                }
+                                (crate::app::PackModalAction::Remove, _) => {
+                                    opener.remove_pack(&id).await
+                                }
+                                (_, None) => Ok(false),
+                            }
+                        }
+                        Err(error) => Err(error),
+                    };
+                    match result {
+                        Ok(_) => {
+                            let _ = tx.send(LoopMsg::PacksLoaded(opener.list_packs().await));
+                        }
+                        Err(error) => {
+                            let _ = tx.send(LoopMsg::ModalError(format!("{error:#}")));
+                        }
+                    }
+                });
+                changed = true;
+            }
+            PendingSessionAction::HostAction { tab_id, action } => {
+                let Some(opener) = app.session_opener.clone() else {
+                    if let Some(tab) = app.tabs.iter_mut().find(|tab| tab.tab_id == tab_id) {
+                        tab.transcript.push(TranscriptEntry::Error {
+                            text: "Host actions need a session host.".to_string(),
+                            expanded: false,
+                        });
+                    }
+                    changed = true;
+                    continue;
+                };
+                let workspace = app.workspace_root.clone();
+                let cmd_tx = app
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.tab_id == tab_id)
+                    .map(|tab| tab.cmd_tx.clone());
+                let session_id = app
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.tab_id == tab_id)
+                    .map(|tab| tab.session_id.clone());
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let result = execute_host_action(
+                        HostActionContext {
+                            opener: opener.as_ref(),
+                            project_root: &workspace,
+                            session_id: session_id.as_ref(),
+                            cmd_tx: cmd_tx.as_ref(),
+                        },
+                        action,
+                    )
+                    .await;
+                    let _ = tx.send(LoopMsg::HostActionDone { tab_id, result });
+                });
+                changed = true;
+            }
+            PendingSessionAction::LoadBlob { tab_id, key } => {
+                let session_id = app
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.tab_id == tab_id)
+                    .map(|tab| tab.session_id.clone());
+                let opener = opener.clone();
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let result = match (opener, session_id) {
+                        (Some(opener), Some(session_id)) => {
+                            opener.read_session_blob(&session_id, &key).await
+                        }
+                        _ => Err(anyhow::anyhow!("no active session for the blob viewer")),
+                    };
+                    let _ = tx.send(LoopMsg::BlobLoaded { key, result });
+                });
+                changed = true;
+            }
             PendingSessionAction::SyncContext => {
                 if let (Some(opener), Some(reg)) = (opener.clone(), app.registry.clone()) {
                     let context = app.settings.context.clone();
@@ -913,6 +1154,173 @@ fn handle_loop_msg(
             }
             false
         }
+        LoopMsg::MemoriesLoaded(result) => {
+            if let Some(ActiveModal::Memory {
+                query, selected, ..
+            }) = app.modal.take()
+            {
+                match result {
+                    Ok(entries) => {
+                        let selected = selected.min(entries.len().saturating_sub(1));
+                        app.modal = Some(ActiveModal::Memory {
+                            entries,
+                            query,
+                            selected,
+                            loading: false,
+                            error: None,
+                        });
+                    }
+                    Err(error) => {
+                        app.modal = Some(ActiveModal::Memory {
+                            entries: Vec::new(),
+                            query,
+                            selected: 0,
+                            loading: false,
+                            error: Some(format!("{error:#}")),
+                        });
+                    }
+                }
+            }
+            true
+        }
+        LoopMsg::RoutesLoaded(result) => {
+            if let Some(ActiveModal::Routing { selected, .. }) = app.modal.take() {
+                match result {
+                    Ok(settings) => {
+                        let selected = selected.min(settings.routes.len().saturating_sub(1));
+                        app.modal = Some(ActiveModal::Routing {
+                            routes: settings.routes,
+                            selected,
+                            loading: false,
+                            error: None,
+                        });
+                    }
+                    Err(error) => {
+                        app.modal = Some(ActiveModal::Routing {
+                            routes: Vec::new(),
+                            selected: 0,
+                            loading: false,
+                            error: Some(format!("{error:#}")),
+                        });
+                    }
+                }
+            }
+            true
+        }
+        LoopMsg::PacksLoaded(result) => {
+            if let Some(ActiveModal::Packs {
+                definitions,
+                tab,
+                selected,
+                ..
+            }) = app.modal.take()
+            {
+                match result {
+                    Ok(packs) => {
+                        let selected = selected.min(packs.len().saturating_sub(1));
+                        app.modal = Some(ActiveModal::Packs {
+                            packs,
+                            definitions,
+                            tab,
+                            selected,
+                            loading: false,
+                            error: None,
+                        });
+                    }
+                    Err(error) => {
+                        app.modal = Some(ActiveModal::Packs {
+                            packs: Vec::new(),
+                            definitions,
+                            tab,
+                            selected: 0,
+                            loading: false,
+                            error: Some(format!("{error:#}")),
+                        });
+                    }
+                }
+            }
+            true
+        }
+        LoopMsg::DefinitionsLoaded(result) => {
+            if let Some(ActiveModal::Packs {
+                packs,
+                tab,
+                selected,
+                ..
+            }) = app.modal.take()
+            {
+                match result {
+                    Ok(definitions) => {
+                        app.modal = Some(ActiveModal::Packs {
+                            packs,
+                            definitions,
+                            tab,
+                            selected,
+                            loading: false,
+                            error: None,
+                        });
+                    }
+                    Err(error) => {
+                        app.modal = Some(ActiveModal::Packs {
+                            packs,
+                            definitions: meerai_host::HostDefinitionsDiagnostics::default(),
+                            tab,
+                            selected,
+                            loading: false,
+                            error: Some(format!("{error:#}")),
+                        });
+                    }
+                }
+            }
+            true
+        }
+        LoopMsg::ModalError(message) => {
+            if let Some(modal) = app.modal.as_mut() {
+                match modal {
+                    ActiveModal::Memory { error, loading, .. } => {
+                        *error = Some(message);
+                        *loading = false;
+                    }
+                    ActiveModal::Routing { error, loading, .. } => {
+                        *error = Some(message);
+                        *loading = false;
+                    }
+                    ActiveModal::Packs { error, loading, .. } => {
+                        *error = Some(message);
+                        *loading = false;
+                    }
+                    _ => {}
+                }
+            }
+            true
+        }
+        LoopMsg::HostActionDone { tab_id, result } => {
+            if let Some(tab) = app.tabs.iter_mut().find(|tab| tab.tab_id == tab_id) {
+                tab.auto_follow = true;
+                match result {
+                    Ok(text) => tab.transcript.push(TranscriptEntry::System { text }),
+                    Err(error) => tab.transcript.push(TranscriptEntry::Error {
+                        text: format!("{error:#}"),
+                        expanded: false,
+                    }),
+                }
+            }
+            true
+        }
+        LoopMsg::BlobLoaded { key, result } => {
+            if let Some(ActiveModal::Context(panel)) = app.modal.as_mut() {
+                match result {
+                    Ok(content) => {
+                        panel.blob_key = Some(key);
+                        panel.blob_content = Some(content);
+                        panel.blob_scroll = 0;
+                        panel.error = None;
+                    }
+                    Err(error) => panel.error = Some(format!("{error:#}")),
+                }
+            }
+            true
+        }
         LoopMsg::WebServerStopped => {
             app.web_server_hit = None;
             app.status_notice = Some("Stopped local web server".to_string());
@@ -1026,12 +1434,20 @@ fn live_to_transcript(entry: LiveEntry) -> TranscriptEntry {
             status,
             report,
             child_session_id,
+            ..
         } => TranscriptEntry::Subagent(crate::app::SubagentEntry {
             id,
             agent,
             status: map_status_str(&status),
             report,
             child_session_id,
+            model: None,
+            approval_mode: "ask".to_string(),
+            steps_used: 0,
+            max_steps: 0,
+            usage: Default::default(),
+            est_cost_usd: None,
+            active_tool: None,
             expanded: false,
             nested: None,
             nested_refreshed_at: None,

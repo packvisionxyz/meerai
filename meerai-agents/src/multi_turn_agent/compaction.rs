@@ -79,6 +79,8 @@ impl MultiTurnAgent {
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
         cancel: &CancellationToken,
         clock: Option<TurnClock>,
+        focus: Option<String>,
+        from_turn_id: Option<TurnId>,
     ) -> Result<bool, TurnError> {
         let Some((events, verbatim_window_turns)) = self.harness.as_ref().map(|harness| {
             (
@@ -143,7 +145,11 @@ impl MultiTurnAgent {
             return Ok(false);
         }
 
-        let Some(range) = plan_compaction_boundary(&events, verbatim_window_turns) else {
+        let range = match &from_turn_id {
+            Some(turn_id) => meerai_session::plan_compaction_boundary_from(&events, turn_id),
+            None => plan_compaction_boundary(&events, verbatim_window_turns),
+        };
+        let Some(range) = range else {
             self.log_event(
                 event_tx,
                 SessionEvent::CompactionEnded {
@@ -176,6 +182,12 @@ impl MultiTurnAgent {
             .harness
             .as_ref()
             .is_some_and(|harness| harness.config.summarizer_model.is_some());
+        let instruction = match focus.as_deref().map(str::trim) {
+            Some(focus) if !focus.is_empty() => {
+                format!("{SUMMARY_INSTRUCTION}\n\nFocus this summary on: {focus}")
+            }
+            _ => SUMMARY_INSTRUCTION.to_string(),
+        };
         let request = if distinct_model {
             let mut transcript_policy = projection_policy.clone();
             transcript_policy.clear_old_tool_results = false;
@@ -183,11 +195,10 @@ impl MultiTurnAgent {
                 &derive_messages(&events[..end_index], &transcript_policy),
                 SUMMARY_MESSAGE_TOKEN_LIMIT,
             );
-            ChatRequest::new(vec![ChatMessage::user(transcript)])
-                .with_system(SUMMARY_INSTRUCTION.to_string())
+            ChatRequest::new(vec![ChatMessage::user(transcript)]).with_system(instruction.clone())
         } else {
             let mut messages = self.request_messages();
-            messages.push(ChatMessage::user(SUMMARY_INSTRUCTION.to_string()));
+            messages.push(ChatMessage::user(instruction.clone()));
             let tools: Vec<Tool> = self
                 .tools
                 .iter()
@@ -230,6 +241,13 @@ impl MultiTurnAgent {
 
         match summary {
             Ok((state_block, usage)) => {
+                let auto_memory = self
+                    .harness
+                    .as_ref()
+                    .is_some_and(|harness| harness.config.auto_memory);
+                if auto_memory && let Some(capture) = &self.memory_capture {
+                    capture.capture_summary(&state_block);
+                }
                 self.record_summary_usage(usage, event_tx).await;
                 self.log_event(
                     event_tx,
@@ -254,13 +272,6 @@ impl MultiTurnAgent {
                         freed_tokens: 0,
                     },
                 });
-                let _ = event_tx.send(AgentEvent::ItemCompleted {
-                    item: SessionItem::Compaction {
-                        id: item_id,
-                        trigger,
-                        freed_tokens,
-                    },
-                });
                 self.log_event(
                     event_tx,
                     SessionEvent::CompactionEnded {
@@ -269,6 +280,13 @@ impl MultiTurnAgent {
                     },
                 )
                 .await;
+                let _ = event_tx.send(AgentEvent::ItemCompleted {
+                    item: SessionItem::Compaction {
+                        id: item_id,
+                        trigger,
+                        freed_tokens,
+                    },
+                });
                 self.run_hook(
                     HookEvent::PostCompact,
                     None,
@@ -279,6 +297,7 @@ impl MultiTurnAgent {
                     event_tx,
                 )
                 .await;
+                self.emit_context_updated(event_tx);
                 Ok(true)
             }
             Err(error) => {
@@ -348,7 +367,29 @@ impl MultiTurnAgent {
             .harness
             .as_ref()
             .and_then(|harness| harness.config.summarizer_model.clone())
+            .or_else(|| {
+                self.harness
+                    .as_ref()
+                    .and_then(|harness| {
+                        harness
+                            .config
+                            .routing
+                            .route(&meerai_common::settings::TaskType::Compact)
+                    })
+                    .map(|route| route.model_spec())
+            })
             .unwrap_or_else(|| self.model.clone());
+        let _routing_permit = match self
+            .harness
+            .as_ref()
+            .and_then(|harness| harness.routing.clone())
+        {
+            Some(coordinator) => {
+                let provider = crate::routing::provider_of(&model);
+                coordinator.acquire(&provider).await
+            }
+            None => None,
+        };
         let streamer = self.streamer.clone();
         let mut stream = tokio::select! {
             _ = cancel.cancelled() => return Err(anyhow!("compaction cancelled")),
@@ -395,10 +436,12 @@ impl MultiTurnAgent {
             return;
         };
         self.cumulative_usage.add(usage);
+        let est_cost_usd = self.estimated_cost(self.cumulative_usage);
+        self.note_routing_cost(est_cost_usd);
         let _ = event_tx.send(AgentEvent::UsageUpdated {
             usage,
             cumulative: self.cumulative_usage,
-            est_cost_usd: None,
+            est_cost_usd,
         });
         self.log_event(
             event_tx,
@@ -425,6 +468,65 @@ impl MultiTurnAgent {
         let estimated =
             estimate_context_tokens(&messages) + system_tokens + self.tool_schema_tokens;
         estimated > threshold
+    }
+
+    pub(super) async fn enforce_spend_cap(
+        &mut self,
+        turn_id: &TurnId,
+        coordinator: &std::sync::Arc<crate::routing::RoutingCoordinator>,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+        cancel: &CancellationToken,
+        inbox: Option<&mut mpsc::UnboundedReceiver<AgentCommand>>,
+    ) -> BudgetOutcome {
+        let spent = coordinator.spent_usd();
+        let cap = coordinator.cap().unwrap_or(0.0);
+        let request_id = RequestId::new();
+        let preview = ApprovalPreview {
+            title: "Session spend cap reached".to_string(),
+            detail: format!("session spent ${spent:.4} of the ${cap:.4} cap"),
+        };
+        let _ = event_tx.send(AgentEvent::ApprovalRequested {
+            request: ApprovalRequest {
+                request_id: request_id.clone(),
+                turn_id: turn_id.clone(),
+                kind: ApprovalKind::Spend,
+                preview: preview.clone(),
+                effect: None,
+            },
+        });
+        self.log_event(
+            event_tx,
+            SessionEvent::ApprovalRequested {
+                request_id: request_id.clone(),
+                kind: ApprovalKind::Spend,
+                preview,
+            },
+        )
+        .await;
+
+        let outcome = self
+            .await_decision(&request_id, event_tx, cancel, inbox)
+            .await;
+        match outcome.decision {
+            ApprovalDecision::Accept => {
+                coordinator.set_cap(Some(spent + cap.max(1.0)));
+                BudgetOutcome::Continue
+            }
+            ApprovalDecision::AcceptForSession => {
+                coordinator.set_cap(None);
+                BudgetOutcome::Continue
+            }
+            ApprovalDecision::Cancel => {
+                cancel.cancel();
+                BudgetOutcome::Cancelled
+            }
+            ApprovalDecision::Decline => BudgetOutcome::Declined {
+                detail: SPEND_CAP_DECLINED.to_string(),
+            },
+            ApprovalDecision::DeclineWithReason(reason) => BudgetOutcome::Declined {
+                detail: format!("{SPEND_CAP_DECLINED}: {reason}"),
+            },
+        }
     }
 
     pub(super) async fn enforce_token_budget(

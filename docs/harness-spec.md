@@ -76,7 +76,7 @@ All boxes below exist in the tree; the SDK/server client is planned (§3).
 │   cancellation · retries · recovery turn · subagents · acp-run           │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ meerai-session — append-only SessionEvent log                            │
-│   JSONL+zstd persistence · derive_messages projection · fork · replay    │
+│   SQLite persistence · derive_messages projection · fork · replay        │
 │   snapshots · blobs · spill · compaction primitives                      │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ meerai-policy — permissions · approval modes · grants                    │
@@ -157,23 +157,24 @@ Rules:
 #### Persistence
 
 ```text
-~/.local/share/meerai/sessions/<session-id>/     # $XDG_DATA_HOME/meerai/sessions
-├── session.v<N>.jsonl         # active append-only log (one JSON object per line)
-├── session.v<N>.jsonl.zstd    # sealed older generations (zstd, write-once)
-├── blobs/<hash>-<len>.txt     # spilled tool outputs (§2.5)
-├── snapshots/<turn-id>/       # checkpoints: manifest.json + captured blobs
-└── meta.json                  # cwd, git, title, model, approval mode, lineage,
-                               # harness/remote id, timestamps
+~/.local/share/meerai/meerai.db                  # $XDG_DATA_HOME/meerai or MEERAI_DB_PATH
+├── sessions                   # id, project root, cwd, git, title, model, mode, lineage, timestamps
+├── session_events             # append-only event rows, ordered by (session_id, seq)
+├── session_events_fts         # FTS5 projection of event text
+├── session_blobs              # zstd spilled tool outputs
+├── session_snapshots          # checkpoint rows: turn_id, rel_path, existed, zstd content
+└── meta                       # schema version and vault key envelope
+~/.local/share/meerai/sessions/<session-id>/session.lock   # one worker lock per session
 ```
 
-- The active generation is plain JSONL: crash-resilient at line
-  granularity and easy to tail. Rotation is size-based (8 MiB): the active
-  file seals to `.jsonl.zstd` and a new generation starts. Committed
-  generations are never rewritten.
-- The root is `$XDG_DATA_HOME/meerai/sessions` (default
-  `~/.local/share/meerai/sessions`), or `MEERAI_SESSION_DIR`.
-- On Unix, session directories are `0700` and files `0600`, re-tightened
-  on open; Windows has no equivalent enforcement.
+- The store is SQLite with WAL, `synchronous = NORMAL`, `foreign_keys = ON`, and
+  a 5 s busy timeout. Event rows are append-only and ordered by `seq`; the FTS5
+  triggers index event text for `Session::search_events`.
+- The root is `<data>/meerai.db`, or `MEERAI_DB_PATH`. The sessions directory is
+  `$XDG_DATA_HOME/meerai/sessions` (`MEERAI_SESSION_DIR`) and holds only the
+  worker lock.
+- On Unix, the database and lock files are `0600` and directories `0700`,
+  re-tightened on open; Windows has no equivalent enforcement.
 - **Crash recovery and healing.** On open, the session heals dangling tool
   calls (one error `ToolResult` per unpaired call in the last visible
   assistant message), closes every open turn with
@@ -210,7 +211,7 @@ pub fn derive_messages(events: &[LoggedEvent], policy: &ProjectionPolicy) -> Vec
 
 - `fork(source, boundary)` copies events through an inclusive closed
   `turn-end` boundary into a new session id and records `forked_from` +
-  `inherited_event_count` in `meta.json`. An open or unknown boundary turn
+  `inherited_event_count` in the `sessions` row. An open or unknown boundary turn
   is rejected, not silently clipped. Surfaces: `--fork <ID>`,
   `sessions fork <ID> [--turn <ID>]`, TUI `/fork`, and the user-message
   menu's Fork action.
@@ -674,8 +675,8 @@ Read-only discovery at the project root
 `.claude/agents/*.md`; `.agents/skills/*/SKILL.md` then
 `.claude/skills/*/SKILL.md`. `.agents` wins duplicate ids (warning names
 both paths); output is sorted by id; symlinks are skipped; only `SKILL.md`
-text is read; `.meerai` is never a definition directory and nothing is
-copied.
+text is read during discovery; `.meerai` is never a definition directory and
+nothing is copied.
 
 ```markdown
 <!-- .agents/agents/reviewer.md -->
@@ -689,22 +690,29 @@ mode: subagent             # optional; recorded but not applied
 Review the current changes. List findings by severity with file:line references.
 ```
 
-- Frontmatter: `name`, `description`, `model`, `steps`, `mode`. `tools`,
-  `permissions`, and `allowed-tools` warn and are not applied. Invalid
-  frontmatter warns and skips; missing frontmatter uses the file/directory
-  name and the body.
-- Application is prompt-only: startup `--agent <ID>` (one id; repeating is
-  an error) and repeatable `--skill <ID>` (skills before the agent) append
-  to the system prompt, capped at 16 KiB per definition and 32 KiB total.
-  TUI `/agent`/`/skill` apply a System instruction at the next step
-  boundary; the `@` Mentions popup applies definitions before the prompt
+- Frontmatter: `name`, `description`, `model`, `steps`, `mode`, and
+  `disable-model-invocation`. `tools`, `permissions`, and `allowed-tools` warn
+  and are not applied. Invalid frontmatter warns and skips; missing frontmatter
+  uses the file/directory name and the body.
+- Skills load progressively. The system prompt appends a `## Skills` block with
+  `<id>: <description>` for each skill that has a description and does not set
+  `disable-model-invocation`, capped at 8 KiB and screened as untrusted. The
+  `skill-load` tool returns the `SKILL.md` body and the supporting file names;
+  a second call with `file` returns one file. Reads stay inside the skill
+  directory, reject path separators and symlinks, and cap text at 16 KiB. The
+  tool is registered only when at least one skill is advertised.
+- Explicit application: startup `--agent <ID>` (one id; repeating is an error)
+  and repeatable `--skill <ID>` (skills before the agent) append a body to the
+  system prompt, capped at 16 KiB per definition and 32 KiB total. TUI
+  `/agent`/`/skill` apply a System instruction at the next step boundary; the
+  `@` Mentions popup applies definitions before the prompt
   ([tui-design.md](tui-design.md) §2.6).
 - Model precedence: `--model` → `MEERAI_MODEL` → agent `model` →
   settings/provider default. A `:` model is ignored with a warning;
   `steps`/`mode` are note-only.
-- Definitions are untrusted repository prompt text, screened before
-  insertion. They grant no tools, permissions, scripts, MCP, or sandbox.
-  Tool/permission mapping and supporting skill files are planned (§3).
+- Definitions are untrusted repository prompt text, screened before insertion.
+  They grant no tools, permissions, scripts, MCP, or sandbox. Tool/permission
+  mapping is planned (§3).
 
 #### Subagent execution
 
@@ -813,7 +821,7 @@ process, and `plan` refuses ACP. Full specification and trust boundary:
 | Progressive tool disclosure | Admit a compact tool index plus a `load_tool_schema` meta-tool when admitted schemas exceed ~2k tokens (MCP, skills growth) | Tool count growth |
 | `meerai export` | Export a session log for evals and audit (`--json`) | CLI milestone |
 | TUI polish | Select mode, Space leader, `:` command mode, transcript search, `Summarize from here`, inline viewport | [tui-design.md](tui-design.md) §3 |
-| Definition mapping | Map definition `tools`/`permissions`, load supporting skill files, MCP servers | Security review |
+| Definition mapping | Map definition `tools`/`permissions` and MCP servers | Security review |
 | M14 — `meerai acp` | meerai as an ACP agent for editors | [acp.md](acp.md) §3.1 |
 | ACP presets | User-config preset catalog (`acp.yml`), OpenCode/Gemini/Claude/Codex adapters | [acp.md](acp.md) §3 |
 | M15 — OpenAI plan usage | In-TUI sign-in modal, multi-account switching, live provider spike | [openai-chatgpt-plan-usage.md](openai-chatgpt-plan-usage.md) |
@@ -847,7 +855,7 @@ policies, or tools on the same spine.
 
 | # | Milestone | Content | Status |
 | --- | --- | --- | --- |
-| M1 | Session log core | `SessionEvent`, JSONL+zstd persistence, `derive_messages` + snapshots, crash recovery, meta | Implemented |
+| M1 | Session log core | `SessionEvent`, SQLite persistence, `derive_messages` + snapshots, crash recovery, meta | Implemented |
 | M2 | Item protocol | `AgentEvent` lifecycle; TUI fold; headless NDJSON | Implemented |
 | M3 | Coding tools + effect classes | Seven `code-*` tools, path guards, unified-diff `FileChange` items | Implemented |
 | M4 | Policy engine + approvals | Ordered rules, approval suspend/resume, TUI overlay, grants | Implemented |
@@ -859,7 +867,7 @@ policies, or tools on the same spine.
 | M9 | CLI + resume/fork | `meerai-cli`, `--prompt`/`--json`/`--continue`/`--resume`/`--fork`, `sessions fork`, auth/sessions | Implemented (`export` planned; TUI `/fork` implemented) |
 | M10 | Retrieval v2/v3 | `repo_map`, LSP stdio tools, `search_as_code`, opt-in post-edit diagnostics | Implemented |
 | M11 | Security & supply chain | Guards, sensitive blocks, sandbox, keychain, redaction, screening, budgets, retention, CI audit, threat model, conditional signing | Implemented (signing secrets operator-configured; Windows host guards) |
-| M12 | Agents & skills discovery | Read-only `.agents`/`.claude` discovery, prompt-only application, mentions | Implemented (tool/permission mapping planned) |
+| M12 | Agents & skills discovery | Read-only `.agents`/`.claude` discovery, progressive skill loading via `skill-load`, mentions | Implemented (tool/permission mapping planned) |
 | M13 | ACP client | `meerai-acp` bridge, `AcpWorker`, `--acp`/`/acp`/`acp doctor`, `session/load` resume, `acp-run` | Implemented for `agy` (other presets planned) |
 | M14 | ACP agent | `meerai acp` on stdio for editors | Planned (compatibility kit + editor smoke) |
 | M15 | OpenAI plan usage | Sign in with ChatGPT (`chatgpt.tokens.use.direct`), plan request profile, account model catalog | Implemented (live provider spike and multi-account planned) |
@@ -886,8 +894,9 @@ policies, or tools on the same spine.
 - **Build surfaces.** `meerai-tui` defaults `update`; `meerai-cli`
   defaults `tui`; `--no-default-features` builds headless without
   ratatui/git2/comrak/TUI.
-- **Persistence.** Active generation is plain append-only JSONL; zstd
-  applies to sealed generations; rotation is size-based.
+- **Persistence.** Sessions, events, the FTS5 index, spilled blobs, and
+  checkpoints live in SQLite (`meerai.db`); only `session.lock` remains in the
+  per-session directory. `meerai sessions export` prints JSONL.
 - **`plan` is hard read-only.** Non-Read denied before rules and grants;
   `auto` honors explicit `ask`/`deny`.
 - **Headless exit contract.** Tool approval: fail fast, exit `2`. Spend:
@@ -917,11 +926,12 @@ policies, or tools on the same spine.
   `Stop` halts the batch.
 - **Definitions merge at runtime, with no copies.** `.agents` before
   `.claude`; no `.meerai` definition directories, no import lock;
-  definitions are prompt-only and untrusted; agent models cannot switch
-  provider; skill supporting files are not traversed.
+  definitions are untrusted text that cannot grant capabilities; agent models
+  cannot switch provider; skill reads stay inside the skill directory.
 - **Prompt composition.** Base + workspace root line + `--system` + root
   instructions (32 KiB/file, 64 KiB block); scoped `AGENTS.md` once per
-  turn (16 KiB, max 8); an `Active model:` identity line at request time.
+  turn (16 KiB, max 8); an `Active model:` identity line at request time with
+  the bare model id, not the provider adapter prefix.
 - **ACP is not a safety boundary.** External agents keep their own tools
   and policy; permissions are advisory; `plan` refuses ACP.
 
@@ -939,7 +949,7 @@ consolidated gate passes.
 Primary sources consulted (Nov 2026):
 
 - Codex app-server protocol — developers.openai.com/codex/app-server
-  (Thread/Turn/Item, deltas, approvals, fork/resume/compact, JSONL
+  (Thread/Turn/Item, deltas, approvals, fork/resume/compact, SQLite
   rollouts).
 - Codex sandboxing & approvals — developers.openai.com/codex/sandboxing
   (read-only / workspace-write / danger-full-access; Seatbelt,

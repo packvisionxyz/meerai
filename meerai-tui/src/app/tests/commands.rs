@@ -216,17 +216,15 @@ fn skills_and_agents_commands_open_filtered_mentions() {
     )];
 
     submit(&mut app, "/skills");
-    assert_eq!(app.tab().input, "@skill/");
-    assert_eq!(app.mode, InputMode::Insert);
-    assert!(app.completion.is_active());
-    assert!(
-        app.completion
-            .items()
-            .iter()
-            .all(|item| item.item_kind == CompletionItemKind::Skill)
-    );
-    assert_eq!(app.completion.items()[0].label, "orchestrate");
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::Packs {
+            tab: PackTab::Definitions,
+            ..
+        })
+    ));
 
+    app.modal = None;
     app.tab_mut().input.clear();
     app.tab_mut().cursor = 0;
     app.completion.reset();
@@ -277,7 +275,13 @@ fn compact_and_mode_commands_emit_agent_commands() {
 
     type_text(&mut app, "/compact");
     app.handle_key_event(key(KeyCode::Enter));
-    assert_eq!(rx.try_recv().unwrap(), AgentCommand::Compact);
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::Compact {
+            focus: None,
+            from_turn_id: None,
+        }
+    );
     assert!(matches!(
         app.tab().transcript.last(),
         Some(TranscriptEntry::System { text }) if text.contains("Compaction requested")
@@ -447,6 +451,9 @@ fn test_agent_definition(id: &str) -> AgentDefinition {
         mode: None,
         prompt: String::new(),
         path: PathBuf::from(format!(".agents/agents/{id}.md")),
+        token_estimate: 0,
+        warnings: Vec::new(),
+        supporting_files: Vec::new(),
     }
 }
 
@@ -568,6 +575,10 @@ fn effort_command_updates_state_queues_sync_and_appears_in_help() {
     let (mut app, _rx, _secrets) = test_app();
 
     submit(&mut app, "/effort");
+    assert!(matches!(app.modal, Some(ActiveModal::Sampling { .. })));
+    app.modal = None;
+
+    submit(&mut app, "/effort high");
     assert_eq!(
         app.context_effort,
         Some(meerai_common::settings::EffortLevel::High)
@@ -613,5 +624,59 @@ fn effort_command_updates_state_queues_sync_and_appears_in_help() {
     assert!(matches!(
         app.tab().transcript.last(),
         Some(TranscriptEntry::System { text }) if text.contains("/effort [low|medium|high]")
+    ));
+}
+
+#[test]
+fn host_action_commands_queue_and_context_is_local() {
+    let (mut app, mut rx, _secrets) = test_app();
+
+    type_text(&mut app, "/context");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        AgentCommand::InspectContext
+    ));
+    assert!(matches!(app.modal, Some(ActiveModal::Context(_))));
+    app.modal = None;
+
+    type_text(&mut app, "/memory parser");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(app.modal, Some(ActiveModal::Memory { .. })));
+    app.modal = None;
+
+    type_text(&mut app, "/routing set build openai::o3 1.5 20000 2");
+    app.handle_key_event(key(KeyCode::Enter));
+    type_text(&mut app, "/subagent explore find the parser");
+    app.handle_key_event(key(KeyCode::Enter));
+    type_text(&mut app, "/packs");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(app.modal, Some(ActiveModal::Packs { .. })));
+    app.modal = None;
+
+    let actions = app.take_pending_session_actions();
+    assert!(matches!(
+        actions.first(),
+        Some(PendingSessionAction::LoadMemories {
+            query: Some(query)
+        }) if query == "parser"
+    ));
+    assert!(matches!(
+        actions.get(1),
+        Some(PendingSessionAction::HostAction {
+            action: meerai_host::HostAction::SetRoute { task_type, provider, model, .. },
+            ..
+        }) if task_type == "build" && provider == "openai" && model == "o3"
+    ));
+    assert!(matches!(
+        actions.get(2),
+        Some(PendingSessionAction::HostAction {
+            action: meerai_host::HostAction::SpawnSubagent { spec },
+            ..
+        }) if spec.agent == "explore" && spec.task == "find the parser"
+    ));
+    assert!(matches!(
+        actions.get(3),
+        Some(PendingSessionAction::LoadPacks)
     ));
 }

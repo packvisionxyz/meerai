@@ -69,6 +69,41 @@ pub fn plan_compaction_boundary(
     None
 }
 
+/// Compacts everything before `turn_id` and keeps that turn and later turns verbatim.
+pub fn plan_compaction_boundary_from(events: &[LoggedEvent], turn_id: &TurnId) -> Option<SeqRange> {
+    let first = events.first()?;
+    let window_start = events.iter().position(|logged| {
+        matches!(
+            &logged.event,
+            SessionEvent::TurnStarted { turn_id: started, .. } if started == turn_id
+        )
+    })?;
+    if window_start == 0 {
+        return None;
+    }
+    let candidates: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .take(window_start)
+        .filter(|(_, logged)| {
+            matches!(
+                logged.event,
+                SessionEvent::TurnEnded { .. } | SessionEvent::StepEnded { .. }
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+    for index in candidates.into_iter().rev() {
+        if tool_pairing_balanced(&events[..=index]) {
+            return Some(SeqRange {
+                start: first.seq,
+                end_inclusive: events[index].seq,
+            });
+        }
+    }
+    None
+}
+
 pub fn summary_message(state_block: &str) -> String {
     let mut sections: Vec<String> = Vec::new();
     let block = state_block.trim();
@@ -232,6 +267,27 @@ mod tests {
 
         let full = plan_compaction_boundary(&events, 0).unwrap();
         assert_eq!(full.end_inclusive, Seq(6));
+    }
+
+    #[test]
+    fn from_turn_summarizes_only_the_older_history() {
+        let turn_a = TurnId::from("a");
+        let turn_b = TurnId::from("b");
+        let turn_c = TurnId::from("c");
+        let (a_start, a_end) = turn(1, &turn_a);
+        let (b_start, b_end) = turn(3, &turn_b);
+        let (c_start, c_end) = turn(5, &turn_c);
+        let events = vec![a_start, a_end, b_start, b_end, c_start, c_end];
+
+        let range = plan_compaction_boundary_from(&events, &turn_c).unwrap();
+        assert_eq!(range.start, Seq(1));
+        assert_eq!(range.end_inclusive, Seq(4));
+
+        let range = plan_compaction_boundary_from(&events, &turn_b).unwrap();
+        assert_eq!(range.end_inclusive, Seq(2));
+
+        assert!(plan_compaction_boundary_from(&events, &turn_a).is_none());
+        assert!(plan_compaction_boundary_from(&events, &TurnId::from("missing")).is_none());
     }
 
     #[test]

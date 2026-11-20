@@ -354,6 +354,7 @@ fn harness(session: &Session, policy: PolicyEngine, config: HarnessConfig) -> Ag
         session: session.clone(),
         policy,
         config,
+        routing: None,
     }
 }
 
@@ -419,6 +420,7 @@ fn event_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::QuestionAnswered { .. } => "question_answered",
         SessionEvent::RewindApplied { .. } => "rewind_applied",
         SessionEvent::HookFired { .. } => "hook_fired",
+        SessionEvent::ContextTurnPinned { .. } => "context_turn_pinned",
         SessionEvent::CheckpointCreated { .. } => "checkpoint_created",
         SessionEvent::CircuitBreaker { .. } => "circuit_breaker",
         SessionEvent::Error { .. } => "error",
@@ -1308,8 +1310,8 @@ async fn model_switch_updates_identity_in_request_and_log() {
     assert_eq!(requests.len(), 2);
     let first = requests[0].system.clone().unwrap();
     let second = requests[1].system.clone().unwrap();
-    assert!(first.contains("Active model: openai::gpt-4o."));
-    assert!(second.contains("Active model: gemini::gemini-3.8-flash."));
+    assert!(first.contains("Active model: gpt-4o."));
+    assert!(second.contains("Active model: gemini-3.8-flash."));
     assert!(!second.contains("openai::gpt-4o"));
 
     let system_messages: Vec<(String, u64)> = session_events(&session)
@@ -1325,7 +1327,11 @@ async fn model_switch_updates_identity_in_request_and_log() {
     assert_eq!(system_messages.len(), 2);
     assert_eq!(system_messages[0].1, 0);
     assert_eq!(system_messages[1].1, 1);
-    assert!(system_messages[1].0.contains("gemini::gemini-3.8-flash"));
+    assert!(
+        system_messages[1]
+            .0
+            .contains("Active model: gemini-3.8-flash.")
+    );
 }
 
 #[tokio::test]
@@ -1953,6 +1959,12 @@ async fn model_set_during_a_turn_persists_session_meta() {
         }
     }
 
+    for _ in 0..50 {
+        if session.meta().model.as_deref() == Some("gpt-5-mini") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(session.meta().model.as_deref(), Some("gpt-5-mini"));
 
     let _ = cmd_tx.send(AgentCommand::Quit);
@@ -2334,26 +2346,22 @@ async fn spill_stores_blob_and_retains_notice() {
     }
     let completed = completed.expect("tool item completed");
     assert!(completed.contains("(Omitted "));
-    assert!(completed.contains("Full result stored at:"));
+    assert!(completed.contains("Full result stored as blob"));
 
     let events = session_events(&session);
-    let (bytes_omitted, blob_path) = events
+    let (bytes_omitted, blob_key) = events
         .iter()
         .find_map(|event| match event {
             SessionEvent::SpillApplied {
                 bytes_omitted,
-                blob_path,
+                blob_key,
                 ..
-            } => Some((*bytes_omitted, blob_path.clone())),
+            } => Some((*bytes_omitted, blob_key.clone())),
             _ => None,
         })
         .expect("spill applied");
     assert!(bytes_omitted > 0);
-    assert!(blob_path.exists());
-    assert!(
-        blob_path.starts_with(root.join(session.id().as_str()).join("blobs")),
-        "blob written under the session dir"
-    );
+    assert!(session.read_blob(&blob_key).await.unwrap().is_some());
 
     let observation = events
         .iter()
@@ -2363,10 +2371,10 @@ async fn spill_stores_blob_and_retains_notice() {
         })
         .expect("tool result logged");
     assert!(observation.stdout.starts_with("row 0 with"));
-    assert!(observation.stdout.contains("Full result stored at:"));
+    assert!(observation.stdout.contains("Full result stored as blob"));
 
     let reqs = streamer.requests.lock().unwrap();
-    assert!(format!("{:?}", reqs[1].messages).contains("Full result stored at:"));
+    assert!(format!("{:?}", reqs[1].messages).contains("Full result stored as blob"));
 
     std::fs::remove_dir_all(&root).ok();
 }
@@ -2531,6 +2539,7 @@ async fn pressure_compaction_brackets_and_shrinks_history() {
         verbatim_window_turns: 1,
         clear_old_tool_results: false,
         include_system_messages: false,
+        pinned_turns: Vec::new(),
     };
     let derived = session.derive_messages(&policy);
     assert_eq!(derived.len(), 3);
@@ -2693,7 +2702,12 @@ async fn manual_compact_runs_at_step_boundary() {
         .send(AgentCommand::SubmitPrompt("second".to_string()))
         .unwrap();
     started.notified().await;
-    cmd_tx.send(AgentCommand::Compact).unwrap();
+    cmd_tx
+        .send(AgentCommand::Compact {
+            focus: None,
+            from_turn_id: None,
+        })
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(25)).await;
     release.notify_one();
 
@@ -2909,6 +2923,7 @@ async fn final_step_strips_tools_and_requests_summary() {
     let session = memory_session();
     let config = HarnessConfig {
         max_steps_per_turn: 2,
+        step_limit_continuations: 0,
         ..HarnessConfig::default()
     };
     let mut agent = harness_agent(
@@ -2944,6 +2959,77 @@ async fn final_step_strips_tools_and_requests_summary() {
         )
     });
     assert!(notice);
+}
+
+#[tokio::test]
+async fn step_budget_continuation_keeps_tools_and_asks_to_finish() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![tool_call("c1", "a")]))],
+        vec![ChatStreamEvent::End(tool_end(vec![tool_call("c2", "b")]))],
+        vec![ChatStreamEvent::End(tool_end(vec![tool_call("c3", "c")]))],
+        vec![ChatStreamEvent::End(text_end("finished the work"))],
+    ]));
+
+    let session = memory_session();
+    let config = HarnessConfig {
+        max_steps_per_turn: 2,
+        step_limit_continuations: 1,
+        ..HarnessConfig::default()
+    };
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![Box::new(EchoToolset)],
+        "",
+        &session,
+        auto_mode(),
+        config,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "finished the work");
+
+    let reqs = streamer.requests.lock().unwrap();
+    assert_eq!(reqs.len(), 4);
+    assert!(reqs[0].tools.is_some());
+    assert!(reqs[1].tools.is_some());
+    assert!(reqs[2].tools.is_some(), "a continuation keeps the tools");
+    assert!(
+        reqs[3].tools.is_none(),
+        "the absolute final step strips tools"
+    );
+    assert!(
+        format!("{:?}", reqs[2].messages).contains("Step budget reached."),
+        "the continuation notice must reach the request"
+    );
+    assert!(format!("{:?}", reqs[3].messages).contains("Step limit reached."));
+
+    let notices: Vec<String> = session_events(&session)
+        .into_iter()
+        .filter_map(|event| match event {
+            SessionEvent::UserMessage {
+                source: InputSource::RuntimeContext,
+                content,
+            } => content.into_iter().find_map(|block| match block {
+                ContentBlock::Text(text) => Some(text),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        notices
+            .iter()
+            .any(|text| text.starts_with("Step budget reached."))
+    );
+    assert!(
+        notices
+            .iter()
+            .any(|text| text.starts_with("Step limit reached."))
+    );
 }
 
 #[tokio::test]
@@ -3461,6 +3547,27 @@ fn remaining_turn_budget_handles_disabled_exhausted_and_remaining() {
     assert!(left <= Duration::from_secs(30));
 }
 
+#[test]
+fn subagent_turn_budget_reserves_a_parent_margin() {
+    use crate::subagent::{SUBAGENT_TURN_DEADLINE_MARGIN_SECS, child_turn_secs};
+
+    let now = Instant::now();
+    assert_eq!(child_turn_secs(None, now), 0);
+    assert_eq!(
+        child_turn_secs(Some(now + Duration::from_secs(600)), now),
+        600 - SUBAGENT_TURN_DEADLINE_MARGIN_SECS
+    );
+    assert_eq!(
+        child_turn_secs(
+            Some(now + Duration::from_secs(SUBAGENT_TURN_DEADLINE_MARGIN_SECS)),
+            now
+        ),
+        1
+    );
+    assert_eq!(child_turn_secs(Some(now), now), 1);
+    assert_eq!(child_turn_secs(Some(now - Duration::from_secs(30)), now), 1);
+}
+
 #[tokio::test]
 async fn read_only_calls_run_concurrently_and_settle_in_call_order() {
     let barrier = Arc::new(Barrier::new(2));
@@ -3958,7 +4065,12 @@ async fn idle_compact_appends_bracketed_events() {
     }
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    cmd_tx.send(AgentCommand::Compact).unwrap();
+    cmd_tx
+        .send(AgentCommand::Compact {
+            focus: None,
+            from_turn_id: None,
+        })
+        .unwrap();
     let compacted = tokio::time::timeout(Duration::from_secs(2), async {
         while let Some(event) = rx.recv().await {
             if matches!(
@@ -4986,6 +5098,9 @@ fn subagent_presets_and_effect_of_call_classification() {
             mode: Some("auto".to_string()),
             prompt: "Review carefully.".to_string(),
             path: PathBuf::from(".agents/agents/reviewer.md"),
+            token_estimate: 0,
+            warnings: Vec::new(),
+            supporting_files: Vec::new(),
         },
         AgentDefinition {
             id: "explore".to_string(),
@@ -4996,6 +5111,9 @@ fn subagent_presets_and_effect_of_call_classification() {
             mode: Some("auto".to_string()),
             prompt: "Ignore rules".to_string(),
             path: PathBuf::from(".claude/agents/explore.md"),
+            token_estimate: 0,
+            warnings: Vec::new(),
+            supporting_files: Vec::new(),
         },
         AgentDefinition {
             id: "build".to_string(),
@@ -5006,6 +5124,9 @@ fn subagent_presets_and_effect_of_call_classification() {
             mode: None,
             prompt: "Hijack".to_string(),
             path: PathBuf::from(".claude/agents/build.md"),
+            token_estimate: 0,
+            warnings: Vec::new(),
+            supporting_files: Vec::new(),
         },
     ];
 
@@ -5419,6 +5540,9 @@ async fn subagent_custom_definition_enforces_read_only_plan_policy_and_model() {
             mode: Some("auto".to_string()),
             prompt: "Review carefully.".to_string(),
             path: PathBuf::from(".agents/agents/reviewer.md"),
+            token_estimate: 0,
+            warnings: Vec::new(),
+            supporting_files: Vec::new(),
         },
         AgentDefinition {
             id: "bad-model".to_string(),
@@ -5429,6 +5553,9 @@ async fn subagent_custom_definition_enforces_read_only_plan_policy_and_model() {
             mode: None,
             prompt: "Check safely.".to_string(),
             path: PathBuf::from(".claude/agents/bad-model.md"),
+            token_estimate: 0,
+            warnings: Vec::new(),
+            supporting_files: Vec::new(),
         },
         AgentDefinition {
             id: "explore".to_string(),
@@ -5439,6 +5566,9 @@ async fn subagent_custom_definition_enforces_read_only_plan_policy_and_model() {
             mode: None,
             prompt: "Hijack prompt".to_string(),
             path: PathBuf::from(".claude/agents/explore.md"),
+            token_estimate: 0,
+            warnings: Vec::new(),
+            supporting_files: Vec::new(),
         },
     ];
 
@@ -5460,24 +5590,35 @@ async fn subagent_custom_definition_enforces_read_only_plan_policy_and_model() {
     assert_eq!(out, "all checked");
 
     let models = child_streamer.models.lock().unwrap();
+    let mut models = models.clone();
+    models.sort();
     assert_eq!(
-        *models,
+        models,
         vec![
+            "openai::gpt-4o".to_string(),
+            "openai::gpt-4o".to_string(),
             "openai::gpt-4o-mini".to_string(),
-            "openai::gpt-4o".to_string(),
-            "openai::gpt-4o".to_string(),
         ]
     );
 
     let reqs = child_streamer.requests.lock().unwrap();
+    let review = reqs
+        .iter()
+        .find(|request| {
+            request
+                .system
+                .as_deref()
+                .is_some_and(|system| system.contains("Review carefully."))
+        })
+        .expect("reviewer request");
     assert_eq!(
-        reqs[0].system,
+        review.system,
         Some(crate::prompt::append_model_identity(
             "Review carefully.".to_string(),
             "openai::gpt-4o-mini"
         ))
     );
-    let tool_names: Vec<&str> = reqs[0]
+    let tool_names: Vec<&str> = review
         .tools
         .as_ref()
         .unwrap()
@@ -5485,7 +5626,10 @@ async fn subagent_custom_definition_enforces_read_only_plan_policy_and_model() {
         .map(|t| t.name.as_str())
         .collect();
     assert_eq!(tool_names, vec!["code-read_file"]);
-    assert_ne!(reqs[2].system.as_deref(), Some("Hijack prompt"));
+    assert!(
+        reqs.iter()
+            .all(|request| request.system.as_deref() != Some("Hijack prompt"))
+    );
 }
 
 #[tokio::test]
@@ -5963,14 +6107,17 @@ async fn subagent_ignores_single_tool_timeout_ms() {
 }
 
 #[tokio::test]
-async fn subagent_turn_deadline_cancels_child_and_emits_item_completed() {
+async fn subagent_turn_deadline_stops_child_before_the_parent_budget() {
     use crate::subagent::SubagentToolset;
 
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let parent_streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
-        tool_end(vec![subagent_call("c1", "explore", "hang")]),
-    )]]));
+    let parent_streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![subagent_call(
+            "c1", "explore", "hang",
+        )]))],
+        vec![ChatStreamEvent::End(text_end("parent finished"))],
+    ]));
     let child_streamer = Arc::new(GatedStreamer {
         turns: Mutex::new(VecDeque::from(vec![vec![ChatStreamEvent::End(text_end(
             "never",
@@ -5983,7 +6130,7 @@ async fn subagent_turn_deadline_cancels_child_and_emits_item_completed() {
 
     let session = memory_session();
     let config = HarnessConfig {
-        max_turn_secs: 1,
+        max_turn_secs: crate::subagent::SUBAGENT_TURN_DEADLINE_MARGIN_SECS + 1,
         ..HarnessConfig::default()
     };
     let mut agent = harness_agent(parent_streamer, vec![], "", &session, auto_mode(), config);
@@ -5994,38 +6141,48 @@ async fn subagent_turn_deadline_cancels_child_and_emits_item_completed() {
     ));
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let _ = agent
-        .prompt_streaming("hit deadline", &tx, CancellationToken::new())
-        .await;
+    let started_at = Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        agent.prompt_streaming("hit deadline", &tx, CancellationToken::new()),
+    )
+    .await
+    .expect("the delegated child must stop before the parent budget");
+    assert!(result.is_ok());
+    assert!(
+        started_at.elapsed()
+            < Duration::from_secs(crate::subagent::SUBAGENT_TURN_DEADLINE_MARGIN_SECS + 1),
+        "the parent must keep time after the child stops"
+    );
 
     let mut saw_started = false;
-    let mut completed_status = None;
+    let mut completed = None;
     let mut saw_budget_error = false;
-    let mut turn_failed = false;
+    let mut turn_reason = None;
     while let Ok(ev) = rx.try_recv() {
         match ev {
             AgentEvent::ItemStarted {
                 item: SessionItem::SubagentRun { .. },
             } => saw_started = true,
             AgentEvent::ItemCompleted {
-                item: SessionItem::SubagentRun { status, .. },
-            } => completed_status = Some(status),
+                item: SessionItem::SubagentRun { status, report, .. },
+            } => completed = Some((status, report)),
             AgentEvent::Error {
                 code: ErrorCode::Budget,
                 ..
             } => saw_budget_error = true,
-            AgentEvent::TurnCompleted {
-                reason: TurnEndReason::Failed { .. },
-                ..
-            } => turn_failed = true,
+            AgentEvent::TurnCompleted { reason, .. } => turn_reason = Some(reason),
             _ => {}
         }
     }
 
-    assert!(saw_budget_error);
-    assert!(turn_failed);
     assert!(saw_started);
-    assert_eq!(completed_status, Some(ItemStatus::Cancelled));
+    assert_eq!(
+        completed,
+        Some((ItemStatus::Failed, Some("turn exceeded 1s".to_string())))
+    );
+    assert!(!saw_budget_error);
+    assert_eq!(turn_reason, Some(TurnEndReason::Completed));
 }
 
 #[tokio::test]
@@ -7957,6 +8114,8 @@ async fn compaction_reuses_the_parent_prefix_for_cache_hits() {
             &compact_tx,
             &CancellationToken::new(),
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -8001,6 +8160,79 @@ async fn compaction_reuses_the_parent_prefix_for_cache_hits() {
         serde_json::to_value(&summary.messages[..prefix]).unwrap(),
         serde_json::to_value(&parent.messages).unwrap(),
         "summary history must reuse the parent prefix"
+    );
+}
+
+#[tokio::test]
+async fn compaction_captures_project_memories_when_enabled() {
+    use meerai_store::Store;
+
+    let summary = "Goal: ship the store\nCompleted progress\n- schema\n- vault\n\
+                   Key decisions\n- Use SQLite\n- Keep overlays file-based\n\
+                   Open blockers\n- none";
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(text_end("one"))],
+        vec![ChatStreamEvent::End(text_end("two"))],
+        vec![
+            ChatStreamEvent::Chunk(StreamChunk {
+                content: summary.to_string(),
+            }),
+            ChatStreamEvent::End(text_end(summary)),
+        ],
+    ]));
+    let session = memory_session();
+    let config = HarnessConfig {
+        verbatim_window_turns: 1,
+        auto_memory: true,
+        ..HarnessConfig::default()
+    };
+    let mut agent = harness_agent(streamer, vec![], "system", &session, auto_mode(), config);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("memory.db")).unwrap();
+    agent.set_memory_capture(crate::memory::MemoryCapture::new(
+        store.clone(),
+        dir.path(),
+        None,
+    ));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("one", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    agent
+        .prompt_streaming("two", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    let (compact_tx, _compact_rx) = mpsc::unbounded_channel();
+    let applied = agent
+        .run_compaction(
+            CompactionTrigger::Manual,
+            &compact_tx,
+            &CancellationToken::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(applied);
+
+    let memories = store
+        .memories()
+        .list(&dir.path().display().to_string())
+        .unwrap();
+    assert!(
+        memories
+            .iter()
+            .any(|memory| memory.title == "ship the store")
+    );
+    assert!(
+        memories
+            .iter()
+            .filter(|memory| memory.kind == meerai_store::ProjectMemoryKind::Decision)
+            .count()
+            >= 2
     );
 }
 
@@ -8163,6 +8395,8 @@ async fn plan_usage_compaction_sends_no_cache_control() {
             CompactionTrigger::Manual,
             &compact_tx,
             &CancellationToken::new(),
+            None,
+            None,
             None,
         )
         .await
@@ -8799,4 +9033,166 @@ async fn effort_tier_flows_into_chat_options_and_plan_usage_omits_it() {
     let plan_cached = plan_streamer.options.lock().unwrap();
     assert_eq!(plan_cached[0].temperature, None);
     assert!(plan_cached[0].reasoning_effort.is_none());
+}
+
+#[tokio::test]
+async fn manual_subagent_spawn_emits_items_and_clamps_plan_mode() {
+    use meerai_policy::ApprovalMode;
+
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("child finished"),
+    )]]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        vec![],
+        "",
+        &session,
+        PolicyEngine::new(ApprovalMode::Plan),
+        HarnessConfig::default(),
+    );
+    agent.set_subagent_support(mock_tool_factory(), Vec::new());
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (_cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let mut deferred = VecDeque::new();
+    agent
+        .spawn_manual_subagent(
+            crate::events::SubagentSpec {
+                agent: "explore".to_string(),
+                task: "find the parser".to_string(),
+                model: None,
+                approval_mode: Some(ApprovalMode::Auto),
+                allowed_tools: None,
+                max_steps: Some(2),
+                max_tokens: None,
+                max_cost_usd: None,
+            },
+            &tx,
+            &mut cmd_rx,
+            &mut deferred,
+        )
+        .await;
+    assert!(deferred.is_empty());
+
+    let mut started = None;
+    let mut completed = None;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AgentEvent::ItemStarted {
+                item:
+                    SessionItem::SubagentRun {
+                        approval_mode,
+                        max_steps,
+                        model,
+                        ..
+                    },
+            } => started = Some((approval_mode, max_steps, model)),
+            AgentEvent::ItemCompleted {
+                item: SessionItem::SubagentRun { status, .. },
+            } => completed = Some(status),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        started,
+        Some((ApprovalMode::Plan, 2, Some("gpt-4o-mini".to_string())))
+    );
+    assert_eq!(completed, Some(ItemStatus::Succeeded));
+}
+
+#[tokio::test]
+async fn spend_cap_gate_asks_before_the_next_step() {
+    use meerai_common::settings::{ModelRoute, RoutingSettings, TaskType};
+    use meerai_session::ApprovalKind;
+
+    use crate::routing::{DEFAULT_GLOBAL_CONCURRENCY, RoutingCoordinator};
+
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("should not stream"),
+    )]]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        vec![],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+    let coordinator = Arc::new(RoutingCoordinator::from_settings(
+        &RoutingSettings {
+            routes: vec![ModelRoute {
+                task_type: TaskType::Default,
+                provider: "openai".to_string(),
+                model: "gpt-4o-mini".to_string(),
+                effort: None,
+                max_tokens_per_turn: None,
+                max_cost_usd: Some(1.0),
+                max_concurrency: None,
+            }],
+        },
+        DEFAULT_GLOBAL_CONCURRENCY,
+    ));
+    coordinator.note_cost(2.0);
+    agent.harness.as_mut().unwrap().routing = Some(coordinator);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let mut spend_approvals = 0;
+    let mut failed_reason = None;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AgentEvent::ApprovalRequested { request } if request.kind == ApprovalKind::Spend => {
+                spend_approvals += 1;
+            }
+            AgentEvent::TurnCompleted { reason, .. } => failed_reason = Some(reason),
+            _ => {}
+        }
+    }
+    assert_eq!(spend_approvals, 1);
+    assert!(matches!(
+        failed_reason,
+        Some(TurnEndReason::Failed { error }) if error.contains("spend cap")
+    ));
+}
+
+#[tokio::test]
+async fn routing_applies_effort_and_output_cap_to_the_request() {
+    use genai::chat::ReasoningEffort;
+    use meerai_common::settings::{EffortLevel, ModelRoute, RoutingSettings, TaskType};
+
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("routed"),
+    )]]));
+    let session = memory_session();
+    let config = HarnessConfig::default().with_routing(RoutingSettings {
+        routes: vec![ModelRoute {
+            task_type: TaskType::Default,
+            provider: "openai".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            effort: Some("high".to_string()),
+            max_tokens_per_turn: Some(1_234),
+            max_cost_usd: None,
+            max_concurrency: None,
+        }],
+    });
+    let mut agent = harness_agent(streamer.clone(), vec![], "", &session, auto_mode(), config);
+    assert_eq!(
+        agent.harness.as_ref().unwrap().config.effort,
+        Some(EffortLevel::Medium)
+    );
+
+    agent.prompt("go").await.unwrap();
+
+    let options = streamer.options.lock().unwrap();
+    assert_eq!(options[0].max_tokens, Some(1_234));
+    assert!(matches!(
+        options[0].reasoning_effort,
+        Some(ReasoningEffort::High)
+    ));
 }

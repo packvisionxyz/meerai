@@ -1589,6 +1589,653 @@ impl AppState {
                     }
                 }
             }
+            ActiveModal::Context(mut panel) => {
+                if panel.focus_input.is_some() {
+                    match key.code {
+                        KeyCode::Esc => {
+                            panel.focus_input = None;
+                            panel.error = None;
+                        }
+                        KeyCode::Enter => {
+                            let focus = panel.focus_input.take().unwrap_or_default();
+                            let from_turn_id = panel
+                                .breakdown
+                                .as_ref()
+                                .and_then(|breakdown| breakdown.turn_ids.get(panel.selected_turn))
+                                .map(|turn| turn.to_string());
+                            queue_modal_host_action(
+                                self,
+                                meerai_host::HostAction::Summarize {
+                                    focus: (!focus.trim().is_empty())
+                                        .then(|| focus.trim().to_string()),
+                                    from_turn_id,
+                                },
+                            );
+                        }
+                        KeyCode::Char(c) => {
+                            if let Some(input) = panel.focus_input.as_mut() {
+                                input.push(c);
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if let Some(input) = panel.focus_input.as_mut() {
+                                input.pop();
+                            }
+                        }
+                        _ => {}
+                    }
+                    self.modal = Some(ActiveModal::Context(panel));
+                    return true;
+                }
+                if panel.blob_content.is_some() {
+                    match key.code {
+                        KeyCode::Esc => {
+                            panel.blob_key = None;
+                            panel.blob_content = None;
+                            panel.blob_scroll = 0;
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            panel.blob_scroll = panel.blob_scroll.saturating_add(1);
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            panel.blob_scroll = panel.blob_scroll.saturating_sub(1);
+                        }
+                        KeyCode::Char('g') => panel.blob_scroll = 0,
+                        _ => {}
+                    }
+                    self.modal = Some(ActiveModal::Context(panel));
+                    return true;
+                }
+                let turn_count = panel
+                    .breakdown
+                    .as_ref()
+                    .map_or(0, |breakdown| breakdown.turn_ids.len());
+                let blob_count = panel
+                    .breakdown
+                    .as_ref()
+                    .map_or(0, |breakdown| breakdown.spilled_blobs.len());
+                match key.code {
+                    KeyCode::Esc => self.modal = None,
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if turn_count > 0 {
+                            panel.selected_turn = (panel.selected_turn + 1) % turn_count;
+                        }
+                        if blob_count > 0 {
+                            panel.selected_blob = (panel.selected_blob + 1) % blob_count;
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if turn_count > 0 {
+                            panel.selected_turn = panel.selected_turn.saturating_sub(1);
+                        }
+                        if blob_count > 0 {
+                            panel.selected_blob = panel.selected_blob.saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Char('g') => {
+                        panel.scroll = 0;
+                        panel.selected_turn = 0;
+                        panel.selected_blob = 0;
+                    }
+                    KeyCode::Char('r') => {
+                        let _ = self.tab().cmd_tx.send(AgentCommand::InspectContext);
+                    }
+                    KeyCode::Char('p') => {
+                        if let Some(turn) = panel
+                            .breakdown
+                            .as_ref()
+                            .and_then(|breakdown| breakdown.turn_ids.get(panel.selected_turn))
+                        {
+                            let pinned = panel
+                                .breakdown
+                                .as_ref()
+                                .is_some_and(|breakdown| breakdown.pinned_turn_ids.contains(turn));
+                            queue_modal_host_action(
+                                self,
+                                meerai_host::HostAction::PinTurn {
+                                    turn_id: turn.to_string(),
+                                    pinned: !pinned,
+                                },
+                            );
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        if let Some(turn) = panel
+                            .breakdown
+                            .as_ref()
+                            .and_then(|breakdown| breakdown.turn_ids.get(panel.selected_turn))
+                        {
+                            queue_modal_host_action(
+                                self,
+                                meerai_host::HostAction::Summarize {
+                                    focus: None,
+                                    from_turn_id: Some(turn.to_string()),
+                                },
+                            );
+                        }
+                    }
+                    KeyCode::Char('f') => panel.focus_input = Some(String::new()),
+                    KeyCode::Char('b') => {
+                        if let Some(key) = panel
+                            .breakdown
+                            .as_ref()
+                            .and_then(|breakdown| breakdown.spilled_blobs.get(panel.selected_blob))
+                        {
+                            let tab_id = self.tab().tab_id;
+                            self.pending_session_actions
+                                .push(PendingSessionAction::LoadBlob {
+                                    tab_id,
+                                    key: key.clone(),
+                                });
+                        }
+                    }
+                    KeyCode::Char('t') => {
+                        let current = panel
+                            .breakdown
+                            .as_ref()
+                            .map_or(4, |breakdown| breakdown.verbatim_window_turns);
+                        let next = match current {
+                            0..=3 => 4,
+                            4..=7 => 8,
+                            8..=15 => 16,
+                            _ => 4,
+                        };
+                        queue_modal_host_action(
+                            self,
+                            meerai_host::HostAction::SetContextPolicy {
+                                verbatim_window_turns: Some(next),
+                                reasoning_pruning: None,
+                                clear_old_tool_results: None,
+                            },
+                        );
+                    }
+                    KeyCode::Char('c') => {
+                        let next = !panel
+                            .breakdown
+                            .as_ref()
+                            .is_some_and(|breakdown| breakdown.reasoning_pruning);
+                        queue_modal_host_action(
+                            self,
+                            meerai_host::HostAction::SetContextPolicy {
+                                verbatim_window_turns: None,
+                                reasoning_pruning: Some(next),
+                                clear_old_tool_results: None,
+                            },
+                        );
+                    }
+                    KeyCode::Char('C') => {
+                        let next = !panel
+                            .breakdown
+                            .as_ref()
+                            .is_some_and(|breakdown| breakdown.clear_old_tool_results);
+                        queue_modal_host_action(
+                            self,
+                            meerai_host::HostAction::SetContextPolicy {
+                                verbatim_window_turns: None,
+                                reasoning_pruning: None,
+                                clear_old_tool_results: Some(next),
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+                self.modal = Some(ActiveModal::Context(panel));
+            }
+            ActiveModal::Memory {
+                entries,
+                query,
+                mut selected,
+                loading,
+                error,
+            } => {
+                let count = entries.len();
+                match key.code {
+                    KeyCode::Esc => self.modal = None,
+                    KeyCode::Down | KeyCode::Char('j') if count > 0 => {
+                        selected = (selected + 1) % count;
+                        self.modal = Some(ActiveModal::Memory {
+                            entries,
+                            query,
+                            selected,
+                            loading,
+                            error,
+                        });
+                    }
+                    KeyCode::Up | KeyCode::Char('k') if count > 0 => {
+                        selected = if selected == 0 {
+                            count - 1
+                        } else {
+                            selected - 1
+                        };
+                        self.modal = Some(ActiveModal::Memory {
+                            entries,
+                            query,
+                            selected,
+                            loading,
+                            error,
+                        });
+                    }
+                    KeyCode::Char('r') => {
+                        self.pending_session_actions
+                            .push(PendingSessionAction::LoadMemories {
+                                query: (!query.is_empty()).then(|| query.clone()),
+                            });
+                        self.modal = Some(ActiveModal::Memory {
+                            entries,
+                            query,
+                            selected,
+                            loading: true,
+                            error: None,
+                        });
+                    }
+                    KeyCode::Char('d') | KeyCode::Char('p') if count > 0 => {
+                        let Some(memory) = entries.get(selected) else {
+                            self.modal = Some(ActiveModal::Memory {
+                                entries,
+                                query,
+                                selected,
+                                loading,
+                                error,
+                            });
+                            return true;
+                        };
+                        let action = if key.code == KeyCode::Char('d') {
+                            MemoryModalAction::Delete
+                        } else {
+                            MemoryModalAction::TogglePin
+                        };
+                        self.pending_session_actions
+                            .push(PendingSessionAction::MemoryAction {
+                                action,
+                                id: memory.id.clone(),
+                            });
+                        self.modal = Some(ActiveModal::Memory {
+                            entries,
+                            query,
+                            selected,
+                            loading: true,
+                            error: None,
+                        });
+                    }
+                    _ => {
+                        self.modal = Some(ActiveModal::Memory {
+                            entries,
+                            query,
+                            selected,
+                            loading,
+                            error,
+                        });
+                    }
+                }
+            }
+            ActiveModal::Routing {
+                routes,
+                mut selected,
+                loading,
+                error,
+            } => {
+                let count = routes.len();
+                match key.code {
+                    KeyCode::Esc => self.modal = None,
+                    KeyCode::Down | KeyCode::Char('j') if count > 0 => {
+                        selected = (selected + 1) % count;
+                        self.modal = Some(ActiveModal::Routing {
+                            routes,
+                            selected,
+                            loading,
+                            error,
+                        });
+                    }
+                    KeyCode::Up | KeyCode::Char('k') if count > 0 => {
+                        selected = if selected == 0 {
+                            count - 1
+                        } else {
+                            selected - 1
+                        };
+                        self.modal = Some(ActiveModal::Routing {
+                            routes,
+                            selected,
+                            loading,
+                            error,
+                        });
+                    }
+                    KeyCode::Char('d') if count > 0 => {
+                        let task_type = routes[selected].task_type.as_key();
+                        self.pending_session_actions
+                            .push(PendingSessionAction::RouteAction { task_type });
+                        self.modal = Some(ActiveModal::Routing {
+                            routes,
+                            selected,
+                            loading: true,
+                            error: None,
+                        });
+                    }
+                    KeyCode::Char('r') => {
+                        self.pending_session_actions
+                            .push(PendingSessionAction::LoadRoutes);
+                        self.modal = Some(ActiveModal::Routing {
+                            routes,
+                            selected,
+                            loading: true,
+                            error: None,
+                        });
+                    }
+                    _ => {
+                        self.modal = Some(ActiveModal::Routing {
+                            routes,
+                            selected,
+                            loading,
+                            error,
+                        });
+                    }
+                }
+            }
+            ActiveModal::Packs {
+                packs,
+                definitions,
+                tab,
+                mut selected,
+                loading,
+                error,
+            } => {
+                let active_len = match tab {
+                    PackTab::Packs => packs.len(),
+                    PackTab::Definitions => definitions.agents.len() + definitions.skills.len(),
+                };
+                match key.code {
+                    KeyCode::Esc => self.modal = None,
+                    KeyCode::Tab | KeyCode::Char('1') | KeyCode::Char('2') => {
+                        let tab = match key.code {
+                            KeyCode::Char('1') => PackTab::Packs,
+                            KeyCode::Char('2') => PackTab::Definitions,
+                            _ if tab == PackTab::Packs => PackTab::Definitions,
+                            _ => PackTab::Packs,
+                        };
+                        self.modal = Some(ActiveModal::Packs {
+                            packs,
+                            definitions,
+                            tab,
+                            selected: 0,
+                            loading,
+                            error,
+                        });
+                    }
+                    KeyCode::Down | KeyCode::Char('j') if active_len > 0 => {
+                        selected = (selected + 1) % active_len;
+                        self.modal = Some(ActiveModal::Packs {
+                            packs,
+                            definitions,
+                            tab,
+                            selected,
+                            loading,
+                            error,
+                        });
+                    }
+                    KeyCode::Up | KeyCode::Char('k') if active_len > 0 => {
+                        selected = if selected == 0 {
+                            active_len - 1
+                        } else {
+                            selected - 1
+                        };
+                        self.modal = Some(ActiveModal::Packs {
+                            packs,
+                            definitions,
+                            tab,
+                            selected,
+                            loading,
+                            error,
+                        });
+                    }
+                    KeyCode::Char('e') | KeyCode::Char('t') | KeyCode::Char('x')
+                        if tab == PackTab::Packs && !packs.is_empty() =>
+                    {
+                        let Some(pack) = packs.get(selected) else {
+                            self.modal = Some(ActiveModal::Packs {
+                                packs,
+                                definitions,
+                                tab,
+                                selected,
+                                loading,
+                                error,
+                            });
+                            return true;
+                        };
+                        let action = match key.code {
+                            KeyCode::Char('e') => PackModalAction::ToggleEnabled,
+                            KeyCode::Char('t') => PackModalAction::ToggleTrusted,
+                            _ => PackModalAction::Remove,
+                        };
+                        self.pending_session_actions
+                            .push(PendingSessionAction::PackAction {
+                                action,
+                                id: pack.id.clone(),
+                            });
+                        self.modal = Some(ActiveModal::Packs {
+                            packs,
+                            definitions,
+                            tab,
+                            selected,
+                            loading: true,
+                            error: None,
+                        });
+                    }
+                    KeyCode::Char('r') => {
+                        self.pending_session_actions
+                            .push(PendingSessionAction::LoadPacks);
+                        self.pending_session_actions
+                            .push(PendingSessionAction::LoadDefinitions);
+                        self.modal = Some(ActiveModal::Packs {
+                            packs,
+                            definitions,
+                            tab,
+                            selected,
+                            loading: true,
+                            error: None,
+                        });
+                    }
+                    _ => {
+                        self.modal = Some(ActiveModal::Packs {
+                            packs,
+                            definitions,
+                            tab,
+                            selected,
+                            loading,
+                            error,
+                        });
+                    }
+                }
+            }
+            ActiveModal::Sampling {
+                mut effort,
+                mut temperature,
+                mut field,
+                error,
+            } => match key.code {
+                KeyCode::Esc => self.modal = None,
+                KeyCode::Tab | KeyCode::Down => {
+                    field = 1;
+                    self.modal = Some(ActiveModal::Sampling {
+                        effort,
+                        temperature,
+                        field,
+                        error: None,
+                    });
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    field = 0;
+                    self.modal = Some(ActiveModal::Sampling {
+                        effort,
+                        temperature,
+                        field,
+                        error: None,
+                    });
+                }
+                KeyCode::Left | KeyCode::Right | KeyCode::Char('l' | 'm' | 'h') if field == 0 => {
+                    effort = Some(match key.code {
+                        KeyCode::Char('l') => EffortLevel::Low,
+                        KeyCode::Char('h') => EffortLevel::High,
+                        KeyCode::Left => EffortLevel::Low,
+                        KeyCode::Right => EffortLevel::High,
+                        _ => EffortLevel::Medium,
+                    });
+                    self.modal = Some(ActiveModal::Sampling {
+                        effort,
+                        temperature,
+                        field,
+                        error: None,
+                    });
+                }
+                KeyCode::Backspace if field == 1 => {
+                    temperature.pop();
+                    self.modal = Some(ActiveModal::Sampling {
+                        effort,
+                        temperature,
+                        field,
+                        error: None,
+                    });
+                }
+                KeyCode::Char(c) if field == 1 && (c.is_ascii_digit() || c == '.') => {
+                    temperature.push(c);
+                    self.modal = Some(ActiveModal::Sampling {
+                        effort,
+                        temperature,
+                        field,
+                        error: None,
+                    });
+                }
+                KeyCode::Enter => match self.apply_sampling(effort, &temperature) {
+                    Ok(()) => self.modal = None,
+                    Err(message) => {
+                        self.modal = Some(ActiveModal::Sampling {
+                            effort,
+                            temperature,
+                            field,
+                            error: Some(message),
+                        });
+                    }
+                },
+                _ => {
+                    self.modal = Some(ActiveModal::Sampling {
+                        effort,
+                        temperature,
+                        field,
+                        error,
+                    });
+                }
+            },
+            ActiveModal::VaultReset { mut input, error } => match key.code {
+                KeyCode::Esc => self.modal = None,
+                KeyCode::Backspace => {
+                    input.pop();
+                    self.modal = Some(ActiveModal::VaultReset { input, error: None });
+                }
+                KeyCode::Enter => {
+                    if input.trim() != "reset" {
+                        self.modal = Some(ActiveModal::VaultReset {
+                            input,
+                            error: Some("Type reset exactly to confirm.".to_string()),
+                        });
+                    } else {
+                        match self.secrets.reset_vault() {
+                            Ok(removed) => {
+                                self.modal = None;
+                                self.tab_mut().auto_follow = true;
+                                self.tab_mut().transcript.push(TranscriptEntry::System {
+                                    text: format!(
+                                        "Vault reset: removed {removed} saved credentials. Run /connect to log in again."
+                                    ),
+                                });
+                            }
+                            Err(error) => {
+                                self.modal = Some(ActiveModal::VaultReset {
+                                    input,
+                                    error: Some(format!("{error:#}")),
+                                });
+                            }
+                        }
+                    }
+                }
+                KeyCode::Char(c) if !has_ctrl && !has_alt => {
+                    input.push(c);
+                    self.modal = Some(ActiveModal::VaultReset { input, error: None });
+                }
+                _ => {
+                    self.modal = Some(ActiveModal::VaultReset { input, error });
+                }
+            },
+            ActiveModal::SubagentSpawn(mut panel) => {
+                const FIELDS: usize = 7;
+                match key.code {
+                    KeyCode::Esc => {
+                        self.modal = None;
+                        return true;
+                    }
+                    KeyCode::Tab | KeyCode::Down => {
+                        panel.field = (panel.field + 1) % FIELDS;
+                        panel.error = None;
+                    }
+                    KeyCode::BackTab | KeyCode::Up => {
+                        panel.field = if panel.field == 0 {
+                            FIELDS - 1
+                        } else {
+                            panel.field - 1
+                        };
+                        panel.error = None;
+                    }
+                    KeyCode::Char('m') if panel.field == 3 => {
+                        panel.mode = match panel.mode {
+                            None => Some(ApprovalMode::Plan),
+                            Some(ApprovalMode::Plan) => Some(ApprovalMode::Ask),
+                            Some(ApprovalMode::Ask) => Some(ApprovalMode::Auto),
+                            Some(ApprovalMode::Auto) => None,
+                        };
+                        panel.error = None;
+                    }
+                    KeyCode::Backspace => {
+                        let field = match panel.field {
+                            0 => &mut panel.agent,
+                            1 => &mut panel.task,
+                            2 => &mut panel.model,
+                            3 => &mut panel.steps,
+                            4 => &mut panel.tokens,
+                            5 => &mut panel.cost,
+                            _ => &mut panel.tools,
+                        };
+                        field.pop();
+                        panel.error = None;
+                    }
+                    KeyCode::Enter => {
+                        if panel.task.trim().is_empty() {
+                            panel.error = Some("Task must not be empty.".to_string());
+                        } else if let Some(spec) = subagent_spec_from_panel(&panel) {
+                            let _ = self.tab().cmd_tx.send(AgentCommand::SpawnSubagent { spec });
+                            self.status_notice = Some("Subagent started.".to_string());
+                            self.modal = None;
+                            return true;
+                        } else {
+                            panel.error = Some(
+                                "Steps and tokens must be integers; cost must be a number."
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    KeyCode::Char(c) if !has_ctrl && !has_alt => {
+                        let field = match panel.field {
+                            0 => &mut panel.agent,
+                            1 => &mut panel.task,
+                            2 => &mut panel.model,
+                            3 => &mut panel.steps,
+                            4 => &mut panel.tokens,
+                            5 => &mut panel.cost,
+                            _ => &mut panel.tools,
+                        };
+                        field.push(c);
+                        panel.error = None;
+                    }
+                    _ => {}
+                }
+                self.modal = Some(ActiveModal::SubagentSpawn(panel));
+            }
         }
 
         true
@@ -2492,4 +3139,51 @@ fn collect_question_answers(
             }
         })
         .collect()
+}
+
+fn queue_modal_host_action(app: &mut AppState, action: meerai_host::HostAction) {
+    let tab_id = app.tab().tab_id;
+    app.pending_session_actions
+        .push(PendingSessionAction::HostAction { tab_id, action });
+}
+
+fn subagent_spec_from_panel(panel: &SubagentSpawnPanel) -> Option<meerai_agents::SubagentSpec> {
+    let max_steps = parse_optional(&panel.steps)?;
+    let max_tokens = parse_optional(&panel.tokens)?;
+    let max_cost_usd = if panel.cost.trim().is_empty() {
+        None
+    } else {
+        Some(panel.cost.trim().parse::<f64>().ok()?)
+    };
+    let allowed_tools = if panel.tools.trim().is_empty() {
+        None
+    } else {
+        let tools: Vec<String> = panel
+            .tools
+            .split(',')
+            .map(str::trim)
+            .filter(|tool| !tool.is_empty())
+            .map(str::to_string)
+            .collect();
+        (!tools.is_empty()).then_some(tools)
+    };
+    Some(meerai_agents::SubagentSpec {
+        agent: panel.agent.trim().to_string(),
+        task: panel.task.trim().to_string(),
+        model: (!panel.model.trim().is_empty()).then(|| panel.model.trim().to_string()),
+        approval_mode: panel.mode,
+        allowed_tools,
+        max_steps,
+        max_tokens,
+        max_cost_usd,
+    })
+}
+
+fn parse_optional<T: std::str::FromStr>(raw: &str) -> Option<Option<T>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        Some(None)
+    } else {
+        raw.parse().ok().map(Some)
+    }
 }

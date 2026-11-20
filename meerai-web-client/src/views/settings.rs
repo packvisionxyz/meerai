@@ -810,7 +810,7 @@ fn context_body(store: StoreHandle) -> AnyView {
     view! {
         <div class="settings-section">
             <h3>"Context & Limits"</h3>
-            <p class="hint">"Saved to user settings.yml on the host. Leave numeric fields blank to use defaults."</p>
+            <p class="hint">"Saved to the user settings database on the host. Leave numeric fields blank to use defaults."</p>
             <datalist id="context-model-specs">
                 {model_specs.into_iter().map(|spec| view! { <option value=spec></option> }).collect::<Vec<_>>()}
             </datalist>

@@ -13,8 +13,11 @@ publish.workspace = true
 [dependencies]
 meerai-core = { path = "../meerai-core/" }
 meerai-policy = { path = "../meerai-policy/" }
+meerai-store = { path = "../meerai-store/" }
 
 anyhow = { workspace = true }
+git2 = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }

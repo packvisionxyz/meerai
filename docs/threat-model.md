@@ -132,17 +132,23 @@ a `WorkspaceWrite` policy and `sac-run_script` with `ReadOnly`; both pass
   run and before spill, the session log, UI events, and model text. The
   original value is discarded; there is no log-only copy. Paths are not
   redacted.
-- **Credential storage** (`meerai-providers/src/secrets.rs`):
-  `KeychainSecretStore` uses the macOS Keychain (`security`) or Linux
-  Secret Service (`secret-tool`) under service `meerai`, deleting stale
-  `auth.json` entries. Fallback is `FileSecretStore` (`auth.json`, `0600`
-  on Unix, dir `0700`), also forced by `MEERAI_DISABLE_KEYCHAIN`. ChatGPT plan
-  OAuth credentials (`type:"oauth"`: access token, rotating refresh token,
-  issued client id, scopes) always live in `auth.json`, never in the keychain;
-  every rewrite takes `auth.json.lock`, and `list_providers`/`auth list` never
-  print a token. Key resolution order: stored credential (API key or OAuth
-  access token) → configured `api_key` → provider env vars from the bundled
-  catalog. Config secrets support `${VAR|default}` and `{env:VAR}` expansion.
+- **Credential storage** (`meerai-providers/src/secrets/vault.rs`):
+  `VaultSecretStore` encrypts both API keys and ChatGPT plan OAuth credentials
+  with ChaCha20-Poly1305 in `vault_secrets`; the 256-bit DEK is generated on the
+  first write and stored in the OS keychain (macOS Keychain, Linux Secret
+  Service, Windows Credential Manager) under service `meerai` and a per-database
+  `vault-master-key-v1-<id>` account. macOS uses `/usr/bin/security`, so the
+  keychain grants access to Apple's tool rather than to the meerai binary: a
+  rebuild or upgrade keeps the grant, and any process that runs as the user can
+  read the item through the same tool. The vault is an at-rest control, not a
+  same-user boundary (see residual risk 7). Without a keychain,
+  `MEERAI_VAULT_PASSPHRASE` derives the key with Argon2id and the vault fails
+  closed rather than writing plaintext. Each write uses a fresh 96-bit nonce and
+  the provider id as AAD; OAuth refresh is one `BEGIN IMMEDIATE` transaction.
+  `list_providers`/`auth list` never print a token. Key resolution order: stored
+  credential (API key or OAuth access token) → configured `api_key` → provider
+  env vars from the bundled catalog. Config secrets support `${VAR|default}` and
+  `{env:VAR}` expansion.
 
 ### 2.5 Injection screening
 
@@ -168,12 +174,15 @@ guarantee (§5.1).
   (`meerai-common/src/definitions.rs`) is read-only discovery at the
   project root: `.agents/agents/*.md` and `.agents/skills/*/SKILL.md`
   before `.claude/...`; `.agents` wins duplicate ids; symlinks are skipped
-  with a warning; only `SKILL.md` text is read; `.meerai/agents` and
-  `.meerai/skills` are never scanned or created. Definitions are **prompt
-  text only**: frontmatter `tools`, `permissions`, and `allowed-tools`
-  warn and are ignored; no tool registration, permission mapping, script,
-  or sandbox implication. Startup text is capped at 16 KiB per definition
-  and 32 KiB total. An agent `model` containing `:` is ignored (no
+  with a warning; `.meerai/agents` and `.meerai/skills` are never scanned or
+  created. Definitions are **text only**: frontmatter `tools`, `permissions`,
+  and `allowed-tools` warn and are ignored; no tool registration, permission
+  mapping, script, or sandbox implication. Skill descriptions enter the prompt
+  as an untrusted, screened index capped at 8 KiB. The read-only `skill-load`
+  tool returns `SKILL.md` or one supporting file, capped at 16 KiB. It accepts
+  only a listed file name, rejects path separators and symlinks, and never
+  leaves the skill directory. Explicit `--skill` text is capped at 16 KiB per
+  definition and 32 KiB total. An agent `model` containing `:` is ignored (no
   provider switch).
 - **Project configuration.** `merge_project_settings`
   (`meerai-common/src/settings.rs`) is tighten-only: permissions merge as
@@ -266,21 +275,39 @@ refuses `--acp` and denies `acp-run`. Full boundary: [acp.md](acp.md) §5.
 
 ### 2.10 Budgets and circuit breakers
 
-`max_steps_per_turn` (default 32; the final step strips tools and asks for
-a summary), per-tool timeout (default 120 s), per-turn wall clock
-(`max_turn_secs`, default 1800, `0` disables; subagent children run with
-`0`), and an optional session token cap with a Spend approval pause bound
-runaway execution. Breakers: the 3rd identical failing call injects a
+`max_steps_per_turn` (default 32) and `step_limit_continuations` (default 2,
+so 96 steps; the absolute final step strips tools and asks for a summary;
+subagents get no continuations), per-tool timeout (default 120 s), per-turn wall clock
+(`max_turn_secs`, default 1800, `0` disables; a subagent child gets the
+parent's remaining turn time minus a 5 s margin, with a 1 s minimum, so it
+normally fails its own turn first), and an optional session token cap with a
+Spend approval pause bound runaway execution. Breakers: the 3rd identical failing call injects a
 diagnostic and the 4th fails the turn; the 3rd identical batch injects a
 diagnostic and the 5th fails; `NoProgress` diagnoses at 8 write-less steps
 and fails at 12 (disabled in `plan` and without a write tool). Provider
 retries are status-classified, 3 attempts, jittered backoff; one bounded
 recovery turn follows a retryable failure.
 
+Credential vault initialization is silent when the OS keychain is available:
+meerai generates a 256-bit data key on the first write and stores it under
+service `meerai`. On a host without a keychain it requires
+`MEERAI_VAULT_PASSPHRASE` and fails closed; it never falls back to plaintext.
+Per-database keychain accounts prevent two databases from sharing a key. A
+missing key is terminal: meerai does not guess or silently replace it. The
+operator must restore the key or run `meerai auth reset-vault`, which deletes
+all ciphertext and creates a new key. Reset is explicit and confirmed.
+
+Model routing adds a USD ledger: `RoutingCoordinator` caps spend from the
+default route's `max_cost_usd`, shares global and per-provider semaphore
+permits across the main turn, compaction, and subagents, and raises a Spend
+approval before the next step. Manual subagents are clamped: `plan` forces a
+read-only child, the child mode cannot exceed the parent, `allowed_tools` can
+only narrow a preset, and step/token/cost caps stay within the parent.
+
 ### 2.11 Session privacy and retention
 
-Session directories are `0700` and files `0600` on Unix, re-tightened on
-open (including legacy files and blobs). `meta.json` records cwd, git
+Session directories are `0700` and the SQLite database plus session lock files
+are `0600` on Unix, re-tightened on open. The `sessions` row records cwd, git
 branch/SHA, title, model, approval mode, lineage, and timestamps.
 Retention is user-controlled only: manual `sessions prune`, opt-in
 `sessions.auto_prune_days`/`keep` (active session always spared), and
@@ -348,10 +375,10 @@ processes cannot write or delete the same live session concurrently;
 | --- | --- | --- |
 | Workspace code & files | Workspace root + `writable_roots` | Destructive modification, malicious injection, exfiltration |
 | Host filesystem & network | Paths outside the workspace, local services, external endpoints | Arbitrary read/write via `shell`, exfiltration, SSRF |
-| Provider API keys | OS keychain, `auth.json` (`0600`), process env | Leakage via child processes, tool output, logs, model context |
-| ChatGPT plan OAuth tokens | `auth.json` (`0600`), process memory | Refresh-token theft, token in an error body or log, shared-machine access |
+| Provider API keys | Encrypted `vault_secrets` in `meerai.db`, process env | Leakage via child processes, tool output, logs, model context |
+| ChatGPT plan OAuth tokens | Encrypted `vault_secrets` in `meerai.db`, process memory | Refresh-token theft, token in an error body or log, shared-machine access |
 | Repository & user secrets | `.env*`, SSH keys, `.aws/credentials`, `.kube/config`, `.docker/config.json`, `*.pem`/`*.key` | Disclosure into prompts/transcripts or exfiltration |
-| Session transcripts & blobs | `$XDG_DATA_HOME/meerai/sessions/<id>/` (`0700`/`0600` on Unix) | Local multi-user disclosure, secret persistence |
+| Session transcripts & blobs | `$XDG_DATA_HOME/meerai/meerai.db` (`0600` on Unix); `sessions/<id>/session.lock` | Local multi-user disclosure, secret persistence |
 | Supply chain & artifacts | `Cargo.lock`, workspace crates, release binaries | Vulnerable/yanked/unlicensed deps, tampered binaries |
 
 ### 4.2 Trust boundaries
@@ -403,7 +430,7 @@ emission, or model consumption: environment scrub at spawn (§2.4) →
    `CodeTools::new` without injecting a world gets `HostWorld` with no
    warning; the CLI always injects one.
 4. **Windows.** No OS sandbox (always `HostWorld`) and no ACL equivalent of
-   the Unix `0700`/`0600` enforcement on sessions and `auth.json`.
+   the Unix `0700`/`0600` enforcement on sessions and the vault database.
 5. **Broad read visibility; unscoped LSP.** Both sandbox worlds mask the
    listed sensitive locations but allow other host reads so toolchains
    work; files beyond the scan cap/depth remain readable. LSP servers are
@@ -413,9 +440,16 @@ emission, or model consumption: environment scrub at spawn (§2.4) →
 6. **Unsigned releases.** Until signing secrets are configured, macOS and
    Windows archives publish unsigned; Gatekeeper/SmartScreen may warn.
    Verify `SHA256SUMS.txt`.
-7. **Keychain fallback.** Without Secret Service/`secret-tool` (or with
-   `MEERAI_DISABLE_KEYCHAIN`), credentials fall back to plaintext
-   `auth.json` (`0600`) or environment variables.
+7. **Keychain access and fallback.** macOS reads and writes the DEK through
+   `/usr/bin/security`. That stable Apple signature keeps the keychain grant
+   across meerai rebuilds and upgrades. The grant covers the tool, not meerai:
+   any process that runs as the user can read the item with
+   `security find-generic-password -w`, and a write passes the secret in hex
+   through the `security` argument list. Use another OS account or host
+   isolation for a same-user boundary. Without Secret Service/`secret-tool` (or
+   with `MEERAI_DISABLE_KEYCHAIN`), the vault requires
+   `MEERAI_VAULT_PASSPHRASE` and fails closed; it never falls back to plaintext.
+   The passphrase is held in process memory for the vault lifetime.
 8. **Hooks are unsandboxed host commands.** A trusted project hook or a
    user hook can read, write, or exfiltrate anything the user can; `plan`
    and policy rules do not restrict the hook itself. Hooks fail open by

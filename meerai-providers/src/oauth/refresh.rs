@@ -7,7 +7,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::oauth::now_ms;
 use crate::oauth::token::{TokenFailure, TokenPayload, expires_at_ms, refresh_tokens};
-use crate::secrets::AuthFileLock;
+use crate::secrets::commit_refresh;
 
 static REFRESH_LOCKS: OnceLock<Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>> = OnceLock::new();
 
@@ -39,10 +39,6 @@ pub async fn ensure_fresh_credential(store: &dyn SecretStore, provider_id: &str)
 }
 
 async fn refresh_locked(store: &dyn SecretStore, provider_id: &str) -> Result<()> {
-    let _file_lock = match store.auth_lock_path() {
-        Some(path) => Some(AuthFileLock::acquire_path_async(&path).await?),
-        None => None,
-    };
     let Some(Credential::OAuth(current)) = store.read_credential(provider_id)? else {
         return Ok(());
     };
@@ -61,27 +57,47 @@ async fn refresh_locked(store: &dyn SecretStore, provider_id: &str) -> Result<()
     }
     let client_id = client_id.to_string();
 
-    match refresh_tokens(&client_id, &current.refresh).await {
-        Ok(payload) => {
-            let refreshed = merge_refresh(current, payload, &client_id)?;
-            store.write_credential_unlocked(provider_id, &Credential::OAuth(refreshed))
-        }
+    let result = refresh_tokens(&client_id, &current.refresh).await;
+    finish_refresh(store, provider_id, current, &client_id, result)
+}
+
+fn finish_refresh(
+    store: &dyn SecretStore,
+    provider_id: &str,
+    current: OAuthCredential,
+    client_id: &str,
+    result: std::result::Result<TokenPayload, TokenFailure>,
+) -> Result<()> {
+    let (replacement, terminal_code) = match result {
+        Ok(payload) => (merge_refresh(current.clone(), payload, client_id)?, None),
         Err(TokenFailure::Terminal { code, .. }) => {
-            if let Some(Credential::OAuth(latest)) = store.read_credential(provider_id)?
-                && !latest.needs_relogin
-                && !latest.needs_refresh(now_ms())
-            {
-                return Ok(());
-            }
-            let mut blocked = current;
+            let mut blocked = current.clone();
             blocked.needs_relogin = true;
-            store.write_credential_unlocked(provider_id, &Credential::OAuth(blocked))?;
+            (blocked, Some(code))
+        }
+        Err(err) => return Err(err.into_error()),
+    };
+
+    if commit_refresh(store, provider_id, current, replacement)? {
+        if let Some(code) = terminal_code {
             anyhow::bail!(
                 "ChatGPT plan credential for '{provider_id}' expired ({code}). Run `meerai auth login {provider_id} --chatgpt`."
-            )
+            );
         }
-        Err(err) => Err(err.into_error()),
+        return Ok(());
     }
+
+    if let Some(Credential::OAuth(latest)) = store.read_credential(provider_id)? {
+        if latest.needs_relogin {
+            anyhow::bail!("{}", relogin_message(provider_id));
+        }
+        if latest.needs_refresh(now_ms()) {
+            anyhow::bail!(
+                "ChatGPT plan credential for '{provider_id}' changed during refresh. Retry the request."
+            );
+        }
+    }
+    Ok(())
 }
 
 fn merge_refresh(
@@ -205,6 +221,115 @@ mod tests {
         payload.access_token = Some("access".to_string());
         payload.expires_in = None;
         assert!(merge_refresh(current, payload, "oaiapp_1").is_err());
+    }
+
+    fn rotated_tokens() -> TokenPayload {
+        TokenPayload {
+            access_token: Some("new-access".into()),
+            refresh_token: Some("new-refresh".into()),
+            expires_in: Some(3600),
+            ..TokenPayload::default()
+        }
+    }
+
+    fn rejected_token() -> TokenFailure {
+        TokenFailure::Terminal {
+            code: "invalid_grant".into(),
+            description: None,
+        }
+    }
+
+    #[test]
+    fn vault_refresh_preserves_changes_from_another_connection() {
+        use crate::secrets::VaultSecretStore;
+        use meerai_store::Store;
+        use zeroize::Zeroizing;
+
+        struct TestDir(std::path::PathBuf);
+        impl Drop for TestDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let id = crate::oauth::pkce::uuid_v4().unwrap();
+        let dir = TestDir(std::env::temp_dir().join(format!("meerai-oauth-refresh-{id}")));
+        let open = || {
+            VaultSecretStore::with_passphrase(
+                Store::open(dir.0.join("vault.db")).unwrap(),
+                Zeroizing::new("test-only passphrase".into()),
+            )
+        };
+        let first = open();
+        let second = open();
+        first
+            .write_credential("openai", &Credential::OAuth(credential(0)))
+            .unwrap();
+        let snapshot = |store: &VaultSecretStore| {
+            store
+                .read_credential("openai")
+                .unwrap()
+                .unwrap()
+                .oauth()
+                .unwrap()
+                .clone()
+        };
+        let expected = snapshot(&first);
+        let stale = snapshot(&second);
+
+        finish_refresh(&first, "openai", expected, "oaiapp_1", Ok(rotated_tokens())).unwrap();
+        let refreshed = snapshot(&first);
+        assert_eq!(refreshed.refresh, "new-refresh");
+        finish_refresh(
+            &second,
+            "openai",
+            stale.clone(),
+            "oaiapp_1",
+            Err(rejected_token()),
+        )
+        .unwrap();
+        assert_eq!(snapshot(&second), refreshed);
+
+        first.delete_credential("openai").unwrap();
+        finish_refresh(
+            &second,
+            "openai",
+            refreshed.clone(),
+            "oaiapp_1",
+            Ok(rotated_tokens()),
+        )
+        .unwrap();
+        assert!(first.read_credential("openai").unwrap().is_none());
+
+        first.set_key("openai", "test-api-key").unwrap();
+        finish_refresh(&second, "openai", stale, "oaiapp_1", Err(rejected_token())).unwrap();
+        assert_eq!(
+            first.get_key("openai").unwrap().as_deref(),
+            Some("test-api-key")
+        );
+    }
+
+    #[test]
+    fn terminal_failure_blocks_the_matching_credential() {
+        let store = meerai_client::secrets::MemorySecretStore::new();
+        let current = credential(0);
+        store.set_credential("openai", Credential::OAuth(current.clone()));
+
+        let err = finish_refresh(
+            &store,
+            "openai",
+            current.clone(),
+            "oaiapp_1",
+            Err(rejected_token()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid_grant"));
+        let mut blocked = current;
+        blocked.needs_relogin = true;
+        assert_eq!(
+            store.read_credential("openai").unwrap(),
+            Some(Credential::OAuth(blocked))
+        );
     }
 
     #[tokio::test]

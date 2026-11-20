@@ -68,6 +68,33 @@ pub enum DiffListState {
     Open { selected: usize },
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ContextPanel {
+    pub breakdown: Option<meerai_session::ContextBreakdown>,
+    pub scroll: usize,
+    pub selected_turn: usize,
+    pub selected_blob: usize,
+    pub focus_input: Option<String>,
+    pub blob_key: Option<String>,
+    pub blob_content: Option<String>,
+    pub blob_scroll: usize,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SubagentSpawnPanel {
+    pub agent: String,
+    pub task: String,
+    pub model: String,
+    pub mode: Option<ApprovalMode>,
+    pub steps: String,
+    pub tokens: String,
+    pub cost: String,
+    pub tools: String,
+    pub field: usize,
+    pub error: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ActiveModal {
     ProviderSelect {
@@ -171,6 +198,58 @@ pub enum ActiveModal {
         input: String,
         error: Option<String>,
     },
+    Context(ContextPanel),
+    Memory {
+        entries: Vec<meerai_host::ProjectMemory>,
+        query: String,
+        selected: usize,
+        loading: bool,
+        error: Option<String>,
+    },
+    Routing {
+        routes: Vec<meerai_host::ModelRoute>,
+        selected: usize,
+        loading: bool,
+        error: Option<String>,
+    },
+    Packs {
+        packs: Vec<meerai_host::InstalledPack>,
+        definitions: meerai_host::HostDefinitionsDiagnostics,
+        tab: PackTab,
+        selected: usize,
+        loading: bool,
+        error: Option<String>,
+    },
+    SubagentSpawn(SubagentSpawnPanel),
+    VaultReset {
+        input: String,
+        error: Option<String>,
+    },
+    Sampling {
+        effort: Option<EffortLevel>,
+        temperature: String,
+        field: usize,
+        error: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackTab {
+    Packs,
+    Definitions,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryModalAction {
+    Delete,
+    TogglePin,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackModalAction {
+    ToggleEnabled,
+    ToggleTrusted,
+    Remove,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,7 +277,7 @@ impl ProviderConnectionAction {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PendingSessionAction {
     RefreshSessions,
     OpenSessionId(SessionId),
@@ -226,6 +305,31 @@ pub enum PendingSessionAction {
     RunUserShell {
         tab_id: u64,
         command: String,
+    },
+    HostAction {
+        tab_id: u64,
+        action: meerai_host::HostAction,
+    },
+    LoadBlob {
+        tab_id: u64,
+        key: String,
+    },
+    LoadMemories {
+        query: Option<String>,
+    },
+    LoadRoutes,
+    LoadPacks,
+    LoadDefinitions,
+    MemoryAction {
+        action: MemoryModalAction,
+        id: String,
+    },
+    RouteAction {
+        task_type: String,
+    },
+    PackAction {
+        action: PackModalAction,
+        id: String,
     },
     StartWebServer {
         port: Option<u16>,
@@ -372,11 +476,18 @@ pub struct ToolCallEntry {
     pub expanded: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SubagentEntry {
     pub id: String,
     pub agent: String,
     pub status: ToolCallStatus,
+    pub model: Option<String>,
+    pub approval_mode: String,
+    pub steps_used: usize,
+    pub max_steps: usize,
+    pub usage: meerai_session::Usage,
+    pub est_cost_usd: Option<f64>,
+    pub active_tool: Option<String>,
     pub report: Option<String>,
     pub child_session_id: Option<String>,
     pub expanded: bool,
@@ -427,7 +538,7 @@ pub struct ThinkingHitZone {
     pub end_line: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TranscriptEntry {
     User {
         text: String,
@@ -521,6 +632,7 @@ pub struct SessionTab {
     pub transcript_version: u64,
     pub usage: UsageStats,
     pub metrics: TurnMetrics,
+    pub context: Option<meerai_session::ContextBreakdown>,
     pub is_running: bool,
     pub queued: Vec<String>,
     pub user_turns: HashMap<usize, TurnId>,
@@ -566,6 +678,7 @@ impl SessionTab {
             transcript_version: 0,
             usage: UsageStats::default(),
             metrics: TurnMetrics::default(),
+            context: None,
             is_running: false,
             queued: Vec::new(),
             pending_questions: Vec::new(),
@@ -1411,12 +1524,17 @@ impl AppState {
             return;
         }
         let ids: Vec<SessionId> = self.tabs.iter().map(|tab| tab.session_id.clone()).collect();
-        crate::tabs::save(
-            &ids,
-            self.active_tab,
-            &self.workspace_root,
-            self.persistable_empty_session().as_ref(),
-        );
+        if let Ok(store) =
+            meerai_common::settings::open_store_for_config_dir(self.config_dir.as_deref())
+        {
+            crate::tabs::save(
+                &store,
+                &ids,
+                self.active_tab,
+                &self.workspace_root,
+                self.persistable_empty_session().as_ref(),
+            );
+        }
     }
 
     fn persistable_empty_session(&self) -> Option<SessionId> {

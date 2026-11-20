@@ -14,22 +14,24 @@ use hyper::body::{Frame, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use meerai_agents::TurnId;
+use meerai_agents::{AgentCommand, TurnId};
 use meerai_host::diff::{build_file_diff, list_git_changes};
 use meerai_host::search::{
     SearchMatch, SearchMode, build_search_preview, discover_workspace_files, resolve_preview_path,
     search_content, search_files,
 };
 use meerai_host::{
-    ChatGptLoginStatus, HostError, RegistryEventKind, SessionOpener, SessionRegistry,
-    SubscribeResult,
+    ChatGptLoginStatus, HostAction, HostActionContext, HostError, ProjectMemory, RegistryEventKind,
+    SessionOpener, SessionRegistry, SubscribeResult, execute_host_action, render_context,
 };
+
 use meerai_session::{RequestId, SessionEvent, SessionId};
 use meerai_web_protocol::{
     ApiError, ApiErrorCode, ApplyDefinitionRequest, ApprovalDecisionRequest, BackendKind,
-    ChatGptLoginPasteRequest, ChatGptLoginStartResponse, CreateSessionRequest,
-    CreateSessionResponse, ForkSessionRequest, QuestionAnswerRequest, ReloadResponse,
-    RewindRequest, RewindResponse, RunShellRequest, RunShellResponse, SessionEventsResponse,
+    BlobResponse, ChatGptLoginPasteRequest, ChatGptLoginStartResponse, CreateSessionRequest,
+    CreateSessionResponse, ForkSessionRequest, HostActionRequest, HostActionResponse,
+    MemoriesResponse, PacksResponse, QuestionAnswerRequest, ReloadResponse, RewindRequest,
+    RewindResponse, RoutesResponse, RunShellRequest, RunShellResponse, SessionEventsResponse,
     SessionHistoryResponse, SetApiKeyRequest, SetModeRequest, SetModelRequest, SetModelResponse,
     SetProviderBaseUrlRequest, StoredSessionDto, SubmitPromptRequest, SubmitPromptResponse,
     UpdateSettingsRequest, ViewEvent, WorkspaceFilesResponse,
@@ -320,6 +322,19 @@ async fn dispatch_privileged_route(
         (&Method::GET, "/api/workspace/changes") => handle_workspace_changes(state).await,
         (&Method::GET, "/api/workspace/diff") => handle_workspace_diff(state, &req).await,
         (&Method::GET, "/api/providers") => handle_get_providers(state).await,
+        (&Method::POST, "/api/actions") => handle_host_action(state, req).await,
+        (&Method::GET, "/api/memories") => handle_memories(state, &req).await,
+        (&Method::GET, "/api/routes") => handle_routes(state).await,
+        (&Method::GET, "/api/packs") => handle_packs(state).await,
+        (&Method::GET, "/api/definitions/diagnostics") => handle_definitions(state).await,
+        (&Method::GET, p) if extract_session_action(p, "context").is_some() => {
+            let raw_id = extract_session_action(p, "context").unwrap();
+            handle_session_context(state, raw_id)
+        }
+        (&Method::GET, p) if extract_blob_path(p).is_some() => {
+            let (raw_id, blob_key) = extract_blob_path(p).unwrap();
+            handle_session_blob(state, raw_id, blob_key).await
+        }
         (&Method::POST, "/api/settings") => handle_update_settings(state, req).await,
         (&Method::POST, "/api/reload") => handle_reload(state).await,
         (&Method::GET, p) if extract_single_session_id(p).is_some() => {
@@ -1431,6 +1446,158 @@ async fn handle_workspace_diff(state: &AppState, req: &Request<Incoming>) -> Res
         .await
         .unwrap();
     json_response(StatusCode::OK, &mapper::map_file_diff(diff))
+}
+
+async fn handle_host_action(state: &AppState, req: Request<Incoming>) -> Response<RespBody> {
+    let body: HostActionRequest = match parse_json(req).await {
+        Ok(req) => req,
+        Err(resp) => return resp,
+    };
+    let Some(action) = meerai_host::parse_host_action(&body.command) else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::BadRequest,
+            "unsupported host command",
+        );
+    };
+    let snapshot = state.registry.snapshot();
+    let session_id = snapshot.active_session_id;
+    let cmd_tx = session_id.as_ref().and_then(|id| state.registry.cmd_tx(id));
+    let context = session_id
+        .as_ref()
+        .and_then(|id| state.registry.context_for(id));
+    let project_root = state
+        .opener
+        .workspace_root()
+        .unwrap_or_else(|| PathBuf::from("."));
+    let result = if matches!(action, HostAction::InspectContext) {
+        if let Some(cmd_tx) = &cmd_tx {
+            let _ = cmd_tx.send(AgentCommand::InspectContext);
+        }
+        Ok(render_context(context.as_ref()))
+    } else {
+        execute_host_action(
+            HostActionContext {
+                opener: state.opener.as_ref(),
+                project_root: &project_root,
+                session_id: session_id.as_ref(),
+                cmd_tx: cmd_tx.as_ref(),
+            },
+            action,
+        )
+        .await
+    };
+    match result {
+        Ok(text) => json_response(StatusCode::OK, &HostActionResponse { text }),
+        Err(err) => json_error(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::BadRequest,
+            &format!("{err:#}"),
+        ),
+    }
+}
+
+async fn handle_memories(state: &AppState, req: &Request<Incoming>) -> Response<RespBody> {
+    let params = parse_query_params(req.uri().query());
+    let project_root = state
+        .opener
+        .workspace_root()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let result: anyhow::Result<Vec<ProjectMemory>> = match params
+        .get("query")
+        .map(String::as_str)
+        .filter(|query| !query.trim().is_empty())
+    {
+        Some(query) => state.opener.search_memories(&project_root, query).await,
+        None => state.opener.list_memories(&project_root).await,
+    };
+    match result {
+        Ok(memories) => json_response(
+            StatusCode::OK,
+            &MemoriesResponse {
+                memories: memories.into_iter().map(mapper::map_memory).collect(),
+            },
+        ),
+        Err(err) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiErrorCode::Internal,
+            &format!("failed to list memories: {err:#}"),
+        ),
+    }
+}
+
+async fn handle_routes(state: &AppState) -> Response<RespBody> {
+    match state.opener.routes().await {
+        Ok(routes) => json_response(
+            StatusCode::OK,
+            &RoutesResponse {
+                routes: routes.routes.into_iter().map(mapper::map_route).collect(),
+            },
+        ),
+        Err(err) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiErrorCode::Internal,
+            &format!("failed to list routes: {err:#}"),
+        ),
+    }
+}
+
+async fn handle_packs(state: &AppState) -> Response<RespBody> {
+    match state.opener.list_packs().await {
+        Ok(packs) => json_response(
+            StatusCode::OK,
+            &PacksResponse {
+                packs: packs.into_iter().map(mapper::map_pack).collect(),
+            },
+        ),
+        Err(err) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiErrorCode::Internal,
+            &format!("failed to list packs: {err:#}"),
+        ),
+    }
+}
+
+async fn handle_definitions(state: &AppState) -> Response<RespBody> {
+    match state.opener.definitions_diagnostics().await {
+        Ok(diagnostics) => json_response(StatusCode::OK, &mapper::map_definitions(diagnostics)),
+        Err(err) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiErrorCode::Internal,
+            &format!("failed to inspect definitions: {err:#}"),
+        ),
+    }
+}
+
+fn handle_session_context(state: &AppState, raw_id: &str) -> Response<RespBody> {
+    let session_id = SessionId::from_raw(raw_id);
+    match state.registry.context_for(&session_id) {
+        Some(breakdown) => json_response(StatusCode::OK, &mapper::map_context_breakdown(breakdown)),
+        None => json_error(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::NotFound,
+            "no context report for this session yet",
+        ),
+    }
+}
+
+async fn handle_session_blob(state: &AppState, raw_id: &str, blob_key: &str) -> Response<RespBody> {
+    let session_id = SessionId::from_raw(raw_id);
+    match state.opener.read_session_blob(&session_id, blob_key).await {
+        Ok(content) => json_response(StatusCode::OK, &BlobResponse { content }),
+        Err(err) => json_error(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::NotFound,
+            &format!("failed to read blob: {err:#}"),
+        ),
+    }
+}
+
+fn extract_blob_path(path: &str) -> Option<(&str, &str)> {
+    let rest = path.strip_prefix("/api/sessions/")?;
+    let (id, rest) = rest.split_once("/blobs/")?;
+    (!id.is_empty() && !rest.is_empty()).then_some((id, rest))
 }
 
 async fn handle_get_providers(state: &AppState) -> Response<RespBody> {

@@ -27,11 +27,11 @@
   `meerai-cli` builds the `meerai` binary with CLI flag parsing, headless one-shot runner
   (`--prompt`/`--print`, `--json`, `--continue`, `--resume <ID>`, `--fork <ID>`, `--agent`,
   `--skill`), and `auth` / `sessions` (`list`, `rm`, `prune`, `fork`) subcommands.
-- **Data:** `settings.yml` and `providers.yml` in the config dir, an optional
+- **Data:** `providers.yml` in the config dir, an optional
   `<project-root>/.meerai/settings.yml` project overlay (root found by walking up from the CWD),
-  agent/skill definitions under `<project-root>/.agents` then `.claude`, `auth.json` in the XDG
-  data dir, and an append-only session log with `meta.json` and blobs under the same data dir
-  (`$XDG_DATA_HOME/meerai`, default `~/.local/share/meerai`) or `MEERAI_SESSION_DIR`.
+  agent/skill definitions under user-global `~/.config/meerai/{agents,skills}`, trusted packs,
+  project `.agents` then `.claude`, user settings and an append-only session log in
+  `$XDG_DATA_HOME/meerai/meerai.db` (default `~/.local/share/meerai`) or `MEERAI_DB_PATH`.
 - **Runtime stance:** Local-first terminal binary; outbound HTTPS only to configured LLM providers
   (a `genai` 0.7 client over the provider catalog in `meerai-providers`) and an optional update
   check. `ExecutionWorld` provides best-effort Seatbelt/bubblewrap sandboxing with a host fallback.
@@ -45,13 +45,14 @@
 | :--- | :--- |
 | `meerai-core/` | `Toolset` trait (`effect_of`, `effect_of_call`, `invoke_structured`), `ToolOutput`, `ToolError`, `EffectClass`, `ToolObservation`, `ToolRun`, `FileDiff`; re-exports `genai`, `async_trait`, `schemars::JsonSchema` |
 | `meerai-macros/` | Proc-macros `#[tool]` and `#[derive(Toolset)]` (`darling` + `syn` + `quote`), `insta` snapshot tests; test-only dependencies are dev-dependencies |
-| `meerai-session/` | `Session` append-only `SessionEvent` log (JSONL + zstd), `meta.json`, recovery, `derive_messages`, replay projection (`replay`), fork/rewind (`latest_closed_turn`, `fork_latest`, `create_child`), snapshot store (`SnapshotStore`, `snapshots/<turn-id>/`), blob store, spill, compaction primitives, session list/delete/prune support |
+| `meerai-store/` | Embedded SQLite store (`meerai.db`): WAL, FTS5, schema v1, private-file permissions, typed repositories (`config`, `memory`, `packs`, `routes`, `usage`) |
+| `meerai-session/` | `Session` append-only `SessionEvent` log in SQLite, recovery, `derive_messages`, replay projection (`replay`), fork/rewind (`latest_closed_turn`, `fork_latest`, `create_child`), SQLite snapshot store (`session_snapshots`), SQLite blob store (`session_blobs`), spill, compaction primitives, session list/delete/prune support |
 | `meerai-policy/` | `PolicyEngine`: ordered permission rules, `ApprovalMode`, turn/session grants, YAML parsing |
 | `meerai-tools/` | `code` (`CodeTools`, seven `code-*` tools, path guards, unified diffs, `ToolRun` observations, secret env scrub), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`; opt-in post-edit diagnostics via `context.post_edit_diagnostics`), `search_as_code` (`SearchAsCodeToolset`) |
-| `meerai-common/` | `AppSettings` (`settings.yml`), project-root discovery (`find_project_root`) plus project settings load/merge (`load_project_settings`, `merge_project_settings`), markdown agent/skill discovery (`definitions`: `load_definitions`, `AgentDefinition`, `SkillDefinition`, `DefinitionSource`), hook configuration (`hooks`: `HookEvent`, `HookEntry`, `load_hooks`) |
+| `meerai-common/` | SQLite-backed `AppSettings`, project-root discovery (`find_project_root`) plus project settings load/merge (`load_project_settings`, `merge_project_settings`), markdown agent/skill discovery (`definitions`: `load_definitions`, `load_definitions_for`, user/pack/project sources, diagnostics), hook configuration (`hooks`: `HookEvent`, `HookEntry`, `load_hooks`), declarative packs (`packs`) |
 | `meerai-client/` | Client-facing provider surface: `ProviderCatalog` + `providers.yml`, `ModelInfo`, `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract, `MemorySecretStore`, auth listing |
-| `meerai-providers/` | `genai` client factory + native secret stores (`auth.json`, OS keychain); re-exports the client surface |
-| `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig` (+ `TokenPricing`), `AgentEvent`, `intercept` (`Interceptor`/`StepPlan`/`ToolPlan`/`ToolContext`/`ToolOutcome`, async `before_tool`), hook engine (`hooks`: `HookEngine`/`HookContext`/`HookReport`, `HookFired` logging), `question-ask` (`QuestionAsked`/`AnswerQuestion`, not an approval), `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins + read-only custom child runs, `child_session_id` on `SubagentRun`), delegated `acp-run` (`acp_subagent`: `AcpRunToolset`/`AcpSpawner`), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
+| `meerai-providers/` | `genai` client factory + AEAD `VaultSecretStore` (ChaCha20-Poly1305, OS keychain DEK or Argon2id passphrase); re-exports the client surface |
+| `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig` (+ `TokenPricing`), `AgentEvent`, `intercept` (`Interceptor`/`StepPlan`/`ToolPlan`/`ToolContext`/`ToolOutcome`, async `before_tool`), hook engine (`hooks`: `HookEngine`/`HookContext`/`HookReport`, `HookFired` logging), `question-ask` (`QuestionAsked`/`AnswerQuestion`, not an approval), `skill-load` (`skill_tool`), `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins + read-only custom child runs, `child_session_id` on `SubagentRun`), delegated `acp-run` (`acp_subagent`: `AcpRunToolset`/`AcpSpawner`), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
 | `meerai-host/` | UI-neutral host seams (`SessionOpener`, `OpenedSession`, `WorkspaceQuery`/`LocalWorkspace`, `WebServerLauncher`), shared `diff`/`search`/`syntax`/`theme`/`update`, and live `SessionRegistry` event pump/ring |
 | `meerai-web-protocol/` | Serde-only Wasm-safe wire DTOs (`SnapshotResponse`, `ViewEvent`, `HostInfoDto`, `ProvidersResponse`, `SettingsSnapshotDto`, `ApiError`) |
 | `meerai-web/` | Loopback HTTP/SSE server (`hyper` + `subtle` Basic auth, `Host`/`Origin`/JSON checks, parity REST/SSE routes, embedded Wasm bundle serving) |
@@ -136,11 +137,15 @@ Notes:
 9. **Async hygiene:** No blocking sleeps (`std::thread::sleep`) inside `async fn`; use `tokio::time`.
    Async file paths use `tokio::fs`; `BlobStore::put` uses blocking `std::fs` and is called through
    `tokio::task::spawn_blocking` in `apply_spill`.
-10. **Secrets handling:** API keys stay in `auth.json` (written by `meerai auth login`), provider
-    `api_key` config, or provider env vars; never hardcode or log them. ChatGPT plan OAuth
-    credentials (`type:"oauth"`: access, rotating refresh, issued client id, scopes, `needs_relogin`)
-    stay in `auth.json`, are rewritten under `auth.json.lock` by one writer, and never appear in
-    `list_providers` or `auth list`. `auth.json` is `0600` on Unix. The shell tool removes provider
+10. **Secrets handling:** API keys and ChatGPT plan OAuth credentials are encrypted in
+    `vault_secrets` by the AEAD vault (ChaCha20-Poly1305, fresh nonce per write, provider id as
+    AAD). The 256-bit DEK lives in the OS keychain under a per-database
+    `vault-master-key-v1-<id>` account; on macOS it is read and written through
+    `/usr/bin/security`, so the keychain grant survives every rebuild and upgrade but covers the
+    tool, not meerai: it is not a per-application boundary. Without a keychain,
+    `MEERAI_VAULT_PASSPHRASE` derives the DEK with Argon2id and the vault fails closed. Never switch
+    an initialized vault's key source, never write plaintext, and never log a key or token. OAuth refresh is one `BEGIN IMMEDIATE`
+    transaction. `list_providers`/`auth list` never print a token. The shell tool removes provider
     secret variables from child processes. Tool output and
     diffs pass through best-effort pattern redaction (`redact_run`) before spill, log, UI, or model
     delivery; the original secret is discarded and paths are not redacted. This is not a guarantee.
@@ -190,23 +195,26 @@ Notes:
     fail-fast, provider-secret env scrub, best-effort output/diff/error redaction, heuristic
     prompt-injection screening (`screen_run`/`screen_untrusted_text`), session file permissions,
     configurable retention, session/turn token budgets, `ExecutionWorld` OS sandbox (`SeatbeltWorld` /
-    `BubblewrapWorld` with `HostWorld` fallback warning), native OS keychain (`KeychainSecretStore` +
-    `auth.json` fallback), `cargo-deny` CI audit (`deny.toml`), conditional release signing steps,
+    `BubblewrapWorld` with `HostWorld` fallback warning), AEAD credential vault (OS keychain DEK or
+    Argon2id passphrase, fail-closed), `cargo-deny` CI audit (`deny.toml`), conditional release signing steps,
     and `docs/threat-model.md`. Caveats: signing secrets are operator-configured, and Windows uses
     Phase-1 `HostWorld` guards (see `docs/threat-model.md`).
-21. **Agent/skill definitions are prompt-only and untrusted (M12):** discovery is read-only and
+21. **Agent/skill definitions are untrusted text (M12):** discovery is read-only and
     starts at the project root. `.agents/agents/*.md` and `.agents/skills/*/SKILL.md` load before
     `.claude/...`; a duplicate id keeps `.agents` and the warning names both paths; the catalog is
     sorted by id. `.meerai` is config, sessions, and instructions only — never scan, create, or copy
     into `.meerai/agents`/`.meerai/skills`, and add no import lock. Frontmatter is `name`,
-    `description`, `model`, `steps`, `mode`; `tools`/`permissions`/`allowed-tools` warn and are not
-    applied; invalid frontmatter warns and skips. Missing frontmatter uses the file or directory
-    name and the body; only `SKILL.md` is read. Definitions grant no tools, permissions, scripts, or
-    sandbox, and a `:` in an agent `model` is ignored (no provider switch). Startup `--agent` takes
-    one id (repeating is an error); `--skill` is repeatable; unknown ids fail with the available ids. The TUI
-    exposes `/agent`/`/skill`, `/agents`/`/skills` pickers, and a `@` Mentions popup (agents,
-    skills, files; ids colored teal for agents and blue for skills; Tab accepts, Enter accepts
-    without submitting, Esc dismisses).
+    `description`, `model`, `steps`, `mode`, and `disable-model-invocation`;
+    `tools`/`permissions`/`allowed-tools` warn and are not applied; invalid frontmatter warns and
+    skips. Missing frontmatter uses the file or directory name and the body. Skills with a
+    description and no `disable-model-invocation` join a screened 8 KiB prompt index; the read-only
+    `skill-load` tool returns `SKILL.md` or one listed supporting file inside the skill directory
+    (16 KiB cap), rejecting separators and symlinks. Definitions grant no tools, permissions,
+    scripts, or sandbox, and a `:` in an agent `model` is ignored (no provider switch). Startup
+    `--agent` takes one id (repeating is an error); `--skill` is repeatable; unknown ids fail with
+    the available ids. The TUI exposes `/agent`/`/skill`, `/agents`/`/skills` pickers, and a `@`
+    Mentions popup (agents, skills, files; ids colored teal for agents and blue for skills; Tab
+    accepts, Enter accepts without submitting, Esc dismisses).
 22. **ACP client (M13, agy):** `--acp` drives `agy acp`; `/acp` opens a new tab; `acp doctor`
     prints the handshake. `AcpWorker` maps `AcpEvent` to `AgentEvent` and `SessionEvent`, sets
     `harness: acp:agy`/`remote_session_id`, and uses `session/load` for resume. Pre-`Connected`
@@ -259,6 +267,50 @@ Notes:
     as a fallback. Backoff is 250/500 ms plus up to 50% jitter. Do not retry a permanent status. An
     empty stream reports provider, model, stop reason, event count, elapsed time, and a hint; a
     `content_filter`, `max_tokens`, or `stop_sequence` stop reason is non-retryable.
+30. **Delegated turn budget:** a `subagent-run` child gets the parent's remaining turn deadline
+    minus a 5 s margin, with a 1 s minimum (`child_turn_secs`), so the child fails its own budget
+    before the parent cancels it. The parent bridge deadline stays as the backstop. Do not set the
+    child clock to `0` while the parent is bounded.
+31. **Step-budget continuations:** a turn gets `max_steps_per_turn` plus
+    `step_limit_continuations` extra budgets (default 32 + two x 32 = 96).
+    Each boundary logs `STEP_CONTINUE_NOTICE` and keeps tools; only the
+    absolute final step logs `STEP_LIMIT_NOTICE` and strips tools. Never let
+    a subagent inherit continuations: its preset cap is a contract, so set
+    `step_limit_continuations = 0` on the child harness.
+32. **Host actions:** `meerai_host::parse_host_action` and
+    `execute_host_action` are the single implementation of `/context`,
+    `/memory`, `/remember`, `/forget`, `/pin`, `/routing`, `/packs`, `/pack`,
+    `/definitions`, and `/subagent`. The TUI dispatches them through
+    `PendingSessionAction::HostAction`; the web server dispatches
+    `POST /api/actions`. Do not fork the parsing or formatting into a UI.
+33. **Context telemetry:** `ContextBreakdown` is emitted after each step and
+    after compaction, stored on the TUI tab and the host `SessionRecord`, and
+    rebroadcast as `RegistryEventKind::ContextUpdated` /
+    `ViewEvent::ContextUpdated`. Keep pinned turns in
+    `ProjectionPolicy::pinned_turns` and persist them as
+    `SessionEvent::ContextTurnPinned`.
+34. **Project memory:** `MemoryToolset` is the only writer of `project_memories`
+    from the model; `memory-search` is Read and save/delete are Write, so plan
+    mode excludes them. `MemoryCapture` runs only when
+    `HarnessConfig::auto_memory` is true and writes one Progress row plus one
+    Decision row per key decision from a compaction summary. The prompt block
+    is read through `load_memory_prompt` and appended by
+    `compose_system_prompt_with_memory`; keep it bounded and screened.
+35. **Vault selection:** `default_secret_store` reads the stored envelope mode
+    before choosing a key source. A keychain envelope always uses the keychain
+    backend; a passphrase envelope always uses `MEERAI_VAULT_PASSPHRASE`. Only
+    an uninitialized vault may choose the keychain automatically. Never switch
+    an initialized vault's key source. A missing key is not auto-reinitialized:
+    the operator must run `meerai auth reset-vault`, which deletes all
+    ciphertext in one transaction and creates a new key.
+36. **Command panels:** every user-facing command gets a dedicated panel or
+    modal in both clients. Do not add a transcript-only command, and do not
+    require a typed confirmation argument in one client while the other uses a
+    panel. A destructive flow uses the same explicit confirmation in both.
+37. **UI panels:** the TUI exposes `ActiveModal::{Context, Memory, Routing,
+    Packs, SubagentSpawn}`; the browser exposes one `WorkspacePanel` modal with
+    tabs. Both read the same `meerai-host` data methods and send the same host
+    actions. Do not add a workflow to one client alone.
 
 ## 5. Patterns
 
@@ -272,7 +324,7 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 | Hand-written toolset | `impl Toolset` with `definition`/`contain`/`effect_of`/`invoke_structured` | `meerai-tools/src/code/mod.rs` |
 | Config | `AppSettings` + `find_project_root` + `load_settings_from` + `load_project_settings`/`merge_project_settings` + `${VAR\|default}` expansion | `meerai-common/src/settings.rs` |
 | Definitions | `load_definitions(&project_root)` → `DefinitionCatalog`; `.agents` before `.claude`, duplicate warning, sorted by id | `meerai-common/src/definitions.rs` |
-| Secrets | `auth.json` store for API keys and ChatGPT plan OAuth, `0600`, one lock, env-var fallback | `meerai-client/src/secrets.rs`, `meerai-providers/src/secrets.rs`, `meerai-providers/src/oauth/` |
+| Secrets | AEAD vault (`vault_secrets`) for API keys and ChatGPT plan OAuth, OS keychain DEK (macOS through `/usr/bin/security`, not a per-app boundary) or `MEERAI_VAULT_PASSPHRASE`, no plaintext fallback | `meerai-providers/src/secrets/vault.rs`, `meerai-store/src/v1.sql` |
 | Redaction | `redact_run` patterns and `[REDACTED:<kind>]` replacement before settle | `meerai-agents/src/redact.rs`, `multi_turn_agent.rs` |
 | Session log | `Session::append` event, `derive_messages` projection | `meerai-session/src/session.rs`, `projection.rs` |
 | Session CLI | `sessions list`/`rm`/`prune`, `--continue`/`--resume`, `replay_from_events`, opt-in `auto_prune_sessions` | `meerai-session/src/replay.rs`, `session.rs`, `meerai-cli/src/main.rs` |
@@ -478,9 +530,12 @@ Detail in [`infra.md`](infra.md). Summary:
   identity line at request time (refreshed by `set_model`) and logs it with the system prompt.
 - Agent/skill definitions (M12): read-only discovery at the project root from `.agents/agents` and
   `.agents/skills` first, then `.claude/agents` and `.claude/skills`; `.agents` wins duplicate ids;
-  no `.meerai` definition directories and no copies. Startup `--agent` takes one id (repeating is an
-  error) and repeatable `--skill` append instructions to the system prompt; TUI `/agent`/`/skill`
-  send `AgentCommand::ApplyAgent`/`ApplySkill` as System instructions, and the `@` Mentions popup
+  no `.meerai` definition directories and no copies. Skills with a description and no
+  `disable-model-invocation` join an 8 KiB screened prompt index; the read-only `skill-load` tool
+  returns `SKILL.md` or one listed supporting file inside the skill directory (16 KiB cap).
+  Startup `--agent` takes one id (repeating is an error) and repeatable `--skill` append
+  instructions to the system prompt; TUI `/agent`/`/skill` send
+  `AgentCommand::ApplyAgent`/`ApplySkill` as System instructions, and the `@` Mentions popup
   (agents, then skills, then files; ids in teal for agents and blue for skills; Tab accepts, Enter
   accepts without submitting, Esc dismisses) applies the selected definitions before the prompt. A
   known accepted mention renders as an `<id>` chip in the composer while the raw
@@ -494,8 +549,9 @@ Detail in [`infra.md`](infra.md). Summary:
   (`chatgpt.tokens.use.direct`, `api.openai.com/v1/responses`), not the Codex
   `backend-api`. One `openai` provider serves an API key or an OAuth plan credential. Plan
   requests force `store:false`, `stream:true`, the system prompt as `instructions`, and omit
-  `temperature` and cache retention. Plan OAuth lives in `auth.json` (never the keychain), is
-  refreshed under `auth.json.lock`, and is never listed or logged as a token. A configured
+  `temperature` and cache retention. Plan OAuth lives in the encrypted `vault_secrets` row (never
+  plaintext), is refreshed under one `BEGIN IMMEDIATE` transaction, and is never listed or logged
+  as a token. A configured
   provider opens the TUI connection screen (next/update/remove) instead of the auth method screen.
 - Windows is a supported target: `cmd /C` for shell, x64 build only, no file-mode enforcement.
 - Sampling tiers are a user setting: `context.effort` is `low` (0.00), `medium` (0.20, the

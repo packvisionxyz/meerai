@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::{Result, bail};
 
 struct HelpRow {
@@ -12,7 +14,7 @@ const COMMANDS: &[HelpRow] = &[
     },
     HelpRow {
         usage: "auth list",
-        description: "Show credentials across auth.json, config, and env",
+        description: "Show credentials across the encrypted vault, config, and env",
     },
     HelpRow {
         usage: "auth login <provider> [key] [--chatgpt]",
@@ -20,7 +22,19 @@ const COMMANDS: &[HelpRow] = &[
     },
     HelpRow {
         usage: "auth logout <provider>",
-        description: "Remove stored credentials from auth.json",
+        description: "Remove stored credentials for one provider",
+    },
+    HelpRow {
+        usage: "auth reset-vault [--yes]",
+        description: "Delete every saved credential, reinitialize the vault, and require login",
+    },
+    HelpRow {
+        usage: "config export",
+        description: "Print stored user settings as YAML without resolving environment references",
+    },
+    HelpRow {
+        usage: "config import <PATH>",
+        description: "Replace stored user settings from YAML; API keys must be environment references",
     },
     HelpRow {
         usage: "sessions list",
@@ -41,6 +55,42 @@ const COMMANDS: &[HelpRow] = &[
     HelpRow {
         usage: "sessions fork <ID> [--turn <TURN_ID>]",
         description: "Fork a session at a closed turn (default: latest closed turn)",
+    },
+    HelpRow {
+        usage: "sessions export <ID> [--jsonl]",
+        description: "Print every stored session event as JSONL",
+    },
+    HelpRow {
+        usage: "memory [list] [query] [--project PATH]",
+        description: "List project memories or search them with FTS5",
+    },
+    HelpRow {
+        usage: "memory save <kind> <title> [body] [--pin]",
+        description: "Store a project memory (decision, progress, fact, convention)",
+    },
+    HelpRow {
+        usage: "memory delete <id> | memory pin <id> [--off]",
+        description: "Delete or pin a project memory",
+    },
+    HelpRow {
+        usage: "routes [list] | routes set <task> <provider::model> [max_cost] [max_tokens] [concurrency]",
+        description: "List or edit task-type model routes",
+    },
+    HelpRow {
+        usage: "routes clear <task>",
+        description: "Remove a task-type model route",
+    },
+    HelpRow {
+        usage: "pack [list] | pack add <path|git-url> [--rev <rev>]",
+        description: "List packs or install one from a local path or Git repository",
+    },
+    HelpRow {
+        usage: "pack enable|disable|trust|untrust <id>",
+        description: "Change a pack's enabled and trusted state",
+    },
+    HelpRow {
+        usage: "pack pin <id> <rev> | pack remove <id>",
+        description: "Pin a pack revision or remove a pack",
     },
     HelpRow {
         usage: "hooks status",
@@ -65,6 +115,30 @@ const COMMANDS: &[HelpRow] = &[
 ];
 
 const TUI_COMMANDS: &[HelpRow] = &[
+    HelpRow {
+        usage: "/context",
+        description: "Inspect the context breakdown and token headroom",
+    },
+    HelpRow {
+        usage: "/memory [query] | /remember <note>",
+        description: "List, search, or save project memories",
+    },
+    HelpRow {
+        usage: "/routing [set <task> <provider::model>]",
+        description: "List or edit task-type model routes",
+    },
+    HelpRow {
+        usage: "/packs | /pack <verb> <id>",
+        description: "Inspect packs or change their enabled and trusted state",
+    },
+    HelpRow {
+        usage: "/subagent <agent> <task> | /subagent cancel <item>",
+        description: "Spawn or cancel a manual subagent",
+    },
+    HelpRow {
+        usage: "/definitions",
+        description: "Show discovered agents and skills",
+    },
     HelpRow {
         usage: "/agent <id>",
         description: "Apply an agent by id (or mention @agent/<id>)",
@@ -158,9 +232,9 @@ fn help_section(title: &str, rows: &[HelpRow], auth_path: &str) -> String {
 
 pub(crate) fn help_text() -> String {
     let auth_path = meerai_common::settings::default_data_dir()
-        .map(|dir| meerai_client::secrets::auth_file_path(&dir))
+        .map(|dir| dir.join("meerai.db"))
         .map(|path| meerai_core::env::display_path(&path))
-        .unwrap_or_else(|| "auth.json".to_string());
+        .unwrap_or_else(|| "meerai.db".to_string());
     let mut text = String::from(
         "Usage:\n  \
     meerai [-p|--provider <PROVIDER>] [-m|--model <MODEL>] [--system <INSTRUCTIONS>]\n          \
@@ -170,6 +244,8 @@ pub(crate) fn help_text() -> String {
     [--agent <ID>] [--skill <ID>]...\n  \
     meerai acp doctor\n  \
     meerai auth <list|login|logout>\n  \
+    meerai config export\n  \
+    meerai config import <PATH>\n  \
     meerai sessions <list|rm|prune|fork>\n  \
     meerai hooks <trust|untrust|status|verify>\n  \
     meerai serve [--port <PORT>] [--user <NAME>] [--password <PASS>] [--auth] [--continue | --resume <ID> | --fork <ID>]\n\n",
@@ -193,6 +269,15 @@ pub(crate) enum AuthCommand {
     Logout {
         provider: String,
     },
+    ResetVault {
+        yes: bool,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ConfigCommand {
+    Export,
+    Import(PathBuf),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -207,6 +292,57 @@ pub(crate) enum SessionsCommand {
     Remove { target: SessionTarget },
     Prune { days: u64, keep: usize },
     Fork { id: String, turn: Option<String> },
+    Export { id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MemoryCommand {
+    List {
+        project: Option<String>,
+        query: Option<String>,
+    },
+    Save {
+        project: Option<String>,
+        kind: String,
+        title: String,
+        body: Option<String>,
+        pinned: bool,
+    },
+    Delete {
+        project: Option<String>,
+        id: String,
+    },
+    Pin {
+        project: Option<String>,
+        id: String,
+        pinned: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RoutesCommand {
+    List,
+    Set {
+        task: String,
+        spec: String,
+        effort: Option<String>,
+        max_cost_usd: Option<f64>,
+        max_tokens_per_turn: Option<u64>,
+        max_concurrency: Option<usize>,
+    },
+    Clear {
+        task: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PackCommand {
+    List,
+    Add { source: String, rev: Option<String> },
+    SetEnabled { id: String, enabled: bool },
+    SetTrusted { id: String, trusted: bool },
+    Pin { id: String, rev: String },
+    Remove { id: String },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -233,11 +369,15 @@ pub(crate) struct ServeCommand {
     pub(crate) auth: bool,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum CliSubcommand {
     Acp(AcpCommand),
     Auth(AuthCommand),
+    Config(ConfigCommand),
     Hooks(HooksCommand),
+    Memory(MemoryCommand),
+    Pack(PackCommand),
+    Routes(RoutesCommand),
     Serve(ServeCommand),
     Sessions(SessionsCommand),
 }
@@ -386,9 +526,265 @@ where
                         provider: target_provider,
                     }));
                 }
-                Some(other) => {
-                    bail!("unknown auth subcommand: {other}. Expected: list, login, logout");
+                Some("reset-vault") => {
+                    let mut yes = false;
+                    for extra in iter.by_ref() {
+                        match extra.as_str() {
+                            "--yes" => yes = true,
+                            "-h" | "--help" => show_help = true,
+                            other => bail!("unexpected argument for auth reset-vault: {other}"),
+                        }
+                    }
+                    subcommand = Some(CliSubcommand::Auth(AuthCommand::ResetVault { yes }));
                 }
+                Some(other) => {
+                    bail!(
+                        "unknown auth subcommand: {other}. Expected: list, login, logout, reset-vault"
+                    );
+                }
+            },
+            "config" if subcommand.is_none() => match iter.next().as_deref() {
+                Some("-h" | "--help") => show_help = true,
+                Some("export") => match iter.next().as_deref() {
+                    None => subcommand = Some(CliSubcommand::Config(ConfigCommand::Export)),
+                    Some("-h" | "--help") => show_help = true,
+                    Some(_) => bail!("usage: meerai config export"),
+                },
+                Some("import") => match iter.next().as_deref() {
+                    Some("-h" | "--help") => show_help = true,
+                    Some(path) if !path.starts_with('-') && iter.next().is_none() => {
+                        subcommand =
+                            Some(CliSubcommand::Config(ConfigCommand::Import(path.into())));
+                    }
+                    _ => bail!("usage: meerai config import <PATH>"),
+                },
+                _ => bail!("usage: meerai config export | meerai config import <PATH>"),
+            },
+            "memory" if subcommand.is_none() => {
+                match iter.next().as_deref() {
+                    Some("-h" | "--help") | None => {
+                        if iter.next().is_some() {
+                            bail!("usage: meerai memory [list|save|delete|pin] ...");
+                        }
+                        subcommand = Some(CliSubcommand::Memory(MemoryCommand::List {
+                            project: None,
+                            query: None,
+                        }));
+                    }
+                    Some("list") | Some("ls") => {
+                        let mut project = None;
+                        let mut query = None;
+                        while let Some(arg) = iter.next() {
+                            match arg.as_str() {
+                                "--project" => {
+                                    project = Some(iter.next().ok_or_else(|| {
+                                        anyhow::anyhow!("--project needs a path")
+                                    })?);
+                                }
+                                "-h" | "--help" => show_help = true,
+                                other if other.starts_with('-') => {
+                                    bail!("unknown option for memory list: {other}")
+                                }
+                                other => {
+                                    query = Some(query.map_or_else(
+                                        || other.to_string(),
+                                        |q: String| format!("{q} {other}"),
+                                    ));
+                                }
+                            }
+                        }
+                        subcommand = Some(CliSubcommand::Memory(MemoryCommand::List {
+                            project,
+                            query,
+                        }));
+                    }
+                    Some("save") => {
+                        let mut project = None;
+                        let mut pinned = false;
+                        let mut positional = Vec::new();
+                        while let Some(arg) = iter.next() {
+                            match arg.as_str() {
+                                "--project" => {
+                                    project = Some(iter.next().ok_or_else(|| {
+                                        anyhow::anyhow!("--project needs a path")
+                                    })?);
+                                }
+                                "--pin" => pinned = true,
+                                "-h" | "--help" => show_help = true,
+                                other if other.starts_with('-') => {
+                                    bail!("unknown option for memory save: {other}")
+                                }
+                                other => positional.push(other.to_string()),
+                            }
+                        }
+                        let [kind, title, rest @ ..] = positional.as_slice() else {
+                            bail!(
+                                "usage: meerai memory save <decision|progress|fact|convention> <title> [body]"
+                            );
+                        };
+                        subcommand = Some(CliSubcommand::Memory(MemoryCommand::Save {
+                            project,
+                            kind: kind.clone(),
+                            title: title.clone(),
+                            body: (!rest.is_empty()).then(|| rest.join(" ")),
+                            pinned,
+                        }));
+                    }
+                    Some("delete") | Some("rm") => {
+                        let mut project = None;
+                        let mut id = None;
+                        while let Some(arg) = iter.next() {
+                            match arg.as_str() {
+                                "--project" => {
+                                    project = Some(iter.next().ok_or_else(|| {
+                                        anyhow::anyhow!("--project needs a path")
+                                    })?);
+                                }
+                                "-h" | "--help" => show_help = true,
+                                other if other.starts_with('-') => {
+                                    bail!("unknown option for memory delete: {other}")
+                                }
+                                other => id = Some(other.to_string()),
+                            }
+                        }
+                        let id =
+                            id.ok_or_else(|| anyhow::anyhow!("usage: meerai memory delete <id>"))?;
+                        subcommand =
+                            Some(CliSubcommand::Memory(MemoryCommand::Delete { project, id }));
+                    }
+                    Some(verb @ ("pin" | "unpin")) => {
+                        let mut pinned = verb == "pin";
+                        let mut project = None;
+                        let mut id = None;
+                        while let Some(arg) = iter.next() {
+                            match arg.as_str() {
+                                "--project" => {
+                                    project = Some(iter.next().ok_or_else(|| {
+                                        anyhow::anyhow!("--project needs a path")
+                                    })?);
+                                }
+                                "--off" => pinned = false,
+                                "-h" | "--help" => show_help = true,
+                                other if other.starts_with('-') => {
+                                    bail!("unknown option for memory pin: {other}")
+                                }
+                                other => id = Some(other.to_string()),
+                            }
+                        }
+                        let id = id.ok_or_else(|| {
+                            anyhow::anyhow!("usage: meerai memory pin <id> [--off]")
+                        })?;
+                        subcommand = Some(CliSubcommand::Memory(MemoryCommand::Pin {
+                            project,
+                            id,
+                            pinned,
+                        }));
+                    }
+                    Some(other) => bail!("unknown memory subcommand: {other}"),
+                }
+            }
+            "routes" if subcommand.is_none() => match iter.next().as_deref() {
+                Some("-h" | "--help") | None => {
+                    subcommand = Some(CliSubcommand::Routes(RoutesCommand::List));
+                }
+                Some("set") => {
+                    let task = iter.next().ok_or_else(|| anyhow::anyhow!("usage: meerai routes set <task> <provider::model> [max_cost] [max_tokens] [max_concurrency] [--effort <level>]"))?;
+                    let spec = iter.next().ok_or_else(|| anyhow::anyhow!("usage: meerai routes set <task> <provider::model> [max_cost] [max_tokens] [max_concurrency] [--effort <level>]"))?;
+                    let mut effort = None;
+                    let mut max_cost_usd = None;
+                    let mut max_tokens_per_turn = None;
+                    let mut max_concurrency = None;
+                    while let Some(token) = iter.next() {
+                        match token.as_str() {
+                            "--effort" => {
+                                effort = Some(iter.next().ok_or_else(|| {
+                                    anyhow::anyhow!("--effort requires low, medium, or high")
+                                })?);
+                            }
+                            other if max_cost_usd.is_none() => {
+                                max_cost_usd =
+                                    Some(other.parse::<f64>().map_err(|_| {
+                                        anyhow::anyhow!("max_cost must be a number")
+                                    })?);
+                            }
+                            other if max_tokens_per_turn.is_none() => {
+                                max_tokens_per_turn =
+                                    Some(other.parse::<u64>().map_err(|_| {
+                                        anyhow::anyhow!("max_tokens must be a number")
+                                    })?);
+                            }
+                            other if max_concurrency.is_none() => {
+                                max_concurrency = Some(other.parse::<usize>().map_err(|_| {
+                                    anyhow::anyhow!("max_concurrency must be a number")
+                                })?);
+                            }
+                            other => bail!("unexpected argument for routes set: {other}"),
+                        }
+                    }
+                    subcommand = Some(CliSubcommand::Routes(RoutesCommand::Set {
+                        task,
+                        spec,
+                        effort,
+                        max_cost_usd,
+                        max_tokens_per_turn,
+                        max_concurrency,
+                    }));
+                }
+                Some("clear") | Some("remove") => {
+                    let task = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("usage: meerai routes clear <task>"))?;
+                    subcommand = Some(CliSubcommand::Routes(RoutesCommand::Clear { task }));
+                }
+                Some(other) => bail!("unknown routes subcommand: {other}"),
+            },
+            "pack" if subcommand.is_none() => match iter.next().as_deref() {
+                Some("-h" | "--help") | None => {
+                    subcommand = Some(CliSubcommand::Pack(PackCommand::List));
+                }
+                Some("add" | "install") => {
+                    let source = iter.next().ok_or_else(|| {
+                        anyhow::anyhow!("usage: meerai pack add <path|git-url> [--rev <rev>]")
+                    })?;
+                    let rev = match iter.next().as_deref() {
+                        None => None,
+                        Some("--rev") => Some(iter.next().ok_or_else(|| {
+                            anyhow::anyhow!("usage: meerai pack add <path|git-url> [--rev <rev>]")
+                        })?),
+                        Some(other) => bail!("unknown option for pack add: {other}"),
+                    };
+                    subcommand = Some(CliSubcommand::Pack(PackCommand::Add { source, rev }));
+                }
+                Some(verb @ ("enable" | "disable")) => {
+                    let enabled = verb == "enable";
+                    let id = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("usage: meerai pack enable|disable <id>"))?;
+                    subcommand = Some(CliSubcommand::Pack(PackCommand::SetEnabled { id, enabled }));
+                }
+                Some(verb @ ("trust" | "untrust")) => {
+                    let trusted = verb == "trust";
+                    let id = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("usage: meerai pack trust|untrust <id>"))?;
+                    subcommand = Some(CliSubcommand::Pack(PackCommand::SetTrusted { id, trusted }));
+                }
+                Some("pin") => {
+                    let id = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("usage: meerai pack pin <id> <rev>"))?;
+                    let rev = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("usage: meerai pack pin <id> <rev>"))?;
+                    subcommand = Some(CliSubcommand::Pack(PackCommand::Pin { id, rev }));
+                }
+                Some("remove") | Some("rm") => {
+                    let id = iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("usage: meerai pack remove <id>"))?;
+                    subcommand = Some(CliSubcommand::Pack(PackCommand::Remove { id }));
+                }
+                Some(other) => bail!("unknown pack subcommand: {other}"),
             },
             "sessions" if subcommand.is_none() => match iter.next().as_deref() {
                 None | Some("list") | Some("ls") => {
@@ -519,8 +915,32 @@ where
                     })?;
                     subcommand = Some(CliSubcommand::Sessions(SessionsCommand::Fork { id, turn }));
                 }
+                Some("export") => {
+                    let mut id = None;
+                    let mut help = false;
+                    while let Some(arg) = iter.next() {
+                        match arg.as_str() {
+                            "-h" | "--help" => help = true,
+                            "--jsonl" => {}
+                            flag if flag.starts_with('-') => {
+                                bail!("unknown option for sessions export: {flag}")
+                            }
+                            other => id = Some(other.to_string()),
+                        }
+                    }
+                    if help {
+                        show_help = true;
+                        continue;
+                    }
+                    let id = id.ok_or_else(|| {
+                        anyhow::anyhow!("usage: meerai sessions export <ID> [--jsonl]")
+                    })?;
+                    subcommand = Some(CliSubcommand::Sessions(SessionsCommand::Export { id }));
+                }
                 Some(other) => {
-                    bail!("unknown sessions subcommand: {other}. Expected: list, rm, prune, fork");
+                    bail!(
+                        "unknown sessions subcommand: {other}. Expected: list, rm, prune, fork, export"
+                    );
                 }
             },
             "hooks" if subcommand.is_none() => match iter.next().as_deref() {

@@ -295,7 +295,7 @@ pub enum SessionEvent {
     SpillApplied {
         call_id: CallId,
         bytes_omitted: u64,
-        blob_path: PathBuf,
+        blob_key: String,
     },
     CompactionStarted {
         compaction_id: CompactionId,
@@ -344,6 +344,10 @@ pub enum SessionEvent {
         decision: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<HookDetail>,
+    },
+    ContextTurnPinned {
+        turn_id: TurnId,
+        pinned: bool,
     },
     CheckpointCreated {
         checkpoint_id: CheckpointId,

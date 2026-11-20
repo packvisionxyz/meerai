@@ -57,13 +57,33 @@ pub(crate) async fn run_auth(
             secrets.set_key(&provider_id, &api_key)?;
             let target = auth_path
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "auth.json".to_string());
+                .unwrap_or_else(|| "the encrypted vault".to_string());
             println!("Saved credentials for {provider_id} in {target}");
         }
         AuthCommand::Logout { provider } => {
             let provider_id = canonical_provider_id(&provider);
             log_out(&provider_id, secrets).await?;
             println!("Removed stored credentials for {provider_id}");
+        }
+        AuthCommand::ResetVault { yes } => {
+            let data_dir = data_dir.context(
+                "no data directory; set HOME or XDG_DATA_HOME before resetting the vault",
+            )?;
+            if !yes {
+                print!(
+                    "This deletes every saved credential and cannot be undone. Type 'reset' to continue: "
+                );
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if input.trim() != "reset" {
+                    println!("Vault reset cancelled.");
+                    return Ok(());
+                }
+            }
+            let vault = meerai_providers::secrets::open_vault(Some(data_dir))?;
+            let removed = vault.reset()?;
+            println!("Reset credential vault. Removed {removed} saved credentials; log in again.");
         }
     }
     Ok(())

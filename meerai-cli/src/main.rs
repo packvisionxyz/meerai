@@ -6,9 +6,11 @@
 mod acp_cmd;
 mod auth_cmd;
 mod cli;
+mod config_cmd;
 mod headless;
 mod hooks_cmd;
 mod sessions_cmd;
+mod store_cmd;
 #[cfg(test)]
 mod tests;
 
@@ -26,16 +28,17 @@ use meerai_acp::{AGY, AcpStart, AcpWorkerConfig, spawn_acp_worker};
 #[cfg(any(feature = "tui", feature = "web"))]
 use meerai_agents::spawn_worker;
 use meerai_agents::{
-    AcpChild, AcpRunToolset, AcpSpawner, AgentHarness, HarnessConfig, HookEngine, MultiTurnAgent,
-    QuestionToolset, SubagentToolFactory, SubagentToolset, TokenPricing,
+    AcpChild, AcpRunToolset, AcpSpawner, AgentHarness, DEFAULT_GLOBAL_CONCURRENCY, HarnessConfig,
+    HookEngine, MemoryCapture, MemoryToolset, MultiTurnAgent, QuestionToolset, RoutingCoordinator,
+    SKILL_TOOL, SkillToolset, SubagentToolFactory, SubagentToolset, TokenPricing,
 };
 use meerai_client::providers::{
     ProviderAuthKind, ProviderCatalog, RuntimeProviderState, canonical_provider_id,
     check_key_status, first_configured_provider, resolve_credential,
 };
-use meerai_client::secrets::{Credential, SecretStore, auth_file_path};
+use meerai_client::secrets::{Credential, SecretStore};
 use meerai_common::definitions::{
-    AgentDefinition, SkillDefinition, load_definitions, validate_agent_model,
+    AgentDefinition, SkillDefinition, load_definitions, load_definitions_for, validate_agent_model,
 };
 use meerai_common::hooks::{add_trusted_project, load_hooks_for_run, project_is_trusted};
 #[cfg(feature = "tui")]
@@ -48,10 +51,11 @@ use meerai_core::{Toolset, async_trait};
 #[cfg(any(feature = "tui", feature = "web"))]
 use meerai_host::{
     AcpPresetInfo, Backend, ChatGptLogin, ChatGptLoginOutcome, HostAgentInfo, HostAuthKind,
-    HostInfoSnapshot, HostModelItem, HostPalette, HostProviderItem, HostProvidersSnapshot,
-    HostReloadOutcome, HostReloadPayload, HostSettingsUpdate, HostSettingsView, HostSkillInfo,
-    OpenedSession, ResolvedAgentApplication, ResolvedModelSelection, ResolvedSkillApplication,
-    SessionOpener, SessionRegistry, WebServerLauncher,
+    HostDefinitionInfo, HostDefinitionsDiagnostics, HostInfoSnapshot, HostModelItem, HostPalette,
+    HostProviderItem, HostProvidersSnapshot, HostReloadOutcome, HostReloadPayload,
+    HostSettingsUpdate, HostSettingsView, HostSkillInfo, OpenedSession, ResolvedAgentApplication,
+    ResolvedModelSelection, ResolvedSkillApplication, SessionOpener, SessionRegistry,
+    WebServerLauncher,
 };
 #[cfg(feature = "web")]
 use meerai_host::{WebServerHandle, WebServerStart};
@@ -61,6 +65,9 @@ use meerai_providers::secrets::default_secret_store;
 use meerai_session::{
     LoggedEvent, Session, SessionConfig, SessionId, SessionSummary, TurnId, default_sessions_root,
     delete_session as delete_session_dir, list_sessions,
+};
+use meerai_store::{
+    InstalledPack, ModelRoute, NewProjectMemory, ProjectMemory, RoutingSettings, Store, TaskType,
 };
 use meerai_tools::search_as_code::ScriptRuntime;
 use meerai_tools::{
@@ -153,12 +160,27 @@ fn capped_definition(body: &str) -> (String, bool) {
     )
 }
 
+fn load_definitions_for_runtime(
+    config_dir: Option<&Path>,
+    project_root: &Path,
+) -> meerai_common::definitions::DefinitionCatalog {
+    match meerai_common::settings::open_store_for_config_dir(config_dir) {
+        Ok(store) => load_definitions_for(&store, config_dir, project_root),
+        Err(_) => load_definitions(project_root),
+    }
+}
+
 fn compose_definition_prompt(
     mut system: String,
     skills: &[&SkillDefinition],
     agent: Option<&AgentDefinition>,
+    catalog: &[SkillDefinition],
 ) -> String {
     let mut block = String::new();
+    if let Some(index) = meerai_agents::prompt::skill_index(catalog) {
+        block.push_str("\n\n");
+        block.push_str(&index);
+    }
     let mut truncated = false;
     for skill in skills {
         let (body, cut) = capped_definition(&skill.body);
@@ -336,6 +358,17 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if let Some(CliSubcommand::Config(command)) = cli.subcommand.as_ref() {
+        return config_cmd::run(command);
+    }
+
+    match cli.subcommand.as_ref() {
+        Some(CliSubcommand::Memory(command)) => return store_cmd::run_memory(command.clone()),
+        Some(CliSubcommand::Routes(command)) => return store_cmd::run_routes(command.clone()),
+        Some(CliSubcommand::Pack(command)) => return store_cmd::run_pack(command.clone()),
+        _ => {}
+    }
+
     let is_serve = matches!(cli.subcommand, Some(CliSubcommand::Serve(_)));
     #[cfg(not(feature = "web"))]
     if is_serve {
@@ -348,15 +381,15 @@ async fn main() -> Result<()> {
 
     let workspace_root = std::env::current_dir()?;
     let project_root = find_project_root(&workspace_root);
+    let config_dir = default_config_dir();
     if let Some(CliSubcommand::Acp(command)) = cli.subcommand.as_ref() {
         return acp_cmd::run(*command, &workspace_root).await;
     }
-    let definitions = load_definitions(&project_root);
+    let definitions = load_definitions_for_runtime(config_dir.as_deref(), &project_root);
     for warning in &definitions.warnings {
         eprintln!("Warning: {warning}");
     }
     let project_settings_path = project_root.join(".meerai").join("settings.yml");
-    let config_dir = default_config_dir();
     let data_dir = default_data_dir();
     let mut user_settings = config_dir
         .as_deref()
@@ -402,8 +435,8 @@ async fn main() -> Result<()> {
         }
         meerai_tui::theme::install(palette);
     }
-    let secrets = default_secret_store(data_dir.as_deref());
-    let auth_path = data_dir.as_deref().map(auth_file_path);
+    let secrets = default_secret_store(data_dir.as_deref())?;
+    let auth_path = data_dir.as_deref().map(|dir| dir.join("meerai.db"));
 
     if let Some(CliSubcommand::Auth(auth_cmd)) = cli.subcommand {
         return run_auth(
@@ -543,7 +576,9 @@ async fn main() -> Result<()> {
         && cli.resume.is_none()
         && cli.fork.is_none()
     {
-        let restored = meerai_tui::tabs::restored_tabs_for(&workspace_root);
+        let restored = meerai_common::settings::open_store_for_config_dir(config_dir.as_deref())
+            .map(|store| meerai_tui::tabs::restored_tabs_for(&store, &workspace_root))
+            .unwrap_or_default();
         let mut candidates = Vec::with_capacity(restored.sessions.len() + 1);
         if let Some(hint) = restored.empty_session.clone() {
             candidates.push(hint);
@@ -629,13 +664,32 @@ async fn main() -> Result<()> {
     }
 
     let script_runtime = ScriptRuntime::detect();
-    let base_system = meerai_agents::compose_system_prompt(&cli.system, &workspace_root).await;
+    let memory_bytes = settings
+        .context
+        .as_ref()
+        .and_then(|context| context.memory_prompt_bytes)
+        .map_or(meerai_store::DEFAULT_MEMORY_PROMPT_BYTES as u64, |bytes| {
+            bytes
+        }) as usize;
+    let memory_block = meerai_common::settings::open_store_for_config_dir(config_dir.as_deref())
+        .ok()
+        .and_then(|store| meerai_agents::load_memory_prompt(&store, &project_root, memory_bytes));
+    let base_system = meerai_agents::prompt::compose_system_prompt_with_memory(
+        &cli.system,
+        &workspace_root,
+        memory_block.as_deref(),
+    )
+    .await;
     let base_system = meerai_agents::prompt::append_script_guidance(
         base_system,
         script_runtime.map(ScriptRuntime::program),
     );
-    let initial_system =
-        compose_definition_prompt(base_system.clone(), &selected_skills, selected_agent);
+    let initial_system = compose_definition_prompt(
+        base_system.clone(),
+        &selected_skills,
+        selected_agent,
+        &definitions.skills,
+    );
     let launch_definitions = initial_system
         .strip_prefix(base_system.as_str())
         .unwrap_or_default()
@@ -711,6 +765,7 @@ async fn main() -> Result<()> {
         sensitive_env_vars,
         hooks,
         custom_agents: definitions.agents.clone(),
+        skill_catalog: Arc::new(definitions.skills.clone()),
         base_system,
         launch_system: cli.system.clone(),
         launch_definitions: launch_definitions.clone(),
@@ -1194,6 +1249,7 @@ struct CliSessionHost {
     sensitive_env_vars: Vec<String>,
     hooks: Arc<HookEngine>,
     custom_agents: Vec<AgentDefinition>,
+    skill_catalog: Arc<Vec<SkillDefinition>>,
     base_system: String,
     launch_system: String,
     launch_definitions: String,
@@ -1203,6 +1259,25 @@ struct CliSessionHost {
 }
 
 impl CliSessionHost {
+    fn store(&self) -> Result<Store> {
+        meerai_common::settings::open_store_for_config_dir(self.config_dir.as_deref())
+    }
+
+    fn memory_prompt_block(
+        &self,
+        context: Option<&meerai_common::settings::ContextSettings>,
+    ) -> Option<String> {
+        let bytes = context
+            .and_then(|context| context.memory_prompt_bytes)
+            .map_or(meerai_store::DEFAULT_MEMORY_PROMPT_BYTES as u64, |bytes| {
+                bytes
+            }) as usize;
+        let project_root = find_project_root(&self.workspace_root);
+        self.store()
+            .ok()
+            .and_then(|store| meerai_agents::load_memory_prompt(&store, &project_root, bytes))
+    }
+
     fn resolve_session_provider_model(&self, meta_model: Option<&str>) -> (String, String) {
         let current_provider = self
             .runtime
@@ -1293,7 +1368,16 @@ impl CliSessionHost {
             sac = sac.with_runtime(runtime);
         }
         let mut initial_tools = build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, false);
+        let store = self.store()?;
+        let memory_project_root = find_project_root(&self.workspace_root);
+        initial_tools.push(Box::new(
+            MemoryToolset::new(store.clone(), &memory_project_root)
+                .with_source_session(Some(session.id().clone())),
+        ));
         initial_tools.push(Box::new(QuestionToolset));
+        if self.skill_catalog.iter().any(|skill| skill.model_invocable) {
+            initial_tools.push(Box::new(SkillToolset::new(self.skill_catalog.clone())));
+        }
         initial_tools.push(Box::new(
             AcpRunToolset::new(Arc::new(CliAcpSpawner)).with_hooks(self.hooks.clone()),
         ));
@@ -1313,6 +1397,11 @@ impl CliSessionHost {
 
         let mut agent = MultiTurnAgent::new(self.client.clone(), model_spec, initial_tools, system);
         agent.set_hooks(self.hooks.clone());
+        agent.set_memory_capture(MemoryCapture::new(
+            store,
+            &memory_project_root,
+            Some(session.id().clone()),
+        ));
         agent.set_post_edit_diagnostics(
             self.settings
                 .context
@@ -1320,11 +1409,16 @@ impl CliSessionHost {
                 .and_then(|context| context.post_edit_diagnostics)
                 .unwrap_or(false),
         );
-        let subagent_tool = SubagentToolset::from_agent(&agent, subagent_factory)
+        let subagent_tool = SubagentToolset::from_agent(&agent, subagent_factory.clone())
             .with_hooks(self.hooks.clone())
             .with_custom_agents(self.custom_agents.clone());
         agent.add_tool(subagent_tool);
+        agent.set_subagent_support(subagent_factory, self.custom_agents.clone());
         let config = self.harness_config(provider, model);
+        let routing = Arc::new(RoutingCoordinator::from_settings(
+            &config.routing,
+            DEFAULT_GLOBAL_CONCURRENCY,
+        ));
         let plan_usage = config.plan_usage;
         if let Ok(mut runtime) = self.runtime.write() {
             runtime.active_provider = canonical_provider_id(provider);
@@ -1334,12 +1428,14 @@ impl CliSessionHost {
             session,
             policy,
             config,
+            routing: Some(routing),
         });
         Ok(agent)
     }
 
     fn harness_config(&self, provider: &str, model: &str) -> HarnessConfig {
-        let mut config = HarnessConfig::from_context_settings(self.settings.context.as_ref());
+        let mut config = HarnessConfig::from_context_settings(self.settings.context.as_ref())
+            .with_routing(self.settings.routing.clone().unwrap_or_default());
         config.plan_usage = self
             .runtime
             .read()
@@ -1460,6 +1556,9 @@ impl CliSessionHost {
             .flat_map(|toolset| toolset.definition().into_iter().map(|def| def.name))
             .collect::<Vec<_>>();
         names.push("subagent-run".to_string());
+        if self.skill_catalog.iter().any(|skill| skill.model_invocable) {
+            names.push(SKILL_TOOL.to_string());
+        }
         names
     }
 
@@ -1498,7 +1597,7 @@ impl CliSessionHost {
     #[cfg(any(feature = "tui", feature = "web"))]
     fn compute_host_info_from(&self, merged: &AppSettings, hooks_count: usize) -> HostInfoSnapshot {
         let project_root = find_project_root(&self.workspace_root);
-        let definitions = load_definitions(&project_root);
+        let definitions = load_definitions_for_runtime(self.config_dir.as_deref(), &project_root);
         let git_branch = meerai_host::current_branch(&self.workspace_root);
         let acp_presets = meerai_acp::presets()
             .iter()
@@ -1923,7 +2022,7 @@ impl SessionOpener for CliSessionHost {
         current_provider: &str,
     ) -> Result<ResolvedAgentApplication> {
         let project_root = find_project_root(&self.workspace_root);
-        let definitions = load_definitions(&project_root);
+        let definitions = load_definitions_for_runtime(self.config_dir.as_deref(), &project_root);
         let agent = definitions
             .agents
             .into_iter()
@@ -1962,7 +2061,7 @@ impl SessionOpener for CliSessionHost {
 
     async fn resolve_skill_application(&self, name: &str) -> Result<ResolvedSkillApplication> {
         let project_root = find_project_root(&self.workspace_root);
-        let definitions = load_definitions(&project_root);
+        let definitions = load_definitions_for_runtime(self.config_dir.as_deref(), &project_root);
         let skill = definitions
             .skills
             .into_iter()
@@ -2012,14 +2111,19 @@ impl SessionOpener for CliSessionHost {
         let project_root = find_project_root(&self.workspace_root);
         let (user, merged, mut warnings) = self.load_merged_settings();
         *self.user_settings.lock().unwrap() = user.clone();
-        let definitions = load_definitions(&project_root);
+        let definitions = load_definitions_for_runtime(self.config_dir.as_deref(), &project_root);
         warnings.extend(definitions.warnings);
         let rules = merged
             .permissions
             .as_ref()
             .and_then(|value| rules_from_yaml(value).ok());
-        let base =
-            meerai_agents::compose_system_prompt(&self.launch_system, &self.workspace_root).await;
+        let memory_block = self.memory_prompt_block(merged.context.as_ref());
+        let base = meerai_agents::prompt::compose_system_prompt_with_memory(
+            &self.launch_system,
+            &self.workspace_root,
+            memory_block.as_deref(),
+        )
+        .await;
         let system_prompt = format!("{base}{}", self.launch_definitions);
         let hooks_enabled = merged
             .hooks
@@ -2052,5 +2156,163 @@ impl SessionOpener for CliSessionHost {
                 hooks: hook_entries,
             },
         })
+    }
+
+    async fn list_memories(&self, project_root: &str) -> Result<Vec<ProjectMemory>> {
+        self.store()?.memories().list(project_root)
+    }
+
+    async fn search_memories(&self, project_root: &str, query: &str) -> Result<Vec<ProjectMemory>> {
+        self.store()?.memories().search(project_root, query)
+    }
+
+    async fn save_memory(
+        &self,
+        draft: NewProjectMemory,
+        id: Option<&str>,
+    ) -> Result<ProjectMemory> {
+        let store = self.store()?;
+        match id {
+            Some(id) => {
+                let updated = store.memories().update(
+                    &draft.project_root,
+                    id,
+                    Some(draft.kind),
+                    Some(&draft.title),
+                    Some(&draft.body),
+                )?;
+                let _memory = updated.context("memory not found")?;
+                store
+                    .memories()
+                    .set_pinned(&draft.project_root, id, draft.pinned)?
+                    .context("memory not found")
+            }
+            None => store.memories().insert(&draft),
+        }
+    }
+
+    async fn set_memory_pinned(
+        &self,
+        project_root: &str,
+        id: &str,
+        pinned: bool,
+    ) -> Result<Option<ProjectMemory>> {
+        self.store()?
+            .memories()
+            .set_pinned(project_root, id, pinned)
+    }
+
+    async fn delete_memory(&self, project_root: &str, id: &str) -> Result<bool> {
+        self.store()?.memories().delete(project_root, id)
+    }
+
+    async fn routes(&self) -> Result<RoutingSettings> {
+        self.store()?.routes().load()
+    }
+
+    async fn upsert_route(&self, route: ModelRoute) -> Result<()> {
+        self.store()?.routes().upsert(&route)
+    }
+
+    async fn delete_route(&self, task_type: &str) -> Result<bool> {
+        let task = TaskType::parse(task_type)?;
+        self.store()?.routes().remove(&task)
+    }
+
+    async fn list_packs(&self) -> Result<Vec<InstalledPack>> {
+        self.store()?.packs().list()
+    }
+
+    async fn install_pack(&self, source: &str, rev: Option<&str>) -> Result<InstalledPack> {
+        let pack = meerai_common::packs::install_pack(source, rev)?;
+        self.store()?.packs().upsert(&pack)?;
+        Ok(pack)
+    }
+
+    async fn set_pack_enabled(&self, id: &str, enabled: bool) -> Result<bool> {
+        self.store()?.packs().set_enabled(id, enabled)
+    }
+
+    async fn set_pack_trusted(&self, id: &str, trusted: bool) -> Result<bool> {
+        self.store()?.packs().set_trusted(id, trusted)
+    }
+
+    async fn pin_pack(&self, id: &str, rev: &str) -> Result<bool> {
+        self.store()?.packs().pin(id, rev)
+    }
+
+    async fn remove_pack(&self, id: &str) -> Result<bool> {
+        self.store()?.packs().remove(id)
+    }
+
+    async fn definitions_diagnostics(&self) -> Result<HostDefinitionsDiagnostics> {
+        let catalog =
+            load_definitions_for_runtime(self.config_dir.as_deref(), &self.workspace_root);
+        let agents = catalog
+            .agents
+            .iter()
+            .map(|agent| HostDefinitionInfo {
+                id: agent.id.clone(),
+                kind: "agent".to_string(),
+                source: agent.source.label().to_string(),
+                path: agent.path.display().to_string(),
+                description: agent.description.clone(),
+                model_invocable: None,
+                token_estimate: agent.token_estimate,
+                warnings: agent.warnings.clone(),
+                supporting_files: agent.supporting_files.clone(),
+            })
+            .collect();
+        let skills = catalog
+            .skills
+            .iter()
+            .map(|skill| HostDefinitionInfo {
+                id: skill.id.clone(),
+                kind: "skill".to_string(),
+                source: skill.source.label().to_string(),
+                path: skill.path.display().to_string(),
+                description: skill.description.clone(),
+                model_invocable: Some(skill.model_invocable),
+                token_estimate: skill.token_estimate,
+                warnings: skill.warnings.clone(),
+                supporting_files: skill.supporting_files.clone(),
+            })
+            .collect();
+        let shadows = catalog
+            .shadows
+            .iter()
+            .map(|shadow| meerai_host::HostShadowedDefinition {
+                id: shadow.id.clone(),
+                kind: shadow.kind.to_string(),
+                source: shadow.source.label().to_string(),
+                path: shadow.path.display().to_string(),
+                kept_source: shadow.kept_source.label().to_string(),
+                kept_path: shadow.kept_path.display().to_string(),
+            })
+            .collect();
+        Ok(HostDefinitionsDiagnostics {
+            agents,
+            skills,
+            warnings: catalog.warnings,
+            shadows,
+        })
+    }
+
+    async fn reset_vault(&self) -> Result<usize> {
+        let data_dir = self
+            .data_dir
+            .as_deref()
+            .context("no data directory; set HOME or XDG_DATA_HOME")?;
+        meerai_providers::secrets::open_vault(Some(data_dir))?.reset()
+    }
+
+    async fn read_session_blob(&self, id: &SessionId, blob_key: &str) -> Result<String> {
+        let config = SessionConfig {
+            root: default_sessions_root(),
+            workspace: self.workspace_root.clone(),
+        };
+        meerai_session::read_session_blob(&config, id, blob_key)
+            .await?
+            .with_context(|| format!("no spilled blob {blob_key} for session {id}"))
     }
 }

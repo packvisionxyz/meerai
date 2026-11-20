@@ -3867,3 +3867,88 @@ button.settings-row:hover {
     transform: translateX(0);
   }
 }
+.panel-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.btn.tiny.active {
+  background: var(--accent);
+  color: var(--background);
+}
+
+.panel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 42vh;
+  overflow: auto;
+  padding: var(--dialog-padding);
+}
+
+.panel-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--surface-high);
+}
+
+.panel-row.selected {
+  outline: 1px solid var(--interactive);
+}
+
+.panel-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.panel-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 0 var(--dialog-padding) var(--dialog-padding);
+}
+
+.panel-form.column {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.panel-form label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+}
+
+.panel-text {
+  margin: 0;
+  padding: var(--dialog-padding);
+  overflow: auto;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+}
+
+.panel-status {
+  padding: 8px var(--dialog-padding);
+  color: var(--muted);
+}
+
+.panel-status.error {
+  color: var(--error);
+}

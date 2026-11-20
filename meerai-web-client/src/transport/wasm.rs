@@ -7,8 +7,9 @@ use meerai_web_protocol::{
     ApiError, ApplyDefinitionRequest, ApprovalDecisionDto, ApprovalDecisionRequest,
     ApprovalModeDto, BackendKind, ChatGptLoginPasteRequest, ChatGptLoginStartResponse,
     CreateSessionRequest, CreateSessionResponse, FileChangeDto, FileDiffResponse,
-    ForkSessionRequest, GrantScopeDto, ProvidersResponse, QuestionAnswerDto, QuestionAnswerRequest,
-    ReloadResponse, RewindRequest, RewindResponse, RewindScopeDto, RunShellRequest,
+    ForkSessionRequest, GrantScopeDto, HostActionRequest, HostActionResponse, MemoriesResponse,
+    PacksResponse, ProvidersResponse, QuestionAnswerDto, QuestionAnswerRequest, ReloadResponse,
+    RewindRequest, RewindResponse, RewindScopeDto, RoutesResponse, RunShellRequest,
     RunShellResponse, SearchModeDto, SessionDetailDto, SessionEventsResponse,
     SessionHistoryResponse, SetApiKeyRequest, SetModeRequest, SetModelRequest,
     SetProviderBaseUrlRequest, SnapshotResponse, SubmitPromptRequest, UpdateSettingsRequest,
@@ -25,10 +26,11 @@ use web_sys::{
 
 use crate::state::{
     ActiveModal, AppState, ConnectionState, ProviderModalReturn, SessionPanelAction,
-    SettingsSection, apply_created_session, apply_opened_session, apply_providers_response,
-    apply_reload_response, apply_session_detail, apply_shell_output, apply_snapshot,
-    apply_view_event, open_model_input_for, open_settings, return_from_provider_modal,
-    set_status_notice, sync_diff_modal_on_changes,
+    SettingsSection, apply_blob, apply_created_session, apply_definitions,
+    apply_host_action_result, apply_memories, apply_opened_session, apply_packs, apply_panel_error,
+    apply_providers_response, apply_reload_response, apply_routes, apply_session_detail,
+    apply_shell_output, apply_snapshot, apply_view_event, open_model_input_for, open_settings,
+    return_from_provider_modal, set_status_notice, sync_diff_modal_on_changes,
 };
 
 struct PendingDelta {
@@ -73,6 +75,100 @@ impl WasmTransport {
 
     pub fn resync(&self) {
         spawn_bootstrap(self.handle, self.slot.clone(), true);
+    }
+
+    pub fn fetch_memories(&self) {
+        self.fetch_panel_json("/api/memories", |state, body| {
+            match serde_json::from_str::<MemoriesResponse>(&body) {
+                Ok(response) => apply_memories(state, response),
+                Err(error) => {
+                    apply_panel_error(state, format!("Invalid memories response: {error}"))
+                }
+            }
+        });
+    }
+
+    pub fn fetch_routes(&self) {
+        self.fetch_panel_json("/api/routes", |state, body| {
+            match serde_json::from_str::<RoutesResponse>(&body) {
+                Ok(response) => apply_routes(state, response),
+                Err(error) => apply_panel_error(state, format!("Invalid routes response: {error}")),
+            }
+        });
+    }
+
+    pub fn fetch_packs(&self) {
+        self.fetch_panel_json("/api/packs", |state, body| {
+            match serde_json::from_str::<PacksResponse>(&body) {
+                Ok(response) => apply_packs(state, response),
+                Err(error) => apply_panel_error(state, format!("Invalid packs response: {error}")),
+            }
+        });
+    }
+
+    pub fn fetch_definitions(&self) {
+        self.fetch_panel_json("/api/definitions/diagnostics", |state, body| {
+            match serde_json::from_str::<meerai_web_protocol::DefinitionsDiagnosticsDto>(&body) {
+                Ok(definitions) => apply_definitions(state, definitions),
+                Err(error) => {
+                    apply_panel_error(state, format!("Invalid definitions response: {error}"))
+                }
+            }
+        });
+    }
+
+    pub fn fetch_blob(&self, session_id: String, key: String) {
+        let handle = self.handle;
+        spawn_local(async move {
+            let path = format!("/api/sessions/{session_id}/blobs/{key}");
+            match session_request("GET", &path, None).await {
+                Ok(body) => {
+                    match serde_json::from_str::<meerai_web_protocol::BlobResponse>(&body) {
+                        Ok(response) => {
+                            handle.update(|state| apply_blob(state, key.clone(), response.content));
+                        }
+                        Err(error) => {
+                            handle.update(|state| {
+                                apply_panel_error(state, format!("Invalid blob response: {error}"))
+                            });
+                        }
+                    }
+                }
+                Err(error) => handle.update(|state| apply_panel_error(state, error)),
+            }
+        });
+    }
+
+    fn fetch_panel_json<F>(&self, path: &'static str, apply: F)
+    where
+        F: Fn(&mut AppState, String) + 'static,
+    {
+        let handle = self.handle;
+        spawn_local(async move {
+            match session_request("GET", path, None).await {
+                Ok(body) => handle.update(|state| apply(state, body)),
+                Err(error) => handle.update(|state| apply_panel_error(state, error)),
+            }
+        });
+    }
+
+    pub fn run_host_action(&self, command: String) {
+        let handle = self.handle;
+        spawn_local(async move {
+            let payload = serde_json::to_string(&HostActionRequest { command })
+                .unwrap_or_else(|_| "{}".to_owned());
+            match session_request("POST", "/api/actions", Some(&payload)).await {
+                Ok(body) => {
+                    let text = serde_json::from_str::<HostActionResponse>(&body)
+                        .map(|response| response.text)
+                        .unwrap_or(body);
+                    handle.update(|state| apply_host_action_result(state, text));
+                }
+                Err(error) => handle.update(|state| {
+                    state.error_banner = Some(error);
+                }),
+            }
+        });
     }
 
     pub fn post_empty(&self, path: String) {

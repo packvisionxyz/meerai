@@ -6,9 +6,10 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use crate::text::{TextBuffer, UiEffects};
 use meerai_web_protocol::{
-    ApprovalModeDto, ApprovalRequestDto, BackendKind, ChatGptLoginStateDto, ContextSettingsDto,
-    EffortDto, FileChangeDto, FileDiffResponse, HostInfoDto, ModelItemDto, ProviderItemDto,
-    ProvidersResponse, QuestionRequestDto, ReloadResponse, RewindScopeDto, SandboxSettingsDto,
+    ApprovalModeDto, ApprovalRequestDto, BackendKind, ChatGptLoginStateDto, ContextBreakdownDto,
+    ContextSettingsDto, DefinitionsDiagnosticsDto, EffortDto, FileChangeDto, FileDiffResponse,
+    HostInfoDto, MemoryDto, ModelItemDto, PackDto, ProviderItemDto, ProvidersResponse,
+    QuestionRequestDto, ReloadResponse, RewindScopeDto, RouteDto, SandboxSettingsDto,
     SessionDetailDto, SessionSettingsDto, SessionStatus, SessionSummaryDto, SnapshotResponse,
     ThemeOverrideDto, TranscriptEntryDto, TurnMetricsDto, UpdateSettingsRequest, UsageDto,
     ViewEvent, WorkspacePreviewResponse, WorkspaceSearchResponse,
@@ -107,8 +108,20 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         cmd: "/effort",
         args: "[low|medium|high]",
-        desc: "Show, set, or cycle reasoning effort",
+        desc: "Set reasoning effort, or open Context settings with no argument",
         takes_arg: true,
+    },
+    SlashCommandSpec {
+        cmd: "/sampling",
+        args: "",
+        desc: "Set reasoning effort and temperature together",
+        takes_arg: false,
+    },
+    SlashCommandSpec {
+        cmd: "/temperature",
+        args: "",
+        desc: "Set the sampling temperature override in Context settings",
+        takes_arg: false,
     },
     SlashCommandSpec {
         cmd: "/agent",
@@ -129,9 +142,75 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         takes_arg: true,
     },
     SlashCommandSpec {
+        cmd: "/definitions",
+        args: "",
+        desc: "Show discovered agents and skills",
+        takes_arg: false,
+    },
+    SlashCommandSpec {
+        cmd: "/context",
+        args: "",
+        desc: "Inspect the context breakdown and token headroom",
+        takes_arg: false,
+    },
+    SlashCommandSpec {
+        cmd: "/memory",
+        args: "[query]",
+        desc: "List or search project memories",
+        takes_arg: true,
+    },
+    SlashCommandSpec {
+        cmd: "/remember",
+        args: "<note>",
+        desc: "Save a project memory",
+        takes_arg: true,
+    },
+    SlashCommandSpec {
+        cmd: "/forget",
+        args: "<id>",
+        desc: "Delete a project memory",
+        takes_arg: true,
+    },
+    SlashCommandSpec {
+        cmd: "/pin",
+        args: "<id> [off]",
+        desc: "Pin or unpin a project memory",
+        takes_arg: true,
+    },
+    SlashCommandSpec {
+        cmd: "/routing",
+        args: "[set <task> <provider::model>]",
+        desc: "List or edit task model routes",
+        takes_arg: true,
+    },
+    SlashCommandSpec {
+        cmd: "/packs",
+        args: "",
+        desc: "List installed declarative packs",
+        takes_arg: false,
+    },
+    SlashCommandSpec {
+        cmd: "/pack",
+        args: "<verb> <id> [rev]",
+        desc: "Install, enable, trust, pin, or remove a pack",
+        takes_arg: true,
+    },
+    SlashCommandSpec {
+        cmd: "/subagent",
+        args: "<agent> <task>",
+        desc: "Spawn or cancel a manual subagent",
+        takes_arg: true,
+    },
+    SlashCommandSpec {
+        cmd: "/vault-reset",
+        args: "reset",
+        desc: "Delete every saved credential and reinitialize the vault",
+        takes_arg: true,
+    },
+    SlashCommandSpec {
         cmd: "/skills",
         args: "",
-        desc: "Pick a @skill mention",
+        desc: "Show discovered skills, warnings, and token estimates",
         takes_arg: false,
     },
     SlashCommandSpec {
@@ -634,11 +713,14 @@ impl SettingsFormState {
                 rollback_on_verify_failure: Some(self.rollback_on_verify_failure),
                 recovery_model: opt_str("recovery_model"),
                 max_steps_per_turn: parse_usize("max steps/turn", "max_steps_per_turn")?,
+                step_limit_continuations: None,
                 tool_timeout_ms: parse_u64("tool timeout ms", "tool_timeout_ms")?,
                 max_session_tokens: parse_u64("max session tokens", "max_session_tokens")?,
                 max_turn_secs: parse_u64("max turn secs", "max_turn_secs")?,
                 summarizer_model: opt_str("summarizer_model"),
                 post_edit_diagnostics: Some(self.post_edit_diagnostics),
+                auto_memory: None,
+                memory_prompt_bytes: None,
                 temperature: parse_temp("temperature")?,
                 effort: self.effort,
             }),
@@ -676,8 +758,43 @@ impl QuestionDraft {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspacePanelTab {
+    Context,
+    Memory,
+    Subagent,
+    Routing,
+    Packs,
+}
+
 #[derive(Clone, Debug)]
 pub enum ActiveModal {
+    WorkspacePanel {
+        tab: WorkspacePanelTab,
+        context: Option<ContextBreakdownDto>,
+        memories: Vec<MemoryDto>,
+        routes: Vec<RouteDto>,
+        packs: Vec<PackDto>,
+        definitions: DefinitionsDiagnosticsDto,
+        selected: usize,
+        loading: bool,
+        error: Option<String>,
+        subagent_agent: String,
+        subagent_task: TextBuffer,
+        subagent_model: TextBuffer,
+        subagent_mode: Option<ApprovalModeDto>,
+        subagent_field: usize,
+        subagent_steps: TextBuffer,
+        subagent_tokens: TextBuffer,
+        subagent_cost: TextBuffer,
+        subagent_tools: TextBuffer,
+        route_input: TextBuffer,
+        pack_input: TextBuffer,
+        pack_pin_input: TextBuffer,
+        context_turn: usize,
+        context_focus: TextBuffer,
+        context_blob: Option<(String, String)>,
+    },
     ProviderSelect {
         filter: TextBuffer,
         selected: usize,
@@ -777,6 +894,10 @@ pub enum ActiveModal {
         input: TextBuffer,
         error: Option<String>,
     },
+    VaultReset {
+        input: TextBuffer,
+        error: Option<String>,
+    },
     Help,
     SubagentOverlay {
         entry_id: String,
@@ -802,6 +923,7 @@ pub struct SessionTabState {
     pub pending_questions: Vec<QuestionRequestDto>,
     pub usage: UsageDto,
     pub metrics: TurnMetricsDto,
+    pub context: Option<ContextBreakdownDto>,
     pub pending_submit: Option<String>,
     pub pending_queue: VecDeque<String>,
     pub draft_text: String,
@@ -1032,6 +1154,7 @@ pub fn apply_active_detail(state: &mut AppState, detail: SessionDetailDto) {
     tab.pending_questions = detail.pending_questions;
     tab.usage = detail.usage;
     tab.metrics = detail.metrics;
+    tab.context = detail.context;
     tab.unread = false;
     sync_pending_modal_for_active(state);
 }
@@ -1050,6 +1173,7 @@ pub fn apply_session_detail(state: &mut AppState, detail: SessionDetailDto) {
     tab.pending_questions = detail.pending_questions;
     tab.usage = detail.usage;
     tab.metrics = detail.metrics;
+    tab.context = detail.context;
     if state.active_session_id.as_deref() == Some(id.as_str()) {
         tab.unread = false;
         sync_pending_modal_for_active(state);
@@ -1342,6 +1466,22 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
             let tab = state.session_tabs.entry(session_id).or_default();
             tab.usage = usage;
             tab.metrics = metrics;
+            EventEffect::None
+        }
+        ViewEvent::ContextUpdated {
+            session_id,
+            breakdown,
+        } => {
+            let tab = state.session_tabs.entry(session_id).or_default();
+            tab.context = Some(breakdown.clone());
+            if let Some(ActiveModal::WorkspacePanel {
+                tab: WorkspacePanelTab::Context,
+                context,
+                ..
+            }) = state.modal.as_mut()
+            {
+                *context = Some(breakdown);
+            }
             EventEffect::None
         }
         ViewEvent::TurnCompleted {
@@ -2073,6 +2213,130 @@ pub fn execute_user_shell(state: &mut AppState, cmd: &str) {
     }
 }
 
+pub fn open_workspace_panel(state: &mut AppState, tab: WorkspacePanelTab) {
+    let context = state.active_tab().and_then(|tab| tab.context.clone());
+    state.modal = Some(ActiveModal::WorkspacePanel {
+        tab,
+        context,
+        memories: Vec::new(),
+        routes: Vec::new(),
+        packs: Vec::new(),
+        definitions: DefinitionsDiagnosticsDto::default(),
+        selected: 0,
+        loading: true,
+        error: None,
+        subagent_agent: "explore".to_owned(),
+        subagent_task: TextBuffer::new(""),
+        subagent_model: TextBuffer::new(""),
+        subagent_mode: None,
+        subagent_field: 1,
+        subagent_steps: TextBuffer::new(""),
+        subagent_tokens: TextBuffer::new(""),
+        subagent_cost: TextBuffer::new(""),
+        subagent_tools: TextBuffer::new(""),
+        route_input: TextBuffer::new(""),
+        pack_input: TextBuffer::new(""),
+        pack_pin_input: TextBuffer::new(""),
+        context_turn: 0,
+        context_focus: TextBuffer::new(""),
+        context_blob: None,
+    });
+}
+
+pub fn apply_blob(state: &mut AppState, key: String, content: String) {
+    if let Some(ActiveModal::WorkspacePanel {
+        context_blob,
+        error,
+        ..
+    }) = state.modal.as_mut()
+    {
+        *context_blob = Some((key, content));
+        *error = None;
+    }
+}
+
+pub fn apply_memories(state: &mut AppState, response: meerai_web_protocol::MemoriesResponse) {
+    if let Some(ActiveModal::WorkspacePanel {
+        memories,
+        selected,
+        loading,
+        error,
+        ..
+    }) = state.modal.as_mut()
+    {
+        *memories = response.memories;
+        *selected = (*selected).min(memories.len().saturating_sub(1));
+        *loading = false;
+        *error = None;
+    }
+}
+
+pub fn apply_routes(state: &mut AppState, response: meerai_web_protocol::RoutesResponse) {
+    if let Some(ActiveModal::WorkspacePanel {
+        routes,
+        selected,
+        loading,
+        error,
+        ..
+    }) = state.modal.as_mut()
+    {
+        *routes = response.routes;
+        *selected = (*selected).min(routes.len().saturating_sub(1));
+        *loading = false;
+        *error = None;
+    }
+}
+
+pub fn apply_packs(state: &mut AppState, response: meerai_web_protocol::PacksResponse) {
+    if let Some(ActiveModal::WorkspacePanel {
+        packs,
+        selected,
+        loading,
+        error,
+        ..
+    }) = state.modal.as_mut()
+    {
+        *packs = response.packs;
+        *selected = (*selected).min(packs.len().saturating_sub(1));
+        *loading = false;
+        *error = None;
+    }
+}
+
+pub fn apply_definitions(state: &mut AppState, definitions: DefinitionsDiagnosticsDto) {
+    if let Some(ActiveModal::WorkspacePanel {
+        definitions: slot,
+        loading,
+        error,
+        ..
+    }) = state.modal.as_mut()
+    {
+        *slot = definitions;
+        *loading = false;
+        *error = None;
+    }
+}
+
+pub fn apply_panel_error(state: &mut AppState, message: String) {
+    if let Some(ActiveModal::WorkspacePanel { error, loading, .. }) = state.modal.as_mut() {
+        *error = Some(message);
+        *loading = false;
+    }
+}
+
+pub fn apply_host_action_result(state: &mut AppState, text: String) {
+    let Some(session_id) = state.active_session_id.clone() else {
+        set_status_notice(state, text);
+        return;
+    };
+    let tab = state.session_tabs.entry(session_id).or_default();
+    let id = format!("host-action-{}-{}", tab.entries.len(), state.notice_seq);
+    state.notice_seq = state.notice_seq.wrapping_add(1);
+    tab.entries.push(TranscriptEntryDto::System { id, text });
+    tab.entries_version = tab.entries_version.wrapping_add(1);
+    tab.unread = false;
+}
+
 pub fn execute_slash_command(state: &mut AppState, raw: &str) {
     let trimmed = raw.trim();
     let mut parts = trimmed.splitn(2, char::is_whitespace);
@@ -2154,7 +2418,14 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
             }
         }
         "/effort" => {
-            set_effort_from_arg(state, arg);
+            if arg.is_empty() {
+                open_settings(state, Some(SettingsSection::Context));
+            } else {
+                set_effort_from_arg(state, arg);
+            }
+        }
+        "/sampling" | "/temperature" => {
+            open_settings(state, Some(SettingsSection::Context));
         }
         "/agent" => {
             if arg.is_empty() {
@@ -2173,6 +2444,53 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
                 && let Some(t) = crate::transport::current()
             {
                 t.apply_agent(sid, arg.to_owned());
+            }
+        }
+        "/context" => {
+            open_workspace_panel(state, WorkspacePanelTab::Context);
+            if let Some(transport) = crate::transport::current() {
+                transport.run_host_action("/context".to_owned());
+            }
+        }
+        "/memory" => {
+            open_workspace_panel(state, WorkspacePanelTab::Memory);
+            if let Some(transport) = crate::transport::current() {
+                transport.fetch_memories();
+            }
+        }
+        "/routing" | "/routes" => {
+            open_workspace_panel(state, WorkspacePanelTab::Routing);
+            if let Some(transport) = crate::transport::current() {
+                transport.fetch_routes();
+            }
+        }
+        "/packs" | "/definitions" => {
+            open_workspace_panel(state, WorkspacePanelTab::Packs);
+            if let Some(transport) = crate::transport::current() {
+                transport.fetch_packs();
+                transport.fetch_definitions();
+            }
+        }
+        "/subagent" | "/subagents" => {
+            if arg.is_empty() {
+                open_workspace_panel(state, WorkspacePanelTab::Subagent);
+            } else if let Some(transport) = crate::transport::current() {
+                transport.run_host_action(trimmed.to_string());
+            } else {
+                set_status_notice(state, "Host actions need a live server connection.");
+            }
+        }
+        "/vault-reset" => {
+            state.modal = Some(ActiveModal::VaultReset {
+                input: TextBuffer::new(""),
+                error: None,
+            });
+        }
+        "/remember" | "/forget" | "/pin" | "/pack" => {
+            if let Some(transport) = crate::transport::current() {
+                transport.run_host_action(trimmed.to_string());
+            } else {
+                set_status_notice(state, "Host actions need a live server connection.");
             }
         }
         "/agents" => {
@@ -2199,8 +2517,11 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
             }
         }
         "/skills" => {
-            state.draft.replace_text("@skill/");
-            update_completion(state);
+            open_workspace_panel(state, WorkspacePanelTab::Packs);
+            if let Some(transport) = crate::transport::current() {
+                transport.fetch_definitions();
+                transport.fetch_packs();
+            }
         }
         "/search" | "/tv" | "/find" => {
             open_search_modal(state, meerai_web_protocol::SearchModeDto::Files, arg);
@@ -3796,6 +4117,13 @@ mod tests {
                 status: "succeeded".to_owned(),
                 report: None,
                 child_session_id: None,
+                model: None,
+                approval_mode: "ask".to_owned(),
+                steps_used: 0,
+                max_steps: 0,
+                usage: UsageDto::default(),
+                est_cost_usd: None,
+                active_tool: None,
             },
         ];
         let blocks = group_transcript_blocks(&entries);

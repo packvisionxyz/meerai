@@ -268,7 +268,7 @@ pub struct TurnMetricsDto {
     pub tokens_per_sec: Option<f64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -314,6 +314,20 @@ pub enum TranscriptEntryDto {
         report: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         child_session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default)]
+        approval_mode: String,
+        #[serde(default)]
+        steps_used: usize,
+        #[serde(default)]
+        max_steps: usize,
+        #[serde(default)]
+        usage: UsageDto,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        est_cost_usd: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_tool: Option<String>,
     },
     Question {
         id: String,
@@ -363,6 +377,55 @@ pub struct SessionDetailDto {
     pub usage: UsageDto,
     #[serde(default)]
     pub metrics: TurnMetricsDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextBreakdownDto>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextBreakdownDto {
+    #[serde(default)]
+    pub context_window_tokens: u64,
+    #[serde(default)]
+    pub high_watermark_tokens: u64,
+    #[serde(default)]
+    pub estimated_total_tokens: u64,
+    #[serde(default)]
+    pub system_prompt_tokens: u64,
+    #[serde(default)]
+    pub tool_schemas_tokens: u64,
+    #[serde(default)]
+    pub memory_tokens: u64,
+    #[serde(default)]
+    pub user_messages_tokens: u64,
+    #[serde(default)]
+    pub assistant_tokens: u64,
+    #[serde(default)]
+    pub tool_results_tokens: u64,
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+    #[serde(default)]
+    pub compaction_summary_tokens: u64,
+    #[serde(default)]
+    pub spilled_blob_count: usize,
+    #[serde(default)]
+    pub cleared_tool_results_count: usize,
+    #[serde(default)]
+    pub pinned_turn_ids: Vec<String>,
+    #[serde(default)]
+    pub turn_ids: Vec<String>,
+    #[serde(default)]
+    pub turns_in_verbatim_window: usize,
+    #[serde(default)]
+    pub verbatim_window_turns: usize,
+    #[serde(default)]
+    pub reasoning_pruning: bool,
+    #[serde(default)]
+    pub clear_old_tool_results: bool,
+    #[serde(default)]
+    pub spilled_blobs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt_cached_tokens: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -474,6 +537,8 @@ pub struct ContextSettingsDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps_per_turn: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_limit_continuations: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_session_tokens: Option<u64>,
@@ -483,6 +548,10 @@ pub struct ContextSettingsDto {
     pub summarizer_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_edit_diagnostics: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_memory: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_prompt_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -636,6 +705,10 @@ pub enum ViewEvent {
     },
     SessionUpdated {
         session: SessionSummaryDto,
+    },
+    ContextUpdated {
+        session_id: String,
+        breakdown: ContextBreakdownDto,
     },
     SessionActivated {
         session_id: String,
@@ -1110,6 +1183,13 @@ mod tests {
                 status: "running".to_owned(),
                 report: None,
                 child_session_id: Some("ses-child".to_owned()),
+                model: None,
+                approval_mode: "ask".to_owned(),
+                steps_used: 0,
+                max_steps: 0,
+                usage: UsageDto::default(),
+                est_cost_usd: None,
+                active_tool: None,
             },
             TranscriptEntryDto::Question {
                 id: "q-1".to_owned(),
@@ -1179,6 +1259,7 @@ mod tests {
                 pending_questions: Vec::new(),
                 usage: UsageDto::default(),
                 metrics: TurnMetricsDto::default(),
+                context: None,
             }),
             file_changes: vec![FileChangeDto {
                 status: "M".to_owned(),
@@ -1346,4 +1427,124 @@ mod tests {
         let decoded_created: CreateSessionResponse = serde_json::from_str(&created_json).unwrap();
         assert_eq!(decoded_created, created);
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostActionRequest {
+    pub command: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostActionResponse {
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlobResponse {
+    pub content: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryDto {
+    pub id: String,
+    pub project_root: String,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_session_id: Option<String>,
+    pub pinned: bool,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteDto {
+    pub task_type: String,
+    pub provider: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens_per_turn: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackDto {
+    pub id: String,
+    pub source_kind: String,
+    pub source_uri: String,
+    pub pinned_rev: String,
+    pub enabled: bool,
+    pub trusted: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefinitionInfoDto {
+    pub id: String,
+    pub kind: String,
+    pub source: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_invocable: Option<bool>,
+    pub token_estimate: u64,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub supporting_files: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShadowedDefinitionDto {
+    pub id: String,
+    pub kind: String,
+    pub source: String,
+    pub path: String,
+    pub kept_source: String,
+    pub kept_path: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefinitionsDiagnosticsDto {
+    #[serde(default)]
+    pub agents: Vec<DefinitionInfoDto>,
+    #[serde(default)]
+    pub skills: Vec<DefinitionInfoDto>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub shadows: Vec<ShadowedDefinitionDto>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoriesResponse {
+    pub memories: Vec<MemoryDto>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutesResponse {
+    pub routes: Vec<RouteDto>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PacksResponse {
+    pub packs: Vec<PackDto>,
 }

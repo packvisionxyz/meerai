@@ -89,7 +89,7 @@ pub struct TurnMetricsSnapshot {
     pub tokens_per_sec: Option<f64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type", content = "data")]
 pub enum LiveEntry {
     User {
@@ -130,6 +130,20 @@ pub enum LiveEntry {
         report: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         child_session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default)]
+        approval_mode: String,
+        #[serde(default)]
+        steps_used: usize,
+        #[serde(default)]
+        max_steps: usize,
+        #[serde(default)]
+        usage: Usage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        est_cost_usd: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_tool: Option<String>,
     },
     Question {
         id: String,
@@ -166,6 +180,8 @@ pub struct LiveSessionDetail {
     pub pending_questions: Vec<QuestionRequest>,
     pub usage: UsageStatsSnapshot,
     pub metrics: TurnMetricsSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<meerai_session::ContextBreakdown>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -209,6 +225,10 @@ pub enum RegistryEventKind {
     },
     SessionUpdated {
         session: LiveSessionSummary,
+    },
+    ContextUpdated {
+        session_id: SessionId,
+        breakdown: meerai_session::ContextBreakdown,
     },
     SessionActivated {
         session_id: SessionId,
@@ -329,6 +349,7 @@ struct SessionRecord {
     pending_questions: VecDeque<QuestionRequest>,
     usage: UsageStatsSnapshot,
     metrics: TurnMetricsSnapshot,
+    context: Option<meerai_session::ContextBreakdown>,
     turn_started_instant: Option<Instant>,
     tool_items: HashMap<ItemId, String>,
     recovery_pending: bool,
@@ -346,6 +367,7 @@ impl SessionRecord {
             pending_questions: self.pending_questions.iter().cloned().collect(),
             usage: self.usage.clone(),
             metrics: self.metrics.clone(),
+            context: self.context.clone(),
         }
     }
 
@@ -526,6 +548,7 @@ impl SessionRegistry {
             pending_questions: VecDeque::new(),
             usage: UsageStatsSnapshot::default(),
             metrics,
+            context: None,
             turn_started_instant: None,
             tool_items: HashMap::new(),
             recovery_pending: false,
@@ -566,6 +589,14 @@ impl SessionRegistry {
         state.pump_handles.insert(session_id, handle);
 
         summary
+    }
+
+    pub fn context_for(&self, id: &SessionId) -> Option<meerai_session::ContextBreakdown> {
+        let state = self.inner.state.lock().unwrap();
+        state
+            .sessions
+            .get(id)
+            .and_then(|record| record.context.clone())
     }
 
     pub fn snapshot(&self) -> RegistrySnapshot {
@@ -945,7 +976,10 @@ impl SessionRegistry {
             record.cmd_tx.clone()
         };
         cmd_tx
-            .send(AgentCommand::Compact)
+            .send(AgentCommand::Compact {
+                focus: None,
+                from_turn_id: None,
+            })
             .map_err(|_| HostError::WorkerClosed)
     }
 
@@ -1646,6 +1680,13 @@ fn apply_agent_event(
                 status,
                 report,
                 child_session_id,
+                model,
+                approval_mode,
+                steps_used,
+                max_steps,
+                usage,
+                est_cost_usd,
+                active_tool,
             } => {
                 state.flush_streaming(session_id, broadcast_tx);
                 let entry_id = id.to_string();
@@ -1655,6 +1696,13 @@ fn apply_agent_event(
                     status: item_status_str(status).to_string(),
                     report,
                     child_session_id,
+                    model,
+                    approval_mode: approval_mode.label().to_string(),
+                    steps_used,
+                    max_steps,
+                    usage,
+                    est_cost_usd,
+                    active_tool,
                 };
                 let (updated_summary, entry) = {
                     let record = state.sessions.get_mut(session_id).unwrap();
@@ -1730,6 +1778,57 @@ fn apply_agent_event(
                     } else {
                         None
                     }
+                };
+                if let Some(entry) = updated {
+                    state.push_event(
+                        broadcast_tx,
+                        RegistryEventKind::EntryUpdated {
+                            session_id: session_id.clone(),
+                            entry,
+                        },
+                    );
+                }
+            }
+            ItemDelta::SubagentProgress {
+                steps_used,
+                max_steps,
+                usage,
+                est_cost_usd,
+                active_tool,
+            } => {
+                let updated = {
+                    let record = state.sessions.get_mut(session_id).unwrap();
+                    let entry_id = record.tool_items.get(&item_id).cloned();
+                    entry_id.and_then(|entry_id| {
+                        record
+                            .entries
+                            .iter_mut()
+                            .rev()
+                            .find(|entry| {
+                                matches!(
+                                    entry,
+                                    LiveEntry::Subagent { id, .. } if *id == entry_id
+                                )
+                            })
+                            .and_then(|entry| match entry {
+                                LiveEntry::Subagent {
+                                    steps_used: slot_steps,
+                                    max_steps: slot_max,
+                                    usage: slot_usage,
+                                    est_cost_usd: slot_cost,
+                                    active_tool: slot_tool,
+                                    ..
+                                } => {
+                                    *slot_steps = steps_used;
+                                    *slot_max = max_steps;
+                                    *slot_usage = usage;
+                                    *slot_cost = est_cost_usd;
+                                    *slot_tool = active_tool;
+                                    Some(entry.clone())
+                                }
+                                _ => None,
+                            })
+                    })
                 };
                 if let Some(entry) = updated {
                     state.push_event(
@@ -1860,6 +1959,7 @@ fn apply_agent_event(
                 status,
                 report,
                 child_session_id,
+                ..
             } => {
                 let (entry, updated_summary) = {
                     let record = state.sessions.get_mut(session_id).unwrap();
@@ -1994,6 +2094,19 @@ fn apply_agent_event(
                 RegistryEventKind::QuestionResolved {
                     session_id: session_id.clone(),
                     request_id,
+                },
+            );
+        }
+        AgentEvent::ContextUpdated { breakdown } => {
+            {
+                let record = state.sessions.get_mut(session_id).unwrap();
+                record.context = Some(breakdown.clone());
+            }
+            state.push_event(
+                broadcast_tx,
+                RegistryEventKind::ContextUpdated {
+                    session_id: session_id.clone(),
+                    breakdown,
                 },
             );
         }
@@ -2393,6 +2506,13 @@ fn update_or_push_subagent_entry(
         status: status.to_string(),
         report,
         child_session_id,
+        model: None,
+        approval_mode: ApprovalMode::Ask.label().to_string(),
+        steps_used: 0,
+        max_steps: 0,
+        usage: Usage::default(),
+        est_cost_usd: None,
+        active_tool: None,
     };
     record.entries.push(entry.clone());
     entry
@@ -2483,6 +2603,13 @@ fn replay_entry_to_live(
             status: replay_status_str(sub.status).to_string(),
             report: sub.report,
             child_session_id: sub.child_session_id,
+            model: None,
+            approval_mode: ApprovalMode::Ask.label().to_string(),
+            steps_used: 0,
+            max_steps: 0,
+            usage: Usage::default(),
+            est_cost_usd: None,
+            active_tool: None,
         },
         ReplayEntry::Question(q) => LiveEntry::Question {
             id: q.request_id,

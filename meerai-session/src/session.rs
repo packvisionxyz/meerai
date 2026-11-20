@@ -1,4 +1,4 @@
-use std::io::{ErrorKind, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -7,28 +7,26 @@ use anyhow::{Context, Result};
 use genai::chat::ChatMessage;
 use meerai_core::ToolObservation;
 use meerai_core::env::now_millis;
+use meerai_store::Store;
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
 
-use crate::blob::{BLOB_DIR_NAME, BlobStore};
+use crate::blob::BlobStore;
 use crate::compaction::{COMPACTION_INTERRUPTED, open_compactions, open_turns, turn_start};
 use crate::event::{
-    AbortCause, CompactionResult, InputSource, LoggedEvent, RewindScope, Seq, SeqRange,
-    SessionEvent, TurnEndReason,
+    AbortCause, CompactionResult, LoggedEvent, RewindScope, Seq, SeqRange, SessionEvent,
+    TurnEndReason,
 };
 use crate::ids::{CallId, SessionId, TurnId};
 use crate::projection::{ProjectionPolicy, derive_messages, shadowed_ranges};
 use crate::{perms, storage};
 
-const META_FILE: &str = "meta.json";
 const LOCK_FILE: &str = "session.lock";
 const TOOL_INTERRUPTED: &str = "tool execution interrupted before completion";
 
-pub const DEFAULT_ROTATION_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
-
 pub fn default_sessions_root() -> PathBuf {
-    meerai_core::env::sessions_dir()
+    storage::default_root()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -204,13 +202,11 @@ struct SessionInner {
     id: SessionId,
     dir: Option<PathBuf>,
     config: Option<SessionConfig>,
+    store: Store,
     events: RwLock<Vec<LoggedEvent>>,
     meta: RwLock<SessionMeta>,
     next_seq: AtomicU64,
-    generation: AtomicU64,
-    active_size: AtomicU64,
-    rotation_threshold: AtomicU64,
-    write_guard: tokio::sync::Mutex<()>,
+    write_guard: Arc<tokio::sync::Mutex<()>>,
     _lock: Option<SessionLock>,
 }
 
@@ -272,18 +268,21 @@ fn read_lock_holder(lock_path: &Path) -> String {
 
 impl Session {
     pub fn memory(id: SessionId, cwd: PathBuf) -> Self {
+        let store = Store::open(":memory:").expect("open in-memory session store");
+        let meta = SessionMeta::new(id.clone(), cwd.clone());
+        store
+            .immediate(|tx| storage::insert_session(tx, &cwd, &meta))
+            .expect("insert in-memory session");
         Self {
             inner: Arc::new(SessionInner {
-                meta: RwLock::new(SessionMeta::new(id.clone(), cwd)),
+                meta: RwLock::new(meta),
                 id,
                 dir: None,
                 config: None,
+                store,
                 events: RwLock::new(Vec::new()),
                 next_seq: AtomicU64::new(1),
-                generation: AtomicU64::new(0),
-                active_size: AtomicU64::new(0),
-                rotation_threshold: AtomicU64::new(DEFAULT_ROTATION_THRESHOLD_BYTES),
-                write_guard: tokio::sync::Mutex::new(()),
+                write_guard: Arc::new(tokio::sync::Mutex::new(())),
                 _lock: None,
             }),
         }
@@ -294,12 +293,7 @@ impl Session {
     }
 
     pub async fn load_events(config: &SessionConfig, id: &SessionId) -> Result<Vec<LoggedEvent>> {
-        let dir = session_dir(&config.root, id)?;
-        if !path_is_dir(&dir).await? {
-            anyhow::bail!("session not found: {id}");
-        }
-        let log = storage::load(&dir).await?;
-        Ok(log.events)
+        Ok(read_sqlite_session(config, id).await?.1)
     }
 
     pub async fn open_or_create(
@@ -317,30 +311,36 @@ impl Session {
         create: bool,
     ) -> Result<Self> {
         let dir = session_dir(&config.root, &id)?;
-        if create {
-            perms::create_private_dir(&dir).await?;
-        } else if path_is_dir(&dir).await? {
-            perms::tighten_dir(&dir).await?;
-        } else {
-            anyhow::bail!("session not found: {id}");
+        if !create {
+            let root = config.root.clone();
+            let id = id.clone();
+            storage::blocking(move || {
+                let store = storage::read_only(&root)?
+                    .with_context(|| format!("session not found: {id}"))?;
+                store
+                    .read(|conn| storage::meta(conn, &id))?
+                    .with_context(|| format!("session not found: {id}"))
+            })
+            .await?;
         }
+        storage::validate_dir(&dir)?;
+        perms::create_private_dir(&dir).await?;
         let lock = SessionLock::acquire(&dir, &id)?;
         tighten_existing_files(&dir).await;
 
-        let meta_path = dir.join(META_FILE);
-        let (mut meta, existed) = match fs::read_to_string(&meta_path).await {
-            Ok(raw) => {
-                let meta = serde_json::from_str(&raw)
-                    .with_context(|| format!("failed to parse {}", meta_path.display()))?;
-                (meta, true)
-            }
-            Err(err) if err.kind() == ErrorKind::NotFound => {
-                (SessionMeta::new(id.clone(), cwd), false)
-            }
-            Err(err) => {
-                return Err(anyhow::Error::from(err)
-                    .context(format!("failed to read {}", meta_path.display())));
-            }
+        let root = config.root.clone();
+        let stored_id = id.clone();
+        let (store, meta) = storage::blocking(move || {
+            let store = storage::open(&root)?;
+            let meta = store.read(|conn| storage::meta(conn, &stored_id))?;
+            Ok((store, meta))
+        })
+        .await?;
+        let existed = meta.is_some();
+        let mut meta = match meta {
+            Some(meta) => meta,
+            None if create => SessionMeta::new(id.clone(), cwd),
+            None => anyhow::bail!("session not found: {id}"),
         };
 
         let git = GitState::detect(&config.workspace).await;
@@ -357,31 +357,36 @@ impl Session {
             meta.git_sha = Some(sha);
             meta_changed = true;
         }
-        if meta_changed {
-            write_meta(&dir, &meta).await?;
-        }
-
-        let log = storage::load(&dir).await?;
-        let next_seq = log
-            .events
-            .iter()
-            .map(|logged| logged.seq.0)
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let stored_meta = meta.clone();
+        let workspace = config.workspace.clone();
+        let events = {
+            let store = store.clone();
+            storage::blocking(move || {
+                if meta_changed {
+                    store.immediate(|tx| {
+                        if existed {
+                            storage::update_meta(tx, &stored_meta)
+                        } else {
+                            storage::insert_session(tx, &workspace, &stored_meta)
+                        }
+                    })?;
+                }
+                store.read(|conn| storage::events(conn, &stored_meta.id))
+            })
+            .await?
+        };
+        let next_seq = events.iter().map(|logged| logged.seq.0).max().unwrap_or(0) + 1;
 
         let session = Self {
             inner: Arc::new(SessionInner {
                 id,
                 dir: Some(dir),
                 config: Some(config.clone()),
-                events: RwLock::new(log.events),
+                store,
+                events: RwLock::new(events),
                 meta: RwLock::new(meta),
                 next_seq: AtomicU64::new(next_seq),
-                generation: AtomicU64::new(log.active_generation),
-                active_size: AtomicU64::new(log.active_size),
-                rotation_threshold: AtomicU64::new(DEFAULT_ROTATION_THRESHOLD_BYTES),
-                write_guard: tokio::sync::Mutex::new(()),
+                write_guard: Arc::new(tokio::sync::Mutex::new(())),
                 _lock: Some(lock),
             }),
         };
@@ -391,37 +396,58 @@ impl Session {
         Ok(session)
     }
 
-    pub fn rotation_threshold(&self) -> u64 {
-        self.inner.rotation_threshold.load(Ordering::Relaxed)
-    }
-
-    pub fn set_rotation_threshold(&self, bytes: u64) {
-        self.inner
-            .rotation_threshold
-            .store(bytes, Ordering::Relaxed);
-    }
-
     pub fn blob_store(&self) -> Option<BlobStore> {
-        self.inner.dir.as_ref().map(BlobStore::for_session)
+        Some(BlobStore::new(
+            self.inner.store.clone(),
+            self.inner.id.clone(),
+        ))
+    }
+
+    pub async fn read_blob(&self, key: &str) -> Result<Option<String>> {
+        if key.contains('/') || key.contains('\\') || key.contains("..") {
+            anyhow::bail!("invalid blob key");
+        }
+        match self.blob_store() {
+            Some(blobs) => blobs.get(key),
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_blobs(&self) -> Result<Vec<(String, u64)>> {
+        match self.blob_store() {
+            Some(blobs) => blobs.list(),
+            None => Ok(Vec::new()),
+        }
     }
 
     pub async fn append(&self, event: SessionEvent) -> Result<Seq> {
-        let _guard = self.inner.write_guard.lock().await;
-        let seq = Seq(self.inner.next_seq.fetch_add(1, Ordering::Relaxed));
-        let logged = LoggedEvent { seq, event };
-
-        if let Some(dir) = &self.inner.dir {
-            let dir = dir.clone();
-            self.persist(&dir, &logged).await?;
-        }
-
-        let turn_ended = matches!(&logged.event, SessionEvent::TurnEnded { .. });
-        write_lock(&self.inner.events).push(logged);
-
-        if turn_ended && let Some(dir) = &self.inner.dir {
-            let _ = self.touch_meta(dir).await;
-        }
-        Ok(seq)
+        let guard = self.inner.write_guard.clone().lock_owned().await;
+        let store = self.inner.store.clone();
+        let inner = self.inner.clone();
+        storage::blocking(move || {
+            let _guard = guard;
+            let seq = Seq(inner.next_seq.load(Ordering::Relaxed));
+            let logged = LoggedEvent { seq, event };
+            let updated_meta = matches!(&logged.event, SessionEvent::TurnEnded { .. }).then(|| {
+                let mut meta = read_lock(&inner.meta).clone();
+                meta.updated_at_ms = now_millis();
+                meta
+            });
+            store.immediate(|tx| {
+                storage::insert_event(tx, &inner.id, &logged)?;
+                if let Some(meta) = &updated_meta {
+                    storage::update_meta(tx, meta)?;
+                }
+                Ok(())
+            })?;
+            inner.next_seq.store(seq.0 + 1, Ordering::Relaxed);
+            write_lock(&inner.events).push(logged);
+            if let Some(meta) = updated_meta {
+                *write_lock(&inner.meta) = meta;
+            }
+            Ok(seq)
+        })
+        .await
     }
 
     pub fn events(&self) -> Vec<LoggedEvent> {
@@ -441,8 +467,10 @@ impl Session {
     }
 
     pub fn snapshot_store(&self) -> Option<crate::SnapshotStore> {
-        self.dir()
-            .map(|dir| crate::SnapshotStore::new(dir.join("snapshots")))
+        Some(crate::SnapshotStore::new(
+            self.inner.store.clone(),
+            self.inner.id.clone(),
+        ))
     }
 
     pub fn config(&self) -> Option<&SessionConfig> {
@@ -454,26 +482,20 @@ impl Session {
     }
 
     pub async fn update_meta(&self, f: impl FnOnce(&mut SessionMeta)) -> Result<()> {
-        let meta = {
-            let mut meta = write_lock(&self.inner.meta);
-            f(&mut meta);
-            meta.updated_at_ms = now_millis();
-            meta.clone()
-        };
-
-        if let Some(dir) = &self.inner.dir {
-            write_meta(dir, &meta).await?;
-        }
-        Ok(())
-    }
-
-    async fn touch_meta(&self, dir: &Path) -> Result<()> {
-        let meta = {
-            let mut meta = write_lock(&self.inner.meta);
-            meta.updated_at_ms = now_millis();
-            meta.clone()
-        };
-        write_meta(dir, &meta).await
+        let guard = self.inner.write_guard.clone().lock_owned().await;
+        let mut meta = self.meta();
+        f(&mut meta);
+        anyhow::ensure!(meta.id == self.inner.id, "cannot change session id");
+        meta.updated_at_ms = now_millis();
+        let store = self.inner.store.clone();
+        let inner = self.inner.clone();
+        storage::blocking(move || {
+            let _guard = guard;
+            store.immediate(|tx| storage::update_meta(tx, &meta))?;
+            *write_lock(&inner.meta) = meta;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn set_title(&self, title: impl Into<String>) -> Result<()> {
@@ -515,27 +537,81 @@ impl Session {
     }
 
     pub async fn flush(&self) -> Result<()> {
-        let Some(dir) = &self.inner.dir else {
-            return Ok(());
-        };
-        let generation = self.inner.generation.load(Ordering::Relaxed);
-        let path = dir.join(storage::active_name(generation));
-
-        match fs::OpenOptions::new().append(true).open(&path).await {
-            Ok(file) => file
-                .sync_all()
-                .await
-                .with_context(|| format!("failed to sync {}", path.display())),
-            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-            Err(err) => {
-                Err(anyhow::Error::from(err).context(format!("failed to open {}", path.display())))
-            }
-        }
+        let guard = self.inner.write_guard.clone().lock_owned().await;
+        let store = self.inner.store.clone();
+        storage::blocking(move || {
+            let _guard = guard;
+            storage::flush(&store)
+        })
+        .await
     }
 
     pub fn derive_messages(&self, policy: &ProjectionPolicy) -> Vec<ChatMessage> {
         let events = self.events();
         derive_messages(&events, policy)
+    }
+
+    pub fn search_events(&self, query: &str, limit: usize) -> Result<Vec<LoggedEvent>> {
+        let Some(fts) = fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let limit = i64::try_from(limit.max(1))?;
+        self.inner.store.read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT e.seq, e.payload_json
+                 FROM session_events_fts
+                 JOIN session_events e
+                   ON e.session_id = session_events_fts.session_id
+                  AND e.seq = session_events_fts.seq
+                 WHERE session_events_fts.session_id = ?1
+                   AND session_events_fts MATCH ?2
+                 ORDER BY e.seq
+                 LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(params![self.inner.id.as_str(), fts, limit], |row| {
+                let seq = Seq(row.get(0)?);
+                let raw: String = row.get(1)?;
+                Ok((seq, raw))
+            })?;
+            let mut events = Vec::new();
+            for row in rows {
+                let (seq, raw) = row?;
+                let event = serde_json::from_str(&raw)
+                    .with_context(|| format!("decode session event {}", seq.0))?;
+                events.push(LoggedEvent { seq, event });
+            }
+            Ok(events)
+        })
+    }
+
+    pub async fn record_usage(
+        &self,
+        turn_id: Option<&TurnId>,
+        provider: &str,
+        model: &str,
+        task_type: Option<&str>,
+        usage: &crate::event::Usage,
+        est_cost_usd: Option<f64>,
+    ) -> Result<()> {
+        let entry = meerai_store::UsageEntry {
+            session_id: self.inner.id.as_str().to_string(),
+            parent_session_id: self
+                .meta()
+                .parent_session_id
+                .map(|id| id.as_str().to_string()),
+            turn_id: turn_id.map(|turn| turn.as_str().to_string()),
+            agent_id: None,
+            task_type: task_type.map(str::to_string),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            prompt_tokens: usage.prompt_tokens.unwrap_or(0).max(0) as u64,
+            completion_tokens: usage.completion_tokens.unwrap_or(0).max(0) as u64,
+            cached_tokens: usage.cached_tokens.unwrap_or(0).max(0) as u64,
+            est_cost_usd,
+            ts_ms: now_millis(),
+        };
+        let store = self.inner.store.clone();
+        storage::blocking(move || store.usage().record(&entry)).await
     }
 
     pub async fn fork(
@@ -553,23 +629,8 @@ impl Session {
         source_id: &SessionId,
         boundary_turn: Option<&TurnId>,
     ) -> Result<Session> {
-        let dir = session_dir(&config.root, source_id)?;
-        if !path_is_dir(&dir).await? {
-            anyhow::bail!("session not found: {source_id}");
-        }
-        let log = storage::load(&dir).await?;
-        let meta = match fs::read_to_string(dir.join(META_FILE)).await {
-            Ok(raw) => serde_json::from_str(&raw)
-                .with_context(|| format!("failed to parse {}", dir.join(META_FILE).display()))?,
-            Err(err) if err.kind() == ErrorKind::NotFound => {
-                SessionMeta::new(source_id.clone(), config.workspace.clone())
-            }
-            Err(err) => {
-                return Err(anyhow::Error::from(err)
-                    .context(format!("failed to read {}", dir.join(META_FILE).display())));
-            }
-        };
-        Self::fork_from_parts(config, source_id, &meta, &log.events, boundary_turn).await
+        let (meta, events) = read_sqlite_session(config, source_id).await?;
+        Self::fork_from_parts(config, source_id, &meta, &events, boundary_turn).await
     }
 
     async fn fork_from_parts(
@@ -735,82 +796,24 @@ impl Session {
         Ok(())
     }
 
-    async fn persist(&self, dir: &Path, logged: &LoggedEvent) -> Result<()> {
-        let mut line = serde_json::to_string(logged)
-            .with_context(|| format!("failed to serialize event {}", logged.seq.0))?;
-        line.push('\n');
-        let bytes = line.as_bytes();
-
-        let threshold = self.inner.rotation_threshold.load(Ordering::Relaxed);
-        let size = self.inner.active_size.load(Ordering::Relaxed);
-        if size > 0 && size.saturating_add(bytes.len() as u64) > threshold {
-            let generation = self.inner.generation.load(Ordering::Relaxed);
-            storage::seal(dir, generation).await?;
-            self.inner
-                .generation
-                .store(generation + 1, Ordering::Relaxed);
-            self.inner.active_size.store(0, Ordering::Relaxed);
-        }
-
-        let generation = self.inner.generation.load(Ordering::Relaxed);
-        let path = dir.join(storage::active_name(generation));
-        let mut file = perms::append_options()
-            .open(&path)
-            .await
-            .with_context(|| format!("failed to open {}", path.display()))?;
-        file.write_all(bytes)
-            .await
-            .with_context(|| format!("failed to write {}", path.display()))?;
-        file.flush()
-            .await
-            .with_context(|| format!("failed to flush {}", path.display()))?;
-        drop(file);
-        perms::tighten_file(&path).await?;
-        self.inner
-            .active_size
-            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-
-        Ok(())
-    }
-
     async fn append_preserved(&self, events: &[LoggedEvent]) -> Result<()> {
-        let Some(dir) = &self.inner.dir else {
-            write_lock(&self.inner.events).extend_from_slice(events);
-            self.advance_next_seq(events);
-            return Ok(());
-        };
-
-        let _guard = self.inner.write_guard.lock().await;
-        let generation = self.inner.generation.load(Ordering::Relaxed);
-        let path = dir.join(storage::active_name(generation));
-        let mut file = perms::append_options()
-            .open(&path)
-            .await
-            .with_context(|| format!("failed to open {}", path.display()))?;
-
-        let mut written = 0u64;
-        for logged in events {
-            let mut line = serde_json::to_string(logged)
-                .with_context(|| format!("failed to serialize event {}", logged.seq.0))?;
-            line.push('\n');
-            file.write_all(line.as_bytes())
-                .await
-                .with_context(|| format!("failed to write {}", path.display()))?;
-            written += line.len() as u64;
-        }
-        file.flush()
-            .await
-            .with_context(|| format!("failed to flush {}", path.display()))?;
-        file.sync_all()
-            .await
-            .with_context(|| format!("failed to sync {}", path.display()))?;
-        drop(file);
-        perms::tighten_file(&path).await?;
-        self.inner.active_size.fetch_add(written, Ordering::Relaxed);
-
-        write_lock(&self.inner.events).extend_from_slice(events);
-        self.advance_next_seq(events);
-        Ok(())
+        let guard = self.inner.write_guard.clone().lock_owned().await;
+        let store = self.inner.store.clone();
+        let session = self.clone();
+        let events = events.to_vec();
+        storage::blocking(move || {
+            let _guard = guard;
+            store.immediate(|tx| {
+                for event in &events {
+                    storage::insert_event(tx, session.id(), event)?;
+                }
+                Ok(())
+            })?;
+            write_lock(&session.inner.events).extend_from_slice(&events);
+            session.advance_next_seq(&events);
+            Ok(())
+        })
+        .await
     }
 
     fn advance_next_seq(&self, events: &[LoggedEvent]) {
@@ -818,6 +821,15 @@ impl Session {
             self.inner.next_seq.fetch_max(max + 1, Ordering::Relaxed);
         }
     }
+}
+
+fn fts_query(query: &str) -> Option<String> {
+    let tokens: Vec<String> = query
+        .split_whitespace()
+        .filter(|token| !matches!(*token, "AND" | "OR" | "NOT" | "NEAR"))
+        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+        .collect();
+    (!tokens.is_empty()).then(|| tokens.join(" "))
 }
 
 fn latest_closed_turn_in_events(events: &[LoggedEvent]) -> Option<TurnId> {
@@ -852,96 +864,40 @@ fn fork_prefix(events: &[LoggedEvent], boundary_turn: &TurnId) -> Result<Vec<Log
 }
 
 fn session_dir(root: &Path, id: &SessionId) -> Result<PathBuf> {
-    let name = id.as_str();
-    if !crate::ids::is_safe_segment(name) {
-        anyhow::bail!("invalid session id: {name}");
-    }
-    Ok(root.join(name))
+    storage::validate_id(id)?;
+    Ok(root.join(id.as_str()))
 }
 
-async fn path_is_dir(path: &Path) -> Result<bool> {
-    match fs::metadata(path).await {
-        Ok(metadata) => Ok(metadata.is_dir()),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
-        Err(err) => {
-            Err(anyhow::Error::from(err).context(format!("failed to inspect {}", path.display())))
-        }
-    }
+async fn read_sqlite_session(
+    config: &SessionConfig,
+    id: &SessionId,
+) -> Result<(SessionMeta, Vec<LoggedEvent>)> {
+    let root = config.root.clone();
+    let id = id.clone();
+    storage::blocking(move || {
+        let store =
+            storage::read_only(&root)?.with_context(|| format!("session not found: {id}"))?;
+        store.read(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let meta =
+                storage::meta(&tx, &id)?.with_context(|| format!("session not found: {id}"))?;
+            let events = storage::events(&tx, &id)?;
+            tx.commit()?;
+            Ok((meta, events))
+        })
+    })
+    .await
 }
 
 async fn tighten_existing_files(dir: &Path) {
-    let Ok(mut entries) = fs::read_dir(dir).await else {
-        return;
-    };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type().await else {
-            continue;
-        };
-        if file_type.is_dir() {
-            if name == BLOB_DIR_NAME {
-                let _ = perms::tighten_dir(&path).await;
-                tighten_blob_files(&path).await;
-            }
-            continue;
-        }
-        if name == META_FILE || name == LOCK_FILE || storage::is_log_file_name(name) {
-            let _ = perms::tighten_file(&path).await;
-        }
-    }
-}
-
-async fn tighten_blob_files(dir: &Path) {
-    let Ok(mut entries) = fs::read_dir(dir).await else {
-        return;
-    };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let Ok(file_type) = entry.file_type().await else {
-            continue;
-        };
-        if file_type.is_file() {
-            let _ = perms::tighten_file(&entry.path()).await;
-        }
-    }
+    let _ = perms::tighten_file(&dir.join(LOCK_FILE)).await;
 }
 
 pub fn list_sessions(root: &Path) -> Result<Vec<SessionSummary>> {
-    let mut summaries = Vec::new();
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(summaries),
-        Err(err) => {
-            return Err(
-                anyhow::Error::from(err).context(format!("failed to list {}", root.display()))
-            );
-        }
+    let Some(store) = storage::read_only(root)? else {
+        return Ok(Vec::new());
     };
-
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let Some(meta) = read_meta(&dir) else {
-            continue;
-        };
-        let bytes = dir_size(&dir);
-        summaries.push(SessionSummary {
-            id: meta.id,
-            dir,
-            title: meta.title,
-            model: meta.model,
-            created_at_ms: meta.created_at_ms,
-            updated_at_ms: meta.updated_at_ms,
-            bytes,
-            parent_session_id: meta.parent_session_id,
-        });
-    }
-
+    let mut summaries = store.read(|conn| storage::list(conn, root))?;
     summaries.sort_by(|left, right| {
         right
             .updated_at_ms
@@ -960,30 +916,60 @@ pub fn latest_session(root: &Path) -> Result<Option<SessionSummary>> {
         .or_else(|| sessions.into_iter().next()))
 }
 
+pub async fn read_session_blob(
+    config: &SessionConfig,
+    id: &SessionId,
+    key: &str,
+) -> Result<Option<String>> {
+    if key.contains('/') || key.contains('\\') || key.contains("..") {
+        anyhow::bail!("invalid blob key");
+    }
+    let root = config.root.clone();
+    let id = id.clone();
+    let key = key.to_string();
+    storage::blocking(move || {
+        let Some(store) = storage::read_only(&root)? else {
+            return Ok(None);
+        };
+        BlobStore::new(store, id).get(&key)
+    })
+    .await
+}
+
 pub async fn session_has_user_input(dir: &Path) -> Result<bool> {
-    let loaded = storage::load(dir).await?;
-    Ok(loaded.events.iter().any(|logged| {
-        matches!(
-            &logged.event,
-            SessionEvent::UserMessage {
-                source: InputSource::User,
-                ..
-            }
-        )
-    }))
+    let root = dir.parent().context("missing sessions root")?.to_owned();
+    let name = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("invalid session directory")?;
+    let id = SessionId::from(name);
+    storage::validate_id(&id)?;
+    storage::blocking(move || {
+        let store =
+            storage::read_only(&root)?.with_context(|| format!("session not found: {id}"))?;
+        store.read(|conn| storage::has_user_input(conn, &id))
+    })
+    .await
 }
 
 pub fn delete_session(root: &Path, id: &SessionId) -> Result<bool> {
     let dir = session_dir(root, id)?;
-    if !dir.exists() {
+    let Some(store) = storage::read_only(root)? else {
+        return Ok(false);
+    };
+    if store.read(|conn| storage::meta(conn, id))?.is_none() {
         return Ok(false);
     }
+    storage::validate_dir(&dir)?;
+    perms::create_private_dir_blocking(&dir)?;
     let lock = SessionLock::acquire(&dir, id)?;
+    let store = storage::open(root)?;
+    let deleted = store.immediate(|tx| storage::delete(tx, id))?;
     #[cfg(windows)]
     drop(lock);
     let result = match std::fs::remove_dir_all(&dir) {
         Ok(()) => Ok(true),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(deleted),
         Err(err) => {
             Err(anyhow::Error::from(err).context(format!("failed to delete {}", dir.display())))
         }
@@ -991,38 +977,6 @@ pub fn delete_session(root: &Path, id: &SessionId) -> Result<bool> {
     #[cfg(not(windows))]
     drop(lock);
     result
-}
-
-fn read_meta(dir: &Path) -> Option<SessionMeta> {
-    let raw = std::fs::read_to_string(dir.join(META_FILE)).ok()?;
-    serde_json::from_str(&raw).ok()
-}
-
-fn dir_size(path: &Path) -> u64 {
-    let mut total = 0u64;
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return total;
-    };
-    for entry in entries.flatten() {
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        if metadata.is_dir() {
-            total += dir_size(&entry.path());
-        } else {
-            total += metadata.len();
-        }
-    }
-    total
-}
-
-async fn write_meta(dir: &Path, meta: &SessionMeta) -> Result<()> {
-    let path = dir.join(META_FILE);
-    let raw = serde_json::to_string_pretty(meta)
-        .with_context(|| format!("failed to serialize {}", path.display()))?;
-    perms::write_private(&path, format!("{raw}\n").as_bytes())
-        .await
-        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
@@ -1058,6 +1012,11 @@ mod tests {
         }
     }
 
+    fn persisted_meta(root: &Path, id: &SessionId) -> SessionMeta {
+        let store = storage::read_only(root).unwrap().unwrap();
+        store.read(|conn| storage::meta(conn, id)).unwrap().unwrap()
+    }
+
     fn user(text: &str) -> SessionEvent {
         SessionEvent::UserMessage {
             source: InputSource::User,
@@ -1079,17 +1038,6 @@ mod tests {
         }
     }
 
-    async fn event_count(dir: &Path) -> usize {
-        let mut entries = fs::read_dir(dir).await.unwrap();
-        let mut count = 0;
-        while let Some(entry) = entries.next_entry().await.unwrap() {
-            if entry.metadata().await.unwrap().is_dir() {
-                count += 1;
-            }
-        }
-        count
-    }
-
     #[tokio::test]
     async fn memory_session_appends_in_memory() {
         let session = Session::memory(SessionId::new(), PathBuf::from("/tmp/workspace"));
@@ -1102,6 +1050,8 @@ mod tests {
         assert_eq!(session.events().len(), 2);
         assert!(session.dir().is_none());
         assert_eq!(session.meta().cwd, PathBuf::from("/tmp/workspace"));
+        session.set_model("gpt-5-mini").await.unwrap();
+        assert_eq!(session.meta().model.as_deref(), Some("gpt-5-mini"));
     }
 
     #[tokio::test]
@@ -1120,7 +1070,9 @@ mod tests {
 
         let expected_dir = root.join(id.as_str());
         assert_eq!(session.dir(), Some(expected_dir.as_path()));
-        assert!(expected_dir.join(META_FILE).exists());
+        assert!(expected_dir.join(LOCK_FILE).exists());
+        assert!(!expected_dir.join("meta.json").exists());
+        assert!(session_has_user_input(&expected_dir).await.unwrap());
         drop(session);
 
         let reopened = Session::open_or_create(&config, id.clone(), cwd.clone())
@@ -1137,7 +1089,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_meta_rewrites_meta_file() {
+    async fn update_meta_persists_in_sqlite() {
         let root = temp_root("meta");
         let config = config(&root);
         let id = SessionId::new();
@@ -1157,10 +1109,7 @@ mod tests {
         assert!(session.meta().updated_at_ms > 0);
         assert!(session.meta().updated_at_ms >= session.meta().created_at_ms);
 
-        let raw = fs::read_to_string(root.join(id.as_str()).join(META_FILE))
-            .await
-            .unwrap();
-        let persisted: SessionMeta = serde_json::from_str(&raw).unwrap();
+        let persisted = persisted_meta(&root, &id);
         assert_eq!(persisted.title.as_deref(), Some("Renamed"));
 
         fs::remove_dir_all(&root).await.unwrap();
@@ -1197,10 +1146,7 @@ mod tests {
         assert_eq!(meta.harness.as_deref(), Some("acp:agy"));
         assert_eq!(meta.remote_session_id.as_deref(), Some("remote-session-1"));
 
-        let raw = fs::read_to_string(root.join(id.as_str()).join(META_FILE))
-            .await
-            .unwrap();
-        let persisted: SessionMeta = serde_json::from_str(&raw).unwrap();
+        let persisted = persisted_meta(&root, &id);
         assert_eq!(persisted.harness.as_deref(), Some("acp:agy"));
         assert_eq!(
             persisted.remote_session_id.as_deref(),
@@ -1210,35 +1156,6 @@ mod tests {
         session.clear_remote_session().await.unwrap();
         assert_eq!(session.meta().harness, None);
         assert_eq!(session.meta().remote_session_id, None);
-
-        fs::remove_dir_all(&root).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn skips_malformed_log_lines() {
-        let root = temp_root("malformed");
-        let config = config(&root);
-        let id = SessionId::new();
-        let session = Session::open_or_create(&config, id.clone(), PathBuf::from("/tmp/workspace"))
-            .await
-            .unwrap();
-        session.append(user("kept")).await.unwrap();
-
-        let log_path = root.join(id.as_str()).join(storage::active_name(
-            session.inner.generation.load(Ordering::Relaxed),
-        ));
-        let mut raw = fs::read_to_string(&log_path).await.unwrap();
-        raw.push_str("{ this is not an event }\n");
-        fs::write(&log_path, raw).await.unwrap();
-        drop(session);
-
-        let reopened =
-            Session::open_or_create(&config, id.clone(), PathBuf::from("/tmp/workspace"))
-                .await
-                .unwrap();
-
-        assert_eq!(reopened.events().len(), 1);
-        assert_eq!(reopened.append(user("new")).await.unwrap(), Seq(2));
 
         fs::remove_dir_all(&root).await.unwrap();
     }
@@ -1267,66 +1184,6 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&root).await;
-    }
-
-    #[tokio::test]
-    async fn rotates_generations_and_reads_all() {
-        let root = temp_root("rotation");
-        let config = config(&root);
-        let id = SessionId::new();
-        let session = Session::open_or_create(&config, id.clone(), PathBuf::from("/tmp/workspace"))
-            .await
-            .unwrap();
-        session.set_rotation_threshold(200);
-
-        for index in 0..40 {
-            session
-                .append(user(&format!("message {index}")))
-                .await
-                .unwrap();
-        }
-        session.flush().await.unwrap();
-
-        let dir = session.dir().unwrap().to_path_buf();
-        let mut sealed = Vec::new();
-        let mut active = Vec::new();
-        let mut entries = fs::read_dir(&dir).await.unwrap();
-        while let Some(entry) = entries.next_entry().await.unwrap() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.ends_with(".jsonl.zstd") {
-                sealed.push(entry.path());
-            } else if name.ends_with(".jsonl") {
-                active.push(entry.path());
-            }
-        }
-        sealed.sort();
-        assert!(
-            !sealed.is_empty(),
-            "expected at least one sealed generation"
-        );
-        assert_eq!(active.len(), 1, "exactly one active generation");
-
-        let first_sealed = fs::read(&sealed[0]).await.unwrap();
-        drop(session);
-
-        let reopened =
-            Session::open_or_create(&config, id.clone(), PathBuf::from("/tmp/workspace"))
-                .await
-                .unwrap();
-        let events = reopened.events();
-        assert_eq!(events.len(), 40);
-        for (index, logged) in events.iter().enumerate() {
-            assert_eq!(logged.seq, Seq(index as u64 + 1));
-        }
-        assert_eq!(reopened.append(user("after")).await.unwrap(), Seq(41));
-
-        let first_sealed_after = fs::read(&sealed[0]).await.unwrap();
-        assert_eq!(
-            first_sealed, first_sealed_after,
-            "committed generations are never rewritten"
-        );
-
-        fs::remove_dir_all(&root).await.unwrap();
     }
 
     #[tokio::test]
@@ -1642,11 +1499,11 @@ mod tests {
         source.append(started(&open)).await.unwrap();
         source.append(user("still running")).await.unwrap();
 
-        let before = event_count(&root).await;
+        let before = list_sessions(&root).unwrap().len();
         let result = Session::fork(&config, &source, &open).await;
         assert!(result.is_err());
         assert_eq!(
-            event_count(&root).await,
+            list_sessions(&root).unwrap().len(),
             before,
             "no partial session written"
         );
@@ -1853,42 +1710,15 @@ mod tests {
             Session::open_or_create(&config, SessionId::new(), PathBuf::from("/tmp/workspace"))
                 .await
                 .unwrap();
-        session.set_rotation_threshold(150);
-        for index in 0..12 {
-            session
-                .append(user(&format!("permission check {index}")))
-                .await
-                .unwrap();
-        }
+        session.append(user("permission check")).await.unwrap();
         session.flush().await.unwrap();
 
-        let dir = session.dir().unwrap().to_path_buf();
-        assert_eq!(mode_of(&dir), 0o700);
-        assert_eq!(mode_of(&dir.join(META_FILE)), 0o600);
-        assert_eq!(
-            mode_of(&dir.join(storage::active_name(
-                session.inner.generation.load(Ordering::Relaxed),
-            ))),
-            0o600
-        );
-        assert_eq!(mode_of(&dir.join(storage::sealed_name(0))), 0o600);
+        let dir = session.dir().unwrap();
+        assert_eq!(mode_of(dir), 0o700);
+        assert_eq!(mode_of(&dir.join(LOCK_FILE)), 0o600);
+        assert_eq!(mode_of(&storage::db_path(&root)), 0o600);
 
         fs::remove_dir_all(&root).await.unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn blob_files_use_private_permissions() {
-        let root = temp_root("blob-perms");
-        std::fs::create_dir_all(&root).unwrap();
-        let blobs = BlobStore::for_session(&root);
-
-        let path = blobs.put("spilled output").unwrap();
-
-        assert_eq!(mode_of(&path), 0o600);
-        assert_eq!(mode_of(blobs.dir()), 0o700);
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
@@ -1917,10 +1747,7 @@ mod tests {
         assert_eq!(session.meta().git_branch.as_deref(), Some("main"));
         assert_eq!(session.meta().git_sha.as_deref(), Some(GIT_SHA));
 
-        let raw = fs::read_to_string(root.join(session.id().as_str()).join(META_FILE))
-            .await
-            .unwrap();
-        let persisted: SessionMeta = serde_json::from_str(&raw).unwrap();
+        let persisted = persisted_meta(&root, session.id());
         assert_eq!(persisted.git_branch.as_deref(), Some("main"));
         assert_eq!(persisted.git_sha.as_deref(), Some(GIT_SHA));
 
@@ -2030,10 +1857,7 @@ mod tests {
         assert_eq!(modeled.model.as_deref(), Some("gpt-4o-mini"));
         assert!(modeled.updated_at_ms > titled.updated_at_ms);
 
-        let raw = fs::read_to_string(root.join(session.id().as_str()).join(META_FILE))
-            .await
-            .unwrap();
-        let persisted: SessionMeta = serde_json::from_str(&raw).unwrap();
+        let persisted = persisted_meta(&root, session.id());
         assert_eq!(persisted.title.as_deref(), Some("Fix the parser"));
         assert_eq!(persisted.model.as_deref(), Some("gpt-4o-mini"));
         assert_eq!(persisted.updated_at_ms, modeled.updated_at_ms);
@@ -2042,7 +1866,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lists_sessions_newest_first_and_skips_malformed() {
+    async fn lists_sessions_newest_first() {
         let root = temp_root("list");
         let config = config(&root);
         let first =
@@ -2057,9 +1881,7 @@ mod tests {
                 .await
                 .unwrap();
         second.set_model("gpt-4o-mini").await.unwrap();
-
-        std::fs::create_dir_all(root.join("broken")).unwrap();
-        std::fs::write(root.join("broken").join(META_FILE), "not json").unwrap();
+        second.append(user("listed")).await.unwrap();
 
         let listed = list_sessions(&root).unwrap();
         assert_eq!(listed.len(), 2);
@@ -2205,75 +2027,8 @@ mod tests {
         assert_eq!(&latest_session(&root).unwrap().unwrap().id, older.id());
         assert!(older.meta().updated_at_ms > newer.meta().updated_at_ms);
 
-        let raw = fs::read_to_string(root.join(older.id().as_str()).join(META_FILE))
-            .await
-            .unwrap();
-        let persisted: SessionMeta = serde_json::from_str(&raw).unwrap();
+        let persisted = persisted_meta(&root, older.id());
         assert_eq!(persisted.updated_at_ms, older.meta().updated_at_ms);
-
-        fs::remove_dir_all(&root).await.unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn open_retightens_legacy_world_readable_files() {
-        let root = temp_root("legacy-perms");
-        let config = config(&root);
-        let id = SessionId::new();
-        let session = Session::open_or_create(&config, id.clone(), PathBuf::from("/tmp/workspace"))
-            .await
-            .unwrap();
-        session.set_rotation_threshold(150);
-        for index in 0..12 {
-            session
-                .append(user(&format!("legacy permission {index}")))
-                .await
-                .unwrap();
-        }
-        session.flush().await.unwrap();
-
-        let blobs = session.blob_store().unwrap();
-        let blob_path = blobs.put("spilled").unwrap();
-        let dir = session.dir().unwrap().to_path_buf();
-        drop(session);
-
-        let loose = |path: &Path| {
-            use std::os::unix::fs::PermissionsExt;
-
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        };
-
-        let mut files = Vec::new();
-        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
-            if entry.file_type().unwrap().is_dir() {
-                continue;
-            }
-            loose(&entry.path());
-            files.push(entry.path());
-        }
-        loose(&blob_path);
-
-        assert!(files.iter().any(|path| path.ends_with(META_FILE)));
-        assert!(
-            files
-                .iter()
-                .any(|path| path.extension().is_some_and(|ext| ext == "zstd"))
-        );
-        assert!(
-            files
-                .iter()
-                .any(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
-        );
-
-        let reopened = Session::open(&config, id, PathBuf::from("/tmp/workspace"))
-            .await
-            .unwrap();
-        assert_eq!(mode_of(reopened.dir().unwrap()), 0o700);
-        for path in &files {
-            assert_eq!(mode_of(path), 0o600, "{}", path.display());
-        }
-        assert_eq!(mode_of(&blob_path), 0o600);
-        assert_eq!(mode_of(blobs.dir()), 0o700);
 
         fs::remove_dir_all(&root).await.unwrap();
     }

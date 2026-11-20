@@ -30,13 +30,14 @@ events. Depth lives in the owning documents: product behavior in
 | --- | --- |
 | `meerai-core` | `Toolset` trait (`effect_of`, `effect_of_call`, `permission_spec`, `should_spill_output`, `grant_path_root`, `invoke_structured`), `ToolCall`, `ToolDefinition`, `ToolOutput::{Text,Fail,Stop}`, `ToolError`, `EffectClass`, `PermissionAction`, `ApprovalPreview`, `GrantScope`, `ToolObservation`, `ToolRun`, `FileDiff`, lenient argument parsing/coercion, shared text/env/fs-perms helpers; re-exports `genai`, `async_trait`, `schemars::JsonSchema` |
 | `meerai-macros` | Proc-macros `#[tool]` and `#[derive(Toolset)]`; insta snapshot tests |
-| `meerai-common` | `AppSettings` (`settings.yml`), project-root discovery and tighten-only project merge, markdown agent/skill discovery (`definitions`), hook configuration (`hooks`) |
+| `meerai-store` | Embedded SQLite store (`meerai.db`): WAL, FTS5, schema v1, private-file permissions, and typed repositories for config, memories, packs, routes, and usage |
+| `meerai-common` | SQLite-backed `AppSettings`, project-root discovery and tighten-only project merge, markdown agent/skill discovery (`definitions`) across user, trusted packs, and project sources, hook configuration (`hooks`) |
 | `meerai-client` | Client-facing provider surface: `ProviderCatalog` + bundled `providers.yml`, per-model metadata (`ModelInfo`), `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract, `MemorySecretStore`, auth listing |
-| `meerai-providers` | `genai` client factory plus native secret stores (OS keychain for API keys, `auth.json` for keys and ChatGPT plan OAuth, `meerai-providers/src/oauth/`); re-exports the client surface |
-| `meerai-session` | Append-only `SessionEvent` log (JSONL generations sealed to zstd), `meta.json`, crash recovery and idempotent healing, `derive_messages` projection, replay, fork/rewind, snapshot store, blob store, spill and compaction primitives, listing/deletion/pruning |
+| `meerai-providers` | `genai` client factory plus the AEAD `VaultSecretStore` (ChaCha20-Poly1305, OS keychain DEK, Argon2id passphrase fallback) and ChatGPT plan OAuth |
+| `meerai-session` | Append-only `SessionEvent` log in SQLite, crash recovery and idempotent healing, `derive_messages` projection, replay, fork/rewind, SQLite blob and snapshot stores, spill and compaction primitives, listing/deletion/pruning |
 | `meerai-policy` | `PolicyEngine`: ordered rules (default sensitive → user → agent, last match wins), `ApprovalMode` presets, literal turn/session grants, YAML parsing |
 | `meerai-tools` | `code` (`CodeTools`, seven `code-*` tools, path guards, unified diffs, observations, shell safety inputs, env scrub), `repo_map` (`retrieval-repo_map`, tree-sitter + PageRank), `lsp` (`lsp-*` over stdio JSON-RPC), `search_as_code` (`sac-run_script`), `ExecutionWorld` sandbox seam |
-| `meerai-agents` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig`, `AgentEvent`/`AgentCommand`, interceptor seam, hook engine, `question-ask`, prompt composition, `spawn_worker`, subagent runtime, delegated `acp-run`, redaction and injection screening, shell-safety allowlist |
+| `meerai-agents` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig`, `AgentEvent`/`AgentCommand`, interceptor seam, hook engine, `question-ask`, `skill-load`, prompt composition, `spawn_worker`, subagent runtime, delegated `acp-run`, redaction and injection screening, shell-safety allowlist |
 | `meerai-syntax` | Tree-sitter highlighting (Rust, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML, CSS, JSON) plus a lexical fallback; per-line tokens, no UI dependency |
 | `meerai-host` | UI-neutral host seams (`SessionOpener`, `OpenedSession`, `WorkspaceQuery`/`LocalWorkspace`) and `SessionRegistry` live event pump/ring |
 | `meerai-web-protocol` | Serde-only Wasm-safe wire DTOs (`SnapshotResponse`, `ViewEvent`, `SubmitPromptRequest`, `ApiError`) with adjacent serde tagging |
@@ -44,7 +45,7 @@ events. Depth lives in the owning documents: product behavior in
 | `meerai-web-client` | Leptos 0.8 CSR browser client crate (`scripts/build-web.py`), DOM transcript, modals, and theme ([browser-ui.md](browser-ui.md)) |
 | `meerai-tui` | Modal TUI library (`ratatui` + `crossterm`): transcript replay and cached rendering, tabs, approvals, questions, rewind/fork menus, diff/search modals, mentions, palette, theme, re-exporting `meerai-host` seams |
 | `meerai-acp` | ACP client bridge: `agy` preset, handshake, typed `AcpEvent` stream, `AcpWorker` (event mapping + session log), permission replies, cancel, `session/load` |
-| `meerai-cli` | Binary crate (`meerai`): CLI flags, headless runner, `auth`/`sessions`/`hooks`/`acp doctor`/`serve` (feature `web`) subcommands, TUI launcher, host wiring |
+| `meerai-cli` | Binary crate (`meerai`): CLI flags, headless runner, `auth`/`sessions`/`memory`/`routes`/`pack`/`config`/`hooks`/`acp doctor`/`serve` (feature `web`) subcommands, TUI launcher, host wiring |
 
 ### 2.2 Dependency direction
 
@@ -153,7 +154,7 @@ Field-level detail: [harness-internals.md](harness-internals.md).
 | Incremental projection | Tail-incremental `derive_messages` and frozen/shared message representations; the full-result cache is implemented | Projection purity |
 | Progressive tool disclosure | Compact tool index plus a `load_tool_schema` meta-tool when admitted schemas grow (MCP, skills) | Tool count growth |
 | `meerai export` | Session export for evals and audit; replay already produces the human projection | CLI milestone |
-| Definition mapping | Map definition `tools`/`permissions`, load supporting skill files, MCP servers | Security review |
+| Definition mapping | Map definition `tools`/`permissions` and MCP servers | Security review |
 | M14 ACP agent | `meerai acp` on stdio for editors | [acp.md](acp.md) §3.1 |
 | Per-model budget auto-tuning | Budgets derive from catalog metadata today; automatic tuning is not built | Usage data |
 

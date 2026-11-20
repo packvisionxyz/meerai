@@ -1,16 +1,14 @@
-use std::collections::BTreeMap;
-use std::collections::hash_map::DefaultHasher;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use meerai_core::env::now_millis;
+use meerai_store::Store;
+use rusqlite::{OptionalExtension, params};
 
-use crate::ids::TurnId;
+use crate::ids::{SessionId, TurnId};
 
-const MANIFEST_FILE: &str = "manifest.json";
 const MAX_SNAPSHOT_BYTES: u64 = 2 * 1024 * 1024;
 const KEEP_TURNS: usize = 100;
 
@@ -18,7 +16,8 @@ static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 pub struct SnapshotStore {
-    root: PathBuf,
+    store: Store,
+    session_id: SessionId,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -30,29 +29,20 @@ pub struct RestoreReport {
 
 #[derive(Clone, Debug)]
 enum AppliedOp {
-    Restored { target: PathBuf, blob: PathBuf },
+    Restored { target: PathBuf, content: Vec<u8> },
     Deleted,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-struct SnapshotManifest {
-    #[serde(default)]
-    entries: BTreeMap<String, SnapshotEntry>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct SnapshotEntry {
-    blob: String,
+#[derive(Clone, Debug)]
+struct SnapshotRow {
+    rel_path: String,
     existed: bool,
+    content_zstd: Option<Vec<u8>>,
 }
 
 impl SnapshotStore {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
+    pub fn new(store: Store, session_id: SessionId) -> Self {
+        Self { store, session_id }
     }
 
     pub async fn capture(
@@ -91,24 +81,14 @@ impl SnapshotStore {
             workspace.join(path)
         };
         let relative = relative_path(workspace, &full)?;
-        let turn_dir = self.root.join(turn_id.as_str());
-        let manifest_path = turn_dir.join(MANIFEST_FILE);
-        let mut manifest = read_manifest(&manifest_path)?;
-        if manifest.entries.contains_key(&relative) {
+        if self.entry_exists(turn_id, &relative)? {
             return Ok(None);
         }
 
         let metadata = match fs::symlink_metadata(&full) {
             Ok(metadata) => metadata,
             Err(_) => {
-                manifest.entries.insert(
-                    relative,
-                    SnapshotEntry {
-                        blob: String::new(),
-                        existed: false,
-                    },
-                );
-                write_manifest(&turn_dir, &manifest_path, &manifest)?;
+                self.insert_entry(turn_id, &relative, false, None)?;
                 return Ok(None);
             }
         };
@@ -121,57 +101,119 @@ impl SnapshotStore {
 
         let bytes = fs::read(&full)
             .with_context(|| format!("failed to read snapshot source {}", full.display()))?;
-        let blob = format!("{:016x}-{}.bin", hash_path(&relative), bytes.len());
-        fs::create_dir_all(&turn_dir)
-            .with_context(|| format!("failed to create {}", turn_dir.display()))?;
-        fs::write(turn_dir.join(&blob), &bytes)
-            .with_context(|| format!("failed to write snapshot blob {blob}"))?;
-        manifest.entries.insert(
-            relative,
-            SnapshotEntry {
-                blob,
-                existed: true,
-            },
-        );
-        write_manifest(&turn_dir, &manifest_path, &manifest)?;
-        let _ = prune_turns(&self.root, KEEP_TURNS);
+        let compressed =
+            zstd::stream::encode_all(bytes.as_slice(), 3).context("compress snapshot content")?;
+        self.insert_entry(turn_id, &relative, true, Some(compressed))?;
+        self.prune_turns()?;
         Ok(Some(full))
     }
 
     fn restore_blocking(&self, turn_id: &TurnId, workspace: &Path) -> Result<RestoreReport> {
-        let turn_dir = self.root.join(turn_id.as_str());
-        let manifest = read_manifest(&turn_dir.join(MANIFEST_FILE))?;
+        let rows = self.rows(turn_id)?;
         let mut report = RestoreReport::default();
         let mut applied = Vec::new();
-        for (relative, entry) in &manifest.entries {
-            if let Err(error) = apply_entry(
-                &turn_dir,
-                workspace,
-                relative,
-                entry,
-                &mut applied,
-                &mut report,
-            ) {
+        for row in rows {
+            if let Err(error) = apply_entry(workspace, &row, &mut applied, &mut report) {
                 return Err(roll_back(error, &applied));
             }
         }
         Ok(report)
     }
+
+    fn entry_exists(&self, turn_id: &TurnId, relative: &str) -> Result<bool> {
+        let exists: Option<bool> = self.store.read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT 1 FROM session_snapshots
+                     WHERE session_id = ?1 AND turn_id = ?2 AND rel_path = ?3",
+                    params![self.session_id.as_str(), turn_id.as_str(), relative],
+                    |_| Ok(true),
+                )
+                .optional()?)
+        })?;
+        Ok(exists.unwrap_or(false))
+    }
+
+    fn insert_entry(
+        &self,
+        turn_id: &TurnId,
+        relative: &str,
+        existed: bool,
+        content: Option<Vec<u8>>,
+    ) -> Result<()> {
+        self.store.immediate(|tx| {
+            tx.execute(
+                "INSERT INTO session_snapshots
+                    (session_id, turn_id, rel_path, existed, content_zstd, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    self.session_id.as_str(),
+                    turn_id.as_str(),
+                    relative,
+                    i64::from(existed),
+                    content,
+                    now_millis() as i64
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn rows(&self, turn_id: &TurnId) -> Result<Vec<SnapshotRow>> {
+        self.store.read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT rel_path, existed, content_zstd FROM session_snapshots
+                 WHERE session_id = ?1 AND turn_id = ?2 ORDER BY rel_path",
+            )?;
+            let rows =
+                stmt.query_map(params![self.session_id.as_str(), turn_id.as_str()], |row| {
+                    Ok(SnapshotRow {
+                        rel_path: row.get(0)?,
+                        existed: row.get::<_, i64>(1)? != 0,
+                        content_zstd: row.get(2)?,
+                    })
+                })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    fn prune_turns(&self) -> Result<usize> {
+        self.store.immediate(|tx| {
+            let mut stmt = tx.prepare(
+                "SELECT turn_id FROM session_snapshots
+                 WHERE session_id = ?1 GROUP BY turn_id
+                 ORDER BY MAX(created_at_ms) DESC LIMIT -1 OFFSET ?2",
+            )?;
+            let stale: Vec<String> = stmt
+                .query_map(
+                    params![self.session_id.as_str(), KEEP_TURNS as i64],
+                    |row| row.get(0),
+                )?
+                .collect::<rusqlite::Result<_>>()?;
+            drop(stmt);
+            let mut removed = 0;
+            for turn_id in stale {
+                removed += tx.execute(
+                    "DELETE FROM session_snapshots WHERE session_id = ?1 AND turn_id = ?2",
+                    params![self.session_id.as_str(), turn_id],
+                )?;
+            }
+            Ok(removed)
+        })
+    }
 }
 
 fn apply_entry(
-    turn_dir: &Path,
     workspace: &Path,
-    relative: &str,
-    entry: &SnapshotEntry,
+    row: &SnapshotRow,
     applied: &mut Vec<AppliedOp>,
     report: &mut RestoreReport,
 ) -> Result<()> {
-    let target = safe_join(workspace, relative)?;
-    if !entry.existed {
+    let target = safe_join(workspace, &row.rel_path)?;
+    if !row.existed {
         match fs::remove_file(&target) {
             Ok(()) => {
-                report.deleted.push(target);
+                report.deleted.push(target.clone());
                 applied.push(AppliedOp::Deleted);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -183,8 +225,11 @@ fn apply_entry(
         return Ok(());
     }
 
-    let blob = turn_dir.join(&entry.blob);
-    let bytes = match fs::read(&blob) {
+    let Some(compressed) = row.content_zstd.as_deref() else {
+        report.skipped.push(target);
+        return Ok(());
+    };
+    let bytes = match zstd::stream::decode_all(compressed) {
         Ok(bytes) => bytes,
         Err(_) => {
             report.skipped.push(target);
@@ -194,7 +239,7 @@ fn apply_entry(
     stage_into_place(&target, &bytes)?;
     applied.push(AppliedOp::Restored {
         target: target.clone(),
-        blob,
+        content: bytes,
     });
     report.restored.push(target);
     Ok(())
@@ -250,34 +295,13 @@ fn roll_back(error: anyhow::Error, applied: &[AppliedOp]) -> anyhow::Error {
 fn rollback(applied: &[AppliedOp]) -> Vec<String> {
     let mut failures = Vec::new();
     for op in applied.iter().rev() {
-        if let AppliedOp::Restored { target, blob } = op
-            && let Err(error) = fs::read(blob).and_then(|bytes| fs::write(target, bytes))
+        if let AppliedOp::Restored { target, content } = op
+            && let Err(error) = fs::write(target, content)
         {
             failures.push(format!("{}: {error}", target.display()));
         }
     }
     failures
-}
-
-fn read_manifest(path: &Path) -> Result<SnapshotManifest> {
-    match fs::read_to_string(path) {
-        Ok(raw) => serde_json::from_str(&raw)
-            .with_context(|| format!("failed to parse snapshot manifest {}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(SnapshotManifest::default())
-        }
-        Err(error) => Err(error)
-            .with_context(|| format!("failed to read snapshot manifest {}", path.display())),
-    }
-}
-
-fn write_manifest(dir: &Path, path: &Path, manifest: &SnapshotManifest) -> Result<()> {
-    fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
-    let raw =
-        serde_json::to_string_pretty(manifest).context("failed to encode snapshot manifest")?;
-    let temp = path.with_extension("json.tmp");
-    fs::write(&temp, raw).with_context(|| format!("failed to write {}", temp.display()))?;
-    fs::rename(&temp, path).with_context(|| format!("failed to seal {}", path.display()))
 }
 
 fn relative_path(workspace: &Path, path: &Path) -> Result<String> {
@@ -308,39 +332,6 @@ fn safe_join(root: &Path, relative: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn hash_path(value: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn prune_turns(root: &Path, keep: usize) -> Result<usize> {
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(0),
-    };
-    let mut turns: Vec<(std::time::SystemTime, PathBuf)> = entries
-        .flatten()
-        .filter(|entry| entry.path().is_dir())
-        .filter_map(|entry| {
-            let modified = entry.metadata().ok()?.modified().ok()?;
-            Some((modified, entry.path()))
-        })
-        .collect();
-    if turns.len() <= keep {
-        return Ok(0);
-    }
-    turns.sort_by_key(|(modified, _)| *modified);
-    let remove_count = turns.len().saturating_sub(keep);
-    let mut removed = 0;
-    for (_, path) in turns.into_iter().take(remove_count) {
-        if fs::remove_dir_all(&path).is_ok() {
-            removed += 1;
-        }
-    }
-    Ok(removed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,10 +350,26 @@ mod tests {
         dir
     }
 
+    fn snapshot_store() -> SnapshotStore {
+        let store = Store::open(":memory:").unwrap();
+        let session = SessionId::new();
+        store
+            .immediate(|tx| {
+                tx.execute(
+                    "INSERT INTO sessions (id, project_root, cwd, created_at_ms, updated_at_ms)
+                     VALUES (?1, '/w', '/w', 0, 0)",
+                    [session.as_str()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        SnapshotStore::new(store, session)
+    }
+
     #[tokio::test]
     async fn captures_and_restores_modified_and_new_files() {
         let workspace = temp_dir("restore");
-        let store = SnapshotStore::new(workspace.join("snapshots"));
+        let store = snapshot_store();
         let turn = TurnId::new();
         fs::write(workspace.join("a.txt"), "old").unwrap();
 
@@ -389,7 +396,7 @@ mod tests {
     #[tokio::test]
     async fn rolls_back_earlier_restores_when_a_later_file_fails() {
         let workspace = temp_dir("rollback");
-        let store = SnapshotStore::new(workspace.join("snapshots"));
+        let store = snapshot_store();
         let turn = TurnId::new();
         fs::write(workspace.join("a.txt"), "original-a").unwrap();
         fs::write(workspace.join("b.txt"), "original-b").unwrap();
@@ -428,7 +435,7 @@ mod tests {
     #[tokio::test]
     async fn restores_a_tracked_deletion() {
         let workspace = temp_dir("delete");
-        let store = SnapshotStore::new(workspace.join("snapshots"));
+        let store = snapshot_store();
         let turn = TurnId::new();
         store
             .capture(&turn, &workspace, Path::new("removed.txt"))
@@ -447,7 +454,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_paths_outside_the_workspace() {
         let workspace = temp_dir("outside");
-        let store = SnapshotStore::new(workspace.join("snapshots"));
+        let store = snapshot_store();
         let error = store
             .capture(&TurnId::new(), &workspace, Path::new("../escape"))
             .await

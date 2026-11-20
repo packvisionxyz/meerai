@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use meerai_common::definitions::{AgentDefinition, validate_agent_model};
@@ -15,8 +16,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::events::{
-    AgentCommand, AgentEvent, ApprovalDecision, ApprovalRequest, ItemId, ItemStatus, SessionItem,
-    TurnEndReason,
+    AgentCommand, AgentEvent, ApprovalDecision, ApprovalRequest, ItemDelta, ItemId, ItemStatus,
+    SessionItem, TurnEndReason,
 };
 use crate::harness::{AgentHarness, HarnessConfig};
 use crate::hooks::{HookContext, HookDecision, HookEngine};
@@ -25,6 +26,7 @@ use crate::multi_turn_agent::{ChatStreamer, MultiTurnAgent, MultiTurnAgentConfig
 const TOOLSET_NAME: &str = "subagent";
 const TOOL_RUN: &str = "subagent-run";
 const CUSTOM_AGENT_MAX_STEPS: usize = 16;
+pub(crate) const SUBAGENT_TURN_DEADLINE_MARGIN_SECS: u64 = 5;
 
 pub const READ_ONLY_SUBAGENT_TOOLS: &[&str] = &[
     "code-read_file",
@@ -118,6 +120,7 @@ pub(crate) struct SubagentBridge {
     pub(crate) grant_tx: mpsc::UnboundedSender<Grant>,
     pub(crate) budget_tx: mpsc::UnboundedSender<SubagentBudgetUpdate>,
     pub(crate) cancel: CancellationToken,
+    pub(crate) turn_deadline: Option<Instant>,
     pub(crate) parent_session: Option<Session>,
     pub(crate) parent_policy_mode: ApprovalMode,
     pub(crate) parent_policy_rules: Vec<PermissionRule>,
@@ -125,6 +128,7 @@ pub(crate) struct SubagentBridge {
     pub(crate) workspace_root: PathBuf,
     pub(crate) parent_harness_config: HarnessConfig,
     pub(crate) parent_used_tokens: u64,
+    pub(crate) routing: Option<Arc<crate::routing::RoutingCoordinator>>,
 }
 
 tokio::task_local! {
@@ -137,6 +141,71 @@ struct SubagentRunArgs {
     task: String,
     #[serde(default, deserialize_with = "meerai_core::lenient::option_bool_value")]
     fork_session: Option<bool>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    approval_mode: Option<ApprovalMode>,
+    #[serde(default)]
+    allowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    max_steps: Option<usize>,
+    #[serde(default)]
+    max_tokens: Option<u64>,
+    #[serde(default)]
+    max_cost_usd: Option<f64>,
+    #[serde(default)]
+    item_id: Option<ItemId>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SubagentMonitor {
+    item_id: ItemId,
+    max_steps: usize,
+    max_cost_usd: Option<f64>,
+    steps_used: usize,
+    usage: Usage,
+    active_tool: Option<String>,
+    turn_end_reason: Option<TurnEndReason>,
+}
+
+impl SubagentMonitor {
+    fn new(item_id: ItemId, max_steps: usize, max_cost_usd: Option<f64>) -> Self {
+        Self {
+            item_id,
+            max_steps,
+            max_cost_usd,
+            ..Self::default()
+        }
+    }
+}
+
+fn estimated_cost(usage: Usage, config: &HarnessConfig) -> Option<f64> {
+    let pricing = config.token_pricing?;
+    let prompt = usage.prompt_tokens.unwrap_or(0).max(0) as f64;
+    let completion = usage.completion_tokens.unwrap_or(0).max(0) as f64;
+    Some(
+        prompt / 1_000_000.0 * pricing.input_per_mtok
+            + completion / 1_000_000.0 * pricing.output_per_mtok,
+    )
+}
+
+fn clamp_mode(
+    requested: Option<ApprovalMode>,
+    parent: ApprovalMode,
+    read_only: bool,
+) -> ApprovalMode {
+    if read_only {
+        return ApprovalMode::Plan;
+    }
+    let rank = |mode: ApprovalMode| match mode {
+        ApprovalMode::Plan => 0,
+        ApprovalMode::Ask => 1,
+        ApprovalMode::Auto => 2,
+    };
+    match requested {
+        Some(requested) if rank(requested) < rank(parent) => requested,
+        _ => parent,
+    }
 }
 
 enum ResolvedAgent<'a> {
@@ -205,6 +274,33 @@ impl ResolvedAgent<'_> {
     }
 }
 
+fn intersect_allowed_tools(
+    preset: Option<Vec<String>>,
+    requested: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    match (preset, requested) {
+        (Some(preset), Some(requested)) => Some(
+            preset
+                .into_iter()
+                .filter(|tool| requested.iter().any(|requested| requested == tool))
+                .collect(),
+        ),
+        (Some(preset), None) => Some(preset),
+        (None, requested) => requested,
+    }
+}
+
+fn subagent_task_type(agent_id: &str) -> meerai_common::settings::TaskType {
+    use meerai_common::settings::TaskType;
+    match agent_id {
+        "explore" => TaskType::Explore,
+        "plan" => TaskType::Plan,
+        "build" => TaskType::Build,
+        "review" => TaskType::Review,
+        _ => TaskType::Default,
+    }
+}
+
 fn apply_child_model(parent_model: &str, model_id: &str) -> String {
     if let Some((provider, _)) = parent_model.split_once("::")
         && !provider.is_empty()
@@ -222,7 +318,7 @@ fn apply_child_model(parent_model: &str, model_id: &str) -> String {
 struct ChildToolsetFilter {
     inner: Box<dyn Toolset>,
     read_only: bool,
-    allowed_tools: Option<&'static [&'static str]>,
+    allowed_tools: Option<Vec<String>>,
 }
 
 impl ChildToolsetFilter {
@@ -232,7 +328,8 @@ impl ChildToolsetFilter {
             && (!self.read_only || self.inner.effect_of(fn_name) == EffectClass::Read)
             && self
                 .allowed_tools
-                .is_none_or(|allowed| allowed.contains(&fn_name))
+                .as_ref()
+                .is_none_or(|allowed| allowed.iter().any(|name| name == fn_name))
     }
 }
 
@@ -350,7 +447,7 @@ impl SubagentToolset {
     fn build_child_tools(
         &self,
         read_only: bool,
-        allowed_tools: Option<&'static [&'static str]>,
+        allowed_tools: Option<Vec<String>>,
     ) -> Vec<Box<dyn Toolset>> {
         (self.tool_factory)(read_only)
             .into_iter()
@@ -359,7 +456,7 @@ impl SubagentToolset {
                 Box::new(ChildToolsetFilter {
                     inner: tool,
                     read_only,
-                    allowed_tools,
+                    allowed_tools: allowed_tools.clone(),
                 }) as Box<dyn Toolset>
             })
             .filter(|tool| !tool.definition().is_empty())
@@ -406,6 +503,17 @@ async fn create_child_session(
         .ok()
 }
 
+pub(crate) fn child_turn_secs(deadline: Option<Instant>, now: Instant) -> u64 {
+    let Some(deadline) = deadline else {
+        return 0;
+    };
+    deadline
+        .saturating_duration_since(now)
+        .as_secs()
+        .saturating_sub(SUBAGENT_TURN_DEADLINE_MARGIN_SECS)
+        .max(1)
+}
+
 #[async_trait]
 impl Toolset for SubagentToolset {
     fn name(&self) -> String {
@@ -431,6 +539,32 @@ impl Toolset for SubagentToolset {
                     "fork_session": {
                         "type": "boolean",
                         "description": "Fork the parent session transcript instead of starting a fresh child session (default: false)"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional model override for the child; it stays on the parent provider"
+                    },
+                    "approval_mode": {
+                        "type": "string",
+                        "enum": ["plan", "ask", "auto"],
+                        "description": "Optional child approval mode; it is clamped to the parent mode and plan mode stays read-only"
+                    },
+                    "allowed_tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional tool name subset for the child; it can only narrow the agent preset"
+                    },
+                    "max_steps": {
+                        "type": "integer",
+                        "description": "Optional step cap for the child; it is clamped to the preset and the parent turn cap"
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Optional child session token cap, clamped to the parent remaining budget"
+                    },
+                    "max_cost_usd": {
+                        "type": "number",
+                        "description": "Optional child cost cap in USD; the child is cancelled when it is exceeded"
                     }
                 },
                 "required": ["agent", "task"]
@@ -496,12 +630,29 @@ impl Toolset for SubagentToolset {
         let agent_id = resolved.id().to_string();
         let read_only = resolved.read_only();
         let preset_max_steps = resolved.max_steps();
-        let allowed_tools = resolved.allowed_tools();
+        let preset_tools: Option<Vec<String>> = resolved
+            .allowed_tools()
+            .map(|tools| tools.iter().map(|tool| tool.to_string()).collect());
+        let allowed_tools = intersect_allowed_tools(preset_tools, parsed.allowed_tools.clone());
         let system_prompt = resolved.system_prompt();
         let parent_model = self.current_model();
-        let child_model = resolved.model(&parent_model);
+        let mut child_model = resolved.model(&parent_model);
 
         let bridge = SUBAGENT_BRIDGE.try_with(Clone::clone).ok();
+        if let Some(bridge) = &bridge
+            && let Some(route) = bridge
+                .parent_harness_config
+                .routing
+                .route(&subagent_task_type(&agent_id))
+        {
+            child_model = route.model_spec();
+        }
+        if let Some(requested) = parsed.model.as_deref().map(str::trim)
+            && !requested.is_empty()
+            && !requested.contains(':')
+        {
+            child_model = apply_child_model(&parent_model, requested);
+        }
 
         if let Some(hooks) = &self.hooks
             && let Some(bridge) = &bridge
@@ -529,10 +680,10 @@ impl Toolset for SubagentToolset {
             }
         }
 
-        let item_id = ItemId::new();
-
-        let max_steps = bridge.as_ref().map_or(preset_max_steps, |bridge| {
-            preset_max_steps.min(bridge.parent_harness_config.max_steps_per_turn)
+        let item_id = parsed.item_id.clone().unwrap_or_default();
+        let requested_steps = parsed.max_steps.unwrap_or(preset_max_steps).max(1);
+        let max_steps = bridge.as_ref().map_or(requested_steps, |bridge| {
+            requested_steps.min(bridge.parent_harness_config.max_steps_per_turn)
         });
         let child_tools = self.build_child_tools(read_only, allowed_tools);
         let child_config = MultiTurnAgentConfig {
@@ -546,10 +697,18 @@ impl Toolset for SubagentToolset {
             system_prompt,
             child_config,
         );
+        child_agent.set_task_type(subagent_task_type(&agent_id));
         if let Some(hooks) = &self.hooks {
             child_agent.set_hooks(hooks.clone());
         }
 
+        let mut child_mode = if read_only {
+            ApprovalMode::Plan
+        } else {
+            bridge
+                .as_ref()
+                .map_or(ApprovalMode::Ask, |bridge| bridge.parent_policy_mode)
+        };
         let mut child_session_id: Option<String> = None;
         let mut child_initial_cap: Option<u64> = None;
         if let Some(bridge) = &bridge {
@@ -570,12 +729,8 @@ impl Toolset for SubagentToolset {
                 }
                 None => Session::memory(SessionId::new(), bridge.workspace_root.clone()),
             };
-            let policy_mode = if read_only {
-                ApprovalMode::Plan
-            } else {
-                bridge.parent_policy_mode
-            };
-            let child_policy = PolicyEngine::new(policy_mode)
+            child_mode = clamp_mode(parsed.approval_mode, bridge.parent_policy_mode, read_only);
+            let child_policy = PolicyEngine::new(child_mode)
                 .with_workspace_root(bridge.workspace_root.clone())
                 .with_rules(bridge.parent_policy_rules.clone());
             for grant in &bridge.parent_policy_grants {
@@ -583,16 +738,25 @@ impl Toolset for SubagentToolset {
             }
             let mut child_harness_config = bridge.parent_harness_config.clone();
             child_harness_config.max_steps_per_turn = max_steps;
-            child_harness_config.max_turn_secs = 0;
+            child_harness_config.step_limit_continuations = 0;
+            child_harness_config.max_turn_secs =
+                child_turn_secs(bridge.turn_deadline, Instant::now());
             child_agent.set_harness(AgentHarness {
                 session: child_session,
                 policy: child_policy,
                 config: child_harness_config,
+                routing: bridge.routing.clone(),
             });
+            let requested_tokens = parsed.max_tokens.unwrap_or(u64::MAX);
             if let Some(cap) = bridge.parent_harness_config.max_session_tokens {
                 let child_seeded = child_agent.cumulative_usage_tokens();
                 let remaining = cap.saturating_sub(bridge.parent_used_tokens);
-                let adjusted = child_seeded.saturating_add(remaining);
+                let adjusted = child_seeded.saturating_add(remaining.min(requested_tokens));
+                child_initial_cap = Some(adjusted);
+                child_agent.set_max_session_tokens(Some(adjusted));
+            } else if parsed.max_tokens.is_some() {
+                let seeded = child_agent.cumulative_usage_tokens();
+                let adjusted = seeded.saturating_add(requested_tokens);
                 child_initial_cap = Some(adjusted);
                 child_agent.set_max_session_tokens(Some(adjusted));
             }
@@ -606,6 +770,13 @@ impl Toolset for SubagentToolset {
                     status: ItemStatus::InProgress,
                     report: None,
                     child_session_id: child_session_id.clone(),
+                    model: Some(child_model.clone()),
+                    approval_mode: child_mode,
+                    steps_used: 0,
+                    max_steps,
+                    usage: Usage::default(),
+                    est_cost_usd: None,
+                    active_tool: None,
                 },
             });
         }
@@ -617,7 +788,10 @@ impl Toolset for SubagentToolset {
             .map(|bridge| bridge.cancel.child_token())
             .unwrap_or_default();
 
-        let mut turn_end_reason: Option<TurnEndReason> = None;
+        let max_cost_usd = parsed
+            .max_cost_usd
+            .filter(|cost| cost.is_finite() && *cost > 0.0);
+        let mut monitor = SubagentMonitor::new(item_id.clone(), max_steps, max_cost_usd);
         let child_result = {
             let mut turn_fut = std::pin::pin!(child_agent.prompt_streaming_with_commands(
                 &parsed.task,
@@ -634,7 +808,7 @@ impl Toolset for SubagentToolset {
                             event,
                             bridge.as_ref(),
                             &child_cmd_tx,
-                            &mut turn_end_reason,
+                            &mut monitor,
                         );
                     }
                 }
@@ -642,7 +816,7 @@ impl Toolset for SubagentToolset {
         };
 
         while let Ok(event) = child_event_rx.try_recv() {
-            handle_child_event(event, bridge.as_ref(), &child_cmd_tx, &mut turn_end_reason);
+            handle_child_event(event, bridge.as_ref(), &child_cmd_tx, &mut monitor);
         }
 
         if let Some(bridge) = &bridge
@@ -668,7 +842,7 @@ impl Toolset for SubagentToolset {
             }
         }
 
-        let (final_status, report, output) = match (child_result, turn_end_reason) {
+        let (final_status, report, output) = match (child_result, monitor.turn_end_reason.take()) {
             (Ok(_), Some(TurnEndReason::Aborted { .. })) => {
                 let msg = "subagent cancelled".to_string();
                 (ItemStatus::Cancelled, msg.clone(), ToolOutput::Fail(msg))
@@ -713,6 +887,13 @@ impl Toolset for SubagentToolset {
                     status: final_status,
                     report: Some(report),
                     child_session_id: child_session_id.clone(),
+                    model: Some(child_model),
+                    approval_mode: child_mode,
+                    steps_used: 0,
+                    max_steps,
+                    usage: child_agent.cumulative_usage,
+                    est_cost_usd: child_agent.estimated_cost(child_agent.cumulative_usage),
+                    active_tool: None,
                 },
             });
         }
@@ -727,12 +908,35 @@ fn handle_child_event(
     event: AgentEvent,
     bridge: Option<&SubagentBridge>,
     child_cmd_tx: &mpsc::UnboundedSender<AgentCommand>,
-    turn_end_reason: &mut Option<TurnEndReason>,
+    monitor: &mut SubagentMonitor,
 ) {
     match event {
-        AgentEvent::UsageUpdated { usage, .. } => {
+        AgentEvent::UsageUpdated {
+            usage, cumulative, ..
+        } => {
+            monitor.steps_used = monitor.steps_used.saturating_add(1);
+            monitor.usage = cumulative;
             if let Some(bridge) = bridge {
                 let _ = bridge.usage_tx.send(usage);
+                if emit_subagent_progress(bridge, monitor) {
+                    let _ = child_cmd_tx.send(AgentCommand::Cancel);
+                }
+            }
+        }
+        AgentEvent::ItemStarted {
+            item: SessionItem::ToolCall { name, .. },
+        } => {
+            monitor.active_tool = Some(name);
+            if let Some(bridge) = bridge {
+                emit_subagent_progress(bridge, monitor);
+            }
+        }
+        AgentEvent::ItemCompleted {
+            item: SessionItem::ToolCall { .. },
+        } => {
+            monitor.active_tool = None;
+            if let Some(bridge) = bridge {
+                emit_subagent_progress(bridge, monitor);
             }
         }
         AgentEvent::ApprovalRequested { request } => {
@@ -773,15 +977,82 @@ fn handle_child_event(
             }
         }
         AgentEvent::TurnCompleted { reason, .. } => {
-            *turn_end_reason = Some(reason);
+            monitor.turn_end_reason = Some(reason);
         }
         _ => {}
+    }
+}
+
+fn emit_subagent_progress(bridge: &SubagentBridge, monitor: &SubagentMonitor) -> bool {
+    let est_cost_usd = estimated_cost(monitor.usage, &bridge.parent_harness_config);
+    let _ = bridge.event_tx.send(AgentEvent::ItemDelta {
+        item_id: monitor.item_id.clone(),
+        delta: ItemDelta::SubagentProgress {
+            steps_used: monitor.steps_used,
+            max_steps: monitor.max_steps,
+            usage: monitor.usage,
+            est_cost_usd,
+            active_tool: monitor.active_tool.clone(),
+        },
+    });
+    match (monitor.max_cost_usd, est_cost_usd) {
+        (Some(cap), Some(cost)) => cost > cap,
+        _ => false,
     }
 }
 
 #[cfg(test)]
 mod lenient_tests {
     use super::*;
+
+    #[test]
+    fn plan_mode_clamps_child_approval_modes() {
+        assert_eq!(
+            clamp_mode(Some(ApprovalMode::Auto), ApprovalMode::Plan, false),
+            ApprovalMode::Plan
+        );
+        assert_eq!(
+            clamp_mode(Some(ApprovalMode::Auto), ApprovalMode::Ask, false),
+            ApprovalMode::Ask
+        );
+        assert_eq!(
+            clamp_mode(Some(ApprovalMode::Ask), ApprovalMode::Auto, false),
+            ApprovalMode::Ask
+        );
+        assert_eq!(
+            clamp_mode(Some(ApprovalMode::Auto), ApprovalMode::Auto, true),
+            ApprovalMode::Plan
+        );
+    }
+
+    #[test]
+    fn requested_tools_only_narrow_the_preset() {
+        let preset = Some(vec!["code-read_file".to_string(), "shell".to_string()]);
+        let requested = Some(vec!["shell".to_string(), "code-write_file".to_string()]);
+        assert_eq!(
+            intersect_allowed_tools(preset.clone(), requested),
+            Some(vec!["shell".to_string()])
+        );
+        assert_eq!(
+            intersect_allowed_tools(preset, None),
+            Some(vec!["code-read_file".to_string(), "shell".to_string()])
+        );
+        assert_eq!(
+            intersect_allowed_tools(None, Some(vec!["shell".to_string()])),
+            Some(vec!["shell".to_string()])
+        );
+        assert_eq!(intersect_allowed_tools(None, None), None);
+    }
+
+    #[test]
+    fn task_types_follow_the_agent_id() {
+        use meerai_common::settings::TaskType;
+        assert_eq!(subagent_task_type("explore"), TaskType::Explore);
+        assert_eq!(subagent_task_type("plan"), TaskType::Plan);
+        assert_eq!(subagent_task_type("build"), TaskType::Build);
+        assert_eq!(subagent_task_type("review"), TaskType::Review);
+        assert_eq!(subagent_task_type("general"), TaskType::Default);
+    }
 
     #[test]
     fn accepts_string_booleans_for_fork_session() {

@@ -697,6 +697,13 @@ fn subagent_run_lifecycle_folds_and_renders() {
             status: ItemStatus::Proposed,
             report: None,
             child_session_id: Some("ses-child-1".to_string()),
+            model: None,
+            approval_mode: ApprovalMode::Ask,
+            steps_used: 0,
+            max_steps: 0,
+            usage: Default::default(),
+            est_cost_usd: None,
+            active_tool: None,
         },
     });
     assert_eq!(
@@ -707,6 +714,13 @@ fn subagent_run_lifecycle_folds_and_renders() {
             status: ToolCallStatus::Proposed,
             report: None,
             child_session_id: Some("ses-child-1".to_string()),
+            model: None,
+            approval_mode: "ask".to_string(),
+            steps_used: 0,
+            max_steps: 0,
+            usage: Default::default(),
+            est_cost_usd: None,
+            active_tool: None,
             expanded: false,
             nested: None,
             nested_refreshed_at: None,
@@ -726,6 +740,13 @@ fn subagent_run_lifecycle_folds_and_renders() {
             status: ToolCallStatus::Running,
             report: None,
             child_session_id: Some("ses-child-1".to_string()),
+            model: None,
+            approval_mode: "ask".to_string(),
+            steps_used: 0,
+            max_steps: 0,
+            usage: Default::default(),
+            est_cost_usd: None,
+            active_tool: None,
             expanded: false,
             nested: None,
             nested_refreshed_at: None,
@@ -740,6 +761,13 @@ fn subagent_run_lifecycle_folds_and_renders() {
             status: ItemStatus::Succeeded,
             report: Some("Line one\nLine two".to_string()),
             child_session_id: Some("ses-child-1".to_string()),
+            model: None,
+            approval_mode: ApprovalMode::Ask,
+            steps_used: 0,
+            max_steps: 0,
+            usage: Default::default(),
+            est_cost_usd: None,
+            active_tool: None,
         },
     });
     assert_eq!(
@@ -750,6 +778,13 @@ fn subagent_run_lifecycle_folds_and_renders() {
             status: ToolCallStatus::Succeeded,
             report: Some("Line one\nLine two".to_string()),
             child_session_id: Some("ses-child-1".to_string()),
+            model: None,
+            approval_mode: "ask".to_string(),
+            steps_used: 0,
+            max_steps: 0,
+            usage: Default::default(),
+            est_cost_usd: None,
+            active_tool: None,
             expanded: false,
             nested: None,
             nested_refreshed_at: None,
@@ -789,6 +824,13 @@ fn subagent_entry_finalizes_on_parent_turn_failure_and_abort() {
             status: ItemStatus::InProgress,
             report: None,
             child_session_id: None,
+            model: None,
+            approval_mode: ApprovalMode::Ask,
+            steps_used: 0,
+            max_steps: 0,
+            usage: Default::default(),
+            est_cost_usd: None,
+            active_tool: None,
         },
     });
     app.handle_agent_event(AgentEvent::TurnCompleted {
@@ -815,6 +857,13 @@ fn subagent_entry_finalizes_on_parent_turn_failure_and_abort() {
             status: ItemStatus::InProgress,
             report: None,
             child_session_id: None,
+            model: None,
+            approval_mode: ApprovalMode::Ask,
+            steps_used: 0,
+            max_steps: 0,
+            usage: Default::default(),
+            est_cost_usd: None,
+            active_tool: None,
         },
     });
     app.handle_agent_event(AgentEvent::TurnCompleted {
@@ -848,6 +897,13 @@ fn child_session_load_queues_action_and_folds_nested_transcript() {
             status: ItemStatus::InProgress,
             report: None,
             child_session_id: Some("ses-child-read".to_string()),
+            model: None,
+            approval_mode: ApprovalMode::Ask,
+            steps_used: 0,
+            max_steps: 0,
+            usage: Default::default(),
+            est_cost_usd: None,
+            active_tool: None,
         },
     });
 
@@ -1104,4 +1160,51 @@ fn queued_edit_modal_tracks_drained_queue_indices() {
         app.status_notice.as_deref(),
         Some("Queued message was already sent")
     );
+}
+
+#[test]
+fn subagent_progress_updates_live_telemetry() {
+    let (mut app, _rx, _secrets) = test_app();
+    let item_id = ItemId::from_raw("item-sub-live");
+    app.handle_agent_event(AgentEvent::ItemStarted {
+        item: SessionItem::SubagentRun {
+            id: item_id.clone(),
+            agent: "explore".to_string(),
+            status: ItemStatus::InProgress,
+            report: None,
+            child_session_id: None,
+            model: Some("openai::o3".to_string()),
+            approval_mode: ApprovalMode::Auto,
+            steps_used: 0,
+            max_steps: 8,
+            usage: Default::default(),
+            est_cost_usd: None,
+            active_tool: None,
+        },
+    });
+    app.handle_agent_event(AgentEvent::ItemDelta {
+        item_id,
+        delta: ItemDelta::SubagentProgress {
+            steps_used: 3,
+            max_steps: 8,
+            usage: Usage {
+                prompt_tokens: Some(120),
+                completion_tokens: Some(40),
+                total_tokens: Some(160),
+                cached_tokens: Some(20),
+                cache_creation_tokens: None,
+            },
+            est_cost_usd: Some(0.004),
+            active_tool: Some("code-grep".to_string()),
+        },
+    });
+
+    let Some(TranscriptEntry::Subagent(entry)) = app.tab().transcript.last() else {
+        panic!("expected a subagent entry");
+    };
+    assert_eq!(entry.steps_used, 3);
+    assert_eq!(entry.max_steps, 8);
+    assert_eq!(entry.est_cost_usd, Some(0.004));
+    assert_eq!(entry.active_tool.as_deref(), Some("code-grep"));
+    assert_eq!(entry.usage.total_tokens, Some(160));
 }

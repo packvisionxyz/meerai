@@ -5,23 +5,33 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::packs::{PACK_AGENTS_DIR, PACK_SKILLS_DIR, load_pack};
+
 const AGENTS_AGENTS_DIR: &str = ".agents/agents";
 const AGENTS_SKILLS_DIR: &str = ".agents/skills";
 const CLAUDE_AGENTS_DIR: &str = ".claude/agents";
 const CLAUDE_SKILLS_DIR: &str = ".claude/skills";
+const USER_AGENTS_DIR: &str = "agents";
+const USER_SKILLS_DIR: &str = "skills";
 const SKILL_FILE: &str = "SKILL.md";
+const MAX_SUPPORTING_FILES: usize = 32;
+const MAX_SKILL_DESCRIPTION_CHARS: usize = 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DefinitionSource {
+    User,
+    Pack(String),
     Agents,
     Claude,
 }
 
 impl DefinitionSource {
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> String {
         match self {
-            DefinitionSource::Agents => ".agents",
-            DefinitionSource::Claude => ".claude",
+            Self::User => "user".to_string(),
+            Self::Pack(id) => format!("pack:{id}"),
+            Self::Agents => ".agents".to_string(),
+            Self::Claude => ".claude".to_string(),
         }
     }
 }
@@ -46,6 +56,9 @@ pub struct AgentDefinition {
     pub mode: Option<String>,
     pub prompt: String,
     pub path: PathBuf,
+    pub token_estimate: u64,
+    pub warnings: Vec<String>,
+    pub supporting_files: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,8 +66,23 @@ pub struct SkillDefinition {
     pub id: String,
     pub source: DefinitionSource,
     pub description: Option<String>,
+    pub model_invocable: bool,
     pub body: String,
     pub path: PathBuf,
+    pub directory: PathBuf,
+    pub token_estimate: u64,
+    pub warnings: Vec<String>,
+    pub supporting_files: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShadowedDefinition {
+    pub id: String,
+    pub kind: &'static str,
+    pub source: DefinitionSource,
+    pub path: PathBuf,
+    pub kept_source: DefinitionSource,
+    pub kept_path: PathBuf,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -62,6 +90,13 @@ pub struct DefinitionCatalog {
     pub agents: Vec<AgentDefinition>,
     pub skills: Vec<SkillDefinition>,
     pub warnings: Vec<String>,
+    pub shadows: Vec<ShadowedDefinition>,
+}
+
+impl DefinitionCatalog {
+    pub fn advertised_skills(&self) -> impl Iterator<Item = &SkillDefinition> {
+        self.skills.iter().filter(|skill| skill.model_invocable)
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -76,6 +111,8 @@ struct Frontmatter {
     permissions: Option<serde_yaml::Value>,
     #[serde(rename = "allowed-tools")]
     allowed_tools: Option<serde_yaml::Value>,
+    #[serde(rename = "disable-model-invocation")]
+    disable_model_invocation: Option<bool>,
 }
 
 struct ParsedFile {
@@ -84,36 +121,108 @@ struct ParsedFile {
 }
 
 pub fn load_definitions(project_root: &Path) -> DefinitionCatalog {
+    load_definitions_with_sources(project_root, None, &[])
+}
+
+pub fn load_definitions_for(
+    store: &meerai_store::Store,
+    config_dir: Option<&Path>,
+    project_root: &Path,
+) -> DefinitionCatalog {
+    let pack_roots = crate::packs::trusted_pack_roots(store);
+    load_definitions_with_sources(project_root, config_dir, &pack_roots)
+}
+
+pub fn load_definitions_with_sources(
+    project_root: &Path,
+    user_root: Option<&Path>,
+    pack_roots: &[PathBuf],
+) -> DefinitionCatalog {
     let mut catalog = DefinitionCatalog::default();
     let mut agents: BTreeMap<String, AgentDefinition> = BTreeMap::new();
     let mut skills: BTreeMap<String, SkillDefinition> = BTreeMap::new();
 
-    for source in [DefinitionSource::Agents, DefinitionSource::Claude] {
-        for agent in load_agents(project_root, source, &mut catalog.warnings) {
-            if let Some(kept) = agents.get(&agent.id) {
-                catalog.warnings.push(duplicate_warning(
-                    &agent.id,
-                    source,
-                    &agent.path,
-                    kept.source,
-                    &kept.path,
-                ));
-            } else {
-                agents.insert(agent.id.clone(), agent);
+    if let Some(user_root) = user_root {
+        let source = DefinitionSource::User;
+        for agent in load_agents_in_dir(
+            &user_root.join(USER_AGENTS_DIR),
+            source.clone(),
+            &mut catalog.warnings,
+        ) {
+            insert_agent(&mut catalog, &mut agents, agent);
+        }
+        for skill in load_skills_in_dir(
+            &user_root.join(USER_SKILLS_DIR),
+            source,
+            &mut catalog.warnings,
+        ) {
+            insert_skill(&mut catalog, &mut skills, skill);
+        }
+    }
+
+    for pack_root in pack_roots {
+        let pack = match load_pack(pack_root) {
+            Ok(pack) => pack,
+            Err(error) => {
+                catalog.warnings.push(format!("{error:#}"));
+                continue;
+            }
+        };
+        let source = DefinitionSource::Pack(pack.id().to_string());
+        let (agent_paths, mut warnings) = if pack.manifest.agents.is_empty() {
+            (
+                markdown_files(&pack.root.join(PACK_AGENTS_DIR), &mut Vec::new()),
+                Vec::new(),
+            )
+        } else {
+            pack.agent_paths()
+        };
+        catalog.warnings.append(&mut warnings);
+        for path in agent_paths {
+            if let Some(agent) = parse_agent_file(&path, source.clone(), &mut catalog.warnings) {
+                insert_agent(&mut catalog, &mut agents, agent);
             }
         }
-        for skill in load_skills(project_root, source, &mut catalog.warnings) {
-            if let Some(kept) = skills.get(&skill.id) {
-                catalog.warnings.push(duplicate_warning(
-                    &skill.id,
-                    source,
-                    &skill.path,
-                    kept.source,
-                    &kept.path,
-                ));
-            } else {
-                skills.insert(skill.id.clone(), skill);
+        let (skill_paths, mut warnings) = if pack.manifest.skills.is_empty() {
+            (
+                skill_files(&pack.root.join(PACK_SKILLS_DIR), &mut Vec::new()),
+                Vec::new(),
+            )
+        } else {
+            pack.skill_paths()
+        };
+        catalog.warnings.append(&mut warnings);
+        for path in skill_paths {
+            if let Some(skill) = parse_skill_file(&path, source.clone(), &mut catalog.warnings) {
+                insert_skill(&mut catalog, &mut skills, skill);
             }
+        }
+    }
+
+    for source in [DefinitionSource::Agents, DefinitionSource::Claude] {
+        let agents_dir = match source {
+            DefinitionSource::Agents => AGENTS_AGENTS_DIR,
+            DefinitionSource::Claude => CLAUDE_AGENTS_DIR,
+            _ => unreachable!(),
+        };
+        let skills_dir = match source {
+            DefinitionSource::Agents => AGENTS_SKILLS_DIR,
+            DefinitionSource::Claude => CLAUDE_SKILLS_DIR,
+            _ => unreachable!(),
+        };
+        for agent in load_agents_in_dir(
+            &project_root.join(agents_dir),
+            source.clone(),
+            &mut catalog.warnings,
+        ) {
+            insert_agent(&mut catalog, &mut agents, agent);
+        }
+        for skill in load_skills_in_dir(
+            &project_root.join(skills_dir),
+            source.clone(),
+            &mut catalog.warnings,
+        ) {
+            insert_skill(&mut catalog, &mut skills, skill);
         }
     }
 
@@ -122,115 +231,191 @@ pub fn load_definitions(project_root: &Path) -> DefinitionCatalog {
     catalog
 }
 
-fn load_agents(
-    project_root: &Path,
+fn insert_agent(
+    catalog: &mut DefinitionCatalog,
+    agents: &mut BTreeMap<String, AgentDefinition>,
+    agent: AgentDefinition,
+) {
+    if let Some(kept) = agents.get(&agent.id) {
+        catalog.shadows.push(ShadowedDefinition {
+            id: agent.id.clone(),
+            kind: "agent",
+            source: agent.source.clone(),
+            path: agent.path.clone(),
+            kept_source: kept.source.clone(),
+            kept_path: kept.path.clone(),
+        });
+        catalog.warnings.push(duplicate_warning(
+            &agent.id,
+            &agent.source,
+            &agent.path,
+            &kept.source,
+            &kept.path,
+        ));
+        return;
+    }
+    agents.insert(agent.id.clone(), agent);
+}
+
+fn insert_skill(
+    catalog: &mut DefinitionCatalog,
+    skills: &mut BTreeMap<String, SkillDefinition>,
+    skill: SkillDefinition,
+) {
+    if let Some(kept) = skills.get(&skill.id) {
+        catalog.shadows.push(ShadowedDefinition {
+            id: skill.id.clone(),
+            kind: "skill",
+            source: skill.source.clone(),
+            path: skill.path.clone(),
+            kept_source: kept.source.clone(),
+            kept_path: kept.path.clone(),
+        });
+        catalog.warnings.push(duplicate_warning(
+            &skill.id,
+            &skill.source,
+            &skill.path,
+            &kept.source,
+            &kept.path,
+        ));
+        return;
+    }
+    skills.insert(skill.id.clone(), skill);
+}
+
+fn load_agents_in_dir(
+    dir: &Path,
     source: DefinitionSource,
     warnings: &mut Vec<String>,
 ) -> Vec<AgentDefinition> {
-    let dir_name = match source {
-        DefinitionSource::Agents => AGENTS_AGENTS_DIR,
-        DefinitionSource::Claude => CLAUDE_AGENTS_DIR,
-    };
-    let dir = project_root.join(dir_name);
-    let mut agents = Vec::new();
-
-    for path in markdown_files(&dir, warnings) {
-        let Some(text) = read_text(&path, warnings) else {
-            continue;
-        };
-        let Some(parsed) = parse_markdown(&text, &path, warnings) else {
-            continue;
-        };
-        let fallback = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or_default();
-        let Some(id) = definition_id(parsed.meta.name.as_deref(), fallback) else {
-            warnings.push(format!("cannot determine id for {}", path.display()));
-            continue;
-        };
-        agents.push(AgentDefinition {
-            id,
-            source,
-            description: parsed.meta.description,
-            model: parsed.meta.model,
-            steps: parsed.meta.steps,
-            mode: parsed.meta.mode,
-            prompt: parsed.body,
-            path,
-        });
-    }
-
-    agents.sort_by(|a, b| a.id.cmp(&b.id));
-    agents
+    markdown_files(dir, warnings)
+        .into_iter()
+        .filter_map(|path| parse_agent_file(&path, source.clone(), warnings))
+        .collect()
 }
 
-fn load_skills(
-    project_root: &Path,
+fn load_skills_in_dir(
+    dir: &Path,
     source: DefinitionSource,
     warnings: &mut Vec<String>,
 ) -> Vec<SkillDefinition> {
-    let dir_name = match source {
-        DefinitionSource::Agents => AGENTS_SKILLS_DIR,
-        DefinitionSource::Claude => CLAUDE_SKILLS_DIR,
-    };
-    let dir = project_root.join(dir_name);
-    let mut skills = Vec::new();
-
-    for entry in dir_entries(&dir, warnings) {
-        let skill_dir = entry.path();
-        match fs::symlink_metadata(&skill_dir) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                warnings.push(format!("skipping symlink {}", skill_dir.display()));
-                continue;
-            }
-            Ok(meta) if meta.is_dir() => {}
-            Ok(_) => continue,
-            Err(err) => {
-                warnings.push(format!("failed to inspect {}: {err}", skill_dir.display()));
-                continue;
-            }
-        }
-
-        let skill_path = skill_dir.join(SKILL_FILE);
-        match fs::symlink_metadata(&skill_path) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                warnings.push(format!("skipping symlink {}", skill_path.display()));
-                continue;
-            }
-            Ok(meta) if meta.is_file() => {}
-            Ok(_) => continue,
-            Err(_) => continue,
-        }
-
-        let Some(text) = read_text(&skill_path, warnings) else {
-            continue;
-        };
-        let Some(parsed) = parse_markdown(&text, &skill_path, warnings) else {
-            continue;
-        };
-        let fallback = skill_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        let Some(id) = definition_id(parsed.meta.name.as_deref(), fallback) else {
-            warnings.push(format!("cannot determine id for {}", skill_path.display()));
-            continue;
-        };
-        skills.push(SkillDefinition {
-            id,
-            source,
-            description: parsed.meta.description,
-            body: parsed.body,
-            path: skill_path,
-        });
-    }
-
-    skills.sort_by(|a, b| a.id.cmp(&b.id));
-    skills
+    skill_files(dir, warnings)
+        .into_iter()
+        .filter_map(|path| parse_skill_file(&path, source.clone(), warnings))
+        .collect()
 }
 
-fn parse_markdown(text: &str, path: &Path, warnings: &mut Vec<String>) -> Option<ParsedFile> {
+fn parse_agent_file(
+    path: &Path,
+    source: DefinitionSource,
+    warnings: &mut Vec<String>,
+) -> Option<AgentDefinition> {
+    let text = read_text(path, warnings)?;
+    let mut local = Vec::new();
+    let parsed = parse_markdown(&text, path, warnings, &mut local)?;
+    let fallback = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    let id = definition_id(parsed.meta.name.as_deref(), fallback)?;
+    Some(AgentDefinition {
+        id,
+        source,
+        description: parsed.meta.description,
+        model: parsed.meta.model,
+        steps: parsed.meta.steps,
+        mode: parsed.meta.mode,
+        token_estimate: token_estimate(&parsed.body),
+        warnings: local,
+        supporting_files: Vec::new(),
+        prompt: parsed.body,
+        path: path.to_path_buf(),
+    })
+}
+
+fn parse_skill_file(
+    path: &Path,
+    source: DefinitionSource,
+    warnings: &mut Vec<String>,
+) -> Option<SkillDefinition> {
+    if let Ok(meta) = fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
+    {
+        warnings.push(format!("skipping symlink {}", path.display()));
+        return None;
+    }
+    if !path.is_file() {
+        return None;
+    }
+    let text = read_text(path, warnings)?;
+    let mut local = Vec::new();
+    let parsed = parse_markdown(&text, path, warnings, &mut local)?;
+    let directory = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let fallback = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let declared = parsed
+        .meta
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    if let Some(name) = declared
+        && name != fallback
+    {
+        let warning = format!(
+            "{}: skill name '{name}' differs from its directory '{fallback}'; using '{name}'",
+            path.display()
+        );
+        warnings.push(warning.clone());
+        local.push(warning);
+    }
+    let id = definition_id(declared, fallback)?;
+    let description = normalized_description(parsed.meta.description, path, warnings, &mut local);
+    let model_invocable =
+        description.is_some() && !parsed.meta.disable_model_invocation.unwrap_or(false);
+    let estimate = token_estimate(&parsed.body);
+    Some(SkillDefinition {
+        id,
+        source,
+        description,
+        model_invocable,
+        body: parsed.body,
+        path: path.to_path_buf(),
+        directory,
+        token_estimate: estimate,
+        warnings: local,
+        supporting_files: supporting_files(path),
+    })
+}
+
+fn normalized_description(
+    raw: Option<String>,
+    path: &Path,
+    warnings: &mut Vec<String>,
+    local: &mut Vec<String>,
+) -> Option<String> {
+    let raw = raw.unwrap_or_default();
+    let text = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        let warning = format!(
+            "{}: skill has no description; it is hidden from the model (apply it with /skill)",
+            path.display()
+        );
+        warnings.push(warning.clone());
+        local.push(warning);
+        return None;
+    }
+    Some(text.chars().take(MAX_SKILL_DESCRIPTION_CHARS).collect())
+}
+
+fn parse_markdown(
+    text: &str,
+    path: &Path,
+    warnings: &mut Vec<String>,
+    local: &mut Vec<String>,
+) -> Option<ParsedFile> {
     let (frontmatter, body) = match split_frontmatter(text) {
         Ok(parts) => parts,
         Err(err) => {
@@ -252,16 +437,69 @@ fn parse_markdown(text: &str, path: &Path, warnings: &mut Vec<String>) -> Option
     };
 
     if meta.tools.is_some() || meta.permissions.is_some() || meta.allowed_tools.is_some() {
-        warnings.push(format!(
-            "{}: agent tool/permission fields are not applied yet",
+        let warning = format!(
+            "{}: agent tool/permission fields are warning-only and are not applied",
             path.display()
-        ));
+        );
+        warnings.push(warning.clone());
+        local.push(warning);
     }
 
     Some(ParsedFile {
         meta,
         body: body.trim().to_string(),
     })
+}
+
+fn supporting_files(skill_path: &Path) -> Vec<String> {
+    let Some(dir) = skill_path.parent() else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_name() != SKILL_FILE)
+        .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_file()))
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    names.truncate(MAX_SUPPORTING_FILES);
+    names
+}
+
+fn token_estimate(text: &str) -> u64 {
+    (text.chars().count() as u64).div_ceil(4)
+}
+
+fn skill_files(dir: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in dir_entries(dir, warnings) {
+        let skill_dir = entry.path();
+        match fs::symlink_metadata(&skill_dir) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                warnings.push(format!("skipping symlink {}", skill_dir.display()));
+                continue;
+            }
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => continue,
+            Err(err) => {
+                warnings.push(format!("failed to inspect {}: {err}", skill_dir.display()));
+                continue;
+            }
+        }
+        let skill_path = skill_dir.join(SKILL_FILE);
+        match fs::symlink_metadata(&skill_path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                warnings.push(format!("skipping symlink {}", skill_path.display()));
+            }
+            Ok(meta) if meta.is_file() => files.push(skill_path),
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    files.sort();
+    files
 }
 
 fn split_frontmatter(text: &str) -> Result<(Option<&str>, &str), &'static str> {
@@ -362,9 +600,9 @@ fn read_text(path: &Path, warnings: &mut Vec<String>) -> Option<String> {
 
 fn duplicate_warning(
     id: &str,
-    incoming_source: DefinitionSource,
+    incoming_source: &DefinitionSource,
     incoming_path: &Path,
-    kept_source: DefinitionSource,
+    kept_source: &DefinitionSource,
     kept_path: &Path,
 ) -> String {
     format!(
@@ -451,6 +689,7 @@ mod tests {
             "Review the changes.\n\nList findings by severity."
         );
         assert_eq!(agent.path, dir.join(".agents/agents/reviewer.md"));
+        assert_eq!(agent.token_estimate, token_estimate(&agent.prompt));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -473,6 +712,8 @@ mod tests {
         assert_eq!(skill.description.as_deref(), Some("Investigate a codebase"));
         assert_eq!(skill.body, "# Explore\n\nRead-only reconnaissance.");
         assert_eq!(skill.path, dir.join(".agents/skills/investigate/SKILL.md"));
+        assert_eq!(skill.directory, dir.join(".agents/skills/investigate"));
+        assert!(skill.model_invocable);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -505,6 +746,78 @@ mod tests {
     }
 
     #[test]
+    fn user_global_wins_over_project_and_pack() {
+        let dir = temp_dir("user_global");
+        let user = dir.join("user");
+        let packs = dir.join("packs");
+        write_file(
+            &user.join("agents/reviewer.md"),
+            "---\nname: reviewer\ndescription: User copy\n---\nUser prompt.\n",
+        );
+        write_file(
+            &packs.join("review-pack/meerai-pack.yml"),
+            "name: review-pack\nagents: [reviewer]\n",
+        );
+        write_file(
+            &packs.join("review-pack/agents/reviewer.md"),
+            "---\nname: reviewer\ndescription: Pack copy\n---\nPack prompt.\n",
+        );
+        write_file(
+            &dir.join(".agents/agents/reviewer.md"),
+            "---\nname: reviewer\ndescription: Project copy\n---\nProject prompt.\n",
+        );
+        write_file(
+            &dir.join(".claude/agents/reviewer.md"),
+            "---\nname: reviewer\ndescription: Claude copy\n---\nClaude prompt.\n",
+        );
+
+        let catalog =
+            load_definitions_with_sources(&dir, Some(&user), &[packs.join("review-pack")]);
+
+        assert_eq!(catalog.agents.len(), 1);
+        assert_eq!(catalog.agents[0].source, DefinitionSource::User);
+        assert_eq!(catalog.agents[0].prompt, "User prompt.");
+        assert_eq!(catalog.shadows.len(), 3);
+        assert!(catalog.warnings.len() == 3);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trusted_pack_definitions_load_and_expose_supporting_files() {
+        let dir = temp_dir("pack_definitions");
+        let pack = dir.join("pack");
+        write_file(
+            &pack.join("meerai-pack.yml"),
+            "name: review-pack\nversion: 1.0.0\nagents: [reviewer]\nskills: [review]\n",
+        );
+        write_file(
+            &pack.join("agents/reviewer.md"),
+            "---\nname: reviewer\ndescription: Pack reviewer\n---\nReview pack changes.\n",
+        );
+        write_file(
+            &pack.join("skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Review skill\n---\nReview the diff.\n",
+        );
+        write_file(&pack.join("skills/review/notes.md"), "extra");
+
+        let catalog = load_definitions_with_sources(&dir, None, &[pack]);
+
+        assert!(catalog.warnings.is_empty());
+        assert_eq!(catalog.agents.len(), 1);
+        assert_eq!(
+            catalog.agents[0].source,
+            DefinitionSource::Pack("review-pack".to_string())
+        );
+        assert_eq!(catalog.agents[0].token_estimate, 5);
+        assert_eq!(catalog.skills.len(), 1);
+        assert_eq!(catalog.skills[0].supporting_files, vec!["notes.md"]);
+        assert_eq!(catalog.skills[0].source.label(), "pack:review-pack");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn agents_wins_duplicate_id_over_claude() {
         let dir = temp_dir("agents_precedence");
         write_file(
@@ -530,6 +843,8 @@ mod tests {
         assert!(warning.contains("duplicate definition id reviewer"));
         assert!(warning.contains(".claude"));
         assert!(warning.contains(".agents"));
+        assert_eq!(catalog.shadows.len(), 1);
+        assert_eq!(catalog.shadows[0].source, DefinitionSource::Claude);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -539,11 +854,11 @@ mod tests {
         let dir = temp_dir("agents_skill_precedence");
         write_file(
             &dir.join(".agents/skills/deploy/SKILL.md"),
-            "---\nname: deploy\n---\nAgents body.\n",
+            "---\nname: deploy\ndescription: Deploy the app\n---\nAgents body.\n",
         );
         write_file(
             &dir.join(".claude/skills/deploy/SKILL.md"),
-            "---\nname: deploy\n---\nClaude body.\n",
+            "---\nname: deploy\ndescription: Deploy the app\n---\nClaude body.\n",
         );
 
         let catalog = load_definitions(&dir);
@@ -602,13 +917,15 @@ mod tests {
 
         let catalog = load_definitions(&dir);
 
-        assert!(catalog.warnings.is_empty());
+        assert_eq!(catalog.warnings.len(), 1);
+        assert!(catalog.warnings[0].contains("skill has no description"));
         assert_eq!(catalog.agents.len(), 1);
         assert_eq!(catalog.agents[0].id, "helper");
         assert_eq!(catalog.agents[0].description, None);
         assert_eq!(catalog.agents[0].prompt, "# Helper\n\nAnswer questions.");
         assert_eq!(catalog.skills[0].id, "planner");
         assert_eq!(catalog.skills[0].body, "# Planner\n\nBuild a plan.");
+        assert!(!catalog.skills[0].model_invocable);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -657,7 +974,9 @@ mod tests {
         assert_eq!(catalog.agents.len(), 1);
         assert_eq!(catalog.agents[0].prompt, "Read only.");
         assert_eq!(catalog.warnings.len(), 1);
-        assert!(catalog.warnings[0].contains("not applied yet"));
+        assert!(catalog.warnings[0].contains("warning-only"));
+        assert_eq!(catalog.agents[0].warnings.len(), 1);
+        assert!(catalog.agents[0].warnings[0].contains("warning-only"));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -717,6 +1036,66 @@ mod tests {
         assert_eq!(snapshot(&dir), before);
         assert!(!dir.join(".meerai").exists());
         assert!(!dir.join(".meerai/imports.lock").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn disable_model_invocation_hides_a_described_skill() {
+        let dir = temp_dir("skill_hidden");
+        write_file(
+            &dir.join(".claude/skills/seed/SKILL.md"),
+            "---\nname: seed\ndescription: Seed the database\ndisable-model-invocation: true\n---\nSeed.\n",
+        );
+
+        let catalog = load_definitions(&dir);
+
+        assert!(catalog.warnings.is_empty());
+        assert_eq!(catalog.skills.len(), 1);
+        assert_eq!(
+            catalog.skills[0].description.as_deref(),
+            Some("Seed the database")
+        );
+        assert!(!catalog.skills[0].model_invocable);
+        assert_eq!(catalog.advertised_skills().count(), 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skill_name_mismatch_warns_and_keeps_the_name() {
+        let dir = temp_dir("skill_name_mismatch");
+        write_file(
+            &dir.join(".agents/skills/folder/SKILL.md"),
+            "---\nname: declared\ndescription: Uses the declared name\n---\nBody.\n",
+        );
+
+        let catalog = load_definitions(&dir);
+
+        assert_eq!(catalog.skills[0].id, "declared");
+        assert_eq!(catalog.warnings.len(), 1);
+        assert!(catalog.warnings[0].contains("differs from its directory"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skill_description_is_collapsed_and_capped() {
+        let dir = temp_dir("skill_description");
+        write_file(
+            &dir.join(".agents/skills/notes/SKILL.md"),
+            &format!(
+                "---\nname: notes\ndescription: |\n  First line\n  second line {}\n---\nBody.\n",
+                "x".repeat(2000)
+            ),
+        );
+
+        let catalog = load_definitions(&dir);
+
+        let description = catalog.skills[0].description.as_deref().unwrap();
+        assert!(description.starts_with("First line second line "));
+        assert_eq!(description.chars().count(), MAX_SKILL_DESCRIPTION_CHARS);
+        assert!(catalog.skills[0].model_invocable);
 
         let _ = fs::remove_dir_all(&dir);
     }

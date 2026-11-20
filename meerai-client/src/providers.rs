@@ -590,7 +590,7 @@ fn format_auth_list_with_env(
     let mut out = String::new();
     let auth_label = auth_file
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "auth.json".to_string());
+        .unwrap_or_else(|| "the encrypted vault".to_string());
     let _ = writeln!(out, "Credentials ({auth_label})");
     let mut stored_count = 0;
     let mut seen_stored = BTreeSet::new();

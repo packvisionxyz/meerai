@@ -1,9 +1,9 @@
 use meerai_agents::AgentCommand;
-use meerai_common::definitions::load_definitions;
+use meerai_common::definitions::{load_definitions, load_definitions_for};
 use meerai_common::hooks::load_hooks_for_run;
 use meerai_common::settings::{
     Temperature, find_project_root, load_project_settings, load_settings_from,
-    merge_project_settings,
+    merge_project_settings, open_store_for_config_dir,
 };
 use meerai_policy::rules_from_yaml;
 
@@ -43,7 +43,10 @@ impl AppState {
         warnings.extend(theme_warnings);
         crate::theme::set(palette);
 
-        let definitions = load_definitions(&project_root);
+        let definitions = match open_store_for_config_dir(self.config_dir.as_deref()) {
+            Ok(store) => load_definitions_for(&store, self.config_dir.as_deref(), &project_root),
+            Err(_) => load_definitions(&project_root),
+        };
         warnings.extend(definitions.warnings.clone());
         self.agents = definitions.agents.clone();
         self.skills = definitions.skills.clone();
@@ -63,8 +66,24 @@ impl AppState {
             .permissions
             .as_ref()
             .and_then(|value| rules_from_yaml(value).ok());
-        let base =
-            meerai_agents::compose_system_prompt(&self.launch_system, &self.workspace_root).await;
+        let memory_bytes = merged
+            .context
+            .as_ref()
+            .and_then(|context| context.memory_prompt_bytes)
+            .map_or(meerai_agents::DEFAULT_MEMORY_PROMPT_BYTES as u64, |bytes| {
+                bytes
+            }) as usize;
+        let memory_block = open_store_for_config_dir(self.config_dir.as_deref())
+            .ok()
+            .and_then(|store| {
+                meerai_agents::load_memory_prompt(&store, &project_root, memory_bytes)
+            });
+        let base = meerai_agents::prompt::compose_system_prompt_with_memory(
+            &self.launch_system,
+            &self.workspace_root,
+            memory_block.as_deref(),
+        )
+        .await;
         let system_prompt = format!("{base}{}", self.launch_definitions);
         for tab in &mut self.tabs {
             let _ = tab.cmd_tx.send(AgentCommand::Reload {

@@ -8,7 +8,7 @@ use meerai_core::{
     EffectClass, PermissionAction, ToolDefinition, ToolError, ToolOutput, ToolPermissionSpec,
     ToolRun, Toolset,
 };
-use meerai_session::Session;
+use meerai_session::{Session, Usage};
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 
@@ -227,6 +227,13 @@ impl Toolset for AcpRunToolset {
                 status: ItemStatus::InProgress,
                 report: None,
                 child_session_id: Some(child_session_id.clone()),
+                model: Some("acp:agy".to_string()),
+                approval_mode: meerai_policy::ApprovalMode::Ask,
+                steps_used: 0,
+                max_steps: 0,
+                usage: Usage::default(),
+                est_cost_usd: None,
+                active_tool: None,
             },
         });
 
@@ -369,6 +376,13 @@ impl Toolset for AcpRunToolset {
                 status,
                 report: Some(text.clone()),
                 child_session_id: Some(child_session_id.clone()),
+                model: Some("acp:agy".to_string()),
+                approval_mode: meerai_policy::ApprovalMode::Ask,
+                steps_used: 0,
+                max_steps: 0,
+                usage: Usage::default(),
+                est_cost_usd: None,
+                active_tool: None,
             },
         });
 
@@ -478,6 +492,7 @@ mod tests {
             grant_tx,
             budget_tx,
             cancel,
+            turn_deadline: None,
             parent_session: Some(parent.clone()),
             parent_policy_mode: ApprovalMode::Ask,
             parent_policy_rules: Vec::new(),
@@ -485,6 +500,7 @@ mod tests {
             workspace_root: parent.meta().cwd,
             parent_harness_config: HarnessConfig::default(),
             parent_used_tokens: 0,
+            routing: None,
         };
         Fixture {
             bridge,

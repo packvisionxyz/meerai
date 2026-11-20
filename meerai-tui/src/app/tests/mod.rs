@@ -83,6 +83,9 @@ fn sample_agent(
         mode: None,
         prompt: prompt.to_string(),
         path: PathBuf::from(format!(".agents/agents/{id}.md")),
+        token_estimate: 0,
+        warnings: Vec::new(),
+        supporting_files: Vec::new(),
     }
 }
 
@@ -96,8 +99,13 @@ fn sample_skill(
         id: id.to_string(),
         source,
         description: description.map(str::to_string),
+        model_invocable: description.is_some(),
         body: body.to_string(),
         path: PathBuf::from(format!(".agents/skills/{id}/SKILL.md")),
+        directory: PathBuf::from(format!(".agents/skills/{id}")),
+        token_estimate: 0,
+        warnings: Vec::new(),
+        supporting_files: Vec::new(),
     }
 }
 

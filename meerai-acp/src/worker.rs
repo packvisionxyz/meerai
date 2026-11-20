@@ -124,7 +124,12 @@ async fn run(
                     | AgentCommand::SetModel { .. }
                     | AgentCommand::SetPlanUsage { .. }
                     | AgentCommand::SetPermissionMode(_)
-                    | AgentCommand::Compact
+                    | AgentCommand::Compact { .. }
+                    | AgentCommand::SetProjectionOverrides { .. }
+                    | AgentCommand::SetTurnPinned { .. }
+                    | AgentCommand::InspectContext
+                    | AgentCommand::SpawnSubagent { .. }
+                    | AgentCommand::CancelSubagent { .. }
                     | AgentCommand::ApplyAgent { .. }
                     | AgentCommand::ApplySkill { .. }
                     | AgentCommand::Reload { .. }

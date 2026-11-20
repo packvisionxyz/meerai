@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use genai::chat::{
     ChatMessage, ContentPart, MessageContent, ToolCall as GenaiToolCall, ToolResponse,
 };
@@ -7,8 +5,9 @@ use meerai_core::ToolObservation;
 use serde::{Deserialize, Serialize};
 
 use crate::compaction::{COMPACTED_MARKER, summary_message};
+use crate::context::{pinned_turns, turn_is_pinned};
 use crate::event::{ContentBlock, InputSource, LoggedEvent, SeqRange, SessionEvent};
-use crate::ids::CallId;
+use crate::ids::{CallId, TurnId};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectionPolicy {
@@ -17,6 +16,8 @@ pub struct ProjectionPolicy {
     pub verbatim_window_turns: usize,
     pub clear_old_tool_results: bool,
     pub include_system_messages: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned_turns: Vec<TurnId>,
 }
 
 impl Default for ProjectionPolicy {
@@ -27,6 +28,7 @@ impl Default for ProjectionPolicy {
             verbatim_window_turns: 4,
             clear_old_tool_results: true,
             include_system_messages: true,
+            pinned_turns: Vec::new(),
         }
     }
 }
@@ -34,6 +36,8 @@ impl Default for ProjectionPolicy {
 pub fn derive_messages(events: &[LoggedEvent], policy: &ProjectionPolicy) -> Vec<ChatMessage> {
     let shadowed = shadowed_ranges(events);
     let summaries = pending_summaries(events, &shadowed);
+    let pinned = pinned_turns(events);
+    let pinned_turns: Vec<&TurnId> = pinned.iter().chain(policy.pinned_turns.iter()).collect();
     let current_turn_start = events
         .iter()
         .rev()
@@ -46,6 +50,7 @@ pub fn derive_messages(events: &[LoggedEvent], policy: &ProjectionPolicy) -> Vec
         .count();
     let spills = spill_paths(events, &shadowed);
     let mut turn_index: Option<usize> = None;
+    let mut current_turn: Option<TurnId> = None;
     let mut next_summary = 0;
     let mut messages = Vec::new();
     let mut latest_calls: Vec<GenaiToolCall> = Vec::new();
@@ -64,8 +69,9 @@ pub fn derive_messages(events: &[LoggedEvent], policy: &ProjectionPolicy) -> Vec
         }
 
         match &logged.event {
-            SessionEvent::TurnStarted { .. } => {
+            SessionEvent::TurnStarted { turn_id, .. } => {
                 turn_index = Some(turn_index.map_or(0, |index| index + 1));
+                current_turn = Some(turn_id.clone());
             }
             SessionEvent::SystemMessage { sections, .. } => {
                 if !policy.include_system_messages {
@@ -124,8 +130,15 @@ pub fn derive_messages(events: &[LoggedEvent], policy: &ProjectionPolicy) -> Vec
                 else {
                     continue;
                 };
-                let content =
-                    tool_result_content(policy, turn_index, turn_count, &spills, call_id, output);
+                let content = tool_result_content(
+                    policy,
+                    turn_index,
+                    turn_count,
+                    &spills,
+                    turn_is_pinned(&current_turn, &pinned_turns),
+                    call_id,
+                    output,
+                );
                 let response =
                     ToolResponse::from_tool_call(call, content).with_fn_name(&call.fn_name);
                 messages.push(ChatMessage::from(response));
@@ -189,7 +202,7 @@ fn to_genai_tool_call(
     }
 }
 
-fn spill_paths(events: &[LoggedEvent], shadowed: &[SeqRange]) -> Vec<(CallId, PathBuf, u64)> {
+fn spill_paths(events: &[LoggedEvent], shadowed: &[SeqRange]) -> Vec<(CallId, String, u64)> {
     events
         .iter()
         .filter(|logged| !shadowed.iter().any(|range| range.contains(logged.seq)))
@@ -197,8 +210,8 @@ fn spill_paths(events: &[LoggedEvent], shadowed: &[SeqRange]) -> Vec<(CallId, Pa
             SessionEvent::SpillApplied {
                 call_id,
                 bytes_omitted,
-                blob_path,
-            } => Some((call_id.clone(), blob_path.clone(), *bytes_omitted)),
+                blob_key,
+            } => Some((call_id.clone(), blob_key.clone(), *bytes_omitted)),
             _ => None,
         })
         .collect()
@@ -208,11 +221,13 @@ fn tool_result_content(
     policy: &ProjectionPolicy,
     turn_index: Option<usize>,
     turn_count: usize,
-    spills: &[(CallId, PathBuf, u64)],
+    spills: &[(CallId, String, u64)],
+    pinned: bool,
     call_id: &CallId,
     output: &ToolObservation,
 ) -> String {
     let clears = policy.clear_old_tool_results
+        && !pinned
         && turn_index.is_some_and(|index| {
             turn_count.saturating_sub(index) > policy.verbatim_window_turns.max(1)
         });
@@ -222,9 +237,8 @@ fn tool_result_content(
     let spill = spills.iter().find(|(id, _, _)| id == call_id);
     let status = format!("{:?}", output.status).to_lowercase();
     let mut text = match spill {
-        Some((_, path, omitted)) => format!(
-            "[tool result cleared from an earlier turn: {status}, {omitted} bytes omitted; full output at {}; re-run the tool if needed]",
-            path.display()
+        Some((_, key, omitted)) => format!(
+            "[tool result cleared from an earlier turn: {status}, {omitted} bytes omitted; full output stored as blob {key}; re-run the tool if needed]"
         ),
         None => format!(
             "[tool result cleared from an earlier turn: {status}, {} bytes omitted; re-run the tool if needed]",
@@ -674,7 +688,7 @@ mod tests {
             SessionEvent::SpillApplied {
                 call_id: CallId::from("call-0"),
                 bytes_omitted: 900,
-                blob_path: PathBuf::from("/tmp/blob-0.txt"),
+                blob_key: "/tmp/blob-0.txt".to_string(),
             },
         ));
 

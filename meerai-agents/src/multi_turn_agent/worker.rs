@@ -20,7 +20,10 @@ impl MultiTurnAgent {
                 AgentCommand::Cancel | AgentCommand::Quit => return true,
                 AgentCommand::Steer(_)
                 | AgentCommand::SetPermissionMode(_)
-                | AgentCommand::Compact
+                | AgentCommand::Compact { .. }
+                | AgentCommand::SetProjectionOverrides { .. }
+                | AgentCommand::SetTurnPinned { .. }
+                | AgentCommand::InspectContext
                 | AgentCommand::ApplyAgent { .. }
                 | AgentCommand::ApplySkill { .. }
                 | AgentCommand::Reload { .. } => {
@@ -35,6 +38,8 @@ impl MultiTurnAgent {
                 | AgentCommand::SubmitPrompt(_)
                 | AgentCommand::SetModel { .. }
                 | AgentCommand::SetPlanUsage { .. }
+                | AgentCommand::SpawnSubagent { .. }
+                | AgentCommand::CancelSubagent { .. }
                 | AgentCommand::Reset => {}
             }
         }
@@ -54,10 +59,19 @@ pub fn spawn_worker(
 
     tokio::spawn(async move {
         let mut queued: VecDeque<QueuedPrompt> = VecDeque::new();
+        let mut pending_spawns: VecDeque<AgentCommand> = VecDeque::new();
+        let mut deferred: VecDeque<AgentCommand> = VecDeque::new();
 
         agent.start_session(&event_tx).await;
 
-        'worker: while let Some(cmd) = cmd_rx.recv().await {
+        'worker: loop {
+            let cmd = match deferred.pop_front() {
+                Some(cmd) => cmd,
+                None => match cmd_rx.recv().await {
+                    Some(cmd) => cmd,
+                    None => break,
+                },
+            };
             match cmd {
                 AgentCommand::SubmitPrompt(prompt) | AgentCommand::Steer(prompt) => {
                     queued.push_back(QueuedPrompt {
@@ -99,97 +113,119 @@ pub fn spawn_worker(
 
                             loop {
                                 tokio::select! {
-                                    res = &mut turn_fut => {
-                                        let (turn_id, outcome) = res;
-                                        match outcome {
-                                            Ok(_) => recovery_attempts = 0,
-                                            Err(err) => {
-                                                let message = err.message();
-                                                let recoverable = match err.code {
-                                                    ErrorCode::Provider => err.retryable,
-                                                    ErrorCode::LoopDetected => true,
-                                                    _ => false,
-                                                };
-                                                let will_recover = recoverable
-                                                    && recovery_attempts < MAX_RECOVERY_ATTEMPTS
-                                                    && !pending_quit
-                                                    && !pending_reset;
-                                                if will_recover {
-                                                    let _ = event_tx.send(
-                                                        AgentEvent::RecoveryStarted {
-                                                            attempt: recovery_attempts + 1,
-                                                        },
-                                                    );
+                                                    res = &mut turn_fut => {
+                                                        let (turn_id, outcome) = res;
+                                                        match outcome {
+                                                            Ok(_) => recovery_attempts = 0,
+                                                            Err(err) => {
+                                                                let message = err.message();
+                                                                let recoverable = match err.code {
+                                                                    ErrorCode::Provider => err.retryable,
+                                                                    ErrorCode::LoopDetected => true,
+                                                                    _ => false,
+                                                                };
+                                                                let will_recover = recoverable
+                                                                    && recovery_attempts < MAX_RECOVERY_ATTEMPTS
+                                                                    && !pending_quit
+                                                                    && !pending_reset;
+                                                                if will_recover {
+                                                                    let _ = event_tx.send(
+                                                                        AgentEvent::RecoveryStarted {
+                                                                            attempt: recovery_attempts + 1,
+                                                                        },
+                                                                    );
+                                                                }
+                                                                let _ = event_tx.send(AgentEvent::Error {
+                                                                    code: err.code,
+                                                                    message: message.clone(),
+                                                                });
+                                                                let _ = event_tx.send(AgentEvent::TurnCompleted {
+                                                                    turn_id,
+                                                                    reason: TurnEndReason::Failed { error: message.clone() },
+                                                                });
+                                                                if will_recover {
+                                                                    recovery_attempts += 1;
+                                                                    recovery = Some(QueuedPrompt {
+                                                                        text: recovery_prompt(&message),
+                                                                        model: recovery_model.clone(),
+                                                                    });
+                                                                }
+                                                            }
+                                                        }
+                                                        break;
+                                                    }
+                                                    maybe_cmd = cmd_rx.recv() => {
+                                                        match maybe_cmd {
+                                                            Some(AgentCommand::Cancel) => cancel.cancel(),
+                                                            Some(AgentCommand::Quit) | None => {
+                                                                cancel.cancel();
+                                                                pending_quit = true;
+                                                            }
+                                                            Some(AgentCommand::Reset) => {
+                                                                cancel.cancel();
+                                                                pending_reset = true;
+                                                            }
+                                                            Some(AgentCommand::SetModel {
+                                                                model,
+                                                                context_window_tokens,
+                                                            }) => {
+                                                                pending_model = Some(model);
+                                                                pending_model_window = context_window_tokens;
+                                                            }
+                                                            Some(AgentCommand::SetPlanUsage { plan_usage }) => {
+                                                                pending_plan_usage = Some(plan_usage);
+                                                            }
+                                                            Some(AgentCommand::SubmitPrompt(prompt)) => {
+                                                                queued.push_back(QueuedPrompt {
+                                                                    text: prompt,
+                                                                    model: None,
+                                                                });
+                                                            }
+                                                            Some(AgentCommand::Steer(text)) if !harnessed => {
+                                                                queued.push_back(QueuedPrompt {
+                                                                    text,
+                                                                    model: None,
+                                                                });
+                                                            }
+                                                            Some(
+                                                                command @ (AgentCommand::SpawnSubagent { .. }
+                                                                | AgentCommand::CancelSubagent { .. }),
+                                                            ) => {
+                                                                pending_spawns.push_back(command);
+                                                            }
+                                                            Some(
+                                                                command @ (AgentCommand::Steer(_)
+                                                                | AgentCommand::Approve { .. }
+                                                                | AgentCommand::AnswerQuestion { .. }
+                                                                | AgentCommand::SetPermissionMode(_)
+                                                                | AgentCommand::Compact { .. }
+                                                                | AgentCommand::SetProjectionOverrides { .. }
+                                | AgentCommand::SetTurnPinned { .. }
+                                                                | AgentCommand::InspectContext
+                                                                | AgentCommand::ApplyAgent { .. }
+                                                                | AgentCommand::ApplySkill { .. }
+                                                                | AgentCommand::Reload { .. }
+                                                                | AgentCommand::SetHooks(_)
+                                                                | AgentCommand::Rewind { .. }),
+                                                            ) => {
+                                                                let _ = inbox_tx.send(command);
+                                                            }
+                                                        }
+                                                    }
                                                 }
-                                                let _ = event_tx.send(AgentEvent::Error {
-                                                    code: err.code,
-                                                    message: message.clone(),
-                                                });
-                                                let _ = event_tx.send(AgentEvent::TurnCompleted {
-                                                    turn_id,
-                                                    reason: TurnEndReason::Failed { error: message.clone() },
-                                                });
-                                                if will_recover {
-                                                    recovery_attempts += 1;
-                                                    recovery = Some(QueuedPrompt {
-                                                        text: recovery_prompt(&message),
-                                                        model: recovery_model.clone(),
-                                                    });
-                                                }
-                                            }
-                                        }
-                                        break;
-                                    }
-                                    maybe_cmd = cmd_rx.recv() => {
-                                        match maybe_cmd {
-                                            Some(AgentCommand::Cancel) => cancel.cancel(),
-                                            Some(AgentCommand::Quit) | None => {
-                                                cancel.cancel();
-                                                pending_quit = true;
-                                            }
-                                            Some(AgentCommand::Reset) => {
-                                                cancel.cancel();
-                                                pending_reset = true;
-                                            }
-                                            Some(AgentCommand::SetModel {
-                                                model,
-                                                context_window_tokens,
-                                            }) => {
-                                                pending_model = Some(model);
-                                                pending_model_window = context_window_tokens;
-                                            }
-                                            Some(AgentCommand::SetPlanUsage { plan_usage }) => {
-                                                pending_plan_usage = Some(plan_usage);
-                                            }
-                                            Some(AgentCommand::SubmitPrompt(prompt)) => {
-                                                queued.push_back(QueuedPrompt {
-                                                    text: prompt,
-                                                    model: None,
-                                                });
-                                            }
-                                            Some(AgentCommand::Steer(text)) if !harnessed => {
-                                                queued.push_back(QueuedPrompt {
-                                                    text,
-                                                    model: None,
-                                                });
-                                            }
-                                            Some(
-                                                command @ (AgentCommand::Steer(_)
-                                                | AgentCommand::Approve { .. }
-                                                | AgentCommand::AnswerQuestion { .. }
-                                                | AgentCommand::SetPermissionMode(_)
-                                                | AgentCommand::Compact
-                                                | AgentCommand::ApplyAgent { .. }
-                                                | AgentCommand::ApplySkill { .. }
-                                                | AgentCommand::Reload { .. }
-                                                | AgentCommand::SetHooks(_)
-                                                | AgentCommand::Rewind { .. }),
-                                            ) => {
-                                                let _ = inbox_tx.send(command);
-                                            }
-                                        }
-                                    }
+                            }
+                        }
+
+                        while let Ok(command) = cmd_rx.try_recv() {
+                            match command {
+                                AgentCommand::SetModel {
+                                    model,
+                                    context_window_tokens,
+                                } => {
+                                    pending_model = Some(model);
+                                    pending_model_window = context_window_tokens;
                                 }
+                                other => deferred.push_back(other),
                             }
                         }
 
@@ -221,6 +257,25 @@ pub fn spawn_worker(
                             break 'worker;
                         }
                     }
+
+                    for command in pending_spawns.drain(..) {
+                        match command {
+                            AgentCommand::SpawnSubagent { spec } => {
+                                agent
+                                    .spawn_manual_subagent(
+                                        spec,
+                                        &event_tx,
+                                        &mut cmd_rx,
+                                        &mut deferred,
+                                    )
+                                    .await;
+                            }
+                            AgentCommand::CancelSubagent { item_id } => {
+                                agent.cancel_subagent(&item_id);
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 AgentCommand::SetModel {
                     model,
@@ -241,10 +296,20 @@ pub fn spawn_worker(
                         let _ = harness.session.set_approval_mode(mode.label()).await;
                     }
                 }
-                AgentCommand::Compact => {
+                AgentCommand::Compact {
+                    focus,
+                    from_turn_id,
+                } => {
                     let cancel = CancellationToken::new();
                     let _ = agent
-                        .run_compaction(CompactionTrigger::Manual, &event_tx, &cancel, None)
+                        .run_compaction(
+                            CompactionTrigger::Manual,
+                            &event_tx,
+                            &cancel,
+                            None,
+                            focus,
+                            from_turn_id,
+                        )
                         .await;
                 }
                 AgentCommand::ApplyAgent {
@@ -294,6 +359,32 @@ pub fn spawn_worker(
                     agent.reset();
                     agent.start_session(&event_tx).await;
                 }
+                AgentCommand::InspectContext => agent.emit_context_updated(&event_tx),
+                AgentCommand::SetTurnPinned { turn_id, pinned } => {
+                    agent.set_turn_pinned(turn_id, pinned, &event_tx).await;
+                }
+                AgentCommand::SetProjectionOverrides {
+                    verbatim_window_turns,
+                    reasoning_pruning,
+                    clear_old_tool_results,
+                    pin_turns,
+                } => {
+                    agent
+                        .apply_projection_overrides(
+                            verbatim_window_turns,
+                            reasoning_pruning,
+                            clear_old_tool_results,
+                            pin_turns,
+                            &event_tx,
+                        )
+                        .await;
+                }
+                AgentCommand::SpawnSubagent { spec } => {
+                    agent
+                        .spawn_manual_subagent(spec, &event_tx, &mut cmd_rx, &mut deferred)
+                        .await;
+                }
+                AgentCommand::CancelSubagent { item_id } => agent.cancel_subagent(&item_id),
                 AgentCommand::Cancel => {}
                 AgentCommand::Approve { .. } => {}
                 AgentCommand::AnswerQuestion { .. } => {}

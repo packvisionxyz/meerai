@@ -78,8 +78,10 @@ make verify                                    # fmt --check + clippy + test (al
 - Redaction keeps no log-only copy of a secret.
 - Keep the shell-safety allowlist conservative.
 - Do not let a project file control session retention.
-- Agent and skill definitions are prompt-only and read-only. `.meerai` is never a definition
-  directory: do not scan or create `.meerai/agents` or `.meerai/skills`, and never copy definitions.
+- Agent and skill definitions are read-only and supply prompt text only. `skill-load` may read
+  files inside a skill directory; nothing grants tools or permissions. `.meerai` is never a
+  definition directory: do not scan or create `.meerai/agents` or `.meerai/skills`, and never copy
+  definitions.
 - Never describe agent or skill definitions, hooks, or an ACP backend as a security boundary.
   Hooks run unsandboxed host commands; an ACP backend keeps its own tools and policy.
 
@@ -97,6 +99,12 @@ make verify                                    # fmt --check + clippy + test (al
 - Keep new TUI dialogs narrow; use the width caps in `docs/tui-design.md`.
 - Neither UI spawns tool processes: `!` commands go through `SessionOpener::run_user_shell`.
 - `meerai-web-client` reducers carry no DOM types; UI side effects become explicit `UiEffect` values.
+- Every user-facing command and workflow gets a dedicated panel or modal in both
+  `meerai-tui` and `meerai-web-client`. Do not ship a transcript-only flow in
+  one client, or require a typed confirmation argument in one client and a
+  panel in the other. Add the command, modal state, renderer, key handling, and
+  tests in both clients in the same change. Destructive flows use the same
+  explicit confirmation in both.
 
 ### Docs
 

@@ -3,12 +3,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result};
-use meerai_policy::{Effect, PermissionAction};
+use anyhow::{Context, Result, ensure};
+use meerai_policy::{Effect, PermissionAction, default_sensitive_rules, rules_from_yaml};
+use meerai_store::Store;
+pub use meerai_store::{ModelRoute, RoutingSettings, TaskType};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-const SETTINGS_FILE: &str = "settings.yml";
+const PROJECT_SETTINGS_FILE: &str = "settings.yml";
+const USER_SETTINGS_KEY: &str = "settings";
 const USER_PROVIDERS_FILE: &str = "providers.yml";
 const MAX_RECENT_MODELS: usize = 20;
 
@@ -170,6 +173,8 @@ pub struct ContextSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps_per_turn: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_limit_continuations: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_session_tokens: Option<u64>,
@@ -183,6 +188,10 @@ pub struct ContextSettings {
     pub temperature: Option<Temperature>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<EffortLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_memory: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_prompt_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,7 +300,7 @@ impl ThemeSettings {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_provider: Option<String>,
@@ -313,6 +322,8 @@ pub struct AppSettings {
     pub sandbox: Option<SandboxSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<ThemeSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingSettings>,
 }
 
 impl AppSettings {
@@ -402,27 +413,63 @@ pub fn user_providers_path(dir: &Path) -> PathBuf {
     dir.join(USER_PROVIDERS_FILE)
 }
 
+pub fn load_user_settings(store: &Store) -> Result<AppSettings> {
+    let settings = store.config().get(USER_SETTINGS_KEY)?.unwrap_or_default();
+    validate_user_api_keys(&settings)?;
+    Ok(settings)
+}
+
+pub fn save_user_settings(store: &Store, settings: &AppSettings) -> Result<()> {
+    validate_user_api_keys(settings)?;
+    store.config().set(USER_SETTINGS_KEY, settings)
+}
+
 pub fn load_settings_from(dir: &Path) -> Result<AppSettings> {
-    let path = dir.join(SETTINGS_FILE);
-    if !path.exists() {
-        return Ok(AppSettings::default());
-    }
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read settings at {}", path.display()))?;
-    if raw.trim().is_empty() {
-        return Ok(AppSettings::default());
-    }
-    serde_yaml::from_str(&raw)
-        .with_context(|| format!("failed to parse settings at {}", path.display()))
+    load_user_settings(&open_settings_store(dir)?)
 }
 
 pub fn save_settings_to(dir: &Path, settings: &AppSettings) -> Result<()> {
-    fs::create_dir_all(dir)
-        .with_context(|| format!("failed to create config dir {}", dir.display()))?;
-    let path = dir.join(SETTINGS_FILE);
-    let yaml = serde_yaml::to_string(settings).context("failed to serialize settings")?;
-    fs::write(&path, yaml)
-        .with_context(|| format!("failed to write settings at {}", path.display()))
+    save_user_settings(&open_settings_store(dir)?, settings)
+}
+
+fn open_settings_store(dir: &Path) -> Result<Store> {
+    open_store_for_config_dir(Some(dir))
+}
+
+pub fn open_store_for_config_dir(dir: Option<&Path>) -> Result<Store> {
+    // Existing callers pass the user config directory; explicit directories stay isolated.
+    match dir {
+        Some(dir) if default_config_dir().as_deref() != Some(dir) => {
+            Store::open(dir.join("meerai.db"))
+        }
+        _ => Store::open_default(),
+    }
+}
+
+fn validate_user_api_keys(settings: &AppSettings) -> Result<()> {
+    static ENV_REFERENCE: OnceLock<Regex> = OnceLock::new();
+    let reference = ENV_REFERENCE.get_or_init(|| {
+        Regex::new(r"\A(?:\{env:[A-Za-z_][A-Za-z0-9_]*\}|\$\{[A-Za-z_][A-Za-z0-9_]*\})\z")
+            .expect("valid environment reference regex")
+    });
+    for provider in settings.providers.values() {
+        for key in [
+            provider.api_key.as_deref(),
+            provider
+                .options
+                .as_ref()
+                .and_then(|opts| opts.api_key.as_deref()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            ensure!(
+                reference.is_match(key.trim()),
+                "user settings API keys must be bare environment references; store literal keys in the vault"
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn find_project_root(start: &Path) -> PathBuf {
@@ -430,7 +477,7 @@ pub fn find_project_root(start: &Path) -> PathBuf {
         if dir.as_os_str().is_empty() {
             break;
         }
-        if dir.join(".git").exists() || dir.join(".meerai").join(SETTINGS_FILE).exists() {
+        if dir.join(".git").exists() || dir.join(".meerai").join(PROJECT_SETTINGS_FILE).exists() {
             return dir.to_path_buf();
         }
     }
@@ -438,7 +485,7 @@ pub fn find_project_root(start: &Path) -> PathBuf {
 }
 
 pub fn load_project_settings(workspace: &Path) -> Result<Option<AppSettings>> {
-    let path = workspace.join(".meerai").join(SETTINGS_FILE);
+    let path = workspace.join(".meerai").join(PROJECT_SETTINGS_FILE);
     if !path.exists() {
         return Ok(None);
     }
@@ -493,6 +540,11 @@ pub fn merge_project_settings(
                 .to_string(),
         );
     }
+    if project.routing.is_some() {
+        warnings.push(
+            "ignoring project routing: only the user config controls model routes".to_string(),
+        );
+    }
 
     if let Some(permissions) = project.permissions.as_ref()
         && let Some((asks, denies)) = split_project_permissions(permissions, &mut warnings)
@@ -518,24 +570,33 @@ fn combine_rules(
     denies: Vec<serde_yaml::Value>,
     warnings: &mut Vec<String>,
 ) -> Option<serde_yaml::Value> {
-    match user {
-        None => {
-            asks.extend(denies);
-            Some(serde_yaml::Value::Sequence(asks))
-        }
-        Some(serde_yaml::Value::Sequence(mut user_rules)) => {
-            asks.append(&mut user_rules);
-            asks.extend(denies);
-            Some(serde_yaml::Value::Sequence(asks))
-        }
+    let user_rules = match user {
+        None => Vec::new(),
+        Some(serde_yaml::Value::Sequence(rules)) => rules,
         Some(other) => {
             warnings.push(
                 "ignoring project permissions: user permissions are not a list of rules"
                     .to_string(),
             );
-            Some(other)
+            return Some(other);
         }
+    };
+    // The policy engine applies explicit rules after its defaults. Keep sensitive-file
+    // denies ahead of user overrides, but after project asks that can match them.
+    if asks.iter().any(|ask| {
+        ask.as_mapping()
+            .and_then(|map| mapping_str(map, "action"))
+            .is_some_and(|action| matches!(action, "*" | "read" | "edit"))
+    }) {
+        asks.extend(
+            default_sensitive_rules().into_iter().map(|rule| {
+                serde_yaml::to_value(rule).expect("permission rules serialize to YAML")
+            }),
+        );
     }
+    asks.extend(user_rules);
+    asks.extend(denies);
+    Some(serde_yaml::Value::Sequence(asks))
 }
 
 fn split_project_permissions(
@@ -586,6 +647,11 @@ fn split_project_permissions(
             }
         }
     }
+    let rules = serde_yaml::Value::Sequence(asks.iter().chain(&denies).cloned().collect());
+    if rules_from_yaml(&rules).is_err() {
+        warnings.push("ignoring project permissions: invalid rule resource".to_string());
+        return None;
+    }
     Some((asks, denies))
 }
 
@@ -599,46 +665,63 @@ fn merge_context(
     user: Option<ContextSettings>,
     project: Option<ContextSettings>,
 ) -> Option<ContextSettings> {
+    let Some(project) = project else {
+        return user;
+    };
+    let user = user.unwrap_or_default();
+    Some(ContextSettings {
+        context_window_tokens: project.context_window_tokens.or(user.context_window_tokens),
+        high_watermark_pct: project.high_watermark_pct.or(user.high_watermark_pct),
+        spill_max_inline_tokens: project
+            .spill_max_inline_tokens
+            .or(user.spill_max_inline_tokens),
+        verbatim_window_turns: project.verbatim_window_turns.or(user.verbatim_window_turns),
+        reasoning_pruning: project.reasoning_pruning.or(user.reasoning_pruning),
+        prompt_caching: project.prompt_caching.or(user.prompt_caching),
+        rollback_on_verify_failure: user.rollback_on_verify_failure,
+        recovery_model: same_provider_model(project.recovery_model).or(user.recovery_model),
+        // Match the harness defaults when the user has not set these limits.
+        max_steps_per_turn: tighten_limit(user.max_steps_per_turn, project.max_steps_per_turn, 32),
+        step_limit_continuations: tighten_limit(
+            user.step_limit_continuations,
+            project.step_limit_continuations,
+            2,
+        ),
+        tool_timeout_ms: tighten_limit(user.tool_timeout_ms, project.tool_timeout_ms, 120_000),
+        max_session_tokens: merge_max_session_tokens(
+            user.max_session_tokens,
+            project.max_session_tokens,
+        ),
+        max_turn_secs: merge_max_turn_secs(user.max_turn_secs, project.max_turn_secs),
+        summarizer_model: same_provider_model(project.summarizer_model).or(user.summarizer_model),
+        post_edit_diagnostics: project.post_edit_diagnostics.or(user.post_edit_diagnostics),
+        temperature: project.temperature.or(user.temperature),
+        effort: project.effort.or(user.effort),
+        auto_memory: project.auto_memory.or(user.auto_memory),
+        memory_prompt_bytes: tighten_limit(
+            user.memory_prompt_bytes,
+            project.memory_prompt_bytes,
+            8 * 1024,
+        ),
+    })
+}
+
+fn same_provider_model(model: Option<String>) -> Option<String> {
+    model.filter(|model| !model.trim().is_empty() && !model.contains(':'))
+}
+
+fn tighten_limit<T: Ord>(user: Option<T>, project: Option<T>, default: T) -> Option<T> {
     match (user, project) {
-        (None, None) => None,
-        (Some(user), None) => Some(user),
-        (None, Some(project)) => Some(project),
-        (Some(user), Some(project)) => Some(ContextSettings {
-            context_window_tokens: project.context_window_tokens.or(user.context_window_tokens),
-            high_watermark_pct: project.high_watermark_pct.or(user.high_watermark_pct),
-            spill_max_inline_tokens: project
-                .spill_max_inline_tokens
-                .or(user.spill_max_inline_tokens),
-            verbatim_window_turns: project.verbatim_window_turns.or(user.verbatim_window_turns),
-            reasoning_pruning: project.reasoning_pruning.or(user.reasoning_pruning),
-            prompt_caching: project.prompt_caching.or(user.prompt_caching),
-            rollback_on_verify_failure: project
-                .rollback_on_verify_failure
-                .or(user.rollback_on_verify_failure),
-            recovery_model: project
-                .recovery_model
-                .filter(|model| !model.contains(':'))
-                .or(user.recovery_model),
-            max_steps_per_turn: project.max_steps_per_turn.or(user.max_steps_per_turn),
-            tool_timeout_ms: project.tool_timeout_ms.or(user.tool_timeout_ms),
-            max_session_tokens: merge_max_session_tokens(
-                user.max_session_tokens,
-                project.max_session_tokens,
-            ),
-            max_turn_secs: merge_max_turn_secs(user.max_turn_secs, project.max_turn_secs),
-            summarizer_model: project.summarizer_model.or(user.summarizer_model),
-            post_edit_diagnostics: project.post_edit_diagnostics.or(user.post_edit_diagnostics),
-            temperature: project.temperature.or(user.temperature),
-            effort: project.effort.or(user.effort),
-        }),
+        (Some(user), Some(project)) => Some(user.min(project)),
+        (None, Some(project)) if project < default => Some(project),
+        (user, _) => user,
     }
 }
 
 fn merge_max_session_tokens(user: Option<u64>, project: Option<u64>) -> Option<u64> {
     match (user, project) {
         (Some(user), Some(project)) => Some(user.min(project)),
-        (Some(user), None) => Some(user),
-        (None, project) => project,
+        (user, project) => user.or(project),
     }
 }
 
@@ -705,7 +788,7 @@ fn merge_sandbox(
             Some(SandboxSettings {
                 require_for_scripts,
                 require_for_shell,
-                strict_env: user.strict_env.or(project.strict_env.filter(|v| *v)),
+                strict_env: project.strict_env.filter(|v| *v).or(user.strict_env),
             })
         }
     }
@@ -753,6 +836,7 @@ mod tests {
 
         save_settings_to(&dir, &settings).unwrap();
         assert_eq!(load_settings_from(&dir).unwrap(), settings);
+        assert!(!dir.join("settings.yml").exists());
 
         settings.set_provider_base_url("opencode", None);
         assert_eq!(
@@ -811,33 +895,78 @@ providers:
     }
 
     #[test]
-    fn legacy_settings_load_unchanged_and_omit_new_fields_on_save() {
+    fn user_settings_ignore_legacy_yaml() {
         let dir = temp_dir("legacy_settings");
         fs::create_dir_all(&dir).unwrap();
-        let legacy = concat!(
-            "active_provider: opencode-go\n",
-            "active_model: glm-5.3\n",
-            "providers:\n",
-            "  opencode-go:\n",
-            "    model: glm-5.3\n",
+        let path = dir.join("settings.yml");
+        let legacy = "active_provider: legacy-provider\n";
+        fs::write(&path, legacy).unwrap();
+
+        assert_eq!(load_settings_from(&dir).unwrap(), AppSettings::default());
+        let settings = AppSettings {
+            active_provider: Some("sqlite-provider".to_string()),
+            ..AppSettings::default()
+        };
+        save_settings_to(&dir, &settings).unwrap();
+        assert_eq!(load_settings_from(&dir).unwrap(), settings);
+        assert_eq!(fs::read_to_string(path).unwrap(), legacy);
+
+        let store = Store::open(dir.join("meerai.db")).unwrap();
+        let row = store
+            .config()
+            .get::<BTreeMap<String, String>>("settings")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row,
+            BTreeMap::from([("active_provider".into(), "sqlite-provider".into())])
         );
-        fs::write(dir.join(SETTINGS_FILE), legacy).unwrap();
-
-        let loaded = load_settings_from(&dir).unwrap();
-        assert_eq!(loaded.active_provider.as_deref(), Some("opencode-go"));
-        assert_eq!(loaded.active_model.as_deref(), Some("glm-5.3"));
-        assert_eq!(loaded.approval_mode, None);
-        assert_eq!(loaded.permissions, None);
-        assert_eq!(loaded.context, None);
-
-        save_settings_to(&dir, &loaded).unwrap();
-        let raw = fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap();
-        assert!(!raw.contains("approval_mode"));
-        assert!(!raw.contains("permissions"));
-        assert!(!raw.contains("context"));
-        assert_eq!(load_settings_from(&dir).unwrap(), loaded);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn user_settings_keep_environment_references_and_reject_literal_keys() {
+        let store = Store::open(":memory:").unwrap();
+        let settings = settings_from_yaml(
+            "providers:\n  test:\n    api_key: '${MEERAI_TEST_KEY}'\n    options:\n      apiKey: '{env:MEERAI_TEST_OVERRIDE}'\n",
+        );
+        save_user_settings(&store, &settings).unwrap();
+        assert_eq!(load_user_settings(&store).unwrap(), settings);
+
+        for raw in [
+            "mock-literal",
+            "${VAR|mock-literal}",
+            "{env:VAR}mock-literal",
+            "${VAR}${OTHER}",
+        ] {
+            for nested in [false, true] {
+                let mut invalid = settings.clone();
+                let provider = invalid.providers.get_mut("test").unwrap();
+                let field = if nested {
+                    &mut provider.options.as_mut().unwrap().api_key
+                } else {
+                    &mut provider.api_key
+                };
+                *field = Some(raw.to_string());
+                let error = save_user_settings(&store, &invalid)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("bare environment references"));
+                assert!(!error.contains(raw));
+                assert_eq!(load_user_settings(&store).unwrap(), settings);
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_sqlite_settings_return_an_error() {
+        let store = Store::open(":memory:").unwrap();
+        store
+            .config()
+            .set(USER_SETTINGS_KEY, "not an AppSettings object")
+            .unwrap();
+        assert!(load_user_settings(&store).is_err());
     }
 
     #[test]
@@ -873,10 +1002,6 @@ providers:
 
         save_settings_to(&dir, &settings).unwrap();
         assert_eq!(load_settings_from(&dir).unwrap(), settings);
-
-        let raw = fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap();
-        assert!(raw.contains("approval_mode: auto"));
-        assert!(raw.contains("context_window_tokens: 200000"));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1004,7 +1129,7 @@ providers:
         let marked_root = temp_dir("project_root_marked");
         fs::create_dir_all(marked_root.join(".meerai")).unwrap();
         fs::write(
-            marked_root.join(".meerai").join(SETTINGS_FILE),
+            marked_root.join(".meerai").join(PROJECT_SETTINGS_FILE),
             "context:\n  high_watermark_pct: 70\n",
         )
         .unwrap();
@@ -1029,7 +1154,7 @@ providers:
         let inner = outer.join("inner");
         fs::create_dir_all(inner.join(".meerai")).unwrap();
         fs::write(
-            inner.join(".meerai").join(SETTINGS_FILE),
+            inner.join(".meerai").join(PROJECT_SETTINGS_FILE),
             "context:\n  high_watermark_pct: 60\n",
         )
         .unwrap();
@@ -1054,9 +1179,6 @@ providers:
         };
         save_settings_to(&dir, &settings).unwrap();
         assert_eq!(load_settings_from(&dir).unwrap(), settings);
-        let raw = fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap();
-        assert!(raw.contains("auto_prune_days: 14"));
-        assert!(raw.contains("keep: 5"));
 
         let partial: AppSettings =
             serde_yaml::from_str("sessions:\n  auto_prune_days: 7\n").unwrap();
@@ -1104,9 +1226,6 @@ providers:
         };
         save_settings_to(&dir, &settings).unwrap();
         assert_eq!(load_settings_from(&dir).unwrap(), settings);
-        let raw = fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap();
-        assert!(raw.contains("enabled: true"));
-        assert!(raw.contains("trust_project: false"));
 
         let partial: AppSettings = serde_yaml::from_str("hooks:\n  trust_project: true\n").unwrap();
         let hooks = partial.hooks.as_ref().unwrap();
@@ -1244,6 +1363,43 @@ providers:
     }
 
     #[test]
+    fn project_ask_cannot_downgrade_default_sensitive_deny() {
+        use meerai_core::EffectClass;
+        use meerai_policy::{ApprovalMode, Decision, PermissionCheck, PolicyEngine};
+
+        let project =
+            settings_from_yaml("permissions:\n  - { action: '*', resource: '*', effect: ask }\n");
+        let (merged, warnings) = merge_project_settings(AppSettings::default(), project);
+        assert!(warnings.is_empty());
+        let rules = rules_from_yaml(merged.permissions.as_ref().unwrap()).unwrap();
+        let policy = PolicyEngine::new(ApprovalMode::Auto).with_rules(rules);
+        let mut check = PermissionCheck {
+            action: PermissionAction::Read,
+            resource: ".env".to_string(),
+            effect: EffectClass::Read,
+            tool_name: "read".to_string(),
+        };
+        assert!(matches!(policy.decide(&check), Decision::Deny { .. }));
+        check.resource = "README.md".to_string();
+        assert_eq!(policy.decide(&check), Decision::Ask);
+    }
+
+    #[test]
+    fn project_context_does_not_redirect_models_or_relax_guards() {
+        let project = settings_from_yaml(
+            "context:\n  recovery_model: other::model\n  summarizer_model: other:model\n  max_steps_per_turn: 64\n  tool_timeout_ms: 240000\n  rollback_on_verify_failure: true\n",
+        );
+        let (merged, _) = merge_project_settings(AppSettings::default(), project.clone());
+        assert_eq!(merged.context.unwrap(), ContextSettings::default());
+
+        let user = settings_from_yaml(
+            "context:\n  recovery_model: user::model\n  summarizer_model: user:model\n  max_steps_per_turn: 16\n  tool_timeout_ms: 60000\n  rollback_on_verify_failure: false\n",
+        );
+        let (merged, _) = merge_project_settings(user.clone(), project);
+        assert_eq!(merged, user);
+    }
+
+    #[test]
     fn merge_project_context_overrides_fields_fieldwise() {
         let user = settings_from_yaml(
             "context:\n  context_window_tokens: 100000\n  high_watermark_pct: 80\n  tool_timeout_ms: 30000\n",
@@ -1291,6 +1447,91 @@ providers:
         assert_eq!(merge_max_turn_secs(Some(0), Some(300)), Some(300));
         assert_eq!(merge_max_turn_secs(Some(0), Some(0)), Some(0));
         assert_eq!(merge_max_turn_secs(Some(0), None), Some(0));
+    }
+
+    #[test]
+    fn merge_ignores_project_routing() {
+        let user = settings_from_yaml(
+            "routing:\n  routes:\n    - task_type: build\n      provider: openai\n      model: o3\n",
+        );
+        let project = settings_from_yaml(
+            "routing:\n  routes:\n    - task_type: build\n      provider: evil\n      model: evil\n",
+        );
+
+        let (merged, warnings) = merge_project_settings(user.clone(), project);
+        assert_eq!(merged.routing, user.routing);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("project routing"))
+        );
+    }
+
+    #[test]
+    fn merge_project_memory_prompt_cap_only_tightens() {
+        let cases = [
+            (Some(4096), Some(1024), Some(1024)),
+            (Some(1024), Some(4096), Some(1024)),
+            (Some(4096), None, Some(4096)),
+            (None, Some(1024), Some(1024)),
+            (None, Some(64 * 1024), None),
+        ];
+        for (user, project, expected) in cases {
+            let context = merge_context(
+                Some(ContextSettings {
+                    memory_prompt_bytes: user,
+                    ..ContextSettings::default()
+                }),
+                Some(ContextSettings {
+                    memory_prompt_bytes: project,
+                    ..ContextSettings::default()
+                }),
+            )
+            .unwrap();
+            assert_eq!(
+                context.memory_prompt_bytes, expected,
+                "user={user:?} project={project:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_project_step_continuations_can_only_lower() {
+        let merge = |user: Option<usize>, project: Option<usize>| {
+            merge_context(
+                Some(ContextSettings {
+                    step_limit_continuations: user,
+                    ..ContextSettings::default()
+                }),
+                Some(ContextSettings {
+                    step_limit_continuations: project,
+                    ..ContextSettings::default()
+                }),
+            )
+            .unwrap()
+            .step_limit_continuations
+        };
+        assert_eq!(merge(Some(2), Some(0)), Some(0));
+        assert_eq!(merge(Some(2), Some(5)), Some(2));
+        assert_eq!(merge(None, Some(1)), Some(1));
+        assert_eq!(merge(None, Some(5)), None);
+        assert_eq!(merge(Some(2), None), Some(2));
+    }
+
+    #[test]
+    fn merge_project_auto_memory_can_only_disable() {
+        let context = merge_context(
+            Some(ContextSettings {
+                auto_memory: Some(true),
+                ..ContextSettings::default()
+            }),
+            Some(ContextSettings {
+                auto_memory: Some(false),
+                ..ContextSettings::default()
+            }),
+        )
+        .unwrap();
+        assert_eq!(context.auto_memory, Some(false));
     }
 
     #[test]
@@ -1398,15 +1639,17 @@ providers:
 
     #[test]
     fn project_sandbox_merge_is_tighten_only() {
-        let user = settings_from_yaml("sandbox:\n  require_for_scripts: true\n");
+        let user =
+            settings_from_yaml("sandbox:\n  require_for_scripts: true\n  strict_env: false\n");
         let project = settings_from_yaml(
-            "sandbox:\n  require_for_scripts: false\n  require_for_shell: true\n",
+            "sandbox:\n  require_for_scripts: false\n  require_for_shell: true\n  strict_env: true\n",
         );
 
         let (merged, warnings) = merge_project_settings(user, project);
         let sandbox = merged.sandbox.expect("sandbox merged");
         assert_eq!(sandbox.require_for_scripts, Some(true));
         assert_eq!(sandbox.require_for_shell, Some(true));
+        assert_eq!(sandbox.strict_env, Some(true));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("require_for_scripts=false"));
     }

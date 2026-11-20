@@ -83,6 +83,21 @@ pub(super) fn render_subagent_overlay(
                     name_style,
                 ),
                 Span::styled(format!(" [{badge}]"), Style::default().fg(color).bg(bg)),
+                Span::styled(
+                    if subagent.max_steps > 0 {
+                        format!(
+                            " {}/{} steps{}",
+                            subagent.steps_used,
+                            subagent.max_steps,
+                            subagent
+                                .est_cost_usd
+                                .map_or_else(String::new, |cost| format!(" · ${cost:.4}"))
+                        )
+                    } else {
+                        String::new()
+                    },
+                    Style::default().fg(theme::p().muted).bg(bg),
+                ),
             ])),
             row,
         );

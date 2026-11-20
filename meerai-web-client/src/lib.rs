@@ -103,6 +103,7 @@ mod tests {
                 pending_questions: Vec::new(),
                 usage: UsageDto::default(),
                 metrics: TurnMetricsDto::default(),
+                context: None,
             }),
             file_changes: Vec::new(),
             host_info: Some(HostInfoDto {
@@ -421,6 +422,7 @@ mod tests {
             },
             pending_approvals: Vec::new(),
             pending_questions: Vec::new(),
+            context: None,
         };
         apply_session_detail(&mut state, detail);
         let tab = state.session_tabs.get("s-1").unwrap();
@@ -959,12 +961,14 @@ mod tests {
         });
         apply_opened_session(&mut state, summary("s-1", SessionStatus::Running));
 
-        execute_slash_command(&mut state, "/effort");
-        assert_eq!(
-            state.host_info.settings.context.effort,
-            Some(meerai_web_protocol::EffortDto::High)
-        );
-        assert_eq!(state.host_info.settings.context.temperature, None);
+        execute_slash_command(&mut state, "/sampling");
+        assert!(matches!(
+            &state.modal,
+            Some(ActiveModal::Settings(form))
+                if form.section == crate::state::SettingsSection::Context
+        ));
+        state.modal = None;
+        state.host_info.settings.context.effort = Some(meerai_web_protocol::EffortDto::High);
         execute_slash_command(&mut state, "/effort low");
         assert_eq!(
             state.host_info.settings.context.effort,
@@ -1028,5 +1032,115 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["s-2"]
         );
+    }
+
+    #[test]
+    fn host_action_results_land_in_the_active_transcript() {
+        let mut state = AppState::default();
+        crate::state::apply_created_session(&mut state, summary("s-1", SessionStatus::Idle));
+        state.active_session_id = Some("s-1".to_owned());
+
+        crate::state::apply_host_action_result(&mut state, "Memories (0):".to_owned());
+
+        let tab = state.session_tabs.get("s-1").unwrap();
+        assert!(matches!(
+            tab.entries.last(),
+            Some(TranscriptEntryDto::System { text, .. }) if text == "Memories (0):"
+        ));
+    }
+
+    #[test]
+    fn host_commands_open_the_workspace_panel() {
+        let mut state = AppState::default();
+        execute_slash_command(&mut state, "/memory");
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::WorkspacePanel {
+                tab: crate::state::WorkspacePanelTab::Memory,
+                ..
+            })
+        ));
+        state.modal = None;
+        execute_slash_command(&mut state, "/context");
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::WorkspacePanel {
+                tab: crate::state::WorkspacePanelTab::Context,
+                ..
+            })
+        ));
+        state.modal = None;
+        execute_slash_command(&mut state, "/subagent");
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::WorkspacePanel {
+                tab: crate::state::WorkspacePanelTab::Subagent,
+                ..
+            })
+        ));
+    }
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::*;
+
+    #[test]
+    fn panel_data_land_in_the_open_panel() {
+        let mut state = AppState::default();
+        crate::state::open_workspace_panel(&mut state, crate::state::WorkspacePanelTab::Memory);
+        crate::state::apply_memories(
+            &mut state,
+            meerai_web_protocol::MemoriesResponse {
+                memories: vec![meerai_web_protocol::MemoryDto {
+                    id: "mem-1".to_owned(),
+                    project_root: "/repo".to_owned(),
+                    kind: "fact".to_owned(),
+                    title: "Use SQLite".to_owned(),
+                    body: "state".to_owned(),
+                    source_session_id: None,
+                    pinned: false,
+                    created_at_ms: 1,
+                    updated_at_ms: 1,
+                }],
+            },
+        );
+        assert!(matches!(
+            &state.modal,
+            Some(ActiveModal::WorkspacePanel {
+                memories,
+                loading: false,
+                ..
+            }) if memories.len() == 1
+        ));
+
+        crate::state::open_workspace_panel(&mut state, crate::state::WorkspacePanelTab::Routing);
+        crate::state::apply_routes(
+            &mut state,
+            meerai_web_protocol::RoutesResponse {
+                routes: vec![meerai_web_protocol::RouteDto {
+                    task_type: "build".to_owned(),
+                    provider: "openai".to_owned(),
+                    model: "o3".to_owned(),
+                    ..Default::default()
+                }],
+            },
+        );
+        assert!(matches!(
+            &state.modal,
+            Some(ActiveModal::WorkspacePanel { routes, .. }) if routes.len() == 1
+        ));
+    }
+}
+
+#[cfg(test)]
+mod vault_command_tests {
+    use super::*;
+
+    #[test]
+    fn vault_reset_opens_a_confirmation_panel() {
+        let mut state = AppState::default();
+        crate::state::execute_slash_command(&mut state, "/vault-reset");
+        assert!(matches!(state.modal, Some(ActiveModal::VaultReset { .. })));
     }
 }

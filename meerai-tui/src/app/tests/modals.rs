@@ -1361,3 +1361,200 @@ fn question_overlay_multiple_keeps_options_and_custom_text() {
         }
     );
 }
+
+#[test]
+fn memory_modal_pins_and_deletes_the_selection() {
+    let (mut app, _rx, _secrets) = test_app();
+    let memory = meerai_host::ProjectMemory {
+        id: "mem-1".to_string(),
+        project_root: "/repo".to_string(),
+        kind: meerai_host::ProjectMemoryKind::Decision,
+        title: "Use SQLite".to_string(),
+        body: "All state lives in meerai.db".to_string(),
+        source_session_id: None,
+        pinned: false,
+        created_at_ms: 1,
+        updated_at_ms: 1,
+    };
+    app.modal = Some(ActiveModal::Memory {
+        entries: vec![memory],
+        query: String::new(),
+        selected: 0,
+        loading: false,
+        error: None,
+    });
+
+    app.handle_key_event(key(KeyCode::Char('p')));
+    app.modal = Some(ActiveModal::Memory {
+        entries: vec![meerai_host::ProjectMemory {
+            id: "mem-1".to_string(),
+            project_root: "/repo".to_string(),
+            kind: meerai_host::ProjectMemoryKind::Decision,
+            title: "Use SQLite".to_string(),
+            body: "All state lives in meerai.db".to_string(),
+            source_session_id: None,
+            pinned: false,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        }],
+        query: String::new(),
+        selected: 0,
+        loading: false,
+        error: None,
+    });
+    app.handle_key_event(key(KeyCode::Char('d')));
+
+    let actions = app.take_pending_session_actions();
+    assert!(matches!(
+        actions.first(),
+        Some(PendingSessionAction::MemoryAction {
+            action: MemoryModalAction::TogglePin,
+            id
+        }) if id == "mem-1"
+    ));
+    assert!(matches!(
+        actions.get(1),
+        Some(PendingSessionAction::MemoryAction {
+            action: MemoryModalAction::Delete,
+            id
+        }) if id == "mem-1"
+    ));
+}
+
+#[test]
+fn packs_modal_toggles_state_and_subagent_form_spawns() {
+    let (mut app, mut rx, _secrets) = test_app();
+    app.modal = Some(ActiveModal::Packs {
+        packs: vec![meerai_host::InstalledPack {
+            id: "review".to_string(),
+            source_kind: meerai_host::PackSourceKind::Local,
+            source_uri: "./review".to_string(),
+            pinned_rev: "local".to_string(),
+            manifest_json: "{}".to_string(),
+            enabled: true,
+            trusted: false,
+            installed_at_ms: 1,
+            updated_at_ms: 1,
+        }],
+        definitions: meerai_host::HostDefinitionsDiagnostics::default(),
+        tab: PackTab::Packs,
+        selected: 0,
+        loading: false,
+        error: None,
+    });
+    app.handle_key_event(key(KeyCode::Char('e')));
+    let actions = app.take_pending_session_actions();
+    assert!(matches!(
+        actions.first(),
+        Some(PendingSessionAction::PackAction {
+            action: PackModalAction::ToggleEnabled,
+            id
+        }) if id == "review"
+    ));
+    app.modal = None;
+
+    app.modal = Some(ActiveModal::SubagentSpawn(SubagentSpawnPanel {
+        agent: "explore".to_string(),
+        field: 1,
+        ..SubagentSpawnPanel::default()
+    }));
+    for ch in "find the parser".chars() {
+        app.handle_key_event(key(KeyCode::Char(ch)));
+    }
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(app.modal.is_none());
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        AgentCommand::SpawnSubagent { spec }
+            if spec.agent == "explore" && spec.task == "find the parser"
+    ));
+}
+
+#[test]
+fn context_modal_scrolls_and_packs_switches_tabs() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.modal = Some(ActiveModal::Context(ContextPanel {
+        breakdown: Some(meerai_session::ContextBreakdown::default()),
+        ..ContextPanel::default()
+    }));
+    app.handle_key_event(key(KeyCode::Char('f')));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::Context(ContextPanel {
+            focus_input: Some(_),
+            ..
+        }))
+    ));
+
+    app.modal = Some(ActiveModal::Packs {
+        packs: Vec::new(),
+        definitions: meerai_host::HostDefinitionsDiagnostics::default(),
+        tab: PackTab::Packs,
+        selected: 0,
+        loading: false,
+        error: None,
+    });
+    app.handle_key_event(key(KeyCode::Tab));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::Packs {
+            tab: PackTab::Definitions,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn vault_reset_requires_the_word_reset_and_clears_credentials() {
+    let (mut app, _rx, secrets) = test_app();
+    secrets.set_key("openai", "sk-secret").unwrap();
+    submit(&mut app, "/vault-reset");
+    assert!(matches!(app.modal, Some(ActiveModal::VaultReset { .. })));
+
+    for ch in "nope".chars() {
+        app.handle_key_event(key(KeyCode::Char(ch)));
+    }
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::VaultReset { error: Some(_), .. })
+    ));
+    assert!(secrets.get_key("openai").unwrap().is_some());
+
+    app.modal = Some(ActiveModal::VaultReset {
+        input: "reset".to_string(),
+        error: None,
+    });
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(app.modal.is_none());
+    assert!(secrets.get_key("openai").unwrap().is_none());
+    assert!(matches!(
+        app.tab().transcript.last(),
+        Some(TranscriptEntry::System { text }) if text.contains("Vault reset")
+    ));
+}
+
+#[test]
+fn sampling_panel_sets_effort_and_temperature_together() {
+    let (mut app, _rx, _secrets) = test_app();
+    submit(&mut app, "/sampling");
+    assert!(matches!(app.modal, Some(ActiveModal::Sampling { .. })));
+
+    app.handle_key_event(key(KeyCode::Char('h')));
+    app.handle_key_event(key(KeyCode::Tab));
+    for ch in "0.9".chars() {
+        app.handle_key_event(key(KeyCode::Char(ch)));
+    }
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert!(app.modal.is_none());
+    let context = app.settings.context.as_ref().unwrap();
+    assert_eq!(context.effort, Some(EffortLevel::High));
+    assert_eq!(context.temperature.map(|t| t.value()), Some(0.9));
+    assert_eq!(app.context_temperature, Some(0.9));
+    assert!(
+        app.take_pending_session_actions()
+            .iter()
+            .any(|action| { matches!(action, PendingSessionAction::SyncContext) })
+    );
+}

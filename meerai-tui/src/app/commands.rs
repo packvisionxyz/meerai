@@ -2,7 +2,8 @@ use meerai_agents::AgentCommand;
 use meerai_client::providers::format_auth_list;
 use meerai_client::secrets::auth_file_path;
 use meerai_common::definitions::{AgentDefinition, SkillDefinition, validate_agent_model};
-use meerai_common::settings::default_data_dir;
+use meerai_common::settings::{Temperature, default_data_dir};
+use meerai_host::parse_host_action;
 
 use super::*;
 use crate::search::SearchMode;
@@ -49,6 +50,69 @@ impl AppState {
                 .transcript
                 .push(TranscriptEntry::System { text: message });
         }
+    }
+
+    fn open_sampling(&mut self, field: usize) {
+        let effort = self.context_effort.or_else(|| {
+            self.settings
+                .context
+                .as_ref()
+                .and_then(|context| context.effort)
+        });
+        let temperature = self
+            .settings
+            .context
+            .as_ref()
+            .and_then(|context| context.temperature)
+            .map(|temperature| format!("{:.2}", temperature.value()))
+            .unwrap_or_default();
+        self.modal = Some(ActiveModal::Sampling {
+            effort,
+            temperature,
+            field,
+            error: None,
+        });
+    }
+
+    pub(super) fn apply_sampling(
+        &mut self,
+        effort: Option<EffortLevel>,
+        temperature: &str,
+    ) -> std::result::Result<(), String> {
+        let text = temperature.trim();
+        let override_temperature = if text.is_empty() || text.eq_ignore_ascii_case("default") {
+            None
+        } else {
+            let value = text
+                .parse::<f32>()
+                .map_err(|_| "Temperature must be a number from 0.0 to 2.0.".to_string())?;
+            Some(
+                Temperature::new(value)
+                    .effective()
+                    .ok_or_else(|| "Temperature must be between 0.0 and 2.0.".to_string())?,
+            )
+        };
+        let effort = effort.unwrap_or_default();
+        let effective = override_temperature.unwrap_or_else(|| effort.default_temperature());
+        let context = self.settings.context.get_or_insert_with(Default::default);
+        context.effort = Some(effort);
+        context.temperature = override_temperature.map(Temperature::new);
+        self.context_effort = Some(effort);
+        self.context_temperature = Some(effective);
+        self.persist_settings();
+        self.pending_session_actions
+            .push(PendingSessionAction::SyncContext);
+        self.status_notice = Some(format!(
+            "Effort {} · temp {:.2}{}",
+            effort.label(),
+            effective,
+            if override_temperature.is_some() {
+                " (override)"
+            } else {
+                " (tier default)"
+            }
+        ));
+        Ok(())
     }
 
     pub(super) fn set_effort_from_arg(&mut self, arg: &str) {
@@ -176,7 +240,18 @@ impl AppState {
                 self.open_mention_picker("agent");
             }
             "/skills" => {
-                self.open_mention_picker("skill");
+                self.modal = Some(ActiveModal::Packs {
+                    packs: Vec::new(),
+                    definitions: meerai_host::HostDefinitionsDiagnostics::default(),
+                    tab: PackTab::Definitions,
+                    selected: 0,
+                    loading: true,
+                    error: None,
+                });
+                self.pending_session_actions
+                    .push(PendingSessionAction::LoadDefinitions);
+                self.pending_session_actions
+                    .push(PendingSessionAction::LoadPacks);
             }
             "/model" => {
                 self.tab_mut().auto_follow = true;
@@ -188,8 +263,14 @@ impl AppState {
                 }
             }
             "/effort" => {
-                self.set_effort_from_arg(arg);
+                if arg.is_empty() {
+                    self.open_sampling(0);
+                } else {
+                    self.set_effort_from_arg(arg);
+                }
             }
+            "/sampling" => self.open_sampling(0),
+            "/temperature" => self.open_sampling(1),
             "/clear" => {
                 let tab = self.tab_mut();
                 tab.transcript.clear();
@@ -246,7 +327,10 @@ impl AppState {
                 tab.transcript.push(TranscriptEntry::System {
                     text: "Compaction requested.".to_string(),
                 });
-                let _ = tab.cmd_tx.send(AgentCommand::Compact);
+                let _ = tab.cmd_tx.send(AgentCommand::Compact {
+                    focus: None,
+                    from_turn_id: None,
+                });
             }
             "/mode" => {
                 let tab = self.tab_mut();
@@ -372,6 +456,104 @@ impl AppState {
             "/quit" | "/q" => {
                 self.quit();
             }
+            "/context" | "/ctx" => {
+                let breakdown = self.tab().context.clone();
+                self.modal = Some(ActiveModal::Context(ContextPanel {
+                    breakdown,
+                    ..ContextPanel::default()
+                }));
+                let _ = self.tab().cmd_tx.send(AgentCommand::InspectContext);
+            }
+            "/memory" => {
+                self.modal = Some(ActiveModal::Memory {
+                    entries: Vec::new(),
+                    query: arg.to_string(),
+                    selected: 0,
+                    loading: true,
+                    error: None,
+                });
+                self.pending_session_actions
+                    .push(PendingSessionAction::LoadMemories {
+                        query: (!arg.is_empty()).then(|| arg.to_string()),
+                    });
+            }
+            "/remember" | "/forget" | "/pin" => match parse_host_action(command) {
+                Some(action) => self.queue_host_action(action),
+                None => {
+                    self.tab_mut().transcript.push(TranscriptEntry::Error {
+                        text: format!("Usage: {command} is incomplete."),
+                        expanded: false,
+                    });
+                }
+            },
+            "/routing" | "/routes" => {
+                if arg.is_empty() || arg.starts_with("set") || arg.starts_with("clear") {
+                    if arg.is_empty() {
+                        self.modal = Some(ActiveModal::Routing {
+                            routes: Vec::new(),
+                            selected: 0,
+                            loading: true,
+                            error: None,
+                        });
+                        self.pending_session_actions
+                            .push(PendingSessionAction::LoadRoutes);
+                    } else {
+                        match parse_host_action(command) {
+                            Some(action) => self.queue_host_action(action),
+                            None => self.host_action_usage(command),
+                        }
+                    }
+                } else {
+                    self.host_action_usage(command);
+                }
+            }
+            "/packs" => {
+                self.modal = Some(ActiveModal::Packs {
+                    packs: Vec::new(),
+                    definitions: meerai_host::HostDefinitionsDiagnostics::default(),
+                    tab: PackTab::Packs,
+                    selected: 0,
+                    loading: true,
+                    error: None,
+                });
+                self.pending_session_actions
+                    .push(PendingSessionAction::LoadPacks);
+            }
+            "/definitions" => {
+                self.modal = Some(ActiveModal::Packs {
+                    packs: Vec::new(),
+                    definitions: meerai_host::HostDefinitionsDiagnostics::default(),
+                    tab: PackTab::Definitions,
+                    selected: 0,
+                    loading: true,
+                    error: None,
+                });
+                self.pending_session_actions
+                    .push(PendingSessionAction::LoadDefinitions);
+            }
+            "/pack" => match parse_host_action(command) {
+                Some(action) => self.queue_host_action(action),
+                None => self.host_action_usage(command),
+            },
+            "/vault-reset" | "/vault" => {
+                self.modal = Some(ActiveModal::VaultReset {
+                    input: String::new(),
+                    error: None,
+                });
+            }
+            "/subagent" | "/subagents" => {
+                if arg.is_empty() {
+                    self.modal = Some(ActiveModal::SubagentSpawn(SubagentSpawnPanel {
+                        agent: "explore".to_string(),
+                        ..SubagentSpawnPanel::default()
+                    }));
+                } else {
+                    match parse_host_action(command) {
+                        Some(action) => self.queue_host_action(action),
+                        None => self.host_action_usage(command),
+                    }
+                }
+            }
             other => {
                 let tab = self.tab_mut();
                 tab.auto_follow = true;
@@ -381,6 +563,23 @@ impl AppState {
                 });
             }
         }
+    }
+
+    fn host_action_usage(&mut self, command: &str) {
+        let tab = self.tab_mut();
+        tab.auto_follow = true;
+        tab.transcript.push(TranscriptEntry::Error {
+            text: format!(
+                "Usage: {command} is incomplete. Try /memory, /remember <note>,                  /routing set <task> <provider::model>, or /pack <add|trust|enable|pin|remove> <id>."
+            ),
+            expanded: false,
+        });
+    }
+
+    fn queue_host_action(&mut self, action: meerai_host::HostAction) {
+        let tab_id = self.tab().tab_id;
+        self.pending_session_actions
+            .push(PendingSessionAction::HostAction { tab_id, action });
     }
 
     pub fn open_session_select(&mut self) {
@@ -579,13 +778,26 @@ fn format_help_text() -> String {
         .map(|(cmd, _, _)| match *cmd {
             "/sessions" => "/sessions [id]".to_string(),
             "/model" => "/model [name]".to_string(),
-            "/effort" => "/effort [low|medium|high]".to_string(),
+            "/effort" => "/effort [low|medium|high] (no arg opens sampling)".to_string(),
+            "/sampling" => "/sampling [effort and temperature]".to_string(),
+            "/temperature" => "/temperature [0.0..2.0|default]".to_string(),
             "/agent" => "/agent <id> (or @agent/<id>)".to_string(),
             "/skill" => "/skill <id> (or @skill/<id>)".to_string(),
             "/mode" => "/mode [plan|ask|auto]".to_string(),
             "/search" => "/search [query]".to_string(),
             "/grep" => "/grep [query]".to_string(),
             "/diff" => "/diff [path]".to_string(),
+            "/memory" => "/memory [query]".to_string(),
+            "/remember" => "/remember <note>".to_string(),
+            "/forget" => "/forget <id>".to_string(),
+            "/pin" => "/pin <id> [off]".to_string(),
+            "/routing" => {
+                "/routing [set <task> <provider::model> [max_cost] [max_tokens] [concurrency]]"
+                    .to_string()
+            }
+            "/pack" => "/pack <add|enable|disable|trust|untrust|pin|remove> <id> [rev]".to_string(),
+            "/subagent" => "/subagent <agent> <task> | /subagent cancel <item-id>".to_string(),
+            "/vault-reset" => "/vault-reset (type reset to confirm)".to_string(),
             other => (*other).to_string(),
         })
         .collect::<Vec<_>>()

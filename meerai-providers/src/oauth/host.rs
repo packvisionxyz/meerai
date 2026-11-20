@@ -5,7 +5,8 @@ use anyhow::{Context, Result};
 use meerai_core::fs_perms::create_private_dir_sync;
 
 use crate::oauth::pkce::uuid_v4;
-use crate::secrets::{write_atomic_private, write_new_private};
+mod files;
+use files::{write_atomic_private, write_new_private};
 
 const HOST_ID_FILE: &str = "agent-host-id";
 const HOST_ID_PREFIX: &str = "urn:uuid:";

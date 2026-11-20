@@ -9,6 +9,7 @@ use meerai_common::hooks::HookEntry;
 use meerai_common::settings::{ContextSettings, SandboxSettings, SessionSettings, ThemeSettings};
 use meerai_policy::{ApprovalMode, PermissionRule};
 use meerai_session::{LoggedEvent, SessionId, SessionSummary};
+use meerai_store::{InstalledPack, ModelRoute, NewProjectMemory, ProjectMemory, RoutingSettings};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -184,6 +185,42 @@ impl Default for HostInfoSnapshot {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostDefinitionInfo {
+    pub id: String,
+    pub kind: String,
+    pub source: String,
+    pub path: String,
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_invocable: Option<bool>,
+    pub token_estimate: u64,
+    pub warnings: Vec<String>,
+    pub supporting_files: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostShadowedDefinition {
+    pub id: String,
+    pub kind: String,
+    pub source: String,
+    pub path: String,
+    pub kept_source: String,
+    pub kept_path: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostDefinitionsDiagnostics {
+    pub agents: Vec<HostDefinitionInfo>,
+    pub skills: Vec<HostDefinitionInfo>,
+    pub warnings: Vec<String>,
+    pub shadows: Vec<HostShadowedDefinition>,
+}
+
+pub fn definition_token_estimate(text: &str) -> u64 {
+    (text.chars().count() as u64).div_ceil(4)
+}
+
 #[derive(Clone, Debug)]
 pub struct HostReloadPayload {
     pub rules: Option<Vec<PermissionRule>>,
@@ -345,5 +382,86 @@ pub trait SessionOpener: Send + Sync {
 
     async fn reload_config(&self) -> Result<HostReloadOutcome> {
         anyhow::bail!("reloading configuration is not supported by this client")
+    }
+
+    async fn list_memories(&self, _project_root: &str) -> Result<Vec<ProjectMemory>> {
+        Ok(Vec::new())
+    }
+
+    async fn search_memories(
+        &self,
+        _project_root: &str,
+        _query: &str,
+    ) -> Result<Vec<ProjectMemory>> {
+        Ok(Vec::new())
+    }
+
+    async fn save_memory(
+        &self,
+        _draft: NewProjectMemory,
+        _id: Option<&str>,
+    ) -> Result<ProjectMemory> {
+        anyhow::bail!("project memories are not supported by this client")
+    }
+
+    async fn set_memory_pinned(
+        &self,
+        _project_root: &str,
+        _id: &str,
+        _pinned: bool,
+    ) -> Result<Option<ProjectMemory>> {
+        anyhow::bail!("project memories are not supported by this client")
+    }
+
+    async fn delete_memory(&self, _project_root: &str, _id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn routes(&self) -> Result<RoutingSettings> {
+        Ok(RoutingSettings::default())
+    }
+
+    async fn upsert_route(&self, _route: ModelRoute) -> Result<()> {
+        anyhow::bail!("model routing is not supported by this client")
+    }
+
+    async fn delete_route(&self, _task_type: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn list_packs(&self) -> Result<Vec<InstalledPack>> {
+        Ok(Vec::new())
+    }
+
+    async fn install_pack(&self, _source: &str, _rev: Option<&str>) -> Result<InstalledPack> {
+        anyhow::bail!("installing packs is not supported by this client")
+    }
+
+    async fn set_pack_enabled(&self, _id: &str, _enabled: bool) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn set_pack_trusted(&self, _id: &str, _trusted: bool) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn pin_pack(&self, _id: &str, _rev: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn remove_pack(&self, _id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn definitions_diagnostics(&self) -> Result<HostDefinitionsDiagnostics> {
+        Ok(HostDefinitionsDiagnostics::default())
+    }
+
+    async fn read_session_blob(&self, _id: &SessionId, _blob_key: &str) -> Result<String> {
+        anyhow::bail!("session blob inspection is not supported by this client")
+    }
+
+    async fn reset_vault(&self) -> Result<usize> {
+        anyhow::bail!("resetting the credential vault is not supported by this client")
     }
 }

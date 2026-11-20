@@ -15,8 +15,8 @@ use meerai_policy::ApprovalMode;
 use meerai_session::{LoggedEvent, SessionId, SessionSummary};
 use meerai_web::{ServeAuth, ServeConfig, ServeSecret, start_server};
 use meerai_web_protocol::{
-    ApiError, ApiErrorCode, CreateSessionResponse, SessionStatus, SnapshotResponse,
-    SubmitPromptRequest, SubmitPromptResponse, TranscriptEntryDto, ViewEvent,
+    ApiError, ApiErrorCode, CreateSessionResponse, HostActionResponse, SessionStatus,
+    SnapshotResponse, SubmitPromptRequest, SubmitPromptResponse, TranscriptEntryDto, ViewEvent,
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -902,6 +902,78 @@ async fn ac1_end_to_end_stream_replay_resync_and_snapshot() {
     drop(sse_stale);
 
     server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn host_action_and_resource_endpoints_work() {
+    let registry = SessionRegistry::new();
+    let opener = Arc::new(FakeOpener::new());
+    let server = spawn_test_server(Arc::clone(&registry), Arc::clone(&opener)).await;
+
+    let host = format!("127.0.0.1:{}", server.addr.port());
+    let origin = format!("http://{host}");
+    let auth = basic_auth_header("meerai", TEST_SECRET);
+    let headers = [
+        ("Host", host.as_str()),
+        ("Origin", origin.as_str()),
+        ("Content-Type", "application/json"),
+        ("Authorization", auth.as_str()),
+    ];
+
+    let action = send_raw_request(
+        server.addr,
+        "POST",
+        "/api/actions",
+        &headers,
+        br#"{"command":"/memory"}"#,
+    )
+    .await;
+    assert_eq!(action.status, 200);
+    let action: HostActionResponse = serde_json::from_slice(&action.body).unwrap();
+    assert_eq!(action.text, "No project memories.");
+
+    let routes = send_raw_request(server.addr, "GET", "/api/routes", &headers, b"").await;
+    assert_eq!(routes.status, 200);
+    let routes: meerai_web_protocol::RoutesResponse = serde_json::from_slice(&routes.body).unwrap();
+    assert!(routes.routes.is_empty());
+
+    let packs = send_raw_request(server.addr, "GET", "/api/packs", &headers, b"").await;
+    assert_eq!(packs.status, 200);
+    let packs: meerai_web_protocol::PacksResponse = serde_json::from_slice(&packs.body).unwrap();
+    assert!(packs.packs.is_empty());
+
+    let definitions = send_raw_request(
+        server.addr,
+        "GET",
+        "/api/definitions/diagnostics",
+        &headers,
+        b"",
+    )
+    .await;
+    assert_eq!(definitions.status, 200);
+    let definitions: meerai_web_protocol::DefinitionsDiagnosticsDto =
+        serde_json::from_slice(&definitions.body).unwrap();
+    assert!(definitions.agents.is_empty());
+
+    let context = send_raw_request(
+        server.addr,
+        "GET",
+        "/api/sessions/ses-missing/context",
+        &headers,
+        b"",
+    )
+    .await;
+    assert_eq!(context.status, 404);
+
+    let blob = send_raw_request(
+        server.addr,
+        "GET",
+        "/api/sessions/ses-missing/blobs/abc.txt",
+        &headers,
+        b"",
+    )
+    .await;
+    assert_eq!(blob.status, 404);
 }
 
 #[tokio::test]

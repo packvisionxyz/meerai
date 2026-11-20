@@ -333,8 +333,25 @@ impl MultiTurnAgent {
         {
             options = options.with_temperature(temperature as f64);
         }
-        if !plan_usage && let Some(effort) = self.harness.as_ref().and_then(|h| h.config.effort) {
+        let route = self
+            .harness
+            .as_ref()
+            .and_then(|harness| harness.config.routing.route(&self.task_type))
+            .cloned();
+        let route_effort = route
+            .as_ref()
+            .and_then(|route| route.effort.as_deref())
+            .and_then(crate::routing::parse_effort);
+        let effort = route_effort.or_else(|| self.harness.as_ref().and_then(|h| h.config.effort));
+        if !plan_usage && let Some(effort) = effort {
             options = options.with_reasoning_effort(effort_level(effort));
+        }
+        if let Some(max_tokens) = route
+            .as_ref()
+            .and_then(|route| route.max_tokens_per_turn)
+            .and_then(|max_tokens| u32::try_from(max_tokens).ok())
+        {
+            options = options.with_max_tokens(max_tokens);
         }
 
         let harnessed = self.harness.is_some();
@@ -343,7 +360,16 @@ impl MultiTurnAgent {
             .as_ref()
             .map_or(self.config.max_cycles, |harness| {
                 harness.config.max_steps_per_turn
-            });
+            })
+            .max(1);
+        let continuations = if harnessed {
+            self.harness
+                .as_ref()
+                .map_or(0, |harness| harness.config.step_limit_continuations)
+        } else {
+            0
+        };
+        let total_steps = max_steps.saturating_mul(continuations.saturating_add(1));
         let max_turn_secs = self
             .harness
             .as_ref()
@@ -371,7 +397,7 @@ impl MultiTurnAgent {
         let mut last_tool_signature: Option<String> = None;
         let mut repeated_tool_batches = 0usize;
 
-        for step_index in 0..max_steps {
+        for step_index in 0..total_steps {
             if cancel.is_cancelled() {
                 return Ok(aborted(event_tx, turn_id));
             }
@@ -385,14 +411,22 @@ impl MultiTurnAgent {
                 cancel.cancel();
                 return Ok(aborted(event_tx, turn_id));
             }
-            if self.pending_compact {
-                self.pending_compact = false;
-                self.run_compaction(CompactionTrigger::Manual, event_tx, &cancel, Some(clock))
-                    .await?;
+            if let Some(pending) = self.pending_compact.take() {
+                self.run_compaction(
+                    CompactionTrigger::Manual,
+                    event_tx,
+                    &cancel,
+                    Some(clock),
+                    pending.focus,
+                    pending.from_turn_id,
+                )
+                .await?;
             }
             self.apply_pending_steers(event_tx).await;
 
-            let final_step = harnessed && step_index + 1 == max_steps;
+            let final_step = harnessed && step_index + 1 == total_steps;
+            let continuation_boundary =
+                harnessed && step_index > 0 && step_index % max_steps == 0 && !final_step;
             let mut plan = StepPlan {
                 turn_id: turn_id.clone(),
                 step_index,
@@ -429,6 +463,34 @@ impl MultiTurnAgent {
                     }
                 }
 
+                if let Some(coordinator) = self
+                    .harness
+                    .as_ref()
+                    .and_then(|harness| harness.routing.clone())
+                    && coordinator.over_cap()
+                {
+                    match self
+                        .enforce_spend_cap(
+                            turn_id,
+                            &coordinator,
+                            event_tx,
+                            &cancel,
+                            inbox.as_deref_mut(),
+                        )
+                        .await
+                    {
+                        BudgetOutcome::Continue => {}
+                        BudgetOutcome::Cancelled => return Ok(aborted(event_tx, turn_id)),
+                        BudgetOutcome::Declined { detail } => {
+                            let _ = event_tx.send(AgentEvent::Error {
+                                code: ErrorCode::Budget,
+                                message: detail.clone(),
+                            });
+                            return Ok(failed(event_tx, turn_id, detail));
+                        }
+                    }
+                }
+
                 if !self.over_high_watermark() {
                     self.pressure_wasted = false;
                 }
@@ -439,7 +501,14 @@ impl MultiTurnAgent {
                 {
                     pressure_step = Some(step_index);
                     match self
-                        .run_compaction(CompactionTrigger::Pressure, event_tx, &cancel, Some(clock))
+                        .run_compaction(
+                            CompactionTrigger::Pressure,
+                            event_tx,
+                            &cancel,
+                            Some(clock),
+                            None,
+                            None,
+                        )
                         .await
                     {
                         Ok(true) => pressure_compactions += 1,
@@ -448,6 +517,16 @@ impl MultiTurnAgent {
                     }
                 }
 
+                if continuation_boundary {
+                    self.log_event(
+                        event_tx,
+                        SessionEvent::UserMessage {
+                            source: InputSource::RuntimeContext,
+                            content: vec![ContentBlock::Text(STEP_CONTINUE_NOTICE.to_string())],
+                        },
+                    )
+                    .await;
+                }
                 if final_step {
                     self.log_event(
                         event_tx,
@@ -508,10 +587,14 @@ impl MultiTurnAgent {
                 .unwrap_or_default();
             if end.captured_usage.is_some() {
                 self.cumulative_usage.add(step_usage);
+                let est_cost_usd = self.estimated_cost(self.cumulative_usage);
+                self.note_routing_cost(est_cost_usd);
+                self.record_usage_row(Some(turn_id), &step_usage, est_cost_usd)
+                    .await;
                 let _ = event_tx.send(AgentEvent::UsageUpdated {
                     usage: step_usage,
                     cumulative: self.cumulative_usage,
-                    est_cost_usd: self.estimated_cost(self.cumulative_usage),
+                    est_cost_usd,
                 });
             }
 
@@ -715,6 +798,7 @@ impl MultiTurnAgent {
                 StepFinish::Completed
             };
             self.log_step_ended(event_tx, &step_id, finish).await;
+            self.emit_context_updated(event_tx);
 
             if cancel.is_cancelled() {
                 return Ok(aborted(event_tx, turn_id));
@@ -838,7 +922,7 @@ impl MultiTurnAgent {
         }
 
         let message = match self.harness {
-            Some(_) => format!("Exceeded maximum number of steps per turn ({max_steps})"),
+            Some(_) => format!("Exceeded maximum number of steps per turn ({total_steps})"),
             None => format!(
                 "Exceeded maximum number of cycles ({})",
                 self.config.max_cycles
@@ -854,6 +938,29 @@ impl MultiTurnAgent {
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
         cancel: &CancellationToken,
     ) -> Result<CollectedStream, StreamFailure> {
+        let _routing_permit = match self
+            .harness
+            .as_ref()
+            .and_then(|harness| harness.routing.clone())
+        {
+            Some(coordinator) => {
+                let provider = crate::routing::provider_of(&self.model);
+                let permit = tokio::select! {
+                    _ = cancel.cancelled() => return Err(StreamFailure::Cancelled),
+                    permit = coordinator.acquire(&provider) => permit,
+                };
+                match permit {
+                    Some(permit) => Some(permit),
+                    None => {
+                        return Err(StreamFailure::Provider {
+                            error: anyhow!("routing coordinator closed"),
+                            partial: false,
+                        });
+                    }
+                }
+            }
+            None => None,
+        };
         let streamer = self.streamer.clone();
         let mut stream = tokio::select! {
             _ = cancel.cancelled() => return Err(StreamFailure::Cancelled),
@@ -1056,6 +1163,8 @@ impl MultiTurnAgent {
                                 event_tx,
                                 cancel,
                                 Some(clock),
+                                None,
+                                None,
                             )
                             .await
                         {

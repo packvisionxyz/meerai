@@ -154,7 +154,17 @@ impl AppState {
                             | AgentEvent::ItemCompleted { .. }
                     );
                 let before_queued = self.tabs[tab_idx].queued.len();
+                let context_update = match &other {
+                    AgentEvent::ContextUpdated { breakdown } => Some(breakdown.clone()),
+                    _ => None,
+                };
                 self.tabs[tab_idx].apply_agent_event(other);
+                if is_active
+                    && let Some(breakdown) = context_update
+                    && let Some(ActiveModal::Context(panel)) = self.modal.as_mut()
+                {
+                    panel.breakdown = Some(breakdown);
+                }
                 let after_queued = self.tabs[tab_idx].queued.len();
                 if is_active
                     && after_queued < before_queued
@@ -300,6 +310,13 @@ impl SessionTab {
                     status,
                     report,
                     child_session_id,
+                    model,
+                    approval_mode,
+                    steps_used,
+                    max_steps,
+                    usage,
+                    est_cost_usd,
+                    active_tool,
                 } => {
                     self.finalize_pending_assistant();
                     let idx = self.transcript.len();
@@ -308,6 +325,13 @@ impl SessionTab {
                             id: id.to_string(),
                             agent,
                             status: map_item_status(status),
+                            model,
+                            approval_mode: approval_mode.label().to_string(),
+                            steps_used,
+                            max_steps,
+                            usage,
+                            est_cost_usd,
+                            active_tool,
                             report,
                             child_session_id,
                             expanded: false,
@@ -349,6 +373,23 @@ impl SessionTab {
                         && entry.id == item_id.as_str()
                     {
                         entry.status = mapped;
+                    }
+                }
+                ItemDelta::SubagentProgress {
+                    steps_used,
+                    max_steps,
+                    usage,
+                    est_cost_usd,
+                    active_tool,
+                } => {
+                    if let Some(&idx) = self.subagent_items.get(&item_id)
+                        && let Some(TranscriptEntry::Subagent(entry)) = self.transcript.get_mut(idx)
+                    {
+                        entry.steps_used = steps_used;
+                        entry.max_steps = max_steps;
+                        entry.usage = usage;
+                        entry.est_cost_usd = est_cost_usd;
+                        entry.active_tool = active_tool;
                     }
                 }
                 ItemDelta::CommandOutput(_) | ItemDelta::PlanUpdated(_) => {}
@@ -442,6 +483,13 @@ impl SessionTab {
                     status,
                     report,
                     child_session_id,
+                    model,
+                    approval_mode,
+                    steps_used,
+                    max_steps,
+                    usage,
+                    est_cost_usd,
+                    active_tool,
                 } => {
                     let status = map_completed_item_status(status);
                     let id_str = id.to_string();
@@ -465,6 +513,13 @@ impl SessionTab {
                     {
                         entry.agent = agent;
                         entry.status = status;
+                        entry.model = model;
+                        entry.approval_mode = approval_mode.label().to_string();
+                        entry.steps_used = steps_used;
+                        entry.max_steps = max_steps;
+                        entry.usage = usage;
+                        entry.est_cost_usd = est_cost_usd;
+                        entry.active_tool = active_tool;
                         if report.is_some() {
                             entry.report = report;
                         }
@@ -478,6 +533,13 @@ impl SessionTab {
                                 id: id_str,
                                 agent,
                                 status,
+                                model,
+                                approval_mode: approval_mode.label().to_string(),
+                                steps_used,
+                                max_steps,
+                                usage,
+                                est_cost_usd,
+                                active_tool,
                                 report,
                                 child_session_id,
                                 expanded: false,
@@ -497,6 +559,9 @@ impl SessionTab {
             AgentEvent::ApprovalRequested { .. } | AgentEvent::ApprovalResolved { .. } => {}
             AgentEvent::QuestionAsked { .. } | AgentEvent::QuestionResolved { .. } => {}
             AgentEvent::RewindCompleted { .. } => {}
+            AgentEvent::ContextUpdated { breakdown } => {
+                self.context = Some(breakdown);
+            }
             AgentEvent::HookCompleted {
                 event,
                 decision,
@@ -711,6 +776,13 @@ impl From<ReplaySubagent> for SubagentEntry {
             id: subagent.id,
             agent: subagent.agent,
             status: subagent.status,
+            model: None,
+            approval_mode: "ask".to_string(),
+            steps_used: 0,
+            max_steps: 0,
+            usage: meerai_session::Usage::default(),
+            est_cost_usd: None,
+            active_tool: None,
             report: subagent.report,
             child_session_id: subagent.child_session_id,
             expanded: false,

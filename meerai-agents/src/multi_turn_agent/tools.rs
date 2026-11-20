@@ -442,6 +442,7 @@ impl MultiTurnAgent {
             hooks: &mut self.hooks,
             pending_steers: &mut self.pending_steers,
             pending_compact: &mut self.pending_compact,
+            projection_overrides: &mut self.projection_overrides,
             chat_history: &mut self.chat_history,
             model: &mut self.model,
             shared_model: &self.shared_model,
@@ -1127,6 +1128,10 @@ impl MultiTurnAgent {
         command: AgentCommand,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) {
+        if matches!(command, AgentCommand::InspectContext) {
+            self.emit_context_updated(event_tx);
+            return;
+        }
         self.decision_ctx()
             .handle_live_command(command, event_tx)
             .await;
@@ -1138,6 +1143,7 @@ impl MultiTurnAgent {
             hooks: &mut self.hooks,
             pending_steers: &mut self.pending_steers,
             pending_compact: &mut self.pending_compact,
+            projection_overrides: &mut self.projection_overrides,
             chat_history: &mut self.chat_history,
             model: &mut self.model,
             shared_model: &self.shared_model,
@@ -1191,7 +1197,7 @@ impl MultiTurnAgent {
             .await;
             return observation;
         }
-        let Some(blob_path) = outcome.blob_path else {
+        let Some(blob_key) = outcome.blob_key else {
             return observation;
         };
 
@@ -1201,7 +1207,7 @@ impl MultiTurnAgent {
             SessionEvent::SpillApplied {
                 call_id: call_id.clone(),
                 bytes_omitted: outcome.bytes_omitted,
-                blob_path,
+                blob_key,
             },
         )
         .await;
@@ -1213,7 +1219,8 @@ struct DecisionCtx<'a> {
     harness: &'a mut Option<AgentHarness>,
     hooks: &'a mut Arc<HookEngine>,
     pending_steers: &'a mut VecDeque<String>,
-    pending_compact: &'a mut bool,
+    pending_compact: &'a mut Option<PendingCompaction>,
+    projection_overrides: &'a mut ProjectionOverrides,
     chat_history: &'a mut Vec<ChatMessage>,
     model: &'a mut String,
     shared_model: &'a Arc<std::sync::RwLock<String>>,
@@ -1276,7 +1283,10 @@ impl DecisionCtx<'_> {
                 }
                 AgentCommand::Steer(_)
                 | AgentCommand::SetPermissionMode(_)
-                | AgentCommand::Compact
+                | AgentCommand::Compact { .. }
+                | AgentCommand::SetProjectionOverrides { .. }
+                | AgentCommand::SetTurnPinned { .. }
+                | AgentCommand::InspectContext
                 | AgentCommand::ApplyAgent { .. }
                 | AgentCommand::ApplySkill { .. }
                 | AgentCommand::Reload { .. }
@@ -1288,6 +1298,8 @@ impl DecisionCtx<'_> {
                 | AgentCommand::SubmitPrompt(_)
                 | AgentCommand::SetModel { .. }
                 | AgentCommand::SetPlanUsage { .. }
+                | AgentCommand::SpawnSubagent { .. }
+                | AgentCommand::CancelSubagent { .. }
                 | AgentCommand::Reset => {}
             }
         }
@@ -1330,10 +1342,15 @@ impl DecisionCtx<'_> {
                 | AgentCommand::SubmitPrompt(_)
                 | AgentCommand::SetModel { .. }
                 | AgentCommand::SetPlanUsage { .. }
+                | AgentCommand::SpawnSubagent { .. }
+                | AgentCommand::CancelSubagent { .. }
                 | AgentCommand::Reset => {}
                 AgentCommand::Steer(_)
                 | AgentCommand::SetPermissionMode(_)
-                | AgentCommand::Compact
+                | AgentCommand::Compact { .. }
+                | AgentCommand::SetProjectionOverrides { .. }
+                | AgentCommand::SetTurnPinned { .. }
+                | AgentCommand::InspectContext
                 | AgentCommand::ApplyAgent { .. }
                 | AgentCommand::ApplySkill { .. }
                 | AgentCommand::Reload { .. }
@@ -1357,7 +1374,88 @@ impl DecisionCtx<'_> {
                     let _ = harness.session.set_approval_mode(mode.label()).await;
                 }
             }
-            AgentCommand::Compact => *self.pending_compact = true,
+            AgentCommand::Compact {
+                focus,
+                from_turn_id,
+            } => {
+                *self.pending_compact = Some(PendingCompaction {
+                    focus,
+                    from_turn_id,
+                });
+            }
+            AgentCommand::SetProjectionOverrides {
+                verbatim_window_turns,
+                reasoning_pruning,
+                clear_old_tool_results,
+                pin_turns,
+            } => {
+                let previous = self
+                    .projection_overrides
+                    .pinned_turns
+                    .clone()
+                    .unwrap_or_default();
+                if verbatim_window_turns.is_some() {
+                    self.projection_overrides.verbatim_window_turns = verbatim_window_turns;
+                }
+                if reasoning_pruning.is_some() {
+                    self.projection_overrides.reasoning_pruning = reasoning_pruning;
+                }
+                if clear_old_tool_results.is_some() {
+                    self.projection_overrides.clear_old_tool_results = clear_old_tool_results;
+                }
+                if pin_turns.is_some() {
+                    self.projection_overrides.pinned_turns = pin_turns;
+                }
+                let next = self
+                    .projection_overrides
+                    .pinned_turns
+                    .clone()
+                    .unwrap_or_default();
+                for turn in previous.iter().filter(|turn| !next.contains(turn)) {
+                    log_harness_event(
+                        self.harness.as_ref(),
+                        event_tx,
+                        SessionEvent::ContextTurnPinned {
+                            turn_id: turn.clone(),
+                            pinned: false,
+                        },
+                    )
+                    .await;
+                }
+                for turn in next.iter().filter(|turn| !previous.contains(turn)) {
+                    log_harness_event(
+                        self.harness.as_ref(),
+                        event_tx,
+                        SessionEvent::ContextTurnPinned {
+                            turn_id: turn.clone(),
+                            pinned: true,
+                        },
+                    )
+                    .await;
+                }
+            }
+            AgentCommand::InspectContext => {}
+            AgentCommand::SetTurnPinned { turn_id, pinned } => {
+                let mut pinned_turns = self
+                    .projection_overrides
+                    .pinned_turns
+                    .clone()
+                    .unwrap_or_default();
+                if pinned {
+                    if !pinned_turns.contains(&turn_id) {
+                        pinned_turns.push(turn_id.clone());
+                    }
+                } else {
+                    pinned_turns.retain(|turn| turn != &turn_id);
+                }
+                self.projection_overrides.pinned_turns = Some(pinned_turns);
+                log_harness_event(
+                    self.harness.as_ref(),
+                    event_tx,
+                    SessionEvent::ContextTurnPinned { turn_id, pinned },
+                )
+                .await;
+            }
             AgentCommand::ApplyAgent {
                 name,
                 instructions,
@@ -1395,6 +1493,8 @@ impl DecisionCtx<'_> {
             | AgentCommand::Rewind { .. }
             | AgentCommand::SubmitPrompt(_)
             | AgentCommand::SetModel { .. }
+            | AgentCommand::SpawnSubagent { .. }
+            | AgentCommand::CancelSubagent { .. }
             | AgentCommand::Reset
             | AgentCommand::Cancel
             | AgentCommand::Quit => {}
@@ -1539,6 +1639,8 @@ where
     let (grant_tx, mut grant_rx) = mpsc::unbounded_channel::<meerai_policy::Grant>();
     let (budget_tx, mut budget_rx) = mpsc::unbounded_channel::<SubagentBudgetUpdate>();
     let bridge_cancel = cancel.child_token();
+    let remaining = clock.remaining();
+    let turn_deadline = remaining.map(|left| Instant::now() + left);
     let bridge = SubagentBridge {
         event_tx: event_tx.clone(),
         approval_tx,
@@ -1546,6 +1648,7 @@ where
         grant_tx,
         budget_tx,
         cancel: bridge_cancel.clone(),
+        turn_deadline,
         parent_session: ctx.harness.as_ref().map(|h| h.session.clone()),
         parent_policy_mode: ctx
             .harness
@@ -1572,12 +1675,12 @@ where
             .total_tokens
             .map(|tokens| tokens.max(0) as u64)
             .unwrap_or(0),
+        routing: ctx.harness.as_ref().and_then(|h| h.routing.clone()),
     };
 
     let mut scoped = std::pin::pin!(SUBAGENT_BRIDGE.scope(bridge, fut));
     let has_deadline = clock.max_secs != 0;
-    let deadline = clock
-        .remaining()
+    let deadline = remaining
         .map(|left| tokio::time::Instant::now() + left)
         .unwrap_or_else(tokio::time::Instant::now);
     let sleep = tokio::time::sleep_until(deadline);

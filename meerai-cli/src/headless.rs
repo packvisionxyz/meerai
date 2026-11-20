@@ -332,7 +332,7 @@ pub(crate) async fn run_headless_channels(
                         );
                     }
                     HeadlessApprovalAction::Decline { .. } => eprintln!(
-                        "session token budget reached; raise context.max_session_tokens in settings.yml or unset it"
+                        "session token budget reached; raise context.max_session_tokens in the user settings or unset it"
                     ),
                     HeadlessApprovalAction::Cancel => {
                         eprintln!("approval required: {}", request.preview.title);

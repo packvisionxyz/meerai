@@ -150,6 +150,9 @@ fn test_agent(id: &str, model: Option<&str>, steps: Option<usize>) -> AgentDefin
         mode: None,
         prompt: format!("Prompt for {id}."),
         path: std::path::PathBuf::from(format!(".agents/agents/{id}.md")),
+        token_estimate: 0,
+        warnings: Vec::new(),
+        supporting_files: Vec::new(),
     }
 }
 
@@ -157,9 +160,14 @@ fn test_skill(id: &str) -> SkillDefinition {
     SkillDefinition {
         id: id.to_string(),
         source: meerai_common::definitions::DefinitionSource::Claude,
-        description: None,
+        description: Some(format!("Skill {id}")),
+        model_invocable: true,
         body: format!("Body for {id}."),
         path: std::path::PathBuf::from(format!(".claude/skills/{id}/SKILL.md")),
+        directory: std::path::PathBuf::from(format!(".claude/skills/{id}")),
+        token_estimate: 0,
+        warnings: Vec::new(),
+        supporting_files: Vec::new(),
     }
 }
 
@@ -245,7 +253,8 @@ fn composes_skill_then_agent_instructions() {
     let second = test_skill("fix");
     let agent = test_agent("reviewer", None, None);
 
-    let composed = compose_definition_prompt("BASE".to_string(), &[&first, &second], Some(&agent));
+    let composed =
+        compose_definition_prompt("BASE".to_string(), &[&first, &second], Some(&agent), &[]);
     assert_eq!(
         composed,
         "BASE\n\n## Skill instructions (explore)\n\nBody for explore.\n\n\
@@ -254,16 +263,71 @@ fn composes_skill_then_agent_instructions() {
     );
 
     assert_eq!(
-        compose_definition_prompt("BASE".to_string(), &[], None),
+        compose_definition_prompt("BASE".to_string(), &[], None, &[]),
         "BASE"
     );
+}
+
+#[test]
+fn adds_a_skill_index_for_advertised_skills() {
+    let skill = test_skill("explore");
+
+    let composed = compose_definition_prompt("BASE".to_string(), &[], None, &[skill]);
+
+    assert!(composed.starts_with("BASE\n\n## Skills\n\n"));
+    assert!(composed.contains("- explore: Skill explore"));
+    assert!(composed.contains("skill-load"));
+    assert!(!composed.contains("Body for explore."));
+}
+
+#[test]
+fn hidden_skills_stay_out_of_the_index() {
+    let mut skill = test_skill("seed");
+    skill.model_invocable = false;
+
+    let composed = compose_definition_prompt("BASE".to_string(), &[], None, &[skill]);
+
+    assert_eq!(composed, "BASE");
+}
+
+#[test]
+fn discovers_and_indexes_a_project_skill() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "meerai_skill_index_{}_{}",
+        std::process::id(),
+        nanos
+    ));
+    let skill_dir = dir.join(".agents/skills/review");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: review\ndescription: Review a diff for regressions\n---\nCheck the diff.\n",
+    )
+    .unwrap();
+    std::fs::write(skill_dir.join("notes.md"), "Details").unwrap();
+
+    let catalog = load_definitions(&dir);
+    let composed = compose_definition_prompt("BASE".to_string(), &[], None, &catalog.skills);
+
+    assert!(composed.contains("- review: Review a diff for regressions"));
+    assert!(!composed.contains("Check the diff."));
+    assert_eq!(
+        catalog.skills[0].supporting_files,
+        vec!["notes.md".to_string()]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn caps_large_definition_instructions() {
     let mut huge = test_skill("huge");
     huge.body = "x".repeat(20_000);
-    let composed = compose_definition_prompt("BASE".to_string(), &[&huge], None);
+    let composed = compose_definition_prompt("BASE".to_string(), &[&huge], None, &[]);
     assert!(composed.len() < 17 * 1024);
     assert!(composed.contains("definition truncated"));
 
@@ -271,7 +335,7 @@ fn caps_large_definition_instructions() {
     first.body = "a".repeat(16_400);
     let mut second = test_skill("second");
     second.body = "b".repeat(16_400);
-    let composed = compose_definition_prompt("BASE".to_string(), &[&first, &second], None);
+    let composed = compose_definition_prompt("BASE".to_string(), &[&first, &second], None, &[]);
     assert!(composed.len() < 33 * 1024);
     assert!(composed.contains("definition block truncated"));
 }
@@ -512,7 +576,10 @@ fn harness_config_uses_defaults_and_context_overrides() {
         max_turn_secs: Some(600),
         summarizer_model: Some("openrouter:small-model".to_string()),
         recovery_model: Some("openrouter:fallback-model".to_string()),
+        step_limit_continuations: None,
         post_edit_diagnostics: None,
+        auto_memory: None,
+        memory_prompt_bytes: None,
         temperature: None,
         effort: None,
     };
@@ -965,25 +1032,24 @@ fn select_prunable_never_selects_the_excluded_session() {
 }
 
 fn write_fake_session(root: &Path, id: &str, updated_at_ms: u64) {
-    let dir = root.join(id);
-    std::fs::create_dir_all(&dir).unwrap();
-    let meta = meerai_session::SessionMeta {
-        id: SessionId::from_raw(id),
-        cwd: root.to_path_buf(),
-        created_at_ms: updated_at_ms,
-        updated_at_ms,
-        title: None,
-        model: None,
-        approval_mode: None,
-        git_branch: None,
-        git_sha: None,
-        forked_from: None,
-        inherited_event_count: None,
-        parent_session_id: None,
-        harness: None,
-        remote_session_id: None,
-    };
-    std::fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
+    let store = meerai_store::Store::open(root.join("meerai.db")).unwrap();
+    store
+        .immediate(|tx| {
+            tx.execute(
+                "INSERT INTO sessions (id, project_root, cwd, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    id,
+                    root.to_string_lossy(),
+                    root.to_string_lossy(),
+                    updated_at_ms as i64,
+                    updated_at_ms as i64
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    std::fs::create_dir_all(root.join(id)).unwrap();
 }
 
 #[test]
@@ -1272,6 +1338,13 @@ fn plain_event_printer_renders_subagent_run_lifecycle() {
                     status: ItemStatus::InProgress,
                     report: None,
                     child_session_id: None,
+                    model: None,
+                    approval_mode: meerai_policy::ApprovalMode::Ask,
+                    steps_used: 0,
+                    max_steps: 0,
+                    usage: Default::default(),
+                    est_cost_usd: None,
+                    active_tool: None,
                 },
             },
             &mut out,
@@ -1295,6 +1368,13 @@ fn plain_event_printer_renders_subagent_run_lifecycle() {
                     status: ItemStatus::Succeeded,
                     report: Some("done".to_string()),
                     child_session_id: None,
+                    model: None,
+                    approval_mode: meerai_policy::ApprovalMode::Ask,
+                    steps_used: 0,
+                    max_steps: 0,
+                    usage: Default::default(),
+                    est_cost_usd: None,
+                    active_tool: None,
                 },
             },
             &mut out,
@@ -1542,6 +1622,7 @@ async fn cli_session_host_lists_creates_and_opens_sessions() {
         sensitive_env_vars: Vec::new(),
         hooks: Arc::new(HookEngine::default()),
         custom_agents: Vec::new(),
+        skill_catalog: Arc::new(vec![test_skill("review")]),
         base_system: "Test system prompt".to_string(),
         launch_system: String::new(),
         launch_definitions: String::new(),
@@ -1550,6 +1631,10 @@ async fn cli_session_host_lists_creates_and_opens_sessions() {
     };
 
     assert!(host.list_sessions().await.unwrap().is_empty());
+    assert!(
+        host.enabled_tool_names()
+            .contains(&"skill-load".to_string())
+    );
 
     let created = host.create_session().await.unwrap();
     assert_eq!(created.provider, expected_provider);
@@ -1646,11 +1731,16 @@ async fn empty_session_cleanup_removes_only_old_unopened_sessions() {
 }
 
 fn age_session(root: &std::path::Path, id: &SessionId, age_ms: u64) {
-    let path = root.join(id.as_str()).join("meta.json");
-    let raw = std::fs::read_to_string(&path).unwrap();
-    let mut meta: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    meta["updated_at_ms"] = serde_json::json!(now_millis().saturating_sub(age_ms));
-    std::fs::write(&path, serde_json::to_string(&meta).unwrap()).unwrap();
+    let store = meerai_store::Store::open(root.join("meerai.db")).unwrap();
+    store
+        .immediate(|tx| {
+            tx.execute(
+                "UPDATE sessions SET updated_at_ms = ?2 WHERE id = ?1",
+                (id.as_str(), now_millis().saturating_sub(age_ms)),
+            )?;
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[tokio::test]
@@ -2256,4 +2346,128 @@ fn resolve_serve_auth_defaults_local_credentials_and_allows_overrides() {
         resolve_serve_auth_with(None, None, None, None, true, || Ok("short".to_string()))
             .unwrap_err();
     assert!(format!("{prompt_short:#}").contains("8 characters"));
+}
+
+#[test]
+fn parses_auth_reset_vault_flags() {
+    assert_eq!(
+        parse_args(vec!["auth".to_string(), "reset-vault".to_string()])
+            .unwrap()
+            .subcommand,
+        Some(CliSubcommand::Auth(AuthCommand::ResetVault { yes: false }))
+    );
+    assert_eq!(
+        parse_args(vec![
+            "auth".to_string(),
+            "reset-vault".to_string(),
+            "--yes".to_string()
+        ])
+        .unwrap()
+        .subcommand,
+        Some(CliSubcommand::Auth(AuthCommand::ResetVault { yes: true }))
+    );
+}
+
+#[test]
+fn parses_memory_route_pack_and_export_commands() {
+    let args =
+        |prefix: &[&str]| -> Vec<String> { prefix.iter().map(|arg| arg.to_string()).collect() };
+
+    assert_eq!(
+        parse_args(args(&["memory", "list", "parser"]))
+            .unwrap()
+            .subcommand,
+        Some(CliSubcommand::Memory(MemoryCommand::List {
+            project: None,
+            query: Some("parser".to_string()),
+        }))
+    );
+    assert_eq!(
+        parse_args(args(&[
+            "memory",
+            "save",
+            "decision",
+            "Use SQLite",
+            "shared",
+            "store",
+            "--pin",
+        ]))
+        .unwrap()
+        .subcommand,
+        Some(CliSubcommand::Memory(MemoryCommand::Save {
+            project: None,
+            kind: "decision".to_string(),
+            title: "Use SQLite".to_string(),
+            body: Some("shared store".to_string()),
+            pinned: true,
+        }))
+    );
+    assert_eq!(
+        parse_args(args(&["memory", "pin", "mem-1", "--off"]))
+            .unwrap()
+            .subcommand,
+        Some(CliSubcommand::Memory(MemoryCommand::Pin {
+            project: None,
+            id: "mem-1".to_string(),
+            pinned: false,
+        }))
+    );
+
+    assert_eq!(
+        parse_args(args(&[
+            "routes",
+            "set",
+            "build",
+            "openai::o3",
+            "1.5",
+            "20000",
+            "2",
+        ]))
+        .unwrap()
+        .subcommand,
+        Some(CliSubcommand::Routes(RoutesCommand::Set {
+            task: "build".to_string(),
+            spec: "openai::o3".to_string(),
+            effort: None,
+            max_cost_usd: Some(1.5),
+            max_tokens_per_turn: Some(20_000),
+            max_concurrency: Some(2),
+        }))
+    );
+    assert_eq!(
+        parse_args(args(&["routes", "clear", "explore"]))
+            .unwrap()
+            .subcommand,
+        Some(CliSubcommand::Routes(RoutesCommand::Clear {
+            task: "explore".to_string(),
+        }))
+    );
+
+    assert_eq!(
+        parse_args(args(&["pack", "trust", "review"]))
+            .unwrap()
+            .subcommand,
+        Some(CliSubcommand::Pack(PackCommand::SetTrusted {
+            id: "review".to_string(),
+            trusted: true,
+        }))
+    );
+    assert_eq!(
+        parse_args(args(&["pack", "pin", "review", "abc123"]))
+            .unwrap()
+            .subcommand,
+        Some(CliSubcommand::Pack(PackCommand::Pin {
+            id: "review".to_string(),
+            rev: "abc123".to_string(),
+        }))
+    );
+
+    assert_eq!(
+        parse_args(args(&["sessions", "export", "ses-1"]))
+            .unwrap()
+            .subcommand,
+        Some(CliSubcommand::Sessions(SessionsCommand::Export {
+            id: "ses-1".to_string(),
+        }))
+    );
 }

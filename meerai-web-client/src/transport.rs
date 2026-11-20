@@ -56,6 +56,40 @@ impl TransportClient {
         Self { _phantom: () }
     }
 
+    pub fn run_host_action(&self, command: String) {
+        #[cfg(target_arch = "wasm32")]
+        self.inner.run_host_action(command);
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = command;
+    }
+
+    pub fn fetch_memories(&self) {
+        #[cfg(target_arch = "wasm32")]
+        self.inner.fetch_memories();
+    }
+
+    pub fn fetch_routes(&self) {
+        #[cfg(target_arch = "wasm32")]
+        self.inner.fetch_routes();
+    }
+
+    pub fn fetch_packs(&self) {
+        #[cfg(target_arch = "wasm32")]
+        self.inner.fetch_packs();
+    }
+
+    pub fn fetch_definitions(&self) {
+        #[cfg(target_arch = "wasm32")]
+        self.inner.fetch_definitions();
+    }
+
+    pub fn fetch_blob(&self, session_id: String, key: String) {
+        #[cfg(target_arch = "wasm32")]
+        self.inner.fetch_blob(session_id, key);
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = (session_id, key);
+    }
+
     pub fn resync(&self) {
         #[cfg(target_arch = "wasm32")]
         self.inner.resync();

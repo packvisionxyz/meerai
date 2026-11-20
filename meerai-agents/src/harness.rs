@@ -1,6 +1,12 @@
-use meerai_common::settings::{ContextSettings, DEFAULT_TEMPERATURE, EffortLevel, Temperature};
+use std::sync::Arc;
+
+use meerai_common::settings::{
+    ContextSettings, DEFAULT_TEMPERATURE, EffortLevel, RoutingSettings, TaskType, Temperature,
+};
 use meerai_policy::PolicyEngine;
 use meerai_session::Session;
+
+use crate::routing::RoutingCoordinator;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TokenPricing {
@@ -20,6 +26,8 @@ pub struct HarnessConfig {
     pub rollback_on_verify_failure: bool,
     pub recovery_model: Option<String>,
     pub max_steps_per_turn: usize,
+    pub step_limit_continuations: usize,
+    pub auto_memory: bool,
     pub tool_timeout_ms: u64,
     pub max_session_tokens: Option<u64>,
     pub max_turn_secs: u64,
@@ -27,6 +35,7 @@ pub struct HarnessConfig {
     pub temperature: Option<f32>,
     pub effort: Option<EffortLevel>,
     pub token_pricing: Option<TokenPricing>,
+    pub routing: RoutingSettings,
 }
 
 impl Default for HarnessConfig {
@@ -42,6 +51,8 @@ impl Default for HarnessConfig {
             rollback_on_verify_failure: false,
             recovery_model: None,
             max_steps_per_turn: 32,
+            step_limit_continuations: 2,
+            auto_memory: true,
             tool_timeout_ms: 120_000,
             max_session_tokens: None,
             max_turn_secs: 1_800,
@@ -49,6 +60,7 @@ impl Default for HarnessConfig {
             temperature: Some(DEFAULT_TEMPERATURE),
             effort: Some(EffortLevel::Medium),
             token_pricing: None,
+            routing: RoutingSettings::default(),
         }
     }
 }
@@ -89,6 +101,12 @@ impl HarnessConfig {
         if let Some(value) = context.max_steps_per_turn {
             cfg.max_steps_per_turn = value;
         }
+        if let Some(value) = context.step_limit_continuations {
+            cfg.step_limit_continuations = value;
+        }
+        if let Some(value) = context.auto_memory {
+            cfg.auto_memory = value;
+        }
         if let Some(value) = context.tool_timeout_ms {
             cfg.tool_timeout_ms = value;
         }
@@ -112,12 +130,22 @@ impl HarnessConfig {
             .or_else(|| Temperature::new(effort.default_temperature()).effective());
         cfg
     }
+
+    pub fn with_routing(mut self, routing: RoutingSettings) -> Self {
+        self.routing = routing;
+        self
+    }
+
+    pub fn route_model(&self, task: &TaskType, fallback: &str) -> String {
+        crate::routing::route_model(&self.routing, task, fallback)
+    }
 }
 
 pub struct AgentHarness {
     pub session: Session,
     pub policy: PolicyEngine,
     pub config: HarnessConfig,
+    pub routing: Option<Arc<RoutingCoordinator>>,
 }
 
 impl AgentHarness {
@@ -126,6 +154,7 @@ impl AgentHarness {
             session,
             policy,
             config: HarnessConfig::default(),
+            routing: None,
         }
     }
 }
@@ -166,6 +195,22 @@ mod tests {
         }));
         assert_eq!(high.effort, Some(EffortLevel::High));
         assert_eq!(high.temperature, Some(0.5));
+    }
+
+    #[test]
+    fn step_continuations_flow_from_context_settings() {
+        assert_eq!(HarnessConfig::default().step_limit_continuations, 2);
+        assert_eq!(
+            HarnessConfig::default().max_steps_per_turn
+                * (HarnessConfig::default().step_limit_continuations + 1),
+            96,
+            "the default turn allows two automatic step-budget continuations"
+        );
+        let config = HarnessConfig::from_context_settings(Some(&ContextSettings {
+            step_limit_continuations: Some(0),
+            ..ContextSettings::default()
+        }));
+        assert_eq!(config.step_limit_continuations, 0);
     }
 
     #[test]

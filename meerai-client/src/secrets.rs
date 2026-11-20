@@ -110,6 +110,10 @@ pub trait SecretStore: Send + Sync {
         self.write_credential(provider_id, credential)
     }
 
+    fn reset_vault(&self) -> Result<usize> {
+        anyhow::bail!("this credential store cannot reset a vault")
+    }
+
     fn list_credentials(&self) -> Result<Vec<(String, CredentialKind)>> {
         Ok(self
             .list_providers()?
@@ -190,6 +194,13 @@ impl SecretStore for MemorySecretStore {
     fn delete_credential(&self, provider_id: &str) -> Result<()> {
         self.entries.lock().unwrap().remove(provider_id);
         Ok(())
+    }
+
+    fn reset_vault(&self) -> Result<usize> {
+        let mut guard = self.entries.lock().unwrap();
+        let removed = guard.len();
+        guard.clear();
+        Ok(removed)
     }
 
     fn list_credentials(&self) -> Result<Vec<(String, CredentialKind)>> {

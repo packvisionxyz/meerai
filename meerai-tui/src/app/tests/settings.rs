@@ -103,7 +103,14 @@ async fn reload_refreshes_the_effective_temperature_from_merged_settings() {
     let (mut app, _rx, _secrets) = test_app();
     let dir = temp_settings_dir("temperature");
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("settings.yml"), "context:\n  temperature: 0.65\n").unwrap();
+    let settings = meerai_common::settings::AppSettings {
+        context: Some(meerai_common::settings::ContextSettings {
+            temperature: Some(meerai_common::settings::Temperature::new(0.65)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    meerai_common::settings::save_settings_to(&dir, &settings).unwrap();
     app.config_dir = Some(dir.clone());
     app.context_temperature = Some(1.5);
 
@@ -119,11 +126,14 @@ async fn reload_refreshes_the_explicit_context_window_from_merged_settings() {
     let (mut app, _rx, _secrets) = test_app();
     let dir = temp_settings_dir("context_window");
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("settings.yml"),
-        "context:\n  context_window_tokens: 200000\n",
-    )
-    .unwrap();
+    let settings = meerai_common::settings::AppSettings {
+        context: Some(meerai_common::settings::ContextSettings {
+            context_window_tokens: Some(200_000),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    meerai_common::settings::save_settings_to(&dir, &settings).unwrap();
     app.config_dir = Some(dir.clone());
     assert_eq!(app.explicit_context_window, None);
 

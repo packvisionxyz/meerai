@@ -242,6 +242,18 @@ pub(crate) async fn run_sessions(command: &SessionsCommand) -> Result<()> {
             let forked = fork_session(&root, &workspace, id, turn.as_deref()).await?;
             println!("forked {} from {id}", forked.id());
         }
+        SessionsCommand::Export { id } => {
+            let session_id = SessionId::parse(id)?;
+            let workspace = std::env::current_dir()?;
+            let config = SessionConfig {
+                root: root.clone(),
+                workspace: workspace.clone(),
+            };
+            let session = Session::open(&config, session_id, workspace).await?;
+            for logged in session.events() {
+                println!("{}", serde_json::to_string(&logged)?);
+            }
+        }
     }
     Ok(())
 }

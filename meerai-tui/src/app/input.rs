@@ -55,7 +55,34 @@ impl AppState {
                         | ActiveModal::AuthMethodSelect { .. }
                         | ActiveModal::ProviderConnection { .. }
                         | ActiveModal::Question { .. }
+                        | ActiveModal::Context(_)
+                        | ActiveModal::Memory { .. }
+                        | ActiveModal::Routing { .. }
+                        | ActiveModal::Packs { .. }
                         | ActiveModal::RewindMenu { .. } => {}
+                        ActiveModal::VaultReset { input, error } => {
+                            input.push_str(&clean);
+                            *error = None;
+                        }
+                        ActiveModal::Sampling {
+                            temperature, error, ..
+                        } => {
+                            temperature.push_str(&clean);
+                            *error = None;
+                        }
+                        ActiveModal::SubagentSpawn(panel) => {
+                            match panel.field {
+                                0 => panel.agent.push_str(&clean),
+                                1 => panel.task.push_str(&clean),
+                                2 => panel.model.push_str(&clean),
+                                3 => panel.steps.push_str(&clean),
+                                4 => panel.tokens.push_str(&clean),
+                                5 => panel.cost.push_str(&clean),
+                                6 => panel.tools.push_str(&clean),
+                                _ => {}
+                            }
+                            panel.error = None;
+                        }
                         ActiveModal::QueuedEdit { input, error, .. } => {
                             input.push_str(&clean);
                             *error = None;

@@ -1,222 +1,250 @@
-use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-use anyhow::{Context, Result};
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use anyhow::{Context, Result, ensure};
+use meerai_core::env::now_millis;
+use meerai_store::Store;
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::event::LoggedEvent;
+use crate::{LoggedEvent, Seq, SessionId, SessionMeta, SessionSummary};
 
-const ACTIVE_PREFIX: &str = "session.v";
-const ACTIVE_SUFFIX: &str = ".jsonl";
-const SEALED_SUFFIX: &str = ".jsonl.zstd";
-const COMPRESSION_LEVEL: i32 = 3;
-
-pub(crate) fn active_name(generation: u64) -> String {
-    format!("{ACTIVE_PREFIX}{generation}{ACTIVE_SUFFIX}")
-}
-
-pub(crate) fn sealed_name(generation: u64) -> String {
-    format!("{ACTIVE_PREFIX}{generation}{SEALED_SUFFIX}")
-}
-
-pub(crate) fn is_log_file_name(name: &str) -> bool {
-    parse_generation(name, ACTIVE_SUFFIX).is_some()
-        || parse_generation(name, SEALED_SUFFIX).is_some()
-}
-
-pub(crate) struct LoadedLog {
-    pub(crate) events: Vec<LoggedEvent>,
-    pub(crate) active_generation: u64,
-    pub(crate) active_size: u64,
-}
-
-struct Discovered {
-    sealed: Vec<(u64, PathBuf)>,
-    plain: Vec<(u64, PathBuf)>,
-    active_generation: u64,
-}
-
-pub(crate) async fn load(dir: &Path) -> Result<LoadedLog> {
-    let discovered = discover(dir).await?;
-
-    let mut text = String::new();
-    if !discovered.sealed.is_empty() {
-        let mut compressed = Vec::new();
-        for (_, path) in &discovered.sealed {
-            let chunk = fs::read(path)
-                .await
-                .with_context(|| format!("failed to read {}", path.display()))?;
-            compressed.extend_from_slice(&chunk);
-        }
-        let decoded = zstd::stream::decode_all(compressed.as_slice()).with_context(|| {
-            format!(
-                "failed to decompress session generations in {}",
-                dir.display()
-            )
-        })?;
-        text.push_str(&String::from_utf8(decoded).with_context(|| {
-            format!(
-                "session generations in {} are not valid UTF-8",
-                dir.display()
-            )
-        })?);
-    }
-
-    for (_, path) in &discovered.plain {
-        let chunk = fs::read_to_string(path)
-            .await
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        text.push_str(&chunk);
-    }
-
-    let active_path = dir.join(active_name(discovered.active_generation));
-    let active_size = match fs::metadata(&active_path).await {
-        Ok(metadata) => metadata.len(),
-        Err(err) if err.kind() == ErrorKind::NotFound => 0,
-        Err(err) => {
-            return Err(anyhow::Error::from(err)
-                .context(format!("failed to inspect {}", active_path.display())));
-        }
+pub(crate) fn default_root() -> PathBuf {
+    let Some(db) = std::env::var_os("MEERAI_DB_PATH").map(PathBuf::from) else {
+        return meerai_core::env::sessions_dir();
     };
-
-    Ok(LoadedLog {
-        events: parse_events(&text),
-        active_generation: discovered.active_generation,
-        active_size,
-    })
+    if db == Path::new(":memory:") {
+        static ROOT: OnceLock<PathBuf> = OnceLock::new();
+        return ROOT
+            .get_or_init(|| std::env::temp_dir().join(SessionId::new().as_str()))
+            .clone();
+    }
+    let mut root = db.into_os_string();
+    root.push(".sessions");
+    root.into()
 }
 
-pub(crate) async fn seal(dir: &Path, generation: u64) -> Result<()> {
-    let plain = dir.join(active_name(generation));
-    let bytes = match fs::read(&plain).await {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(err) => {
-            return Err(
-                anyhow::Error::from(err).context(format!("failed to read {}", plain.display()))
-            );
-        }
-    };
-    if bytes.is_empty() {
-        return Ok(());
-    }
-
-    let compressed = zstd::stream::encode_all(bytes.as_slice(), COMPRESSION_LEVEL)
-        .with_context(|| format!("failed to compress {}", plain.display()))?;
-    let sealed = dir.join(sealed_name(generation));
-    let tmp = dir.join(format!("{}.tmp", sealed_name(generation)));
-    let mut file = crate::perms::create_options()
-        .open(&tmp)
-        .await
-        .with_context(|| format!("failed to create {}", tmp.display()))?;
-    file.write_all(&compressed)
-        .await
-        .with_context(|| format!("failed to write {}", tmp.display()))?;
-    file.sync_all()
-        .await
-        .with_context(|| format!("failed to sync {}", tmp.display()))?;
-    drop(file);
-    crate::perms::tighten_file(&tmp).await?;
-    fs::rename(&tmp, &sealed)
-        .await
-        .with_context(|| format!("failed to rename {} to {}", tmp.display(), sealed.display()))?;
-
-    match fs::remove_file(&plain).await {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-        Err(err) => {
-            Err(anyhow::Error::from(err).context(format!("failed to remove {}", plain.display())))
-        }
-    }
-}
-
-async fn discover(dir: &Path) -> Result<Discovered> {
-    let mut sealed: BTreeMap<u64, PathBuf> = BTreeMap::new();
-    let mut plain: BTreeMap<u64, PathBuf> = BTreeMap::new();
-
-    let mut entries = match fs::read_dir(dir).await {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            return Ok(Discovered {
-                sealed: Vec::new(),
-                plain: Vec::new(),
-                active_generation: 0,
-            });
-        }
-        Err(err) => {
-            return Err(
-                anyhow::Error::from(err).context(format!("failed to list {}", dir.display()))
-            );
-        }
-    };
-
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .with_context(|| format!("failed to list {}", dir.display()))?
+pub(crate) fn db_path(root: &Path) -> PathBuf {
+    if root == default_root()
+        && (std::env::var_os("MEERAI_SESSION_DIR").is_none()
+            || std::env::var_os("MEERAI_DB_PATH").is_some())
+        && let Ok(path) = Store::default_path()
     {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if let Some(generation) = parse_generation(name, SEALED_SUFFIX) {
-            sealed.insert(generation, entry.path());
-        } else if let Some(generation) = parse_generation(name, ACTIVE_SUFFIX) {
-            plain.insert(generation, entry.path());
-        }
+        return path;
     }
+    root.join("meerai.db")
+}
 
-    let duplicates: Vec<u64> = plain
-        .keys()
-        .filter(|generation| sealed.contains_key(generation))
-        .copied()
-        .collect();
-    for generation in duplicates {
-        if let Some(path) = plain.remove(&generation) {
-            let _ = fs::remove_file(path).await;
-        }
+fn memory_store() -> Result<Store> {
+    static STORE: OnceLock<Store> = OnceLock::new();
+    if let Some(store) = STORE.get() {
+        return Ok(store.clone());
     }
+    Ok(STORE
+        .get_or_init({
+            let store = Store::open(":memory:")?;
+            move || store
+        })
+        .clone())
+}
 
-    let active_generation = match (sealed.keys().next_back(), plain.keys().next_back()) {
-        (None, None) => 0,
-        (None, Some(max)) => *max,
-        (Some(max), Some(plain_max)) if plain_max > max => *plain_max,
-        (Some(max), _) => max + 1,
+pub(crate) fn open(root: &Path) -> Result<Store> {
+    let path = db_path(root);
+    if path == Path::new(":memory:") {
+        return memory_store();
+    }
+    if Store::default_path().is_ok_and(|default| default == path) {
+        return Store::open_default();
+    }
+    Store::open(path)
+}
+
+pub(crate) fn read_only(root: &Path) -> Result<Option<Store>> {
+    let path = db_path(root);
+    if path == Path::new(":memory:") {
+        return memory_store().map(Some);
+    }
+    let parent = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent = match parent.canonicalize() {
+        Ok(parent) => parent,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("resolve store directory {}", parent.display()));
+        }
     };
+    Store::open_existing_read_only(
+        parent.join(path.file_name().context("missing database file name")?),
+    )
+}
 
-    Ok(Discovered {
-        sealed: sealed.into_iter().collect(),
-        plain: plain.into_iter().collect(),
-        active_generation,
+pub(crate) async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .context("session storage task failed")?
+}
+
+pub(crate) fn validate_id(id: &SessionId) -> Result<()> {
+    ensure!(
+        crate::ids::is_safe_segment(id.as_str()),
+        "invalid session id: {id}"
+    );
+    Ok(())
+}
+
+pub(crate) fn validate_dir(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => ensure!(meta.is_dir(), "not a session directory: {}", path.display()),
+        Err(err) if err.kind() == ErrorKind::NotFound => (),
+        Err(err) => return Err(err.into()),
+    }
+    Ok(())
+}
+
+fn meta_row(row: &Row<'_>) -> rusqlite::Result<SessionMeta> {
+    Ok(SessionMeta {
+        id: SessionId::from_raw(row.get::<_, String>(0)?),
+        cwd: PathBuf::from(row.get::<_, String>(1)?),
+        created_at_ms: row.get(2)?,
+        updated_at_ms: row.get(3)?,
+        title: row.get(4)?,
+        model: row.get(5)?,
+        approval_mode: row.get(6)?,
+        git_branch: row.get(7)?,
+        git_sha: row.get(8)?,
+        forked_from: row.get::<_, Option<String>>(9)?.map(SessionId::from_raw),
+        inherited_event_count: row.get(10)?,
+        parent_session_id: row.get::<_, Option<String>>(11)?.map(SessionId::from_raw),
+        harness: row.get(12)?,
+        remote_session_id: row.get(13)?,
     })
 }
 
-fn parse_generation(name: &str, suffix: &str) -> Option<u64> {
-    let raw = name.strip_prefix(ACTIVE_PREFIX)?.strip_suffix(suffix)?;
-    raw.parse().ok()
+pub(crate) fn meta(conn: &Connection, id: &SessionId) -> Result<Option<SessionMeta>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, cwd, created_at_ms, updated_at_ms, title, model, approval_mode, git_branch,
+         git_sha, forked_from, inherited_event_count, parent_session_id, harness, remote_session_id
+         FROM sessions WHERE id = ?1",
+            [id.as_str()],
+            meta_row,
+        )
+        .optional()?)
 }
 
-fn parse_events(raw: &str) -> Vec<LoggedEvent> {
-    raw.lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<LoggedEvent>(line).ok())
-        .collect()
+pub(crate) fn insert_session(conn: &Connection, project: &Path, meta: &SessionMeta) -> Result<()> {
+    conn.execute(
+        "INSERT INTO sessions (id, project_root, cwd, created_at_ms, updated_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            meta.id.as_str(),
+            project.to_str().context("project path is not UTF-8")?,
+            meta.cwd.to_str().context("session cwd is not UTF-8")?,
+            meta.created_at_ms,
+            meta.updated_at_ms
+        ],
+    )?;
+    update_meta(conn, meta)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) fn update_meta(conn: &Connection, meta: &SessionMeta) -> Result<()> {
+    let count = conn.execute(
+        "UPDATE sessions SET cwd = ?2, created_at_ms = ?3, updated_at_ms = ?4, title = ?5,
+         model = ?6, approval_mode = ?7, git_branch = ?8, git_sha = ?9, forked_from = ?10,
+         inherited_event_count = ?11, parent_session_id = ?12, harness = ?13, remote_session_id = ?14
+         WHERE id = ?1",
+        params![meta.id.as_str(), meta.cwd.to_str().context("session cwd is not UTF-8")?,
+            meta.created_at_ms, meta.updated_at_ms, meta.title, meta.model, meta.approval_mode,
+            meta.git_branch, meta.git_sha, meta.forked_from.as_ref().map(SessionId::as_str),
+            meta.inherited_event_count, meta.parent_session_id.as_ref().map(SessionId::as_str),
+            meta.harness, meta.remote_session_id],
+    )?;
+    ensure!(count == 1, "session not found: {}", meta.id);
+    Ok(())
+}
 
-    #[test]
-    fn parses_generation_names() {
-        assert_eq!(parse_generation("session.v0.jsonl", ACTIVE_SUFFIX), Some(0));
-        assert_eq!(
-            parse_generation("session.v12.jsonl.zstd", SEALED_SUFFIX),
-            Some(12)
-        );
-        assert_eq!(parse_generation("meta.json", ACTIVE_SUFFIX), None);
-        assert_eq!(parse_generation("session.vx.jsonl", ACTIVE_SUFFIX), None);
+pub(crate) fn events(conn: &Connection, id: &SessionId) -> Result<Vec<LoggedEvent>> {
+    let mut stmt = conn.prepare(
+        "SELECT seq, payload_json FROM session_events WHERE session_id = ?1 ORDER BY seq",
+    )?;
+    read_events(&mut stmt, [id.as_str()])
+}
+
+fn read_events(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: impl rusqlite::Params,
+) -> Result<Vec<LoggedEvent>> {
+    let mut rows = stmt.query(params)?;
+    let mut events = Vec::new();
+    while let Some(row) = rows.next()? {
+        let seq = Seq(row.get(0)?);
+        let raw: String = row.get(1)?;
+        let event = serde_json::from_str(&raw)
+            .with_context(|| format!("decode session event {}", seq.0))?;
+        events.push(LoggedEvent { seq, event });
     }
+    Ok(events)
+}
+
+pub(crate) fn insert_event(conn: &Connection, id: &SessionId, logged: &LoggedEvent) -> Result<()> {
+    let payload = serde_json::to_string(&logged.event)?;
+    conn.execute(
+        "INSERT INTO session_events (session_id, seq, ts_ms, event_type, turn_id, payload_json)
+         VALUES (?1, ?2, ?3, json_extract(?4, '$.type'), json_extract(?4, '$.turn_id'), ?4)",
+        params![id.as_str(), logged.seq.0, now_millis(), payload],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn list(conn: &Connection, root: &Path) -> Result<Vec<SessionSummary>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title, model, created_at_ms, updated_at_ms, parent_session_id,
+         COALESCE((SELECT SUM(length(CAST(payload_json AS BLOB))) FROM session_events WHERE session_id = s.id), 0)
+         + COALESCE((SELECT SUM(length(content_zstd)) FROM session_blobs WHERE session_id = s.id), 0)
+         + COALESCE((SELECT SUM(length(content_zstd)) FROM session_snapshots WHERE session_id = s.id), 0)
+         FROM sessions AS s ORDER BY updated_at_ms DESC, id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let id = SessionId::from_raw(row.get::<_, String>(0)?);
+        Ok(SessionSummary {
+            dir: root.join(id.as_str()),
+            id,
+            title: row.get(1)?,
+            model: row.get(2)?,
+            created_at_ms: row.get(3)?,
+            updated_at_ms: row.get(4)?,
+            parent_session_id: row.get::<_, Option<String>>(5)?.map(SessionId::from_raw),
+            bytes: row.get(6)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub(crate) fn has_user_input(conn: &Connection, id: &SessionId) -> Result<bool> {
+    let value: Option<bool> = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_events WHERE session_id = ?1 AND event_type = 'user_message'
+         AND json_extract(payload_json, '$.source') = 'user') FROM sessions WHERE id = ?1",
+        [id.as_str()], |row| row.get(0),
+    ).optional()?;
+    value.with_context(|| format!("session not found: {id}"))
+}
+
+pub(crate) fn delete(conn: &Connection, id: &SessionId) -> Result<bool> {
+    Ok(conn.execute("DELETE FROM sessions WHERE id = ?1", [id.as_str()])? != 0)
+}
+
+pub(crate) fn flush(store: &Store) -> Result<()> {
+    store.read(|conn| {
+        let (busy, _, _): (i64, i64, i64) =
+            conn.query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+        ensure!(busy == 0, "session database checkpoint is busy");
+        Ok(())
+    })
 }

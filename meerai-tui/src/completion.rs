@@ -30,7 +30,17 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
     ("/model", "Switch active LLM model", true),
     (
         "/effort",
-        "Show, set, or cycle reasoning effort (low|medium|high)",
+        "Set reasoning effort, or open the sampling panel with no argument",
+        true,
+    ),
+    (
+        "/sampling",
+        "Set reasoning effort and temperature together",
+        false,
+    ),
+    (
+        "/temperature",
+        "Set the sampling temperature override (0.0..2.0 or default)",
         true,
     ),
     (
@@ -44,7 +54,11 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
         "Apply a skill by id (or mention @skill/<id>)",
         true,
     ),
-    ("/skills", "Choose a skill from the Mentions popup", false),
+    (
+        "/skills",
+        "Show discovered skills, warnings, and token estimates",
+        false,
+    ),
     (
         "/search",
         "Search files by name or content (ripgrep)",
@@ -75,6 +89,49 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
     (
         "/serve",
         "Start or stop local browser UI server (/serve stop)",
+        false,
+    ),
+    (
+        "/context",
+        "Inspect the context breakdown, watermark, and headroom",
+        false,
+    ),
+    (
+        "/memory",
+        "List or search project memories (/memory <query>)",
+        true,
+    ),
+    (
+        "/remember",
+        "Save a project memory (/remember <note>)",
+        true,
+    ),
+    ("/forget", "Delete a project memory (/forget <id>)", true),
+    (
+        "/pin",
+        "Pin or unpin a project memory (/pin <id> [off])",
+        true,
+    ),
+    (
+        "/routing",
+        "List or edit task model routes (/routing set <task> <provider::model>)",
+        true,
+    ),
+    ("/packs", "List installed declarative packs", false),
+    (
+        "/pack",
+        "Install, enable, trust, pin, or remove a pack (/pack <verb> <id>)",
+        true,
+    ),
+    ("/definitions", "Show discovered agents and skills", false),
+    (
+        "/subagent",
+        "Spawn or cancel a manual subagent (/subagent <agent> <task>)",
+        true,
+    ),
+    (
+        "/vault-reset",
+        "Delete every saved credential and reinitialize the vault",
         false,
     ),
     ("/quit", "Exit meerai", false),
@@ -191,14 +248,14 @@ impl CompletionEngine {
             .iter()
             .map(|agent| MentionEntry {
                 id: agent.id.clone(),
-                description: mention_description(agent.source, agent.description.as_deref()),
+                description: mention_description(&agent.source, agent.description.as_deref()),
             })
             .collect();
         self.skill_mentions = skills
             .iter()
             .map(|skill| MentionEntry {
                 id: skill.id.clone(),
-                description: mention_description(skill.source, skill.description.as_deref()),
+                description: mention_description(&skill.source, skill.description.as_deref()),
             })
             .collect();
     }
@@ -501,14 +558,16 @@ fn build_model_candidates(models: &[(String, String)], query: &str) -> Vec<Compl
         .collect()
 }
 
-fn mention_description(source: DefinitionSource, description: Option<&str>) -> String {
+fn mention_description(source: &DefinitionSource, description: Option<&str>) -> String {
     let source = match source {
-        DefinitionSource::Agents => ".agents",
-        DefinitionSource::Claude => ".claude",
+        DefinitionSource::User => "user".to_string(),
+        DefinitionSource::Pack(id) => format!("pack {id}"),
+        DefinitionSource::Agents => ".agents".to_string(),
+        DefinitionSource::Claude => ".claude".to_string(),
     };
     match description.map(str::trim).filter(|text| !text.is_empty()) {
         Some(description) => format!("{source} — {description}"),
-        None => source.to_string(),
+        None => source,
     }
 }
 
@@ -670,6 +729,9 @@ mod tests {
             mode: None,
             prompt: String::new(),
             path: PathBuf::from(format!(".agents/agents/{id}.md")),
+            token_estimate: 0,
+            warnings: Vec::new(),
+            supporting_files: Vec::new(),
         }
     }
 
@@ -682,8 +744,13 @@ mod tests {
             id: id.to_string(),
             source,
             description: description.map(str::to_string),
+            model_invocable: description.is_some(),
             body: String::new(),
             path: PathBuf::from(format!(".agents/skills/{id}/SKILL.md")),
+            directory: PathBuf::from(format!(".agents/skills/{id}")),
+            token_estimate: 0,
+            warnings: Vec::new(),
+            supporting_files: Vec::new(),
         }
     }
 

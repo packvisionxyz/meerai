@@ -29,6 +29,7 @@ meerai-host = { path = "../meerai-host/", optional = true }
 meerai-policy = { path = "../meerai-policy/" }
 meerai-providers = { path = "../meerai-providers/" }
 meerai-session = { path = "../meerai-session/" }
+meerai-store = { path = "../meerai-store/" }
 meerai-tools = { path = "../meerai-tools/" }
 meerai-tui = { path = "../meerai-tui/", optional = true }
 meerai-web = { path = "../meerai-web/", optional = true }
@@ -41,3 +42,6 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+
+[dev-dependencies]
+rusqlite = { workspace = true }
