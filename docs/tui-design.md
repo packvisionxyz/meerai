@@ -64,10 +64,13 @@ composer, and a one-row statusline.
   terminal the file-changes panel gives up height first.
 - `DIAGNOSE` is collapsed by default and takes three rows (header only).
   `/diagnose` or a click on the header expands it to ten rows. The rows are
-  last-request tokens (`↑prompt ↓completion`), cache hit ratio
-  (`cached_tokens / prompt_tokens` from the provider, not an estimate), cache
-  write tokens, session hit ratio, context use, memory tokens, and tool
-  schema tokens. A provider that reports no cache details shows `n/a`.
+  last-request tokens (`↑prompt ↓completion`), last-request cache hit ratio
+  (`cached_tokens / prompt_tokens` from the provider, not an estimate), last-request cache
+  write tokens, context use, memory tokens, and tool schema tokens. A provider
+  that reports no cache details shows `n/a`. The block does not show a
+  cumulative cache ratio: the percentage is always the last request, and a
+  fork or a resumed stored session shows `n/a` until a new request reports
+  usage.
 - The file list pages with a clickable `… and N more` footer (next page,
   back to top at the end) and scrolls with the mouse wheel. Clicking a
   changed file opens the diff modal.
@@ -131,6 +134,18 @@ order persists in the `user_config` table (`ui_tabs`).
 Clipboard writes use OSC 52 plus a native helper (`pbcopy`, `clip`,
 `wl-copy`, `xclip`, `xsel`) when available. Dragging over the transcript
 selects text and copies it on release. There is no keyboard Select mode.
+
+Clicking a file path in the transcript opens it in the editor, at the line
+number when the text carries one (`click_path_at`, `path_reference_at`,
+`app/input.rs`). The resolver maps the clicked cell to a wrapped transcript
+line through `scroll_offset`, skips the gutter, expands to the surrounding
+token, and accepts it only when `meerai_syntax::detect_path_reference` returns
+a reference and the joined path is an existing file under the workspace root.
+The click queues `HostAction::OpenInEditor`, so the `/open` guard runs before
+any process starts. Absolute paths and `..` never resolve. The editor is
+`MEERAI_EDITOR`, then `VISUAL`, then `EDITOR`, spawned without a shell; plan
+mode refuses. Text selection still wins: a drag is not a click, so selection
+and click-to-open do not conflict.
 
 ### 2.4 Insert mode (`INS`) and the composer
 

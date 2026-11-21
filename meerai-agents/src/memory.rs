@@ -56,8 +56,7 @@ impl MemoryToolset {
     }
 
     fn save(&self, args: MemorySaveArgs) -> Result<ToolOutput, ToolError> {
-        let kind = ProjectMemoryKind::parse(&args.kind)
-            .map_err(|error| ToolError::Unknown(error.into()))?;
+        let kind = ProjectMemoryKind::parse(&args.kind).map_err(ToolError::Unknown)?;
         let body = truncate_bytes(args.body.trim(), MAX_BODY_BYTES);
         if body.is_empty() {
             return Ok(ToolOutput::Fail(

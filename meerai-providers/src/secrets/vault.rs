@@ -4,8 +4,8 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chacha20poly1305::aead::{Aead, AeadInPlace, Payload};
-use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
+use chacha20poly1305::aead::{Aead, AeadInOut, Payload};
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
 use meerai_client::secrets::{Credential, CredentialKind, OAuthCredential, SecretStore};
 use meerai_store::Store;
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -88,12 +88,12 @@ impl VaultSecretStore {
                     row.get(0)
                 })
                 .optional()?;
-            if let (Some(encoded), KeySource::Keychain(backend)) = (encoded, &self.source) {
-                if let Ok(Envelope::Keychain { id, .. }) = serde_json::from_str(&encoded) {
-                    backend
-                        .delete_secret(SERVICE, &account(&id))
-                        .map_err(|error| anyhow!("could not delete native vault key: {error}"))?;
-                }
+            if let (Some(encoded), KeySource::Keychain(backend)) = (encoded, &self.source)
+                && let Ok(Envelope::Keychain { id, .. }) = serde_json::from_str(&encoded)
+            {
+                backend
+                    .delete_secret(SERVICE, &account(&id))
+                    .map_err(|error| anyhow!("could not delete native vault key: {error}"))?;
             }
             let removed = tx.execute("DELETE FROM vault_secrets", [])?;
             tx.execute(
@@ -197,7 +197,7 @@ impl VaultSecretStore {
                         .is_none(),
                     "native vault key already exists"
                 );
-                let encoded = Zeroizing::new(URL_SAFE_NO_PAD.encode(&*dek));
+                let encoded = Zeroizing::new(URL_SAFE_NO_PAD.encode(*dek));
                 backend
                     .set_secret(SERVICE, &account, &encoded)
                     .map_err(|_| anyhow!("could not save native vault key"))?;
@@ -370,14 +370,14 @@ fn random<const N: usize>() -> Result<[u8; N]> {
 
 fn seal(key: &Dek, nonce: &[u8; 12], aad: &[u8], msg: &[u8]) -> Result<Vec<u8>> {
     ChaCha20Poly1305::new((&**key).into())
-        .encrypt(Nonce::from_slice(nonce), Payload { msg, aad })
+        .encrypt(nonce.into(), Payload { msg, aad })
         .map_err(|_| anyhow!("vault encryption failed"))
 }
 
 fn open(key: &Dek, nonce: &[u8; 12], aad: &[u8], ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     let mut clear = Zeroizing::new(ciphertext.to_vec());
     ChaCha20Poly1305::new((&**key).into())
-        .decrypt_in_place(Nonce::from_slice(nonce), aad, &mut *clear)
+        .decrypt_in_place(nonce.into(), aad, &mut *clear)
         .map_err(|_| anyhow!("vault authentication failed"))?;
     Ok(clear)
 }

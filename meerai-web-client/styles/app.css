@@ -2677,6 +2677,16 @@ button.settings-row:hover {
   overflow-wrap: anywhere;
 }
 
+.md-code-path {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.md-code-path:hover {
+  background: var(--accent-soft);
+}
+
 .md-link-blocked {
   color: var(--m-muted);
 }

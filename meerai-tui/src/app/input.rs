@@ -329,6 +329,11 @@ impl AppState {
                     self.doc_selection = None;
                     return true;
                 }
+                if self.modal.is_none() && self.click_path_at(mouse.column, mouse.row) {
+                    self.selection = None;
+                    self.doc_selection = None;
+                    return true;
+                }
                 if self.modal.is_none() && self.composer_pointer_down(mouse.column, mouse.row) {
                     self.selection = None;
                     self.doc_selection = None;
@@ -906,6 +911,65 @@ impl AppState {
             return false;
         };
         self.open_diff_modal(row_idx);
+        true
+    }
+
+    pub fn path_reference_at(&self, column: u16, row: u16) -> Option<meerai_syntax::PathRef> {
+        let area = self.transcript_area;
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+        if column < area.x
+            || column >= area.x + area.width
+            || row < area.y
+            || row >= area.y + area.height
+        {
+            return None;
+        }
+        let scroll = self
+            .tabs
+            .get(self.active_tab)
+            .map_or(0, |tab| tab.scroll_offset);
+        let line_index = scroll + (row - area.y) as usize;
+        let line = self.transcript_wrapped_lines.get(line_index)?;
+        let offset = (column - area.x) as usize;
+        if offset < line.gutter_len {
+            return None;
+        }
+        let byte_start = char_to_byte(&line.text, offset);
+        let byte_end = char_to_byte(&line.text, offset.saturating_add(1));
+        if byte_start >= byte_end || byte_end > line.text.len() {
+            return None;
+        }
+        if !line.text.is_char_boundary(byte_start) || !line.text.is_char_boundary(byte_end) {
+            return None;
+        }
+        let byte = line.text.as_bytes()[byte_start];
+        if !is_path_byte(byte) {
+            return None;
+        }
+        let start = line.text[..byte_start]
+            .rfind(|ch: char| !is_path_byte(ch as u8))
+            .map_or(0, |index| index + 1);
+        let end = line.text[byte_start..]
+            .find(|ch: char| !is_path_byte(ch as u8))
+            .map_or(line.text.len(), |index| byte_start + index);
+        let token = &line.text[start..end];
+        let reference = meerai_syntax::detect_path_reference(token)?;
+        if !self.workspace_root.join(&reference.path).is_file() {
+            return None;
+        }
+        Some(reference)
+    }
+
+    pub fn click_path_at(&mut self, column: u16, row: u16) -> bool {
+        let Some(reference) = self.path_reference_at(column, row) else {
+            return false;
+        };
+        self.queue_host_action(meerai_host::HostAction::OpenInEditor {
+            path: reference.path,
+            line: reference.line,
+        });
         true
     }
 
@@ -2311,4 +2375,14 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
         && column < rect.x + rect.width
         && row >= rect.y
         && row < rect.y + rect.height
+}
+
+fn is_path_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-' | b':' | b'+')
+}
+
+fn char_to_byte(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map_or(text.len(), |(index, _)| index)
 }

@@ -189,7 +189,9 @@ Notes:
     calls/results, compaction markers); runtime/system events are skipped and unmatched tool calls
     become `Cancelled`. The TUI converts `ReplayEntry` into its `TranscriptEntry` view.
     `set_harness` and `session_usage_from_events` seed token counters from the last logged
-    `UsageUpdated`. `AgentCommand` has `Rewind` and no `Revert`/`Fork` variant; conversation shadowing is internal.
+    `UsageUpdated`. A fork copies the prefix but zeroes inherited usage fields, so the child
+    starts with empty token and cache counters. `AgentCommand` has `Rewind` and no
+    `Revert`/`Fork` variant; conversation shadowing is internal.
 20. **Security roadmap (M11):** landed — path guards, sensitive-file blocks (`is_sensitive_path` and
     `PolicyEngine::default_sensitive_rules`), `plan` hard read-only, approval gates, headless
     fail-fast, provider-secret env scrub, best-effort output/diff/error redaction, heuristic

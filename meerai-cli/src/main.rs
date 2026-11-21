@@ -681,9 +681,8 @@ async fn main() -> Result<()> {
         .context
         .as_ref()
         .and_then(|context| context.memory_prompt_bytes)
-        .map_or(meerai_store::DEFAULT_MEMORY_PROMPT_BYTES as u64, |bytes| {
-            bytes
-        }) as usize;
+        .unwrap_or(meerai_store::DEFAULT_MEMORY_PROMPT_BYTES as u64)
+        as usize;
     let memory_block = meerai_common::settings::open_store_for_config_dir(config_dir.as_deref())
         .ok()
         .and_then(|store| meerai_agents::load_memory_prompt(&store, &project_root, memory_bytes));
@@ -1286,9 +1285,8 @@ impl CliSessionHost {
     ) -> Option<String> {
         let bytes = context
             .and_then(|context| context.memory_prompt_bytes)
-            .map_or(meerai_store::DEFAULT_MEMORY_PROMPT_BYTES as u64, |bytes| {
-                bytes
-            }) as usize;
+            .unwrap_or(meerai_store::DEFAULT_MEMORY_PROMPT_BYTES as u64)
+            as usize;
         let project_root = find_project_root(&self.workspace_root);
         self.store()
             .ok()

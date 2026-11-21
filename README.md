@@ -288,8 +288,10 @@ The provider reports token counters, never a cache percentage. meerai computes
 the hit ratio as `cached_tokens / prompt_tokens`. That ratio is exact because
 the provider adds cached tokens to `prompt_tokens` on every supported route.
 Cache writes come from `cache_creation_tokens`. The sidebar `DIAGNOSE` block
-(`/diagnose`) shows the last request's hit ratio and cache writes, the session
-hit ratio, the context use, and the memory and tool-schema tokens.
+(`/diagnose`) shows the last request's hit ratio and cache writes, the context
+use, and the memory and tool-schema tokens. It does not show a cumulative cache
+ratio. A fork or a resumed stored session shows `n/a` until a new request
+reports usage.
 
 On Anthropic routes meerai sets one ephemeral breakpoint on the system block,
 which ends with the project-memory section. The cache therefore covers the
@@ -781,11 +783,17 @@ Basic auth (`meerai` / `12345678`) by default unless overridden (`--port`,
 `--user`, `--password`, `MEERAI_SERVE_SECRET`, or `--auth`). CI runs both
 reduced-feature checks. `.github/workflows/smoke.yml` runs one manual
 live-provider headless turn when `OPENROUTER_API_KEY` is set.
-`.github/workflows/release.yml` starts when CI succeeds on `main`, on a `v*`
-tag push, or on manual dispatch. It reuses the CI gate instead of re-running
-it, builds the five targets when `v<workspace version>` is not yet released,
-and publishes archives plus SHA256 checksums. `.github/workflows/pages.yml`
-deploys `site/` to GitHub Pages.
+`.github/workflows/release.yml` starts when a push to `main` changes
+`Cargo.toml` and the pushed commit message is
+`chore(release): bump version to <version>`, or on manual dispatch. It verifies the commit is a pure
+version bump, builds the five targets when `v<workspace version>` is not yet released, and publishes
+archives plus SHA256 checksums. The release body lists the release commit, the commits grouped by
+type since the previous tag, and the changed files. `.github/workflows/bump.yml` is the only writer
+of `[workspace.package] version`: run it manually with a `patch`, `minor`, or `major` level (or an
+explicit version) and it rewrites `Cargo.toml` and `Cargo.lock`, commits with that subject, and opens
+the bump pull request against `main` with the job's own `GITHUB_TOKEN`. Squash-merge the PR and keep
+its title as the commit message, so the release can match it.
+`.github/workflows/pages.yml` deploys `site/` to GitHub Pages.
 
 Macro expansion is snapshot-tested with insta: update with `cargo insta review`
 or `INSTA_UPDATE=always cargo test -p meerai-macros`.

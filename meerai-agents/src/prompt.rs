@@ -338,7 +338,7 @@ mod tests {
             compose_system_prompt_with_memory("", &root, Some("Use SQLite for all state.")).await;
         assert!(prompt.contains("## Project memory"));
         assert!(prompt.contains("Use SQLite for all state."));
-        assert!(prompt.contains("Active model:") == false);
+        assert!(!prompt.contains("Active model:"));
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -22,9 +22,7 @@ pub fn detect_path_reference(raw: &str) -> Option<PathRef> {
     if body.is_empty() || !looks_like_path(body) {
         return None;
     }
-    if Language::from_path(body).is_none() {
-        return None;
-    }
+    Language::from_path(body)?;
     Some(PathRef {
         path: body.to_string(),
         line,
@@ -56,7 +54,7 @@ fn split_line_suffix(raw: &str) -> (&str, Option<u32>) {
         .rev()
         .find(|line| *line > 0)
         .filter(|_| body.contains('/') || body.contains('.'));
-    (body, line.map(|line| line))
+    (body, line)
 }
 
 fn looks_like_path(raw: &str) -> bool {

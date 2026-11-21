@@ -11,10 +11,14 @@ Repository knowledge for `.agents/skills/*`.
 | `.editorconfig` | Line endings (`lf`), indentation (`4` for `.rs`/`.md`/`.json`, `2` default) |
 | `.vscode/settings.json` | Format-on-save and `rust-analyzer.check.command = "clippy"` |
 | `.github/workflows/ci.yml` | Push/PR verification on `ubuntu-24.04` |
-| `.github/workflows/release.yml` | Release on CI success (`main`), `v*` tags, or dispatch: tag/version detect, 5-target build, GitHub Release |
-| `.github/workflows/pages.yml` | Deploys `site/` to GitHub Pages (`meerai.packvision.xyz`) |
+| `.github/workflows/release.yml` | Release on a `main` push that changes `Cargo.toml` with the bump commit subject, or on dispatch: tag/version detect, pure-bump check, notes, 5-target build, GitHub Release |
+| `.github/workflows/bump.yml` | Manual `workflow_dispatch` version bump: rewrites `Cargo.toml` and `Cargo.lock`, commits, opens the bump PR against `main` |
 | `.github/scripts/compose_installers.py` | Splices `site/requirements.json` into the generated blocks of both installers |
 | `.github/scripts/verify_release_version.py` | Resolves the release tag, compares it with `[workspace.package] version`, emits `tag`/`version`/`prerelease` outputs |
+| `.github/scripts/bump_version.py` | Computes the next version, rewrites `[workspace.package] version` and every workspace entry in `Cargo.lock`, writes the commit subject |
+| `.github/scripts/verify_bump_commit.py` | Proves the release commit changes only the version lines of `Cargo.toml` and `Cargo.lock` |
+| `.github/scripts/generate_release_notes.py` | Builds the release body from the commits and files changed since the previous tag |
+| `.github/workflows/pages.yml` | Deploys `site/` to GitHub Pages (`meerai.packvision.xyz`) |
 | `site/` | Landing page, `install.sh`, `install.ps1`, `requirements.json`, `CNAME`, `.nojekyll` |
 | `Makefile` | Local task entry points (`make help`) |
 | `LICENSE` | Apache-2.0 |
@@ -40,21 +44,76 @@ CI runs on `ubuntu-24.04` only, executing `verify` (fmt check, clippy, workspace
 The Windows `cmd /C` shell path and Windows session-id rules are unit-tested but are not exercised
 on a Windows runner, so Windows-only behavior is not covered by CI.
 
+## Version bump (`bump.yml`)
+
+Trigger: `workflow_dispatch` only, with `level` (`patch`, `minor`, `major`), an optional explicit
+`version`, and an optional `dry_run` flag. Permissions are `contents: write` on the job so the push
+uses the workflow's own `GITHUB_TOKEN`; no personal token and no extra secret are needed. Concurrency
+group `version-bump` serializes runs.
+
+Steps: checkout `main` with `fetch-depth: 0` and tags, set a bot git identity, run
+`.github/scripts/bump_version.py`, refuse a version whose `v<version>` tag already exists, prove
+`Cargo.lock` is consistent with `cargo metadata --locked --no-deps`, show the diff and the commit
+message, then `.github/scripts/open_bump_pr.py` stages `Cargo.toml` and `Cargo.lock`, commits with
+the PR title, force-with-lease pushes `release/bump-v<version>`, and opens or updates the pull
+request against `main`.
+
+`bump.yml` needs one repository setting and one optional secret:
+
+- Settings > Actions > General > Workflow permissions must allow
+  `Allow GitHub Actions to create and approve pull requests`. Without it the `POST /pulls` call
+  returns HTTP 403 `GitHub Actions is not permitted to create or approve pull requests`.
+- Set the `BUMP_TOKEN` secret to a fine-grained token with `contents: write` and
+  `pull-requests: write` to bypass that setting, and to make the bump branch push start CI on its
+  own. `BUMP_TOKEN` falls back to `GITHUB_TOKEN`.
+
+`bump_version.py` is the only writer of `[workspace.package] version`. It reads the current version
+through `verify_release_version.workspace_version`, computes the next one from `--level` or
+`--version`, and refuses a version that is not strictly greater. It rewrites the `version` line
+under `[workspace.package]`, then rewrites the `version` line of every `[[package]]` block in
+`Cargo.lock` whose `name` is a workspace member, and fails when a member is missing or still stale.
+Emitting the outputs `version`, `previous_version`, `tag`, `subject`, and `members`.
+
+The commit subject is exactly `chore(release): bump version to <version>`; `release.yml` matches
+that string. Squash-merge the PR and keep its title as the commit message, or the release does not
+start. Read `open_bump_pr.py` outputs `created`, `branch`, `number`, `url`, and `sha` to follow the
+PR in the run summary.
+
+When `BUMP_TOKEN` is not set, the branch push uses `GITHUB_TOKEN`, and such a push does not start
+`ci.yml`. The `Grant the pull request a CI run` step detects the missing run for the head SHA and
+dispatches `ci.yml` on the bump branch. With `BUMP_TOKEN` the push starts CI by itself, and the step
+finds the existing run and does nothing.
+
 ## Release (`release.yml`)
 
-Triggers: push of a `v*` tag, completion of the CI workflow on `main`, or `workflow_dispatch` with
-`tag` and `prerelease` inputs. The `workflow_run` path starts only when CI concludes successfully
-for a commit of this repository, so release reuses the CI gate and never repeats fmt, clippy,
-tests, or `cargo-deny`. Permissions are `contents: read` at workflow level; `publish` raises
-`contents: write`.
+Triggers: a push to `main` that changes `Cargo.toml` **and** whose commit subject starts with
+`chore(release): bump version to `, plus `workflow_dispatch` with an optional `tag` input. Any other
+`main` push that edits `Cargo.toml` stops at the `detect` job guard. A `dry_run` bump never
+commits, so it never triggers a release.
 
-Jobs run `detect -> build -> publish`:
+Jobs run `detect -> release-notes -> build -> publish`:
 
 | Job | Runner | Content |
 | :--- | :--- | :--- |
-| `detect` | `ubuntu-24.04` | Checks out the built commit (`github.event.workflow_run.head_sha`, else `github.sha`) and runs `.github/scripts/verify_release_version.py`. On `workflow_run` it sets `TAG_FROM_VERSION=1`, so the tag is `v<workspace version>`. Then `gh release view` sets `skip=true` when that release already exists. Runs before the matrix, so a skipped push or a tag/version mismatch costs one short job instead of five builds. |
-| `build` | matrix | `needs: detect`, skipped when `skip` is true. `cargo build --release --locked -p meerai-cli --target <triple>`, conditional macOS `codesign`/`notarytool` (when `APPLE_CERTIFICATE` + Apple credentials exist) and Windows `signtool` (when `WINDOWS_CERTIFICATE` exists), archive plus `.sha256`, `actions/upload-artifact` (1-day retention) |
-| `publish` | `ubuntu-24.04` | `needs: [detect, build]`, skipped when `skip` is true. Checkout, download artifacts, build `SHA256SUMS.txt`, create the GitHub Release with `tag_name`/`prerelease` from `detect` and `target_commitish` set to the built commit |
+| `detect` | `ubuntu-24.04` | Full-history checkout of `github.sha`, then `.github/scripts/verify_release_version.py` with `TAG_FROM_VERSION=1`, so the tag is `v<workspace version>`. The step `Require the bump commit message` compares `git log -1 --format=%s` with `chore(release): bump version to <version>` and fails on a mismatch (a warning on `workflow_dispatch`). `verify_bump_commit.py` then proves the commit is a pure version bump. Finally `gh release view` sets `skip=true` when the release already exists. |
+| `release-notes` | `ubuntu-24.04` | `needs: detect`. Full-history checkout, then `.github/scripts/generate_release_notes.py` writes `release-notes.md` and uploads it as the `release-notes` artifact (1 day). |
+| `build` | matrix | `needs: [detect, release-notes]`, skipped when `skip` is true. `cargo build --release --locked -p meerai-cli --target <triple>`, conditional macOS `codesign`/`notarytool` (when `APPLE_CERTIFICATE` + Apple credentials exist) and Windows `signtool` (when `WINDOWS_CERTIFICATE` exists), archive plus `.sha256`, `actions/upload-artifact` (1-day retention) |
+| `publish` | `ubuntu-24.04` | `needs: [detect, release-notes, build]`, skipped when `skip` is true. Checkout the release commit, download the notes and the artifacts, build `SHA256SUMS.txt`, then `gh release create <tag> --target <release sha> --title "meerai <tag>" --notes-file notes/release-notes.md` with `--prerelease` when the version has a pre-release part and `--notes-start-tag <previous tag>` when one exists. |
+
+`verify_bump_commit.py` diffs `HEAD^..HEAD` with `--unified=0`. It requires the change set to
+contain `Cargo.toml` and `Cargo.lock` and nothing else. Every added and removed line in both files
+must match `version = "<v>"`, the added lines must carry the release version, and `Cargo.toml` must
+contribute exactly one of them. A manual dispatch downgrades every problem to a warning, because a
+dispatched release may point at any commit. The release therefore needs no CI run of its own: the
+bump commit cannot change code, and the `build` job already compiles with `--locked`.
+
+`generate_release_notes.py` picks the base tag from `PREVIOUS_TAG` or the highest `vX.Y.Z*` tag that
+is an ancestor of `HEAD`, then builds the body from `git log` and `git diff --name-status`. The body
+contains the workspace version transition, the release commit, a Breaking changes block when a
+`type!:` subject or a `BREAKING CHANGE:` footer exists, the commits grouped by conventional type
+(feat, fix, perf, refactor, docs, test, build, ci, chore, style), the changed files grouped by crate
+and by `.github`, `site`, and docs, and the install snippet. It caps the file list at 30 entries
+(`NOTES_MAX_FILES`) and the commit list at 100 (`NOTES_MAX_COMMITS`) and links the full compare.
 
 Build matrix — five published targets:
 
@@ -66,24 +125,23 @@ Build matrix — five published targets:
 | `x86_64-apple-darwin` | `macos-15` | `meerai-x86_64-apple-darwin.tar.gz` |
 | `x86_64-pc-windows-msvc` | `windows-latest` | `meerai-x86_64-pc-windows-msvc.zip` |
 
-Tag/version gate: `.github/scripts/verify_release_version.py` resolves the tag (from `REF_NAME` on a
-tag push, or `INPUT_TAG` on `workflow_dispatch`), or derives `v<workspace version>` when
-`TAG_FROM_VERSION` is set on the CI-success path. It strips a leading `v` and any `refs/tags/`
-prefix, then compares the result with the `version` inside `[workspace.package]` of the root
-`Cargo.toml`. A tag passes when its full version equals the workspace version (so `0.1.0-rc.1`
-matches `0.1.0-rc.1`), or when the tag is `vX.Y.Z[-pre][+build]` and the workspace version is that
-same stable `X.Y.Z`. The script writes `tag`/`version`/`prerelease` to `$GITHUB_OUTPUT` and fails
-on a mismatch or a malformed tag, so bump the workspace version before tagging. `detect` runs it
-before the build matrix; `publish` reuses the `detect` outputs.
+Tag/version gate: `.github/scripts/verify_release_version.py` derives
+`v<workspace version>` because the release path sets `TAG_FROM_VERSION=1`; a manual dispatch may pass
+`INPUT_TAG` instead. It strips a leading `v` and any `refs/tags/` prefix, then compares the result
+with the `version` inside `[workspace.package]` of the root `Cargo.toml`. A tag passes when its full
+version equals the workspace version (so `0.1.0-rc.1` matches `0.1.0-rc.1`), or when the tag is
+`vX.Y.Z[-pre][+build]` and the workspace version is that same stable `X.Y.Z`. The script writes
+`tag`/`version`/`prerelease` to `$GITHUB_OUTPUT` and fails on a mismatch or a malformed tag.
 
-Release flow on `main`: bump `[workspace.package] version`, run `cargo update -w`, commit
-`Cargo.toml` and `Cargo.lock` together, and push. CI runs the gate, then `release.yml` derives
-`v<version>`, skips when that release exists, builds, and publishes with the tag created at the
-pushed commit. No tag is pushed by hand and no commit is made by CI.
+Release flow: run the `Bump version` workflow. It rewrites `Cargo.toml` and `Cargo.lock`, commits
+`chore(release): bump version to <version>` on `release/bump-v<version>`, and opens a PR against
+`main`. Squash-merge that PR with the title as the commit message. The resulting push changes
+`Cargo.toml` and matches the subject, so `release.yml` starts, verifies the commit is a pure version
+bump, builds the five targets, and publishes `v<version>` with generated notes. No tag is pushed by
+hand; `gh release create` creates it at the release commit.
 
-A manual `v*` tag or `workflow_dispatch` does not re-run fmt, clippy, tests, or `cargo-deny`: the
-CI-success path is the normal release and the only one that proves the code passed the gate. Treat
-a manual tag as an operator override for a commit CI already validated.
+A `workflow_dispatch` release uses the checked-out `main` commit. The pure-bump check becomes a
+warning there, so verify the commit before you dispatch.
 
 ## Pages (`pages.yml`)
 
@@ -159,11 +217,25 @@ is available at `~/go/bin/actionlint`; it checks expressions, action inputs, and
 The tag/version script can be exercised locally without GitHub:
 
 ```sh
-GITHUB_OUTPUT=/dev/null EVENT_NAME=push REF_NAME=v0.0.1 python3 .github/scripts/verify_release_version.py
-GITHUB_OUTPUT=/dev/null EVENT_NAME=workflow_run REF_NAME=main TAG_FROM_VERSION=1 \
+GITHUB_OUTPUT=/dev/null EVENT_NAME=push REF_NAME=main TAG_FROM_VERSION=1 \
   python3 .github/scripts/verify_release_version.py
-GITHUB_OUTPUT=/dev/null EVENT_NAME=workflow_dispatch INPUT_TAG=v0.0.1 INPUT_PRERELEASE=true \
+GITHUB_OUTPUT=/dev/null EVENT_NAME=workflow_dispatch INPUT_TAG=v0.0.1 \
   python3 .github/scripts/verify_release_version.py
+```
+
+The bump and notes scripts run against a scratch copy of the repository:
+
+```sh
+python3 .github/scripts/bump_version.py --level patch --dry-run
+VERSION=0.0.2 TAG=v0.0.2 PREVIOUS_VERSION=0.0.1 NOTES_OUT=/dev/stdout \
+  python3 .github/scripts/generate_release_notes.py
+```
+
+`verify_bump_commit.py` needs `VERSION` and reads the two commits from `git`. Run it on a scratch
+clone after a dry bump:
+
+```sh
+VERSION=0.0.2 TAG=v0.0.2 EVENT=push python3 .github/scripts/verify_bump_commit.py
 ```
 
 ## Escalate

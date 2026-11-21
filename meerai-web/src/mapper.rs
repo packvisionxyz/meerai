@@ -515,7 +515,7 @@ pub fn map_view_event(kind: RegistryEventKind) -> ViewEvent {
             host_info,
             warnings,
         } => ViewEvent::Reloaded {
-            host_info: Box::new(map_host_info(host_info)),
+            host_info: Box::new(map_host_info(*host_info)),
             warnings,
         },
         RegistryEventKind::ProvidersUpdated => ViewEvent::ProvidersUpdated,

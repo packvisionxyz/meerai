@@ -165,7 +165,8 @@ Rules for all shapes:
   It replays user/steering messages, assistant text/reasoning, tool calls/results, and
   `CompactionSummary` as a system entry; runtime/system/step events are skipped, and unmatched
   running tool calls are marked `Cancelled`. `session_usage_from_events` seeds TUI totals, and
-  `set_harness` seeds the agent's cumulative usage from the last logged `UsageUpdated`.
+  `set_harness` seeds the agent's cumulative usage from the last logged `UsageUpdated`. A fork
+  zeroes inherited usage fields in the copied prefix, so the child starts with empty counters.
 - Compaction is bracketed by `CompactionStarted`/`CompactionEnded`; recovery closes open turns and
   open compactions on open.
 

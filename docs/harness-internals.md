@@ -583,6 +583,9 @@ Specified in [acp.md](acp.md). The implementation traps:
   new turn.
 - `Session::fork` does not copy `harness`/`remote_session_id`; the CLI
   fork path starts a new ACP session (`AcpStart::New`).
+- A fork copies the event prefix but zeroes inherited `Usage` fields in
+  `AssistantMessage`, `AssistantAttempt`, and `UsageUpdated` events. The child
+  starts with empty token and cache counters while keeping the transcript.
 - The SDK cannot set the child working directory: the adapter runs in the
   process CWD. Do not change the process CWD globally.
 - `plan` refuses `--acp`; other `--mode` values are ignored with a

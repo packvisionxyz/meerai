@@ -6804,7 +6804,12 @@ async fn no_progress_breaker_emits_diagnostic_and_fails() {
         .prompt_streaming("go", &tx, CancellationToken::new())
         .await
         .expect_err("no progress must fail");
-    assert!(format!("{error:#}").contains("no progress"));
+    let message = format!("{error:#}");
+    assert!(message.contains("no progress"));
+    assert!(
+        message.contains("last write: code-edit_file src/11.rs"),
+        "the breaker must name the write that made no change: {message}"
+    );
 
     let breakers: Vec<(BreakerKind, BreakerAction)> = session_events(&session)
         .iter()

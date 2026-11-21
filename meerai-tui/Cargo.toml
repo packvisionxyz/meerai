@@ -34,3 +34,6 @@ serde_json = { workspace = true }
 comrak = { workspace = true }
 regex = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

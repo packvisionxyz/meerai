@@ -1095,15 +1095,8 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                     .cache_creation_tokens
                     .map_or_else(|| "n/a".to_owned(), |c| format_tokens(c.max(0) as u64));
                 let mut rows = vec![
-                    ("Cache hit".to_owned(), hit),
+                    ("Cache hit (last)".to_owned(), hit),
                     ("Cache write".to_owned(), write),
-                    (
-                        "Session hit".to_owned(),
-                        format_ratio(
-                            metrics.session_cached_tokens,
-                            metrics.session_prompt_tokens,
-                        ),
-                    ),
                 ];
                 if let Some(c) = context.as_ref() {
                     rows.push((
@@ -1152,7 +1145,7 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                                 <strong>{format_tokens(metrics.session_total_tokens)}</strong>
                             </div>
                             <div class="side-stat">
-                                <span class="side-stat-label">"Cached"</span>
+                                <span class="side-stat-label">"Cached Σ"</span>
                                 <strong>{format_tokens(metrics.session_cached_tokens)}</strong>
                             </div>
                         </div>

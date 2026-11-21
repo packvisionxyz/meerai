@@ -141,6 +141,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
         Rect::default()
     };
     app.anchor_rail_area = rail_area;
+    app.transcript_area = transcript_area;
     transcript::render_transcript(frame, app, transcript_area);
     if rail_area.width > 0 {
         anchors::render_anchor_rail(frame, app, rail_area);

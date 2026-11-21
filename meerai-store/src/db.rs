@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,19 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Clone, Debug)]
 pub struct Store {
     connection: Arc<Mutex<Connection>>,
+    path: Option<Arc<PathBuf>>,
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        // The last handle runs SQLITE_FCNTL_PERSIST_WAL through SQLite's own close path. Doing it
+        // after the connection is gone would need a second open, which releases the record locks.
+        if let Some(path) = self.path.as_ref()
+            && Arc::strong_count(&self.connection) == 1
+        {
+            let _ = files::harden_sidecars(path);
+        }
+    }
 }
 
 impl Store {
@@ -42,20 +55,22 @@ impl Store {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::from_bits_retain(rusqlite::ffi::SQLITE_OPEN_NOFOLLOW as i32),
+                | OpenFlags::from_bits_retain(rusqlite::ffi::SQLITE_OPEN_NOFOLLOW),
         )
         .with_context(|| format!("open read-only SQLite store at {}", path.display()))?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         schema::validate(&conn)?;
         Ok(Some(Self {
             connection: Arc::new(Mutex::new(conn)),
+            path: Some(Arc::new(path.to_path_buf())),
         }))
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if path == Path::new(":memory:") {
-            return Self::from_connection(Connection::open_in_memory()?, false);
+            let conn = Connection::open_in_memory()?;
+            return Self::from_connection(conn, false, None);
         }
         let result: Result<Self> = (|| {
             let path = files::prepare(path)?;
@@ -63,9 +78,9 @@ impl Store {
                 &path,
                 OpenFlags::SQLITE_OPEN_READ_WRITE
                     | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                    | OpenFlags::from_bits_retain(rusqlite::ffi::SQLITE_OPEN_NOFOLLOW as i32),
+                    | OpenFlags::from_bits_retain(rusqlite::ffi::SQLITE_OPEN_NOFOLLOW),
             )?;
-            let store = Self::from_connection(conn, true)?;
+            let store = Self::from_connection(conn, true, Some(path.clone()))?;
             files::harden_sidecars(&path)?;
             Ok(store)
         })();
@@ -92,7 +107,7 @@ impl Store {
             .map_err(|_| anyhow!("SQLite store connection lock poisoned"))
     }
 
-    fn from_connection(mut conn: Connection, disk: bool) -> Result<Self> {
+    fn from_connection(mut conn: Connection, disk: bool, path: Option<PathBuf>) -> Result<Self> {
         conn.busy_timeout(BUSY_TIMEOUT)?;
         if disk {
             enable_wal(&conn)?;
@@ -105,6 +120,7 @@ impl Store {
         schema::initialize(&mut conn)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(conn)),
+            path: path.map(Arc::new),
         })
     }
 }

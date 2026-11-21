@@ -2647,11 +2647,11 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                 ..
             }) => Some(PanelSnapshot {
                 tab: *tab,
-                context: context.clone(),
+                context: context.as_deref().cloned(),
                 memories: memories.clone(),
                 routes: routes.clone(),
                 packs: packs.clone(),
-                definitions: definitions.clone(),
+                definitions: (**definitions).clone(),
                 selected: *selected,
                 loading: *loading,
                 error: error.clone(),

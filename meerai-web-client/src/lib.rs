@@ -17,6 +17,7 @@ pub mod highlight;
 pub mod keymap;
 #[cfg(target_arch = "wasm32")]
 pub mod markdown;
+pub mod pathlink;
 #[cfg(target_arch = "wasm32")]
 pub mod views;
 

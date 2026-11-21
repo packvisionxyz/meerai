@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{Result, bail};
 use meerai_store::Store;
 use rusqlite::Connection;
@@ -194,6 +196,35 @@ fn unix_store_files_are_private_but_existing_custom_parent_is_unchanged() -> Res
         Some("value")
     );
     assert_eq!(mode(dir.path())?, 0o755);
+    Ok(())
+}
+
+#[test]
+fn closing_the_store_hardens_sidecars_created_late() -> Result<()> {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode(path: &Path) -> Result<u32> {
+        Ok(fs::metadata(path)?.permissions().mode() & 0o777)
+    }
+
+    let dir = TempDir::new()?;
+    let path = dir.path().join("store.db");
+    let store = Store::open(&path)?;
+    store.config().set("key", "value")?;
+    for name in ["store.db-wal", "store.db-shm"] {
+        let file = path.with_file_name(name);
+        if file.exists() {
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o644))?;
+        }
+    }
+    drop(store);
+    for name in ["store.db", "store.db-wal", "store.db-shm"] {
+        let file = path.with_file_name(name);
+        if file.exists() {
+            assert_eq!(mode(&file)?, 0o600, "{name}");
+        }
+    }
     Ok(())
 }
 

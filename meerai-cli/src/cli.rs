@@ -918,7 +918,7 @@ where
                 Some("export") => {
                     let mut id = None;
                     let mut help = false;
-                    while let Some(arg) = iter.next() {
+                    for arg in iter.by_ref() {
                         match arg.as_str() {
                             "-h" | "--help" => help = true,
                             "--jsonl" => {}

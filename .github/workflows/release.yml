@@ -1,26 +1,18 @@
 name: Release
 
-run-name: ${{ (github.event_name == 'workflow_run' && 'Release from CI') || format('Release {0}', inputs.tag || github.ref_name) }}
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Release {0}', inputs.tag || 'from workspace version') || 'Release from version bump' }}
 
 on:
   push:
-    tags:
-      - "v*"
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
     branches: [main]
+    paths:
+      - "Cargo.toml"
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag name (e.g. v0.1.0)
-        required: true
-        type: string
-      prerelease:
-        description: Mark release as pre-release
+        description: Release tag name (e.g. v0.1.0); omit to use the workspace version
         required: false
-        default: false
-        type: boolean
+        type: string
 
 permissions:
   contents: read
@@ -37,20 +29,23 @@ jobs:
   detect:
     name: Detect release
     if: >-
-      github.event_name != 'workflow_run' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_repository.full_name == github.repository)
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.head_commit != null &&
+      startsWith(github.event.head_commit.message, 'chore(release): bump version to '))
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
       skip: ${{ steps.gate.outputs.skip }}
+      release_sha: ${{ steps.commit.outputs.release_sha }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Resolve tag and check workspace version
         id: meta
@@ -58,27 +53,92 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
           INPUT_TAG: ${{ inputs.tag }}
-          INPUT_PRERELEASE: ${{ inputs.prerelease }}
-          TAG_FROM_VERSION: ${{ github.event_name == 'workflow_run' && '1' || '' }}
+          TAG_FROM_VERSION: ${{ inputs.tag == '' && '1' || '' }}
         run: python3 .github/scripts/verify_release_version.py
+
+      - name: Require the bump commit message
+        id: commit
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          subject="$(git log -1 --format=%s)"
+          expected="chore(release): bump version to ${TAG#v}"
+          suffix="${subject#"$expected"}"
+          matched=false
+          if [ "$suffix" = "" ] || printf '%s' "$suffix" | grep -Eq '^ \(#[0-9]+\)$'; then
+            matched=true
+          fi
+          if [ "$matched" != "true" ]; then
+            if [ "$EVENT" = "workflow_dispatch" ]; then
+              echo "::warning::Manual dispatch on a commit whose subject is '$subject'."
+            else
+              echo "::error::Commit subject '$subject' does not match '$expected' or '$expected (#<pr>)'."
+              echo "::error::Squash-merge the bump pull request with the PR title unchanged so the release starts."
+              exit 1
+            fi
+          fi
+          echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Release commit: $subject"
+
+      - name: Require a pure version bump commit
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          EVENT: ${{ github.event_name }}
+        run: python3 .github/scripts/verify_bump_commit.py
 
       - name: Skip when the version is already released
         id: gate
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -euo pipefail
           skip=false
-          if [ "${{ github.event_name }}" = "workflow_run" ] &&
-             gh release view "${{ steps.meta.outputs.tag }}" >/dev/null 2>&1; then
-            echo "::notice::Release ${{ steps.meta.outputs.tag }} already exists; skipping."
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "::notice::Release ${TAG} already exists; skipping."
             skip=true
           fi
           echo "skip=${skip}" >> "$GITHUB_OUTPUT"
 
+  release-notes:
+    name: Build release notes
+    needs: detect
+    if: needs.detect.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    outputs:
+      previous_tag: ${{ steps.notes.outputs.previous_tag }}
+      commit_count: ${{ steps.notes.outputs.commit_count }}
+      file_count: ${{ steps.notes.outputs.file_count }}
+    steps:
+      - name: Checkout with full history
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.detect.outputs.release_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Generate release body
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.detect.outputs.version }}
+          TAG: ${{ needs.detect.outputs.tag }}
+          NOTES_OUT: release-notes.md
+        run: python3 .github/scripts/generate_release_notes.py
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: release-notes.md
+          retention-days: 1
+
   build:
     name: Build (${{ matrix.target }})
-    needs: detect
+    needs: [detect, release-notes]
     if: needs.detect.outputs.skip != 'true'
     strategy:
       fail-fast: false
@@ -110,7 +170,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.detect.outputs.release_sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -244,7 +304,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [detect, build]
+    needs: [detect, release-notes, build]
     if: needs.detect.outputs.skip != 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -253,7 +313,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.detect.outputs.release_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Download release notes
+        uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+          path: notes
 
       - name: Download built artifacts
         uses: actions/download-artifact@v8
@@ -268,28 +336,45 @@ jobs:
           cat *.sha256 | sort -k2 > SHA256SUMS.txt
           ls -la
 
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.detect.outputs.tag }}
-          target_commitish: ${{ github.event.workflow_run.head_sha || github.sha }}
-          name: meerai ${{ needs.detect.outputs.tag }}
-          prerelease: ${{ needs.detect.outputs.prerelease == 'true' }}
-          generate_release_notes: true
-          files: |
-            artifacts/meerai-*.tar.gz
-            artifacts/meerai-*.zip
-            artifacts/meerai-*.sha256
+      - name: Create the tag and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.detect.outputs.tag }}
+          VERSION: ${{ needs.detect.outputs.version }}
+          PRERELEASE: ${{ needs.detect.outputs.prerelease }}
+          RELEASE_SHA: ${{ needs.detect.outputs.release_sha }}
+          PREVIOUS_TAG: ${{ needs.release-notes.outputs.previous_tag }}
+        run: |
+          set -euo pipefail
+          flags=()
+          if [ "$PRERELEASE" = "true" ]; then
+            flags+=(--prerelease)
+          fi
+          if [ -n "$PREVIOUS_TAG" ]; then
+            flags+=(--notes-start-tag "$PREVIOUS_TAG")
+          fi
+          gh release create "$TAG" \
+            --target "$RELEASE_SHA" \
+            --title "meerai $TAG" \
+            --notes-file notes/release-notes.md \
+            "${flags[@]}" \
+            artifacts/meerai-*.tar.gz \
+            artifacts/meerai-*.zip \
+            artifacts/meerai-*.sha256 \
             artifacts/SHA256SUMS.txt
-          body: |
-            ## Install
+          echo "::notice::Published https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
 
-            **macOS and Linux**
-            ```sh
-            curl -LsSf https://meerai.packvision.xyz/install.sh | sh
-            ```
-
-            **Windows (PowerShell)**
-            ```powershell
-            powershell -ExecutionPolicy ByPass -c "irm https://meerai.packvision.xyz/install.ps1 | iex"
-            ```
+      - name: Summarize the release
+        env:
+          TAG: ${{ needs.detect.outputs.tag }}
+          VERSION: ${{ needs.detect.outputs.version }}
+          COMMITS: ${{ needs.release-notes.outputs.commit_count }}
+          FILES: ${{ needs.release-notes.outputs.file_count }}
+        run: |
+          {
+            echo "## Released $TAG"
+            echo ""
+            echo "- Workspace version: \`$VERSION\`"
+            echo "- Commits since ${{ needs.release-notes.outputs.previous_tag || 'the start of history' }}: $COMMITS"
+            echo "- Files changed: $FILES"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -788,28 +788,28 @@ pub enum WorkspacePanelTab {
 pub enum ActiveModal {
     WorkspacePanel {
         tab: WorkspacePanelTab,
-        context: Option<ContextBreakdownDto>,
+        context: Option<Box<ContextBreakdownDto>>,
         memories: Vec<MemoryDto>,
         routes: Vec<RouteDto>,
         packs: Vec<PackDto>,
-        definitions: DefinitionsDiagnosticsDto,
+        definitions: Box<DefinitionsDiagnosticsDto>,
         selected: usize,
         loading: bool,
         error: Option<String>,
         subagent_agent: String,
-        subagent_task: TextBuffer,
-        subagent_model: TextBuffer,
+        subagent_task: Box<TextBuffer>,
+        subagent_model: Box<TextBuffer>,
         subagent_mode: Option<ApprovalModeDto>,
         subagent_field: usize,
-        subagent_steps: TextBuffer,
-        subagent_tokens: TextBuffer,
-        subagent_cost: TextBuffer,
-        subagent_tools: TextBuffer,
-        route_input: TextBuffer,
-        pack_input: TextBuffer,
-        pack_pin_input: TextBuffer,
+        subagent_steps: Box<TextBuffer>,
+        subagent_tokens: Box<TextBuffer>,
+        subagent_cost: Box<TextBuffer>,
+        subagent_tools: Box<TextBuffer>,
+        route_input: Box<TextBuffer>,
+        pack_input: Box<TextBuffer>,
+        pack_pin_input: Box<TextBuffer>,
         context_turn: usize,
-        context_focus: TextBuffer,
+        context_focus: Box<TextBuffer>,
         context_blob: Option<(String, String)>,
     },
     ProviderSelect {
@@ -1499,7 +1499,7 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
                 ..
             }) = state.modal.as_mut()
             {
-                *context = Some(breakdown);
+                *context = Some(Box::new(breakdown));
             }
             EventEffect::None
         }
@@ -2236,28 +2236,28 @@ pub fn open_workspace_panel(state: &mut AppState, tab: WorkspacePanelTab) {
     let context = state.active_tab().and_then(|tab| tab.context.clone());
     state.modal = Some(ActiveModal::WorkspacePanel {
         tab,
-        context,
+        context: context.map(Box::new),
         memories: Vec::new(),
         routes: Vec::new(),
         packs: Vec::new(),
-        definitions: DefinitionsDiagnosticsDto::default(),
+        definitions: Box::default(),
         selected: 0,
         loading: true,
         error: None,
         subagent_agent: "explore".to_owned(),
-        subagent_task: TextBuffer::new(""),
-        subagent_model: TextBuffer::new(""),
+        subagent_task: Box::default(),
+        subagent_model: Box::default(),
         subagent_mode: None,
         subagent_field: 1,
-        subagent_steps: TextBuffer::new(""),
-        subagent_tokens: TextBuffer::new(""),
-        subagent_cost: TextBuffer::new(""),
-        subagent_tools: TextBuffer::new(""),
-        route_input: TextBuffer::new(""),
-        pack_input: TextBuffer::new(""),
-        pack_pin_input: TextBuffer::new(""),
+        subagent_steps: Box::default(),
+        subagent_tokens: Box::default(),
+        subagent_cost: Box::default(),
+        subagent_tools: Box::default(),
+        route_input: Box::default(),
+        pack_input: Box::default(),
+        pack_pin_input: Box::default(),
         context_turn: 0,
-        context_focus: TextBuffer::new(""),
+        context_focus: Box::default(),
         context_blob: None,
     });
 }
@@ -2330,7 +2330,7 @@ pub fn apply_definitions(state: &mut AppState, definitions: DefinitionsDiagnosti
         ..
     }) = state.modal.as_mut()
     {
-        *slot = definitions;
+        **slot = definitions;
         *loading = false;
         *error = None;
     }

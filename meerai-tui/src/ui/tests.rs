@@ -304,7 +304,10 @@ fn diagnose_block_reports_cache_hit_and_context_use() {
     assert!(rendered.contains("DIAGNOSE [hide]"));
     assert!(rendered.contains("75.0% 150/200"));
     assert!(rendered.contains("20"));
-    assert!(rendered.contains("25.0% 100/400"));
+    assert!(
+        !rendered.contains("25.0% 100/400"),
+        "the cache percentage must come from the last request, not the session total"
+    );
     assert!(rendered.contains("50.0% 500/1k"));
     assert!(rendered.contains("120 tokens"));
     assert!(rendered.contains("340 tokens"));
@@ -1019,14 +1022,14 @@ fn renders_transcript_completion_and_statusline() {
             prompt_tokens: Some(100),
             completion_tokens: Some(25),
             total_tokens: Some(125),
-            cached_tokens: None,
+            cached_tokens: Some(40),
             cache_creation_tokens: None,
         },
         cumulative: Usage {
-            prompt_tokens: Some(100),
+            prompt_tokens: Some(200),
             completion_tokens: Some(25),
-            total_tokens: Some(125),
-            cached_tokens: Some(40),
+            total_tokens: Some(225),
+            cached_tokens: Some(80),
             cache_creation_tokens: None,
         },
         est_cost_usd: None,
@@ -1067,6 +1070,10 @@ fn renders_transcript_completion_and_statusline() {
     assert!(rendered.contains("DIAGNOSE [hide]"));
     assert!(rendered.contains("↑100 ↓25"));
     assert!(rendered.contains("40.0% 40/100"));
+    assert!(
+        !rendered.contains("40.0% 80/200"),
+        "the diagnose block must show the last request, not the cumulative cache ratio"
+    );
     assert!(
         !rendered.contains("session ↑"),
         "token totals belong to the diagnose block only"
