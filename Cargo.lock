@@ -2554,7 +2554,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-acp"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -2566,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-agents"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2587,7 +2587,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-cli"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2615,7 +2615,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-client"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "meerai-common",
@@ -2626,7 +2626,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-common"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "git2",
@@ -2641,7 +2641,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-core"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2654,7 +2654,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-host"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2681,7 +2681,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-macros"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "convert_case 0.12.0",
  "darling",
@@ -2699,7 +2699,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-policy"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "globset",
@@ -2710,7 +2710,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-providers"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2737,7 +2737,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-session"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "genai",
@@ -2754,7 +2754,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-store"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "getrandom 0.4.3",
@@ -2767,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-syntax"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "tree-sitter",
  "tree-sitter-bash",
@@ -2783,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-tools"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "globset",
@@ -2812,7 +2812,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-tui"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "comrak",
@@ -2837,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-web"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2867,7 +2867,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-web-client"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "comrak",
  "js-sys",
@@ -2881,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "meerai-web-protocol"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
