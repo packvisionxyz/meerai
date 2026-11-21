@@ -44,18 +44,8 @@ pub fn Transcript(store: StoreHandle) -> impl IntoView {
         })
     });
 
-    let pending_inputs = Memo::new(move |_| {
-        store.with(|s| {
-            s.active_tab()
-                .map(|t| {
-                    (
-                        t.pending_submit.clone(),
-                        t.pending_queue.iter().cloned().collect::<Vec<_>>(),
-                    )
-                })
-                .unwrap_or_default()
-        })
-    });
+    let pending_inputs =
+        Memo::new(move |_| store.with(|s| s.active_tab().and_then(|t| t.pending_submit.clone())));
 
     let rail_turns = Memo::new(move |_| {
         let _ = committed_key.get();
@@ -133,10 +123,7 @@ pub fn Transcript(store: StoreHandle) -> impl IntoView {
                         }
                         _ => view! { <span></span> }.into_any(),
                     }}
-                    {move || {
-                        let (sending, queued) = pending_inputs.get();
-                        render_pending_inputs(store, sending, queued)
-                    }}
+                    {move || render_pending_inputs(pending_inputs.get())}
                 </div>
             </section>
             <Show when=move || { rail_turns.get().len() >= 2 }>
@@ -627,67 +614,23 @@ fn render_streaming(
     .into_any()
 }
 
-fn render_pending_inputs(
-    store: StoreHandle,
-    sending: Option<String>,
-    queued: Vec<String>,
-) -> AnyView {
-    if sending.is_none() && queued.is_empty() {
+fn render_pending_inputs(sending: Option<String>) -> AnyView {
+    let Some(text) = sending else {
         return view! { <span></span> }.into_any();
+    };
+    view! {
+        <article class="turn pending">
+            <div class="turn-head">
+                <span class="pending-badge">
+                    <span class="working-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+                    "Sending"
+                </span>
+            </div>
+            <div class="msg-label">"You"</div>
+            <div class="user-msg pending-msg">{text}</div>
+        </article>
     }
-    let mut cards = Vec::new();
-    if let Some(text) = sending {
-        cards.push(
-            view! {
-                <article class="turn pending">
-                    <div class="turn-head">
-                        <span class="pending-badge">
-                            <span class="working-dots" aria-hidden="true"><span></span><span></span><span></span></span>
-                            "Sending"
-                        </span>
-                    </div>
-                    <div class="msg-label">"You"</div>
-                    <div class="user-msg pending-msg">{text}</div>
-                </article>
-            }
-            .into_any(),
-        );
-    }
-    for (index, prompt) in queued.into_iter().enumerate() {
-        let steer_index = index;
-        let drop_index = index;
-        let edit_index = index;
-        cards.push(
-            view! {
-                <article class="turn pending">
-                    <div class="turn-head">
-                        <span class="pending-badge queued">"Pending · Queued"</span>
-                        <div class="turn-pending-actions">
-                            <button
-                                class="btn tiny"
-                                title="Steer this prompt now (Alt+G)"
-                                on:click=move |_| store.update(|s| crate::state::steer_or_send_queued(s, steer_index))
-                            >"Steer"</button>
-                            <button
-                                class="btn tiny"
-                                title="Edit this queued prompt"
-                                on:click=move |_| store.update(|s| crate::state::open_queued_edit(s, edit_index))
-                            >"Edit"</button>
-                            <button
-                                class="btn tiny"
-                                title="Remove from queue"
-                                on:click=move |_| store.update(|s| crate::state::remove_queued(s, drop_index))
-                            >"Remove"</button>
-                        </div>
-                    </div>
-                    <div class="msg-label">"You"</div>
-                    <div class="user-msg pending-msg">{prompt}</div>
-                </article>
-            }
-            .into_any(),
-        );
-    }
-    AnyView::from(Fragment::new(cards))
+    .into_any()
 }
 
 fn render_subagent(

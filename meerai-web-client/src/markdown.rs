@@ -123,7 +123,26 @@ fn collect_inline<'a>(node: &'a AstNode<'a>, out: &mut Vec<AnyView>) {
         NodeValue::LineBreak => out.push(view! { <br /> }.into_any()),
         NodeValue::Code(code) => {
             let text = code.literal.to_owned();
-            out.push(view! { <code class="md-code">{text}</code> }.into_any());
+            // The server re-validates through /open, so this only decides what looks clickable.
+            match crate::pathlink::path_command(&text) {
+                Some(command) => out.push(
+                    view! {
+                        <code
+                            class="md-code md-code-path"
+                            title="Open in editor"
+                            on:click=move |_| {
+                                if let Some(transport) = crate::transport::current() {
+                                    transport.run_host_action(command.clone());
+                                }
+                            }
+                        >
+                            {text}
+                        </code>
+                    }
+                    .into_any(),
+                ),
+                None => out.push(view! { <code class="md-code">{text}</code> }.into_any()),
+            }
         }
         NodeValue::HtmlInline(raw) => out.push(raw.to_owned().into_any()),
         NodeValue::Strong(_) => {
@@ -225,4 +244,37 @@ fn render_code_block(lang: &str, code: &str) -> AnyView {
         </div>
     }
     .into_any()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_command;
+
+    #[test]
+    fn clicks_a_workspace_path() {
+        assert_eq!(
+            path_command("src/main.rs"),
+            Some("/open src/main.rs".to_string())
+        );
+        assert_eq!(
+            path_command("meerai-tui/src/app/mod.rs:530"),
+            Some("/open meerai-tui/src/app/mod.rs:530".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_words_urls_and_unknown_extensions() {
+        assert_eq!(path_command("cargo"), None);
+        assert_eq!(path_command("memory-search"), None);
+        assert_eq!(path_command("https://example.com/a.rs"), None);
+        assert_eq!(path_command("archive.unknownext"), None);
+        assert_eq!(path_command(""), None);
+    }
+
+    #[test]
+    fn ignores_absolute_and_escaping_paths() {
+        assert_eq!(path_command("/etc/passwd"), None);
+        assert_eq!(path_command("../outside.rs"), None);
+        assert_eq!(path_command("src/../../main.rs"), None);
+    }
 }

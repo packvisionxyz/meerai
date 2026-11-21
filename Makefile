@@ -122,13 +122,13 @@ build-debug: ## Build debug binary
 build-web: ## Build the browser UI Wasm bundle into target/web (pass flags via WEB_ARGS="...")
 	python3 scripts/build-web.py $(WEB_ARGS)
 
-install: ## Build the release binary and install it locally, replacing the installed version
-	cargo install --path $(BIN_PKG) --locked --force --target-dir target $(if $(target),--target $(target),) $(ARGS)
-	@echo "Installed $(BIN_NAME) from $(BIN_PKG)"
+install: build-web ## Build the web-enabled release binary and install it locally, replacing the installed version
+	cargo install --path $(BIN_PKG) --locked --force --features web --target-dir target $(if $(target),--target $(target),) $(ARGS)
+	@echo "Installed $(BIN_NAME) from $(BIN_PKG) with the web feature"
 
-package: ## Build and package release archive + SHA256 into dist/ (optional target=<triple>)
+package: build-web ## Build and package the web-enabled archive + SHA256 into dist/ (optional target=<triple>)
 	@mkdir -p $(DIST_DIR)
-	cargo build --release --locked -p $(BIN_PKG) --target $(BUILD_TARGET) $(ARGS)
+	cargo build --release --locked -p $(BIN_PKG) --features web --target $(BUILD_TARGET) $(ARGS)
 	@ARCHIVE_BASE="$(BIN_NAME)-$(BUILD_TARGET)"; \
 	if [[ "$(BUILD_TARGET)" == *windows* ]]; then \
 		ARCHIVE="$$ARCHIVE_BASE.zip"; \

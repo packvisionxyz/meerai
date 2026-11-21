@@ -37,17 +37,33 @@ a version.
 ### From source
 
 ```sh
-cargo install --path meerai-cli --bin meerai
+make install
+```
+
+`make install` builds the Wasm bundle, then installs `meerai` with the `web`
+feature compiled in, so `meerai serve` and TUI `/serve` work. Without `make`,
+run the two steps yourself:
+
+```sh
+python3 scripts/build-web.py
+cargo install --path meerai-cli --bin meerai --features web
 ```
 
 Or build without installing:
 
 ```sh
-cargo build --release -p meerai-cli    # target/release/meerai
+make build-web
+cargo build --release -p meerai-cli --features web    # target/release/meerai
 ```
 
+`make package` builds the same web-enabled binary into a `dist/` archive plus
+`.sha256`, matching the release artifacts.
+
 Rust `1.100.0` (pinned in [rust-toolchain.toml](rust-toolchain.toml)) is
-required; `rustup` installs it automatically.
+required; `rustup` installs it automatically. The bundle step also needs the
+`wasm32-unknown-unknown` target and a matching `wasm-bindgen` CLI
+(`cargo install wasm-bindgen-cli --version 0.2.130 --locked`; the version comes
+from `Cargo.lock`).
 
 ### Platform support
 
@@ -288,8 +304,10 @@ The provider reports token counters, never a cache percentage. meerai computes
 the hit ratio as `cached_tokens / prompt_tokens`. That ratio is exact because
 the provider adds cached tokens to `prompt_tokens` on every supported route.
 Cache writes come from `cache_creation_tokens`. The sidebar `DIAGNOSE` block
-(`/diagnose`) shows the last request's hit ratio and cache writes, the session
-hit ratio, the context use, and the memory and tool-schema tokens.
+(`/diagnose`) shows the last request's hit ratio and cache writes, the context
+use, and the memory and tool-schema tokens. It does not show a cumulative cache
+ratio. A fork or a resumed stored session shows `n/a` until a new request
+reports usage.
 
 On Anthropic routes meerai sets one ephemeral breakpoint on the system block,
 which ends with the project-memory section. The cache therefore covers the
@@ -756,12 +774,17 @@ repository.
 
 ## Development
 
-CI runs on every push and pull request to `main`
-([.github/workflows/ci.yml](.github/workflows/ci.yml)): `cargo fmt --all --
---check`, `cargo clippy --workspace --all-targets`, then `cargo test
---workspace` on `ubuntu-24.04` with the pinned toolchain. CI has no Windows
-runner: the Windows `cmd /C` shell path and Windows session-id rules are
-unit-tested, but not exercised on a Windows host. Run the same order locally:
+CI runs on every push and pull request to `main` that changes code: a push or
+pull request that touches only Markdown, `docs/`, `site/`, `.agents/`, or
+`LICENSE` is skipped, and so is the push that lands a version bump (its only
+change is version lines). The run is `cargo fmt --all -- --check`, `cargo
+clippy --workspace --all-targets`, then `cargo test --workspace` on
+`ubuntu-24.04` with the pinned toolchain, plus the two reduced-feature checks
+and a Wasm check of the browser client. The `cargo-deny` audit runs on every
+push to `main` and on a pull request only when it changes `Cargo.toml` or
+`Cargo.lock`. CI has no Windows runner: the Windows `cmd /C` shell path and
+Windows session-id rules are unit-tested, but not exercised on a Windows host.
+Run the same order locally:
 
 ```sh
 cargo fmt --all
@@ -773,19 +796,31 @@ cargo test --workspace
 meerai-cli --no-default-features` builds the headless surface without ratatui,
 git2, comrak, `meerai-host`, `meerai-web`, or `meerai-tui`; `cargo check -p
 meerai-tui --no-default-features` builds the TUI without the reqwest update
-check. To build and run the opt-in browser companion (`meerai serve` or
-`/serve` in TUI), build the Wasm bundle with `python3 scripts/build-web.py`
-and run `cargo run -p meerai-cli --features web -- serve` (or use `make
-build-web`, `make run-web`, and `make serve`). It binds `127.0.0.1:28860` with
+check. Every released binary and every `make install` binary already contains
+the bundle and the `web` feature, so `meerai serve` and TUI `/serve` work out
+of the box. To run the browser companion from source, build the bundle with
+`python3 scripts/build-web.py` and run `cargo run -p meerai-cli --features web
+-- serve` (or use `make build-web`, `make run-web`, and `make serve`). It binds
+`127.0.0.1:28860` with
 Basic auth (`meerai` / `12345678`) by default unless overridden (`--port`,
 `--user`, `--password`, `MEERAI_SERVE_SECRET`, or `--auth`). CI runs both
 reduced-feature checks. `.github/workflows/smoke.yml` runs one manual
 live-provider headless turn when `OPENROUTER_API_KEY` is set.
-`.github/workflows/release.yml` starts when CI succeeds on `main`, on a `v*`
-tag push, or on manual dispatch. It reuses the CI gate instead of re-running
-it, builds the five targets when `v<workspace version>` is not yet released,
-and publishes archives plus SHA256 checksums. `.github/workflows/pages.yml`
-deploys `site/` to GitHub Pages.
+`.github/workflows/release.yml` starts when a push to `main` changes
+`Cargo.toml` and the pushed commit message is
+`chore(release): bump version to <version>`, or on manual dispatch. A `run-name` cannot read the
+version on the push path, so the run title stays `Release from version bump` and the job names carry
+the tag instead (`Build <triple> (v0.0.2)`, `Publish v0.0.2`). It verifies the commit is a pure
+version bump, builds the five targets when `v<workspace version>` is not yet released, and publishes
+web-enabled archives plus SHA256 checksums. The release body lists the release commit and the commits
+grouped by type since the previous tag, with a link to the full changelog; it does not list changed
+files. `.github/workflows/bump.yml` is the only writer
+of `[workspace.package] version`: run it manually with the target `version` and it rewrites
+`Cargo.toml` and `Cargo.lock`, commits with that subject, and opens the bump pull request against
+`main` with the job's own `GITHUB_TOKEN`. The input is required, and the run title is exactly
+`Bump version <version>`. Squash-merge the PR and keep its title as the commit message, so the
+release can match it.
+`.github/workflows/pages.yml` deploys `site/` to GitHub Pages.
 
 Macro expansion is snapshot-tested with insta: update with `cargo insta review`
 or `INSTA_UPDATE=always cargo test -p meerai-macros`.

@@ -3,8 +3,20 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "site/**"
+      - ".agents/**"
+      - "LICENSE"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "site/**"
+      - ".agents/**"
+      - "LICENSE"
   workflow_dispatch:
 
 permissions:
@@ -20,6 +32,9 @@ env:
 jobs:
   verify:
     name: Format, Clippy, and Test
+    if: >-
+      github.event_name != 'push' ||
+      !startsWith(github.event.head_commit.message, 'chore(release): bump version to ')
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -57,12 +72,36 @@ jobs:
 
   audit:
     name: Security & Dependency Audit
+    if: >-
+      github.event_name != 'push' ||
+      !startsWith(github.event.head_commit.message, 'chore(release): bump version to ')
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      - name: Detect a dependency change
+        id: deps
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          changed=true
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            changed=false
+            files="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
+              --paginate --jq '.[].filename')"
+            if printf '%s\n' "$files" | grep -qxE 'Cargo\.(toml|lock)'; then
+              changed=true
+            fi
+          fi
+          echo "changed=${changed}" >> "$GITHUB_OUTPUT"
+          echo "Dependency change: ${changed}"
+
       - name: Run cargo-deny audit
+        if: steps.deps.outputs.changed == 'true'
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           arguments: --all-features

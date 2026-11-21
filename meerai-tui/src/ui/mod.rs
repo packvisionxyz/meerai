@@ -126,10 +126,19 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
 
     selection::render_tab_bar(frame, app, tab_area);
 
-    let chat_chunks =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(composer_height)]).split(chat_col);
+    let queued_width = chat_col
+        .width
+        .saturating_sub(if chat_col.width >= 16 { 4 } else { 0 });
+    let queued_rows = composer::queued_band_rows(app, queued_width);
+    let chat_chunks = Layout::vertical([
+        Constraint::Min(3),
+        Constraint::Length(queued_rows),
+        Constraint::Length(composer_height),
+    ])
+    .split(chat_col);
     let transcript_area = chat_chunks[0];
-    let composer_area = composer_box_rect(chat_chunks[1], composer_bottom_margin);
+    let queued_area = composer_box_rect(chat_chunks[1], 0);
+    let composer_area = composer_box_rect(chat_chunks[2], composer_bottom_margin);
     let rail_area = if rail_width > 0 {
         Rect::new(
             chat_col.right() + 1,
@@ -141,7 +150,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
         Rect::default()
     };
     app.anchor_rail_area = rail_area;
+    app.transcript_area = transcript_area;
     transcript::render_transcript(frame, app, transcript_area);
+    composer::render_queued_band(frame, app, queued_area);
     if rail_area.width > 0 {
         anchors::render_anchor_rail(frame, app, rail_area);
     } else {

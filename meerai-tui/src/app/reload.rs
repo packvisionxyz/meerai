@@ -75,9 +75,8 @@ impl AppState {
             .context
             .as_ref()
             .and_then(|context| context.memory_prompt_bytes)
-            .map_or(meerai_agents::DEFAULT_MEMORY_PROMPT_BYTES as u64, |bytes| {
-                bytes
-            }) as usize;
+            .unwrap_or(meerai_agents::DEFAULT_MEMORY_PROMPT_BYTES as u64)
+            as usize;
         let memory_block = open_store_for_config_dir(self.config_dir.as_deref())
             .ok()
             .and_then(|store| {

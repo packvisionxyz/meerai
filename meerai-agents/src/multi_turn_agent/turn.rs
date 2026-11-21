@@ -48,6 +48,51 @@ pub(super) fn is_transient_provider_error_with_status(status: Option<u16>, messa
     }
 }
 
+fn shorten(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+fn write_call_summary(tool_calls: &[ToolCall], tools: &[Box<dyn Toolset>]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for call in tool_calls {
+        let args = call.fn_arguments.to_string();
+        let is_write = tools.iter().any(|tool| {
+            tool.contain(&call.fn_name)
+                && tool.effect_of_call(&call.fn_name, &args) == EffectClass::Write
+        });
+        if !is_write {
+            continue;
+        }
+        let target = call
+            .fn_arguments
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                call.fn_arguments
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+            });
+        let label = match target {
+            Some(target) => format!("{} {}", call.fn_name, shorten(target, 80)),
+            None => call.fn_name.clone(),
+        };
+        if !parts.contains(&label) {
+            parts.push(label);
+        }
+    }
+    match parts.len() {
+        0 => String::new(),
+        1 => parts[0].clone(),
+        2..=3 => parts.join(", "),
+        count => format!("{} (+{} more)", parts[0], count - 1),
+    }
+}
+
 fn is_transient_provider_error(error: &anyhow::Error, message: &str) -> bool {
     is_transient_provider_error_with_status(provider_error_status(error), message)
 }
@@ -869,10 +914,19 @@ impl MultiTurnAgent {
                             },
                         )
                         .await;
-                        return Err(TurnError::loop_detected(anyhow!(
-                            "no progress: {} steps without a file change",
-                            no_progress_steps
-                        )));
+                        let offender = write_call_summary(&tool_calls, &self.tools);
+                        let message = if offender.is_empty() {
+                            format!(
+                                "no progress: {} steps without a file change",
+                                no_progress_steps
+                            )
+                        } else {
+                            format!(
+                                "no progress: {} steps without a file change (last write: {offender})",
+                                no_progress_steps
+                            )
+                        };
+                        return Err(TurnError::loop_detected(anyhow!(message)));
                     }
                 }
             }

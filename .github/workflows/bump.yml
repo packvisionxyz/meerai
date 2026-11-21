@@ -1,0 +1,131 @@
+name: Bump version
+
+run-name: Bump version ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Target version to set, for example 0.1.0 or 1.0.0-rc.1
+        required: true
+        type: string
+      dry_run:
+        description: Compute and print the bump without opening a pull request
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: version-bump
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  BUMP_BRANCH_PREFIX: release/bump-v
+
+jobs:
+  bump:
+    name: Open the version bump pull request
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.BUMP_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Apply the requested version
+        id: bump
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/bump_version.py \
+            --root . --version "$INPUT_VERSION" --message-out bump-title.txt
+
+      - name: Refuse an already released version
+        env:
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::Tag ${TAG} already exists. Choose a higher version."
+            exit 1
+          fi
+          echo "Tag ${TAG} is unused."
+
+      - name: Check the rewritten lockfile
+        if: inputs.dry_run == false
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --no-deps --format-version 1 >/dev/null
+          echo "Cargo.lock is consistent with Cargo.toml."
+
+      - name: Show the pending change
+        if: inputs.dry_run == false
+        run: |
+          set -euo pipefail
+          git diff --stat
+          git diff --unified=1 Cargo.toml
+          cat bump-title.txt
+
+      - name: Open the bump pull request
+        if: inputs.dry_run == false
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.BUMP_TOKEN || secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.bump.outputs.version }}
+          PREVIOUS_VERSION: ${{ steps.bump.outputs.previous_version }}
+          TAG: ${{ steps.bump.outputs.tag }}
+          MEMBERS: ${{ steps.bump.outputs.members }}
+          PR_TITLE: ${{ steps.bump.outputs.subject }}
+        run: python3 .github/scripts/open_bump_pr.py
+
+      - name: Grant the pull request a CI run
+        if: inputs.dry_run == false && steps.pr.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ secrets.BUMP_TOKEN || secrets.GITHUB_TOKEN }}
+          PR_BRANCH: ${{ steps.pr.outputs.branch }}
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse HEAD)"
+          if gh run list --workflow ci.yml --commit "$head_sha" --limit 1 --json databaseId --jq '.[0].databaseId' | grep -q .; then
+            echo "::notice::CI is already registered for ${head_sha}."
+            exit 0
+          fi
+          gh workflow run ci.yml --ref "$PR_BRANCH"
+          echo "::notice::Dispatched CI for ${head_sha} on ${PR_BRANCH}."
+
+      - name: Summarize the bump
+        run: |
+          set -euo pipefail
+          {
+            echo "## Version bump"
+            echo ""
+            echo "- Previous workspace version: \`${{ steps.bump.outputs.previous_version }}\`"
+            echo "- New workspace version: \`${{ steps.bump.outputs.version }}\`"
+            echo "- Release tag after the merge: \`${{ steps.bump.outputs.tag }}\`"
+            echo "- Squash commit message: \`${{ steps.bump.outputs.subject }}\`"
+            echo "- Workspace packages updated: ${{ steps.bump.outputs.members }}"
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo "- Mode: dry run (no branch, no pull request)"
+            else
+              echo "- Pull request: ${{ steps.pr.outputs.url }}"
+              echo "- Merge it with the PR title as the squash commit message."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

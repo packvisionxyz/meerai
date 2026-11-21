@@ -34,7 +34,9 @@ make verify                                    # fmt --check + clippy + test (al
 - Verify order is `fmt -> clippy -> test`. CI runs the same gate on `ubuntu-24.04`.
 - CI has no Windows runner. Windows shell and session-id paths are unit-tested only.
 - The toolchain is pinned to Rust 1.100.0 (`rust-toolchain.toml`), edition 2024.
-- `release.yml` runs only after CI passes, and only for an unreleased version that matches the tag.
+- `bump.yml` is the only writer of `[workspace.package] version`. `release.yml` runs only on a
+  `main` push that changes `Cargo.toml` with the bump commit subject, and only for an unreleased
+  version that matches the workspace version.
 - Update macro snapshots with `cargo insta review` or `INSTA_UPDATE=always cargo test -p meerai-macros`.
 
 ## Rules

@@ -304,7 +304,10 @@ fn diagnose_block_reports_cache_hit_and_context_use() {
     assert!(rendered.contains("DIAGNOSE [hide]"));
     assert!(rendered.contains("75.0% 150/200"));
     assert!(rendered.contains("20"));
-    assert!(rendered.contains("25.0% 100/400"));
+    assert!(
+        !rendered.contains("25.0% 100/400"),
+        "the cache percentage must come from the last request, not the session total"
+    );
     assert!(rendered.contains("50.0% 500/1k"));
     assert!(rendered.contains("120 tokens"));
     assert!(rendered.contains("340 tokens"));
@@ -1019,14 +1022,14 @@ fn renders_transcript_completion_and_statusline() {
             prompt_tokens: Some(100),
             completion_tokens: Some(25),
             total_tokens: Some(125),
-            cached_tokens: None,
+            cached_tokens: Some(40),
             cache_creation_tokens: None,
         },
         cumulative: Usage {
-            prompt_tokens: Some(100),
+            prompt_tokens: Some(200),
             completion_tokens: Some(25),
-            total_tokens: Some(125),
-            cached_tokens: Some(40),
+            total_tokens: Some(225),
+            cached_tokens: Some(80),
             cache_creation_tokens: None,
         },
         est_cost_usd: None,
@@ -1067,6 +1070,10 @@ fn renders_transcript_completion_and_statusline() {
     assert!(rendered.contains("DIAGNOSE [hide]"));
     assert!(rendered.contains("↑100 ↓25"));
     assert!(rendered.contains("40.0% 40/100"));
+    assert!(
+        !rendered.contains("40.0% 80/200"),
+        "the diagnose block must show the last request, not the cumulative cache ratio"
+    );
     assert!(
         !rendered.contains("session ↑"),
         "token totals belong to the diagnose block only"
@@ -3010,26 +3017,47 @@ fn queued_panel_tracks_hover_and_edits_or_removes_items() {
 }
 
 #[test]
-fn queued_panel_anchors_bottom_right_and_wraps_text() {
+fn queued_band_anchors_above_composer_and_wraps_text() {
     let mut app = test_app();
     app.tab_mut().is_running = true;
     app.tab_mut().queued = vec![
-        "a long queued message that wraps over several narrow rows in the panel".to_string(),
+        "a long queued message that wraps over several narrow rows in the band".to_string(),
         "second task".to_string(),
     ];
 
     render_to_string(&mut app);
 
-    let panel = app.queued_panel_area;
+    let band = app.queued_band_area;
     let composer = app.composer_block_area;
-    let expected_width = ((composer.width as u32 * 30 / 100) as u16)
-        .clamp(24, 56)
-        .min(composer.width.saturating_sub(2));
-    assert_eq!(panel.width, expected_width);
-    assert_eq!(panel.x + panel.width + 1, composer.x + composer.width);
-    assert_eq!(panel.y + panel.height, composer.y);
-    assert!(panel.height > 2, "long queued text should wrap");
-    assert!(panel.width < composer.width / 2);
+    assert_eq!(band.x, composer.x);
+    assert_eq!(band.width, composer.width);
+    assert_eq!(band.y + band.height, composer.y);
+    assert_eq!(band.height, 2, "one row per queued message");
+
+    let rows = render_rows_with_size(&mut app, 60, 28);
+    let band = app.queued_band_area;
+    let composer = app.composer_block_area;
+    assert_eq!(band.y + band.height, composer.y);
+    assert!(
+        band.height > 2,
+        "long queued text should wrap at 60 columns"
+    );
+    let band_text = rows[band.y as usize..(band.y + band.height) as usize].concat();
+    assert!(band_text.contains("second task"));
+
+    let backend = TestBackend::new(60, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    let buf = terminal.backend().buffer();
+    assert_eq!(
+        buf[(band.x + 1, band.y)].bg,
+        crate::theme::Palette::default().surface_high
+    );
+    assert_eq!(
+        buf[(band.x + 1, band.y + band.height - 1)].bg,
+        crate::theme::Palette::default().surface_high,
+        "the whole band shares one background"
+    );
 }
 
 #[test]

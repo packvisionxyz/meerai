@@ -125,8 +125,6 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: R
         }
     }
 
-    render_queued_panel(frame, app, area);
-
     let tab = app.tab();
     let placeholder = match app.mode {
         InputMode::Insert => "Ask meerai anything...",
@@ -647,66 +645,89 @@ pub(super) fn render_completion_popup(
     }
 }
 
-fn render_queued_panel(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
-    app.queued_hit_zones.clear();
-    app.queued_panel_area = Rect::default();
-    let queued = app.tab().queued.clone();
-    if queued.is_empty() || area.width < 40 || area.y < 6 || app.completion.is_active() {
-        return;
-    }
+const QUEUED_BAND_MAX_ROWS: u16 = 6;
+const QUEUED_ACTIONS_WIDTH: u16 = 10;
 
-    let panel_w = ((area.width as u32 * 30 / 100) as u16)
-        .clamp(24, 56)
-        .min(area.width.saturating_sub(2));
-    let first_text_w = panel_w.saturating_sub(11) as usize;
-    let next_text_w = panel_w.saturating_sub(4) as usize;
-    let max_height = area.y.saturating_sub(2).min(12);
-
+fn queued_band_blocks(
+    queued: &[String],
+    width: u16,
+    max_rows: u16,
+) -> (Vec<(usize, Vec<String>)>, usize) {
+    let text_w = width.saturating_sub(3 + QUEUED_ACTIONS_WIDTH).max(8) as usize;
+    let wrapped: Vec<Vec<String>> = queued
+        .iter()
+        .map(|text| wrap_queued_preview(text, text_w, text_w, 2))
+        .collect();
+    let total: u16 = wrapped.iter().map(|lines| lines.len() as u16).sum();
+    let budget = if total > max_rows {
+        max_rows.saturating_sub(1)
+    } else {
+        max_rows
+    };
     let mut blocks: Vec<(usize, Vec<String>)> = Vec::new();
-    let mut height = 0u16;
-    for (idx, text) in queued.iter().enumerate() {
-        let lines = wrap_queued_preview(text, first_text_w, next_text_w, 3);
+    let mut used = 0u16;
+    for (idx, lines) in wrapped.into_iter().enumerate() {
         let block_h = lines.len() as u16;
-        if height + block_h > max_height {
-            if blocks.is_empty() {
-                let mut lines = lines;
-                lines.truncate(max_height.max(1) as usize);
-                height += lines.len() as u16;
-                blocks.push((idx, lines));
-            }
+        if used + block_h > budget {
             break;
         }
-        height += block_h;
+        used += block_h;
         blocks.push((idx, lines));
     }
-    if blocks.is_empty() {
+    let hidden = queued.len().saturating_sub(blocks.len());
+    (blocks, hidden)
+}
+
+fn queued_band_height(blocks: &[(usize, Vec<String>)], hidden: usize) -> u16 {
+    let rows: u16 = blocks.iter().map(|(_, lines)| lines.len() as u16).sum();
+    rows + u16::from(hidden > 0)
+}
+
+pub(super) fn queued_band_rows(app: &AppState, width: u16) -> u16 {
+    if app.completion.is_active() || width < 40 {
+        return 0;
+    }
+    let queued = &app.tab().queued;
+    if queued.is_empty() {
+        return 0;
+    }
+    let (blocks, hidden) = queued_band_blocks(queued, width, QUEUED_BAND_MAX_ROWS);
+    queued_band_height(&blocks, hidden)
+}
+
+pub(super) fn render_queued_band(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
+    app.queued_hit_zones.clear();
+    app.queued_band_area = Rect::default();
+    if area.height == 0 || area.width < 40 {
+        return;
+    }
+    let queued = app.tab().queued.clone();
+    if queued.is_empty() {
+        return;
+    }
+    let (blocks, hidden) =
+        queued_band_blocks(&queued, area.width, area.height.min(QUEUED_BAND_MAX_ROWS));
+    if blocks.is_empty() && hidden == 0 {
         return;
     }
 
-    let panel = Rect {
-        x: area
-            .x
-            .saturating_add(area.width.saturating_sub(panel_w.saturating_add(1))),
-        y: area.y.saturating_sub(height),
-        width: panel_w,
-        height,
+    let band = Rect {
+        height: queued_band_height(&blocks, hidden).min(area.height),
+        ..area
     };
-    app.queued_panel_area = panel;
-    frame.render_widget(Clear, panel);
+    app.queued_band_area = band;
     frame.render_widget(
-        Block::default().style(Style::default().bg(theme::p().surface)),
-        panel,
+        Block::default().style(Style::default().bg(theme::p().surface_high)),
+        band,
     );
 
     let hovered = app.hovered_queued;
-    let mut row = panel.y + panel.height;
+    let mut row = band.y;
     for (idx, lines) in blocks {
-        let block_h = lines.len() as u16;
-        row -= block_h;
         let edit = QueuedHitKind::Edit(idx);
         let remove = QueuedHitKind::Remove(idx);
-        let edit_rect = Rect::new(panel.x + panel.width.saturating_sub(7), row, 4, 1);
-        let remove_rect = Rect::new(panel.x + panel.width.saturating_sub(2), row, 1, 1);
+        let edit_rect = Rect::new(band.right().saturating_sub(9), row, 4, 1);
+        let remove_rect = Rect::new(band.right().saturating_sub(2), row, 1, 1);
         let label_style = if hovered == Some(edit) || hovered == Some(remove) {
             Style::default().fg(theme::p().text)
         } else {
@@ -719,7 +740,7 @@ fn render_queued_panel(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
                     Span::styled(prefix, Style::default().fg(theme::p().warning)),
                     Span::styled(line.clone(), label_style),
                 ])),
-                Rect::new(panel.x + 1, row + line_idx as u16, panel.width - 2, 1),
+                Rect::new(band.x + 1, row + line_idx as u16, band.width - 2, 1),
             );
         }
         frame.render_widget(
@@ -757,6 +778,16 @@ fn render_queued_panel(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
             rect: remove_rect,
             kind: remove,
         });
+        row += lines.len() as u16;
+    }
+    if hidden > 0 {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                format!("… {hidden} more queued"),
+                Style::default().fg(theme::p().faint),
+            )),
+            Rect::new(band.x + 1, row, band.width.saturating_sub(2), 1),
+        );
     }
 }
 

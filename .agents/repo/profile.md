@@ -82,7 +82,7 @@
 | :--- | :--- |
 | Bootstrap | Rustup installs toolchain `1.100.0` automatically via `rust-toolchain.toml` |
 | Install / build | `cargo build --workspace` |
-| Install binary | `cargo install --path meerai-cli --bin meerai` |
+| Install binary | `make install` (builds the Wasm bundle, installs with `--features web`) |
 | Dev | `cargo check --workspace --all-targets` |
 | Format | `cargo fmt --all` (check only: `cargo fmt --all -- --check`) |
 | Lint | `cargo clippy --workspace --all-targets` |
@@ -93,8 +93,8 @@
 | Headless surface | `cargo check -p meerai-cli --no-default-features` |
 | TUI without update | `cargo check -p meerai-tui --no-default-features` |
 | Local gate | `make verify` (alias of `make ci`) |
-| CI | `.github/workflows/ci.yml` on push/PR to `main`: fmt check, clippy, tests on `ubuntu-24.04` |
-| Release | `.github/workflows/release.yml` after CI succeeds on `main`, on `v*` tags, or on dispatch: tag/version detect, build 5 targets, GitHub Release |
+| CI | `.github/workflows/ci.yml` on push/PR to `main`: fmt check, clippy, reduced-feature and Wasm checks, tests on `ubuntu-24.04`; docs-only, site-only, and bump-commit pushes are skipped |
+| Release | `.github/workflows/release.yml` on a `main` push whose subject is the bump message, or on dispatch: tag/version detect, build 5 web-enabled targets, GitHub Release |
 | Deploy site | `.github/workflows/pages.yml` on `site/**` changes: deploy `site/` to GitHub Pages |
 
 Notes:
@@ -189,7 +189,9 @@ Notes:
     calls/results, compaction markers); runtime/system events are skipped and unmatched tool calls
     become `Cancelled`. The TUI converts `ReplayEntry` into its `TranscriptEntry` view.
     `set_harness` and `session_usage_from_events` seed token counters from the last logged
-    `UsageUpdated`. `AgentCommand` has `Rewind` and no `Revert`/`Fork` variant; conversation shadowing is internal.
+    `UsageUpdated`. A fork copies the prefix but zeroes inherited usage fields, so the child
+    starts with empty token and cache counters. `AgentCommand` has `Rewind` and no
+    `Revert`/`Fork` variant; conversation shadowing is internal.
 20. **Security roadmap (M11):** landed — path guards, sensitive-file blocks (`is_sensitive_path` and
     `PolicyEngine::default_sensitive_rules`), `plan` hard read-only, approval gates, headless
     fail-fast, provider-secret env scrub, best-effort output/diff/error redaction, heuristic
@@ -424,11 +426,15 @@ body.
 Detail in [`infra.md`](infra.md). Summary:
 
 - **CI:** `.github/workflows/ci.yml` runs fmt/clippy/test on push and pull request to `main`, and
-  on `workflow_dispatch`.
-- **Release:** `.github/workflows/release.yml` runs after CI succeeds on `main`, on `v*` tags, or
-  on manual dispatch. `detect` derives the tag from `[workspace.package] version`, blocks all
-  artifacts on a mismatch, and skips a version that is already released; five targets build and
-  archive with SHA256, and `publish` creates the GitHub Release at the built commit.
+  on `workflow_dispatch`. Changes that touch only Markdown, `docs/`, `site/`, `.agents/`, or
+  `LICENSE` skip it, and so does a `chore(release): bump version to ...` push to `main`. The
+  `cargo-deny` audit runs on a pull request only when `Cargo.toml` or `Cargo.lock` changed.
+- **Release:** `.github/workflows/release.yml` runs on a `main` push whose subject is the bump
+  message, or on manual dispatch. `detect` derives the tag from `[workspace.package] version`,
+  blocks all artifacts on a mismatch, and skips a version that is already released; five targets
+  build and archive with SHA256, all with `--features web` and the embedded browser bundle, and
+  `publish` creates the GitHub Release at the built commit. The run title carries the bump commit
+  message, so the version is visible in the Actions list.
 - **Site:** `.github/workflows/pages.yml` deploys `site/` (installers and landing page) to GitHub
   Pages at `meerai.packvision.xyz`.
 - **Local:** all checks are also runnable with the pinned Rust `1.100.0` toolchain via `make verify`.

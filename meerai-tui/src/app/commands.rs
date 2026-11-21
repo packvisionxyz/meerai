@@ -583,7 +583,7 @@ impl AppState {
         });
     }
 
-    fn queue_host_action(&mut self, action: meerai_host::HostAction) {
+    pub(crate) fn queue_host_action(&mut self, action: meerai_host::HostAction) {
         let tab_id = self.tab().tab_id;
         self.pending_session_actions
             .push(PendingSessionAction::HostAction { tab_id, action });

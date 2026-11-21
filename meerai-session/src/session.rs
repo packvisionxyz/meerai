@@ -16,7 +16,7 @@ use crate::blob::BlobStore;
 use crate::compaction::{COMPACTION_INTERRUPTED, open_compactions, open_turns, turn_start};
 use crate::event::{
     AbortCause, CompactionResult, LoggedEvent, RewindScope, Seq, SeqRange, SessionEvent,
-    TurnEndReason,
+    TurnEndReason, Usage,
 };
 use crate::ids::{CallId, SessionId, TurnId};
 use crate::projection::{ProjectionPolicy, derive_messages, shadowed_ranges};
@@ -947,7 +947,32 @@ fn fork_prefix(events: &[LoggedEvent], boundary_turn: &TurnId) -> Result<Vec<Log
     if !open_turns(prefix).is_empty() {
         anyhow::bail!("cannot fork: prefix ends with an open turn");
     }
-    Ok(prefix.to_vec())
+    let mut copied = prefix.to_vec();
+    for logged in &mut copied {
+        reset_inherited_usage(&mut logged.event);
+    }
+    Ok(copied)
+}
+
+fn reset_inherited_usage(event: &mut SessionEvent) {
+    match event {
+        SessionEvent::AssistantMessage {
+            usage,
+            stream_digest,
+            ..
+        } => {
+            *usage = Usage::default();
+            stream_digest.usage = Usage::default();
+        }
+        SessionEvent::AssistantAttempt { usage, .. } => {
+            *usage = Usage::default();
+        }
+        SessionEvent::UsageUpdated { usage, cumulative } => {
+            *usage = Usage::default();
+            *cumulative = Usage::default();
+        }
+        _ => {}
+    }
 }
 
 fn session_dir(root: &Path, id: &SessionId) -> Result<PathBuf> {
@@ -1089,6 +1114,7 @@ mod tests {
         CompactionTrigger, ContentBlock, InputSource, StreamDigest, TurnTrigger, Usage,
     };
     use crate::ids::CompactionId;
+    use crate::replay::session_usage_from_events;
     use meerai_core::ObservationStatus;
     use std::time::Duration;
 
@@ -1571,6 +1597,77 @@ mod tests {
         assert_eq!(forked.meta().forked_from.as_ref(), Some(source.id()));
         assert_eq!(forked.meta().inherited_event_count, Some(3));
         assert_eq!(forked.append(user("new")).await.unwrap(), Seq(4));
+
+        fs::remove_dir_all(&root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fork_resets_inherited_usage_counters() {
+        let root = temp_root("fork-usage");
+        let config = config(&root);
+        let source =
+            Session::open_or_create(&config, SessionId::new(), PathBuf::from("/tmp/workspace"))
+                .await
+                .unwrap();
+        let turn = TurnId::new();
+        let usage = Usage {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(20),
+            total_tokens: Some(120),
+            cached_tokens: Some(80),
+            cache_creation_tokens: Some(10),
+        };
+
+        source.append(started(&turn)).await.unwrap();
+        source
+            .append(SessionEvent::AssistantMessage {
+                provider: "openai".to_string(),
+                model: "gpt-5".to_string(),
+                content: Vec::new(),
+                tool_calls: Vec::new(),
+                call_signatures: Vec::new(),
+                usage,
+                stream_digest: StreamDigest {
+                    final_text: String::new(),
+                    duration_ms: 1,
+                    usage,
+                },
+            })
+            .await
+            .unwrap();
+        source
+            .append(SessionEvent::UsageUpdated {
+                usage,
+                cumulative: usage,
+            })
+            .await
+            .unwrap();
+        source.append(ended(&turn)).await.unwrap();
+
+        let forked = Session::fork(&config, &source, &turn).await.unwrap();
+
+        assert_eq!(forked.events().len(), 4);
+        assert_eq!(
+            session_usage_from_events(&forked.events()),
+            Some(Usage::default())
+        );
+        for logged in forked.events() {
+            match logged.event {
+                SessionEvent::AssistantMessage {
+                    usage,
+                    stream_digest,
+                    ..
+                } => {
+                    assert_eq!(usage, Usage::default());
+                    assert_eq!(stream_digest.usage, Usage::default());
+                }
+                SessionEvent::UsageUpdated { usage, cumulative } => {
+                    assert_eq!(usage, Usage::default());
+                    assert_eq!(cumulative, Usage::default());
+                }
+                _ => {}
+            }
+        }
 
         fs::remove_dir_all(&root).await.unwrap();
     }

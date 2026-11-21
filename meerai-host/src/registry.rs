@@ -314,7 +314,7 @@ pub enum RegistryEventKind {
         changes: Vec<FileChangeEntry>,
     },
     Reloaded {
-        host_info: HostInfoSnapshot,
+        host_info: Box<HostInfoSnapshot>,
         warnings: Vec<String>,
     },
     ProvidersUpdated,
@@ -1474,7 +1474,7 @@ impl SessionRegistry {
         state.push_event(
             &self.inner.broadcast_tx,
             RegistryEventKind::Reloaded {
-                host_info: outcome.host_info.clone(),
+                host_info: Box::new(outcome.host_info.clone()),
                 warnings: outcome.warnings.clone(),
             },
         );

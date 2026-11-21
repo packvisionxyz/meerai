@@ -64,10 +64,13 @@ composer, and a one-row statusline.
   terminal the file-changes panel gives up height first.
 - `DIAGNOSE` is collapsed by default and takes three rows (header only).
   `/diagnose` or a click on the header expands it to ten rows. The rows are
-  last-request tokens (`↑prompt ↓completion`), cache hit ratio
-  (`cached_tokens / prompt_tokens` from the provider, not an estimate), cache
-  write tokens, session hit ratio, context use, memory tokens, and tool
-  schema tokens. A provider that reports no cache details shows `n/a`.
+  last-request tokens (`↑prompt ↓completion`), last-request cache hit ratio
+  (`cached_tokens / prompt_tokens` from the provider, not an estimate), last-request cache
+  write tokens, context use, memory tokens, and tool schema tokens. A provider
+  that reports no cache details shows `n/a`. The block does not show a
+  cumulative cache ratio: the percentage is always the last request, and a
+  fork or a resumed stored session shows `n/a` until a new request reports
+  usage.
 - The file list pages with a clickable `… and N more` footer (next page,
   back to top at the end) and scrolls with the mouse wheel. Clicking a
   changed file opens the diff modal.
@@ -132,6 +135,18 @@ Clipboard writes use OSC 52 plus a native helper (`pbcopy`, `clip`,
 `wl-copy`, `xclip`, `xsel`) when available. Dragging over the transcript
 selects text and copies it on release. There is no keyboard Select mode.
 
+Clicking a file path in the transcript opens it in the editor, at the line
+number when the text carries one (`click_path_at`, `path_reference_at`,
+`app/input.rs`). The resolver maps the clicked cell to a wrapped transcript
+line through `scroll_offset`, skips the gutter, expands to the surrounding
+token, and accepts it only when `meerai_syntax::detect_path_reference` returns
+a reference and the joined path is an existing file under the workspace root.
+The click queues `HostAction::OpenInEditor`, so the `/open` guard runs before
+any process starts. Absolute paths and `..` never resolve. The editor is
+`MEERAI_EDITOR`, then `VISUAL`, then `EDITOR`, spawned without a shell; plan
+mode refuses. Text selection still wins: a drag is not a click, so selection
+and click-to-open do not conflict.
+
 ### 2.4 Insert mode (`INS`) and the composer
 
 - A multi-line buffer with cursor motions, backspace/delete, and bracketed
@@ -157,14 +172,17 @@ selects text and copies it on release. There is no keyboard Select mode.
 - A double-click within 400 ms on the same cell selects the word under the
   cursor and copies it on release (`register_click`,
   `composer_word_bounds_at`).
-- The queued panel anchors to the bottom-right, directly above the composer,
-  at about 30% of the conversation width (24–56 columns, hidden below 40).
-  Each message wraps to at most three rows, and the oldest message sits
-  lowest. Every message keeps `edit` and `✕` hit zones on its first row
-  (`render_queued_panel`, `ui/composer.rs`). `✕` drops the message; `edit`
-  opens the queued-edit dialog, a wrapped multi-line editor with a visible
-  cursor: arrows, Home, and End move it, Backspace and Delete edit around it,
-  `alt+enter` inserts a newline, and `Enter` commits the new text in place.
+- The queued band sits directly above the composer, spans the full composer
+  width, and shares one background across every row. Each message wraps to at
+  most two rows, oldest first, and the band caps at six rows with a
+  `… N more queued` tail. Every message keeps `edit` and `✕` hit zones on its
+  first row, right-aligned (`queued_band_rows`, `render_queued_band`,
+  `ui/composer.rs`). The band reserves its own layout row through
+  `queued_band_rows`, so the composer never covers it. `✕` drops the message;
+  `edit` opens the queued-edit dialog, a wrapped multi-line editor with a
+  visible cursor: arrows, Home, and End move it, Backspace and Delete edit
+  around it, `alt+enter` inserts a newline, and `Enter` commits the new text in
+  place.
 - The composer footer shows the input-mode badge (`INS`/`NOR`), approval
   mode badge, model, provider, and the effective temperature with its tier
   (`temp 0.20 · medium`), driven by `context.effort` and

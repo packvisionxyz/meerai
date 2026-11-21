@@ -165,6 +165,7 @@ mod events;
 mod mentions;
 mod modals;
 mod navigation;
+mod path_click;
 mod sessions;
 mod settings;
 

@@ -655,7 +655,7 @@ fn Composer(store: StoreHandle) -> impl IntoView {
         <div class="composer">
             <div class="composer-shell conversation-column">
                 <Show when=move || !composer_state.get().1.is_empty()>
-                    <div class="queue-strip">
+                    <div class="queue-strip" role="list" aria-label="Queued prompts">
                         {move || {
                             let items = composer_state.get().1;
                             AnyView::from(Fragment::new(
@@ -665,25 +665,29 @@ fn Composer(store: StoreHandle) -> impl IntoView {
                                     .map(|(index, prompt)| {
                                         let steer_index = index;
                                         let drop_index = index;
+                                        let edit_index = index;
                                         view! {
-                                            <div class="queue-pill">
+                                            <div class="queue-row" role="listitem">
                                                 <button
                                                     class="queue-item"
                                                     title="Steer this prompt now (Alt+G)"
                                                     on:click=move |_| store.update(|s| crate::state::steer_or_send_queued(s, steer_index))
                                                 >
                                                     <span class="queue-steer">"Steer"</span>
-                                                    <span>{truncate(&prompt, 72)}</span>
+                                                    <span class="queue-text">{truncate(&prompt, 72)}</span>
                                                 </button>
-                                                <button
-                                                    class="queue-drop"
-                                                    title="Remove from queue"
-                                                    on:click=move |_| store.update(|s| {
-                                                        if let Some(tab) = s.active_tab_mut() {
-                                                            tab.pending_queue.remove(drop_index);
-                                                        }
-                                                    })
-                                                >"×"</button>
+                                                <div class="queue-actions">
+                                                    <button
+                                                        class="queue-drop"
+                                                        title="Edit this queued prompt"
+                                                        on:click=move |_| store.update(|s| crate::state::open_queued_edit(s, edit_index))
+                                                    >"Edit"</button>
+                                                    <button
+                                                        class="queue-drop"
+                                                        title="Remove from queue"
+                                                        on:click=move |_| store.update(|s| crate::state::remove_queued(s, drop_index))
+                                                    >"×"</button>
+                                                </div>
                                             </div>
                                         }
                                         .into_any()
@@ -1095,15 +1099,8 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                     .cache_creation_tokens
                     .map_or_else(|| "n/a".to_owned(), |c| format_tokens(c.max(0) as u64));
                 let mut rows = vec![
-                    ("Cache hit".to_owned(), hit),
+                    ("Cache hit (last)".to_owned(), hit),
                     ("Cache write".to_owned(), write),
-                    (
-                        "Session hit".to_owned(),
-                        format_ratio(
-                            metrics.session_cached_tokens,
-                            metrics.session_prompt_tokens,
-                        ),
-                    ),
                 ];
                 if let Some(c) = context.as_ref() {
                     rows.push((
@@ -1152,7 +1149,7 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                                 <strong>{format_tokens(metrics.session_total_tokens)}</strong>
                             </div>
                             <div class="side-stat">
-                                <span class="side-stat-label">"Cached"</span>
+                                <span class="side-stat-label">"Cached Σ"</span>
                                 <strong>{format_tokens(metrics.session_cached_tokens)}</strong>
                             </div>
                         </div>

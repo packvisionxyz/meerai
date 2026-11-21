@@ -232,7 +232,6 @@ fn diagnose_lines(app: &AppState, width: usize) -> Vec<Line<'static>> {
         Some(written) => format_compact_tokens(written.max(0) as u64),
         None => "n/a".to_string(),
     };
-    let metrics = &tab.metrics;
     let (context, memory, tools) = match tab.context.as_ref() {
         Some(context) => (
             ratio(
@@ -259,13 +258,6 @@ fn diagnose_lines(app: &AppState, width: usize) -> Vec<Line<'static>> {
         ]),
         Line::from(vec![field("hit"), value(hit)]),
         Line::from(vec![field("write"), value(write)]),
-        Line::from(vec![
-            field("session"),
-            value(ratio(
-                metrics.session_cached_tokens,
-                metrics.session_prompt_tokens,
-            )),
-        ]),
         Line::from(vec![field("context"), value(context)]),
         Line::from(vec![field("memory"), value(memory)]),
         Line::from(vec![field("tools"), value(tools)]),

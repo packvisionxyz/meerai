@@ -47,7 +47,7 @@ enum LoopMsg {
         session_id: SessionId,
         event: AgentEvent,
     },
-    RegistryEvent(RegistryEvent),
+    RegistryEvent(Box<RegistryEvent>),
     StreamClosed {
         tab_id: u64,
     },
@@ -298,7 +298,7 @@ fn spawn_registry_forwarder(
             loop {
                 match rx.recv().await {
                     Ok(ev) => {
-                        if tx.send(LoopMsg::RegistryEvent(ev)).is_err() {
+                        if tx.send(LoopMsg::RegistryEvent(Box::new(ev))).is_err() {
                             break;
                         }
                     }
@@ -929,7 +929,7 @@ fn handle_loop_msg(
             }
             touches
         }
-        LoopMsg::RegistryEvent(ev) => handle_registry_event(app, ev),
+        LoopMsg::RegistryEvent(ev) => handle_registry_event(app, *ev),
         LoopMsg::StreamClosed { tab_id } => {
             if let Some(idx) = app.tab_index_by_id(tab_id) {
                 if app.tabs.len() == 1 {
