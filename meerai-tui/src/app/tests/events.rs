@@ -1336,3 +1336,45 @@ fn subagent_progress_updates_live_telemetry() {
     assert_eq!(entry.active_tool.as_deref(), Some("code-grep"));
     assert_eq!(entry.usage.total_tokens, Some(160));
 }
+
+#[test]
+fn item_discarded_removes_streaming_assistant_entry() {
+    let (mut app, _rx, _secrets) = test_app();
+    let first = ItemId::from_raw("item-first");
+
+    app.handle_agent_event(AgentEvent::ItemStarted {
+        item: SessionItem::AgentMessage {
+            id: first.clone(),
+            text: String::new(),
+        },
+    });
+    app.handle_agent_event(AgentEvent::ItemDelta {
+        item_id: first.clone(),
+        delta: ItemDelta::AgentText("partial answer".to_string()),
+    });
+    assert_eq!(app.tab().transcript.len(), 1);
+
+    app.handle_agent_event(AgentEvent::ItemDiscarded { item_id: first });
+    assert!(app.tab().transcript.is_empty());
+
+    let retry = ItemId::from_raw("item-retry");
+    app.handle_agent_event(AgentEvent::ItemStarted {
+        item: SessionItem::AgentMessage {
+            id: retry.clone(),
+            text: String::new(),
+        },
+    });
+    app.handle_agent_event(AgentEvent::ItemDelta {
+        item_id: retry,
+        delta: ItemDelta::AgentText("recovered".to_string()),
+    });
+    assert_eq!(
+        app.tab().transcript,
+        vec![TranscriptEntry::Assistant {
+            text: "recovered".to_string(),
+            reasoning: String::new(),
+            streaming: true,
+            reasoning_expanded: false,
+        }]
+    );
+}

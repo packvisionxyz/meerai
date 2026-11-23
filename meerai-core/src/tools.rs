@@ -88,7 +88,14 @@ pub struct ToolObservation {
     pub hint: Option<String>,
 }
 
+pub const SANDBOX_DENIED_HINT: &str =
+    "the OS sandbox denied write access; a sandbox escape can rerun this command";
+
 impl ToolObservation {
+    pub fn sandbox_denied(&self) -> bool {
+        self.hint.as_deref() == Some(SANDBOX_DENIED_HINT)
+    }
+
     pub fn success(stdout: impl Into<String>) -> Self {
         Self {
             status: ObservationStatus::Success,

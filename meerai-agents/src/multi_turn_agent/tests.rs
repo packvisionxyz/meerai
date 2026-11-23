@@ -18,6 +18,7 @@ use tokio::sync::{Barrier, Notify};
 
 enum ScriptedStream {
     Events(Vec<ChatStreamEvent>),
+    EventsThenError(Vec<ChatStreamEvent>, String),
     Error(String),
     Stall,
 }
@@ -64,6 +65,13 @@ impl ChatStreamer for FakeStreamer {
         match scripted {
             ScriptedStream::Events(events) => {
                 Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+            }
+            ScriptedStream::EventsThenError(events, message) => {
+                let failure = anyhow!(message);
+                Ok(Box::pin(
+                    stream::iter(events.into_iter().map(Ok))
+                        .chain(stream::once(async move { Err(failure) })),
+                ))
             }
             ScriptedStream::Error(message) => Err(anyhow!(message)),
             ScriptedStream::Stall => Ok(Box::pin(
@@ -199,6 +207,97 @@ impl Toolset for StaticToolset {
 
     async fn invoke(&self, _fn_name: &str, _args: &str) -> Result<ToolOutput, ToolError> {
         Ok(ToolOutput::Text(self.output.clone()))
+    }
+}
+
+struct SandboxEscapeToolset {
+    calls: Mutex<Vec<String>>,
+}
+
+impl Default for SandboxEscapeToolset {
+    fn default() -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl Toolset for SandboxEscapeToolset {
+    fn name(&self) -> String {
+        "code".to_string()
+    }
+
+    fn definition(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            r#type: "function".to_string(),
+            name: "code-shell".to_string(),
+            description: "Runs a shell command".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "command": { "type": "string" } }
+            }),
+        }]
+    }
+
+    fn contain(&self, fn_name: &str) -> bool {
+        fn_name == "code-shell"
+    }
+
+    fn effect_of(&self, _fn_name: &str) -> EffectClass {
+        EffectClass::External
+    }
+
+    async fn invoke(&self, _fn_name: &str, _args: &str) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::Text("escaped".to_string()))
+    }
+
+    async fn invoke_structured(&self, _fn_name: &str, args: &str) -> Result<ToolRun, ToolError> {
+        self.calls.lock().unwrap().push(args.to_string());
+        if args.contains("\"unsandboxed\":true") {
+            return Ok(ToolRun::from_output(ToolOutput::Text(
+                "escaped".to_string(),
+            )));
+        }
+        let mut run = ToolRun::from_output(ToolOutput::Text(
+            "Flutter failed to open a file at \"/Users/u/flutter/bin/cache/lockfile\".\n\
+             Please ensure that the SDK is installed in a location that has read/write \
+             permissions for the current user."
+                .to_string(),
+        ));
+        run.observation.hint = Some(meerai_core::SANDBOX_DENIED_HINT.to_string());
+        Ok(run)
+    }
+}
+
+struct SandboxEscapeTool {
+    inner: Arc<SandboxEscapeToolset>,
+}
+
+#[async_trait]
+impl Toolset for SandboxEscapeTool {
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+
+    fn definition(&self) -> Vec<ToolDefinition> {
+        self.inner.definition()
+    }
+
+    fn contain(&self, fn_name: &str) -> bool {
+        self.inner.contain(fn_name)
+    }
+
+    fn effect_of(&self, fn_name: &str) -> EffectClass {
+        self.inner.effect_of(fn_name)
+    }
+
+    async fn invoke(&self, fn_name: &str, args: &str) -> Result<ToolOutput, ToolError> {
+        self.inner.invoke(fn_name, args).await
+    }
+
+    async fn invoke_structured(&self, fn_name: &str, args: &str) -> Result<ToolRun, ToolError> {
+        self.inner.invoke_structured(fn_name, args).await
     }
 }
 
@@ -4066,6 +4165,147 @@ async fn turn_scope_grant_skips_reprompt_until_the_turn_ends() {
 }
 
 #[tokio::test]
+async fn sandbox_denial_asks_and_reruns_the_command() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+            call_id: "c1".to_string(),
+            fn_name: "code-shell".to_string(),
+            fn_arguments: serde_json::json!({ "command": "flutter --version" }),
+            thought_signatures: None,
+        }]))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+    let tool = Arc::new(SandboxEscapeToolset::default());
+    let session = memory_session();
+    let agent = harness_agent(
+        streamer,
+        vec![Box::new(SandboxEscapeTool {
+            inner: tool.clone(),
+        })],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+    let (cmd_tx, mut rx) = spawn_worker(agent);
+    cmd_tx
+        .send(AgentCommand::SubmitPrompt("go".to_string()))
+        .unwrap();
+
+    let mut approvals = 0;
+    let mut output = None;
+    loop {
+        match rx.recv().await {
+            Some(AgentEvent::ApprovalRequested { request }) => {
+                assert_eq!(request.kind, ApprovalKind::SandboxEscape);
+                assert!(request.preview.detail.contains("flutter --version"));
+                approvals += 1;
+                cmd_tx
+                    .send(AgentCommand::Approve {
+                        request_id: request.request_id,
+                        decision: ApprovalDecision::Accept,
+                        scope: None,
+                    })
+                    .unwrap();
+            }
+            Some(AgentEvent::ItemCompleted {
+                item:
+                    SessionItem::ToolCall {
+                        output: item_output,
+                        ..
+                    },
+            }) => output = item_output,
+            Some(AgentEvent::TurnCompleted { .. }) => break,
+            Some(_) => {}
+            None => panic!("worker stopped mid-turn"),
+        }
+    }
+
+    assert_eq!(approvals, 1);
+    assert_eq!(output.as_deref(), Some("escaped"));
+    let calls = tool.calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[1].contains("\"unsandboxed\":true"), "{:?}", calls[1]);
+
+    let _ = cmd_tx.send(AgentCommand::Quit);
+}
+
+#[tokio::test]
+async fn sandbox_escape_session_grant_skips_later_prompts() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+            call_id: "c1".to_string(),
+            fn_name: "code-shell".to_string(),
+            fn_arguments: serde_json::json!({ "command": "flutter --version" }),
+            thought_signatures: None,
+        }]))],
+        vec![ChatStreamEvent::End(text_end("first"))],
+        vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+            call_id: "c2".to_string(),
+            fn_name: "code-shell".to_string(),
+            fn_arguments: serde_json::json!({ "command": "dart analyze" }),
+            thought_signatures: None,
+        }]))],
+        vec![ChatStreamEvent::End(text_end("second"))],
+    ]));
+    let tool = Arc::new(SandboxEscapeToolset::default());
+    let session = memory_session();
+    let agent = harness_agent(
+        streamer,
+        vec![Box::new(SandboxEscapeTool {
+            inner: tool.clone(),
+        })],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+    let (cmd_tx, mut rx) = spawn_worker(agent);
+    let mut approvals = 0;
+
+    cmd_tx
+        .send(AgentCommand::SubmitPrompt("first".to_string()))
+        .unwrap();
+    loop {
+        match rx.recv().await {
+            Some(AgentEvent::ApprovalRequested { request }) => {
+                assert_eq!(request.kind, ApprovalKind::SandboxEscape);
+                approvals += 1;
+                cmd_tx
+                    .send(AgentCommand::Approve {
+                        request_id: request.request_id,
+                        decision: ApprovalDecision::AcceptForSession,
+                        scope: None,
+                    })
+                    .unwrap();
+            }
+            Some(AgentEvent::TurnCompleted { .. }) => break,
+            Some(_) => {}
+            None => panic!("worker stopped mid-turn"),
+        }
+    }
+
+    cmd_tx
+        .send(AgentCommand::SubmitPrompt("second".to_string()))
+        .unwrap();
+    loop {
+        match rx.recv().await {
+            Some(AgentEvent::ApprovalRequested { .. }) => approvals += 1,
+            Some(AgentEvent::TurnCompleted { .. }) => break,
+            Some(_) => {}
+            None => panic!("worker stopped mid-turn"),
+        }
+    }
+
+    assert_eq!(approvals, 1);
+    let calls = tool.calls.lock().unwrap();
+    assert_eq!(calls.len(), 3);
+    assert!(calls[2].contains("\"unsandboxed\":true"), "{:?}", calls[2]);
+
+    let _ = cmd_tx.send(AgentCommand::Quit);
+}
+
+#[tokio::test]
 async fn idle_compact_appends_bracketed_events() {
     let streamer = Arc::new(FakeStreamer::new(vec![
         vec![ChatStreamEvent::End(text_end("first reply"))],
@@ -4175,6 +4415,108 @@ async fn transient_provider_error_is_retried_and_logged() {
         .filter(|event| matches!(event, SessionEvent::AssistantAttempt { .. }))
         .count();
     assert_eq!(attempts, 1);
+}
+
+#[tokio::test]
+async fn partial_stream_failure_discards_output_and_retries() {
+    let streamer = Arc::new(FakeStreamer::with_script(vec![
+        ScriptedStream::EventsThenError(
+            vec![ChatStreamEvent::Chunk(StreamChunk {
+                content: "partial answer".to_string(),
+            })],
+            "LLM stream error: Web stream error for model 'openai::m'.\nCause: error decoding response body"
+                .to_string(),
+        ),
+        ScriptedStream::Events(vec![ChatStreamEvent::End(text_end("recovered"))]),
+    ]));
+
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "recovered");
+    assert_eq!(streamer.requests.lock().unwrap().len(), 2);
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    let discarded: Vec<ItemId> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ItemDiscarded { item_id } => Some(item_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(discarded.len(), 1);
+
+    let messages: Vec<String> = session_events(&session)
+        .into_iter()
+        .filter_map(|event| match event {
+            SessionEvent::AssistantMessage { content, .. } => Some(
+                content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text(text) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(messages, vec!["recovered".to_string()]);
+}
+
+#[tokio::test]
+async fn partial_stream_auth_failure_is_not_retried() {
+    let streamer = Arc::new(FakeStreamer::with_script(vec![
+        ScriptedStream::EventsThenError(
+            vec![ChatStreamEvent::Chunk(StreamChunk {
+                content: "partial answer".to_string(),
+            })],
+            "LLM stream error: HTTP error.\nStatus: 401 Unauthorized".to_string(),
+        ),
+    ]));
+
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let error = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("401"));
+    assert_eq!(streamer.requests.lock().unwrap().len(), 1);
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ItemDiscarded { .. }))
+    );
 }
 
 #[tokio::test]
@@ -6890,6 +7232,70 @@ async fn read_only_turns_do_not_trip_no_progress() {
         auto_mode(),
         HarnessConfig {
             max_steps_per_turn: 14,
+            ..HarnessConfig::default()
+        },
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "done");
+    assert!(!session_events(&session).iter().any(|event| matches!(
+        event,
+        SessionEvent::CircuitBreaker {
+            kind: BreakerKind::NoProgress,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn read_only_steps_after_a_write_do_not_trip_no_progress() {
+    let mut batches: Vec<Vec<ChatStreamEvent>> =
+        vec![vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+            call_id: "edit-0".to_string(),
+            fn_name: "code-edit_file".to_string(),
+            fn_arguments: serde_json::json!({
+                "path": "src/0.rs",
+                "old_text": "old",
+                "new_text": "new"
+            }),
+            thought_signatures: None,
+        }]))]];
+    for index in 0..13 {
+        batches.push(vec![ChatStreamEvent::End(tool_end(vec![ToolCall {
+            call_id: format!("read-{index}"),
+            fn_name: "code-read_file".to_string(),
+            fn_arguments: serde_json::json!({ "path": format!("src/{index}.rs") }),
+            thought_signatures: None,
+        }]))]);
+    }
+    batches.push(vec![ChatStreamEvent::End(text_end("done"))]);
+
+    let streamer = Arc::new(FakeStreamer::new(batches));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer,
+        vec![
+            Box::new(StaticToolset::new(
+                "code",
+                "code-read_file",
+                "content",
+                EffectClass::Read,
+            )),
+            Box::new(StaticToolset::new(
+                "code",
+                "code-edit_file",
+                "edited",
+                EffectClass::Write,
+            )),
+        ],
+        "system",
+        &session,
+        auto_mode(),
+        HarnessConfig {
+            max_steps_per_turn: 20,
             ..HarnessConfig::default()
         },
     );

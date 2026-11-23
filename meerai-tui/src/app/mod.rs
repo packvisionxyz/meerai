@@ -606,7 +606,36 @@ pub struct DocSelection {
 pub struct TranscriptWrappedLine {
     pub text: String,
     pub gutter_len: usize,
+    pub hang_len: usize,
     pub soft_wrapped_next: bool,
+}
+
+pub(crate) fn char_width(ch: char) -> usize {
+    if ch == '\t' {
+        1
+    } else {
+        unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
+    }
+}
+
+pub(crate) fn display_width(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text)
+}
+
+pub(crate) fn display_to_char(text: &str, display: usize) -> usize {
+    let mut column = 0;
+    for (index, ch) in text.chars().enumerate() {
+        let width = char_width(ch);
+        if column + width > display {
+            return index;
+        }
+        column += width;
+    }
+    text.chars().count()
+}
+
+pub(crate) fn char_to_display(text: &str, char_index: usize) -> usize {
+    text.chars().take(char_index).map(char_width).sum()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1165,10 +1194,15 @@ impl TranscriptBuildMemo {
         self.tokens.begin(len);
     }
 
-    pub(crate) fn markdown(&mut self, index: usize, text: &str) -> Rc<Vec<MarkdownLine>> {
-        self.markdown.get(index, memo_hash(None, &[text]), || {
-            crate::markdown::render(text)
-        })
+    pub(crate) fn markdown(
+        &mut self,
+        index: usize,
+        width: usize,
+        text: &str,
+    ) -> Rc<Vec<MarkdownLine>> {
+        let key = memo_hash(None, &[text, &width.to_string()]);
+        self.markdown
+            .get(index, key, || crate::markdown::render(text, width))
     }
 
     pub(crate) fn edit_diff(

@@ -21,8 +21,19 @@ pub(super) fn provider_error_status(error: &anyhow::Error) -> Option<u16> {
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<genai::Error>())
-        .and_then(|error| error.status())
-        .map(|status| status.as_u16())
+        .and_then(genai_error_status)
+}
+
+fn genai_error_status(error: &genai::Error) -> Option<u16> {
+    if let Some(status) = error.status() {
+        return Some(status.as_u16());
+    }
+    match error {
+        genai::Error::WebStream { error, .. } => error
+            .downcast_ref::<genai::Error>()
+            .and_then(genai_error_status),
+        _ => None,
+    }
 }
 
 pub(super) fn status_is_transient(status: u16) -> bool {
@@ -311,6 +322,9 @@ impl MultiTurnAgent {
             }
             harness.policy.clear_scoped_grants(GrantScope::Turn);
         }
+        if self.sandbox_escape == Some(GrantScope::Turn) {
+            self.sandbox_escape = None;
+        }
         (turn_id, outcome)
     }
 
@@ -445,7 +459,6 @@ impl MultiTurnAgent {
             })
             .max(3);
         let no_progress_diagnostic_steps = (no_progress_fail_steps * 2 / 3).max(1);
-        let mut write_attempted = false;
         let mut stop_hook_used = false;
         let mut last_tool_signature: Option<String> = None;
         let mut repeated_tool_batches = 0usize;
@@ -876,58 +889,66 @@ impl MultiTurnAgent {
                         && tool.effect_of_call(&call.fn_name, &args) == EffectClass::Write
                 })
             });
-            write_attempted |= step_write;
 
-            if !tool_calls.is_empty() && progress_tracking && write_attempted {
+            if !tool_calls.is_empty() && progress_tracking {
                 let delegated = tool_calls
                     .iter()
                     .any(|call| matches!(call.fn_name.as_str(), "subagent-run" | "acp-run"));
-                if self.file_changes_this_step > 0 || delegated {
+                if delegated {
                     no_progress_steps = 0;
                     no_progress_diagnosed = false;
-                } else {
-                    no_progress_steps += 1;
-                    if no_progress_steps == no_progress_diagnostic_steps && !no_progress_diagnosed {
-                        no_progress_diagnosed = true;
-                        self.log_event(
-                            event_tx,
-                            SessionEvent::CircuitBreaker {
-                                kind: BreakerKind::NoProgress,
-                                action: BreakerAction::DiagnosticInjected,
-                            },
-                        )
-                        .await;
-                        self.log_event(
-                            event_tx,
-                            SessionEvent::UserMessage {
-                                source: InputSource::RuntimeContext,
-                                content: vec![ContentBlock::Text(NO_PROGRESS_NOTICE.to_string())],
-                            },
-                        )
-                        .await;
-                    }
-                    if no_progress_steps >= no_progress_fail_steps {
-                        self.log_event(
-                            event_tx,
-                            SessionEvent::CircuitBreaker {
-                                kind: BreakerKind::NoProgress,
-                                action: BreakerAction::TurnFailed,
-                            },
-                        )
-                        .await;
-                        let offender = write_call_summary(&tool_calls, &self.tools);
-                        let message = if offender.is_empty() {
-                            format!(
-                                "no progress: {} steps without a file change",
-                                no_progress_steps
+                } else if step_write {
+                    if self.file_changes_this_step > 0 {
+                        no_progress_steps = 0;
+                        no_progress_diagnosed = false;
+                    } else {
+                        no_progress_steps += 1;
+                        if no_progress_steps == no_progress_diagnostic_steps
+                            && !no_progress_diagnosed
+                        {
+                            no_progress_diagnosed = true;
+                            self.log_event(
+                                event_tx,
+                                SessionEvent::CircuitBreaker {
+                                    kind: BreakerKind::NoProgress,
+                                    action: BreakerAction::DiagnosticInjected,
+                                },
                             )
-                        } else {
-                            format!(
-                                "no progress: {} steps without a file change (last write: {offender})",
-                                no_progress_steps
+                            .await;
+                            self.log_event(
+                                event_tx,
+                                SessionEvent::UserMessage {
+                                    source: InputSource::RuntimeContext,
+                                    content: vec![ContentBlock::Text(
+                                        NO_PROGRESS_NOTICE.to_string(),
+                                    )],
+                                },
                             )
-                        };
-                        return Err(TurnError::loop_detected(anyhow!(message)));
+                            .await;
+                        }
+                        if no_progress_steps >= no_progress_fail_steps {
+                            self.log_event(
+                                event_tx,
+                                SessionEvent::CircuitBreaker {
+                                    kind: BreakerKind::NoProgress,
+                                    action: BreakerAction::TurnFailed,
+                                },
+                            )
+                            .await;
+                            let offender = write_call_summary(&tool_calls, &self.tools);
+                            let message = if offender.is_empty() {
+                                format!(
+                                    "no progress: {} write steps without a file change",
+                                    no_progress_steps
+                                )
+                            } else {
+                                format!(
+                                    "no progress: {} write steps without a file change (last write: {offender})",
+                                    no_progress_steps
+                                )
+                            };
+                            return Err(TurnError::loop_detected(anyhow!(message)));
+                        }
                     }
                 }
             }
@@ -1021,7 +1042,7 @@ impl MultiTurnAgent {
                     None => {
                         return Err(StreamFailure::Provider {
                             error: anyhow!("routing coordinator closed"),
-                            partial: false,
+                            items: Vec::new(),
                         });
                     }
                 }
@@ -1032,7 +1053,7 @@ impl MultiTurnAgent {
         let mut stream = tokio::select! {
             _ = cancel.cancelled() => return Err(StreamFailure::Cancelled),
             result = streamer.stream_chat(&self.model, request, options) => {
-                result.map_err(|error| StreamFailure::Provider { error, partial: false })?
+                result.map_err(|error| StreamFailure::Provider { error, items: Vec::new() })?
             }
         };
 
@@ -1092,8 +1113,11 @@ impl MultiTurnAgent {
                             }
                         }
                         Some(Err(error)) => {
-                            let partial = !text.is_empty() || !reasoning.is_empty();
-                            return Err(StreamFailure::Provider { error, partial });
+                            let items = [reasoning_item_id.clone(), text_item_id.clone()]
+                                .into_iter()
+                                .flatten()
+                                .collect();
+                            return Err(StreamFailure::Provider { error, items });
                         }
                         None => break,
                     }
@@ -1208,7 +1232,7 @@ impl MultiTurnAgent {
                         TurnError::provider(error)
                     }));
                 }
-                Err(StreamFailure::Provider { error, partial }) if !partial => {
+                Err(StreamFailure::Provider { error, items }) if items.is_empty() => {
                     let message = format!("{error:#}");
                     let recoverable = self.harness.is_some() && is_context_overflow(&message);
                     self.log_event(
@@ -1263,19 +1287,38 @@ impl MultiTurnAgent {
                     };
                     return Err(StepFailure::Error(error));
                 }
-                Err(StreamFailure::Provider { error, .. }) => {
+                Err(StreamFailure::Provider { error, items }) => {
                     let message = format!("{error:#}");
                     self.log_event(
                         event_tx,
                         SessionEvent::AssistantAttempt {
                             provider: provider_of(&self.model),
                             model: self.model.clone(),
-                            error: message,
+                            error: message.clone(),
                             usage: Usage::default(),
                         },
                     )
                     .await;
-                    return Err(StepFailure::Error(TurnError::provider(error)));
+
+                    let transient = is_transient_provider_error(&error, &message);
+                    if transient {
+                        discard_partial_items(event_tx, &items);
+                        if transient_failures + 1 < MAX_PROVIDER_ATTEMPTS {
+                            transient_failures += 1;
+                            let delay = provider_backoff_with_jitter(transient_failures);
+                            tokio::select! {
+                                _ = cancel.cancelled() => return Err(StepFailure::Cancelled),
+                                _ = tokio::time::sleep(delay) => {}
+                            }
+                            continue;
+                        }
+                    }
+
+                    return Err(StepFailure::Error(if transient {
+                        TurnError::transient_provider(error)
+                    } else {
+                        TurnError::provider(error)
+                    }));
                 }
             }
         }

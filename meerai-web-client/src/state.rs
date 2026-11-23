@@ -1437,6 +1437,12 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
             mark_unread_if_bg(state, &session_id);
             EventEffect::None
         }
+        ViewEvent::StreamDiscarded { session_id } => {
+            if let Some(tab) = state.session_tabs.get_mut(&session_id) {
+                clear_streaming_tab(tab);
+            }
+            EventEffect::None
+        }
         ViewEvent::EntryCompleted { session_id, entry } => {
             let tab = state.session_tabs.entry(session_id.clone()).or_default();
             if matches!(entry, TranscriptEntryDto::Assistant { .. }) {

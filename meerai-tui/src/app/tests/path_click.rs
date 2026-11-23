@@ -17,6 +17,7 @@ fn lines(app: &mut AppState, rows: &[(&str, usize)]) {
         .map(|(text, gutter)| TranscriptWrappedLine {
             text: (*text).to_string(),
             gutter_len: *gutter,
+            hang_len: 0,
             soft_wrapped_next: false,
         })
         .collect();

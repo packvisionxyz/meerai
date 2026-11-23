@@ -1034,7 +1034,16 @@ struct SidebarSnapshot {
     context: Option<ContextBreakdownDto>,
     diagnose_open: bool,
     changes_open: bool,
-    subagents: Vec<(String, String, String, Option<String>)>,
+    subagents: Vec<SidebarSubagent>,
+}
+
+#[derive(Clone, PartialEq)]
+struct SidebarSubagent {
+    id: String,
+    name: Option<String>,
+    agent: String,
+    status: String,
+    child_session_id: Option<String>,
 }
 
 #[component]
@@ -1060,13 +1069,13 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                                 status,
                                 child_session_id,
                                 ..
-                            } => Some((
-                                id.clone(),
-                                name.clone(),
-                                agent.clone(),
-                                status.clone(),
-                                child_session_id.clone(),
-                            )),
+                            } => Some(SidebarSubagent {
+                                id: id.clone(),
+                                name: name.clone(),
+                                agent: agent.clone(),
+                                status: status.clone(),
+                                child_session_id: child_session_id.clone(),
+                            }),
                             _ => None,
                         })
                         .collect::<Vec<_>>()
@@ -1333,7 +1342,14 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                             AnyView::from(Fragment::new(
                                 subagents
                                     .into_iter()
-                                    .map(|(id, name, agent, status, child)| {
+                                    .map(|subagent| {
+                                        let SidebarSubagent {
+                                            id,
+                                            name,
+                                            agent,
+                                            status,
+                                            child_session_id: child,
+                                        } = subagent;
                                         let click_id = id.clone();
                                         let label = name.clone().unwrap_or_else(|| agent.clone());
                                         view! {

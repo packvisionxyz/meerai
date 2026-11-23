@@ -204,6 +204,9 @@ pub enum AgentEvent {
     ItemCompleted {
         item: SessionItem,
     },
+    ItemDiscarded {
+        item_id: ItemId,
+    },
     ApprovalRequested {
         request: ApprovalRequest,
     },

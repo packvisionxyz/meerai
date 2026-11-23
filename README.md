@@ -353,6 +353,12 @@ grant, `a` approves and records a session grant, `n` denies, `r` denies with a
 reason, and `Esc` cancels. Turn grants are cleared at turn end. Grant resources
 are literal, not glob patterns; permission rules still use globs.
 
+When the OS sandbox blocks a shell command from writing outside the workspace,
+meerai adds a `sandbox escape` approval. `y` reruns that command once without
+the sandbox; `t`/`a` also run later shell commands without the sandbox for the
+turn or the session. `plan` mode and `sandbox.require_for_shell` never offer
+the escape.
+
 ### Browser companion
 
 `meerai serve` (or `/serve` in the TUI) serves the browser client on loopback
@@ -375,6 +381,9 @@ Parity highlights:
   next/previous tab, move tab, and cycle approval mode.
 - `Settings` groups Connections, Session, Theme, Context, Sessions, Sandbox, and
   Permissions. Provider keys are never read back.
+- Assistant markdown renders with the same `comrak` feature set as the TUI: tables with
+  alignment, task lists, footnotes, description lists, alerts, math, and preserved line
+  breaks. Wide tables scroll in the browser and fit the width in the TUI.
 
 ### Sampling temperature
 
@@ -423,7 +432,9 @@ A firewall that silently drops the connection can end a provider stream with
 no text, no tool calls, and no usage. meerai treats that as a transient
 provider failure and retries it with the standard provider backoff (3
 attempts) before it fails the turn, so an empty answer does not silently end
-the conversation. The failure shows a diagnostic block with the provider,
+the conversation. A stream that breaks after some text is discarded and
+retried the same way; the partial answer never enters the session log. The
+failure shows a diagnostic block with the provider,
 model, stop reason, stream event count, elapsed time, and a hint. A provider
 stop reason of `content_filter`, `max_tokens`, or `stop_sequence` is reported
 as a non-retryable provider error instead of an empty stream.
@@ -907,7 +918,9 @@ for example `OPENROUTER_API_KEY` (also `OPEN_ROUTER_API_KEY`) and
   when available and falls back to in-process path guards with a startup
   warning. Path guards are policy checks, not a kernel boundary on the fallback
   path. `plan` mode denies writes and shell, but it cannot contain a command you
-  approve in another mode.
+  approve in another mode. A sandbox escape rerun needs your explicit approval
+  and runs with your user privileges; `plan` mode and `sandbox.require_for_shell`
+  never offer it.
 - **Secret handling is partial.** The shell tool removes known provider key
   variables and any variable ending in `_API_KEY`, `_API_TOKEN`,
   `_ACCESS_TOKEN`, `_SECRET`, `_SECRET_KEY`, or `_PRIVATE_KEY` from child

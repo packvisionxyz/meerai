@@ -370,10 +370,10 @@ implementation invariants.
   success resets). The 3rd identical batch injects a diagnostic, the 5th
   fails; edit/write-only batches also log
   `CircuitBreaker { RepeatedIdenticalEdit }` (other batches log the
-  runtime message only). `NoProgress` diagnoses at 8 tool steps without a
-  file change after a write attempt and fails at 12; disabled in `plan`
-  and without a write tool; a `subagent-run`/`acp-run` delegation resets
-  it.
+  runtime message only). `NoProgress` diagnoses at 8 write steps without a
+  file change and fails at 12; a read-only step never increments it; disabled
+  in `plan` and without a write tool; a `subagent-run`/`acp-run` delegation
+  resets it.
 - Healing: `Session::open_inner` runs `heal_dangling_tool_calls`, then
   closes open turns (`TurnEnded { Interrupted }`) and open compactions
   (`CompactionEnded { Failed }`). `run_turn` heals again after `TurnEnded`
@@ -391,7 +391,10 @@ implementation invariants.
   (408/409/425/429 and 5xx transient; other 4xx permanent; message
   blocklist fallback). Stream requests set a 30 s header timeout and a
   120 s per-chunk read timeout; heartbeats reset the read timer. A silent
-  stall or a fully empty stream is transient and retried; a stream with
+  stall or a fully empty stream is transient and retried; a stream that
+  fails after content discards the started `AgentMessage`/`Reasoning` items
+  (`AgentEvent::ItemDiscarded`) and retries under the same classification;
+  no partial text reaches the log. A stream with
   usage but no content is a normal end. An empty stream carries a
   diagnostic block (`provider`, `model`, `stop_reason`, `events`,
   `elapsed`, and a hint) into the turn error. A provider stop reason of
@@ -421,11 +424,11 @@ implementation invariants.
   Subagents set `step_limit_continuations = 0`, so their preset caps stay
   exact.
 - No-progress breaker: `no_progress_fail_steps` (default 12) fails the turn
-  when that many consecutive steps make no file change and delegate no
-  subagent. At two thirds of the threshold the loop logs a
-  `CircuitBreaker` diagnostic and injects `NO_PROGRESS_NOTICE`. The value is
-  clamped to at least 3 so the notice always stays reachable. Read-only turns
-  never trip it.
+  when that many write steps make no file change and delegate no
+  subagent. A read-only step never increments the counter. At two thirds of
+  the threshold the loop logs a `CircuitBreaker` diagnostic and injects
+  `NO_PROGRESS_NOTICE`. The value is clamped to at least 3 so the notice
+  always stays reachable. Read-only turns never trip it.
 - Context telemetry: `ContextBreakdown` is computed from the projected
   event log plus `tool_schema_tokens` and the system/memory prompt split.
   `MultiTurnAgent` emits `AgentEvent::ContextUpdated` after each step,
@@ -587,11 +590,18 @@ implementation invariants.
   `run_command` caps streams at 1 MiB and sets `RLIMIT_FSIZE` (1 GiB) /
   `RLIMIT_CORE` (0) on Unix. `require_for_shell`/`require_for_scripts`
   fail closed on `HostWorld`.
+- A sandboxed `code-shell` run whose output matches a write-denial marker
+  carries `SANDBOX_DENIED_HINT`. The agent asks for
+  `ApprovalKind::SandboxEscape` and then reruns with the hidden
+  `unsandboxed` argument (`SandboxPolicy::Unrestricted`, same env scrub).
+  Turn/session grants apply to later shell calls until the turn ends or the
+  session resets. `plan` mode and `sandbox.require_for_shell` never offer
+  the escape, and the model schema does not expose the flag.
 - LSP servers (`rust-analyzer`, `typescript-language-server --stdio`,
-  `gopls`, `pyright-langserver --stdio`, overridable) are env-scrubbed but
-  run outside `ExecutionWorld`. Requests time out after 15 s; a stalled
-  stdin write times out and retires the cached server so the next call
-  respawns it.
+  `gopls`, `dart language-server --protocol=lsp`, `pyright-langserver
+  --stdio`, overridable) are env-scrubbed but run outside `ExecutionWorld`.
+  Requests time out after 15 s; a stalled stdin write times out and retires
+  the cached server so the next call respawns it.
 
 ### 2.6 ACP invariants
 

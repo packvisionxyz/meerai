@@ -126,6 +126,149 @@ enum Authorization {
 const LSP_DIAGNOSTICS_TOOL: &str = "lsp-get_diagnostics";
 const LSP_DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(5);
 const LSP_DIAGNOSTICS_MAX_BYTES: usize = 4096;
+const SHELL_TOOL: &str = "code-shell";
+
+fn with_unsandboxed_flag(args: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(args) else {
+        return args.to_string();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return args.to_string();
+    };
+    object.insert("unsandboxed".to_string(), serde_json::Value::Bool(true));
+    value.to_string()
+}
+
+fn shell_command_text(args: &str) -> String {
+    let command = serde_json::from_str::<serde_json::Value>(args)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| args.to_string());
+    let mut text: String = command.chars().take(500).collect();
+    if command.chars().count() > 500 {
+        text.push('…');
+    }
+    text
+}
+
+fn with_sandbox_hint(mut run: ToolRun, hint: &str) -> ToolRun {
+    run.observation.hint = Some(hint.to_string());
+    if let ToolOutput::Text(text) | ToolOutput::Fail(text) = &mut run.output {
+        text.push_str("\nHint: ");
+        text.push_str(hint);
+    }
+    run
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn request_sandbox_escape(
+    ctx: &mut DecisionCtx<'_>,
+    tools: &[Box<dyn Toolset>],
+    fn_name: &str,
+    args: &str,
+    run: ToolRun,
+    turn_id: &TurnId,
+    timeout_ms: Option<u64>,
+    max_retries: usize,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    cancel: &CancellationToken,
+    mut inbox: Option<&mut mpsc::UnboundedReceiver<AgentCommand>>,
+    clock: TurnClock,
+) -> (ToolRun, Option<GrantScope>) {
+    if inbox.is_none() {
+        return (run, None);
+    }
+    let Some(harness) = ctx.harness.as_ref() else {
+        return (run, None);
+    };
+    if harness.policy.mode() == ApprovalMode::Plan {
+        return (run, None);
+    }
+
+    let request_id = RequestId::new();
+    let request = ApprovalRequest {
+        request_id: request_id.clone(),
+        turn_id: turn_id.clone(),
+        kind: ApprovalKind::SandboxEscape,
+        preview: ApprovalPreview {
+            title: "Run outside the OS sandbox".to_string(),
+            detail: format!(
+                "command: {}\nblocked: {}\nAccept runs this command once. Turn and session grants also let later shell commands run without the sandbox.",
+                shell_command_text(args),
+                run.observation
+                    .stderr
+                    .lines()
+                    .next()
+                    .unwrap_or("write access denied")
+            ),
+        },
+        effect: Some(EffectClass::External),
+    };
+    let _ = event_tx.send(AgentEvent::ApprovalRequested {
+        request: request.clone(),
+    });
+    if let Some(harness) = ctx.harness.as_ref() {
+        let _ = harness
+            .session
+            .append(SessionEvent::ApprovalRequested {
+                request_id: request_id.clone(),
+                kind: request.kind,
+                preview: request.preview.clone(),
+            })
+            .await;
+    }
+
+    let outcome = ctx
+        .await_decision(&request_id, event_tx, cancel, inbox.as_deref_mut())
+        .await;
+
+    match outcome.decision {
+        ApprovalDecision::Accept | ApprovalDecision::AcceptForSession => {
+            let escaped_args = with_unsandboxed_flag(args);
+            let rerun = run_with_bridge(
+                ctx,
+                event_tx,
+                cancel,
+                inbox,
+                clock,
+                run_tool_from(
+                    tools,
+                    timeout_ms,
+                    max_retries,
+                    fn_name,
+                    &escaped_args,
+                    cancel,
+                ),
+            )
+            .await
+            .unwrap_or_else(|()| Ok(tool_budget_exceeded(clock.max_secs)));
+            match rerun {
+                Ok(rerun) => (rerun, outcome.scope),
+                Err(_) => (run, outcome.scope),
+            }
+        }
+        ApprovalDecision::Decline => (
+            with_sandbox_hint(run, "the user declined the sandbox escape"),
+            None,
+        ),
+        ApprovalDecision::DeclineWithReason(reason) => (
+            with_sandbox_hint(
+                run,
+                &format!("the user declined the sandbox escape: {reason}"),
+            ),
+            None,
+        ),
+        ApprovalDecision::Cancel => {
+            cancel.cancel();
+            (run, None)
+        }
+    }
+}
 
 pub(super) async fn collect_post_edit_diagnostics(
     tools: &[Box<dyn Toolset>],
@@ -450,6 +593,7 @@ impl MultiTurnAgent {
         };
         let mut halted = false;
         let mut cursor = 0;
+        let mut pending_escape_scope: Option<GrantScope> = None;
 
         while cursor < plans.len() && !halted {
             if cancel.is_cancelled() {
@@ -463,19 +607,55 @@ impl MultiTurnAgent {
 
             if !plans[cursor].authorized() || plans[cursor].effect != EffectClass::Read {
                 if plans[cursor].authorized() {
+                    let fn_name = plans[cursor].tool_call.fn_name.clone();
+                    let args = plans[cursor].args.clone();
+                    let run_args = if fn_name == SHELL_TOOL && self.sandbox_escape.is_some() {
+                        with_unsandboxed_flag(&args)
+                    } else {
+                        args.clone()
+                    };
                     let result = {
-                        let fn_name = &plans[cursor].tool_call.fn_name;
-                        let args = &plans[cursor].args;
                         run_with_bridge(
                             &mut ctx,
                             event_tx,
                             cancel,
                             inbox.as_deref_mut(),
                             clock,
-                            run_tool_from(tools, timeout_ms, max_retries, fn_name, args, cancel),
+                            run_tool_from(
+                                tools,
+                                timeout_ms,
+                                max_retries,
+                                &fn_name,
+                                &run_args,
+                                cancel,
+                            ),
                         )
                         .await
                         .unwrap_or_else(|()| Ok(tool_budget_exceeded(clock.max_secs)))
+                    };
+                    let result = match result {
+                        Ok(run) if fn_name == SHELL_TOOL && run.observation.sandbox_denied() => {
+                            let (run, scope) = request_sandbox_escape(
+                                &mut ctx,
+                                tools,
+                                &fn_name,
+                                &args,
+                                run,
+                                turn_id,
+                                timeout_ms,
+                                max_retries,
+                                event_tx,
+                                cancel,
+                                inbox.as_deref_mut(),
+                                clock,
+                            )
+                            .await;
+                            if scope.is_some() {
+                                pending_escape_scope = scope;
+                            }
+                            Ok(run)
+                        }
+                        other => other,
                     };
                     halted =
                         matches!(&result, Ok(run) if matches!(run.output, ToolOutput::Stop(_)));
@@ -538,6 +718,10 @@ impl MultiTurnAgent {
                 });
             }
             cursor = end;
+        }
+
+        if pending_escape_scope.is_some() {
+            self.sandbox_escape = pending_escape_scope;
         }
 
         let mut stop_reason: Option<String> = None;

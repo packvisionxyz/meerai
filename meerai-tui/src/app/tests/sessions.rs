@@ -665,6 +665,7 @@ fn dragging_a_tab_does_not_start_a_transcript_or_composer_selection() {
         .map(|idx| TranscriptWrappedLine {
             text: format!("line {idx}"),
             gutter_len: 0,
+            hang_len: 0,
             soft_wrapped_next: false,
         })
         .collect();

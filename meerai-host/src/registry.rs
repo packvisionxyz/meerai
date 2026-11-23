@@ -288,6 +288,9 @@ pub enum RegistryEventKind {
         item_id: String,
         delta: String,
     },
+    StreamDiscarded {
+        session_id: SessionId,
+    },
     EntryCompleted {
         session_id: SessionId,
         entry: LiveEntry,
@@ -2062,6 +2065,26 @@ fn apply_agent_event(
             }
             _ => {}
         },
+        AgentEvent::ItemDiscarded { .. } => {
+            let cleared = {
+                let record = state.sessions.get_mut(session_id).unwrap();
+                let cleared = record.streaming_item_id.is_some()
+                    || !record.streaming_text.is_empty()
+                    || !record.streaming_reasoning.is_empty();
+                record.streaming_item_id = None;
+                record.streaming_text.clear();
+                record.streaming_reasoning.clear();
+                cleared
+            };
+            if cleared {
+                state.push_event(
+                    broadcast_tx,
+                    RegistryEventKind::StreamDiscarded {
+                        session_id: session_id.clone(),
+                    },
+                );
+            }
+        }
         AgentEvent::ApprovalRequested { request } => {
             let req_clone = request.clone();
             update_pending_status(state, broadcast_tx, session_id, |record| {
@@ -3071,6 +3094,83 @@ mod tests {
             received
                 .iter()
                 .any(|ev| matches!(&ev.kind, RegistryEventKind::TurnCompleted { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn discarding_streaming_output_clears_the_buffer_and_notifies_clients() {
+        let registry = SessionRegistry::new();
+        let worker = open_test_session(&registry, "ses-discard", None, Vec::new());
+        let SubscribeResult::Replay { mut rx, .. } = registry.subscribe(None) else {
+            panic!("expected Replay");
+        };
+
+        let turn_id = TurnId::from_raw("turn-1");
+        let message_id = ItemId::from_raw("item-m1");
+        worker
+            .event_tx
+            .send(AgentEvent::TurnStarted {
+                turn_id,
+                model: "openai::m".to_string(),
+            })
+            .unwrap();
+        worker
+            .event_tx
+            .send(AgentEvent::ItemStarted {
+                item: SessionItem::AgentMessage {
+                    id: message_id.clone(),
+                    text: String::new(),
+                },
+            })
+            .unwrap();
+        worker
+            .event_tx
+            .send(AgentEvent::ItemDelta {
+                item_id: message_id.clone(),
+                delta: ItemDelta::AgentText("partial".to_string()),
+            })
+            .unwrap();
+
+        wait_until(|| {
+            registry
+                .session_detail(&worker.session_id)
+                .is_some_and(|detail| detail.streaming_text == "partial")
+        })
+        .await;
+
+        worker
+            .event_tx
+            .send(AgentEvent::ItemDiscarded {
+                item_id: message_id,
+            })
+            .unwrap();
+
+        wait_until(|| {
+            registry
+                .session_detail(&worker.session_id)
+                .is_some_and(|detail| {
+                    detail.streaming_item_id.is_none() && detail.streaming_text.is_empty()
+                })
+        })
+        .await;
+
+        let mut received = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            received.push(event);
+        }
+        assert!(
+            received
+                .iter()
+                .any(|event| matches!(&event.kind, RegistryEventKind::StreamDiscarded { .. }))
+        );
+
+        let snapshot = registry.snapshot();
+        let active = snapshot.active_session.unwrap();
+        assert!(
+            !active
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, LiveEntry::Assistant { .. }))
         );
     }
 

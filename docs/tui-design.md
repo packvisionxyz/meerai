@@ -670,11 +670,21 @@ opens the dialog.
   click collapses the group. The `N agents` statusline counter opens the
   same conversation in the `Runs` detail modal instead, and that modal
   never expands the transcript row.
-- **Markdown spacing.** Assistant markdown keeps the model's line breaks:
-  a single newline renders as a line break, a blank line separates blocks
-  with one empty row, and transcript entries get two empty rows between
-  messages (one before tool rows). Fenced code uses the shared highlighter;
-  inline code uses the accent color on `surface_high`.
+- **Markdown spacing and coverage.** Both clients parse the same `comrak`
+  extension set: tables with alignment, task lists, footnotes, description
+  lists, GitHub alerts, math, front matter, multiline block quotes,
+  superscript, and subscript. Assistant markdown keeps the model's line
+  breaks: a single newline renders as a line break, a blank line separates
+  blocks with one empty row, and transcript entries get two empty rows
+  between messages (one before tool rows). Tables fit the transcript width,
+  wrap cells instead of overflowing, and use display width so wide
+  characters stay aligned. Prose word-wraps by display width; continuation
+  rows repeat the list or quote prefix, and selection and double-click map
+  display columns back to characters. Fenced code expands tabs, uses the
+  shared highlighter, and paints `surface_high`; inline code uses the warning
+  color. A link shows its target when the target differs from the label, and
+  an image shows its alt text and URL. The Runs detail renders a subagent
+  report as markdown.
 - **Mouse discipline.** Open modals block all mouse input except scroll.
   Toggles happen on mouse-up only (`pending_toggle` is captured on press
   and cleared on drag), so dragging over expanded content never collapses

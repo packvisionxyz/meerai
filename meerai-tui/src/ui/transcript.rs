@@ -2,6 +2,7 @@ use super::statusline::{display_model, key_status_style, summarize_error_line};
 use super::*;
 use crate::app::{
     ToolCallEntry, TranscriptAnchor, TranscriptBuildMemo, TranscriptDocument, TranscriptRenderKey,
+    char_width, display_width,
 };
 
 pub(super) fn render_transcript(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
@@ -157,7 +158,7 @@ fn anchor_rail_hover_range(app: &AppState) -> Option<(usize, usize)> {
 fn rebuild_transcript_document(app: &mut AppState, width: u16) {
     let key = TranscriptRenderKey::capture(app, width);
     let mut memo = app.transcript_cache.take_memo();
-    let built = build_transcript_lines(app, &mut memo);
+    let built = build_transcript_lines(app, &mut memo, width as usize);
     let wrapped = wrap_tagged_lines(built, width as usize);
     let line_count = wrapped.lines.len();
     let mut anchors: Vec<TranscriptAnchor> = {
@@ -602,7 +603,11 @@ struct BuiltTranscript {
     hover_text_lines: Vec<(usize, usize)>,
 }
 
-fn build_transcript_lines(app: &AppState, memo: &mut TranscriptBuildMemo) -> BuiltTranscript {
+fn build_transcript_lines(
+    app: &AppState,
+    memo: &mut TranscriptBuildMemo,
+    width: usize,
+) -> BuiltTranscript {
     let mut lines = build_header_lines(app);
     let mut hover_text_lines: Vec<(usize, usize)> = Vec::new();
     let tab = app.tab();
@@ -725,18 +730,24 @@ fn build_transcript_lines(app: &AppState, memo: &mut TranscriptBuildMemo) -> Bui
                         ));
                         for line in reasoning.split('\n') {
                             lines.push(with_hover(
-                                tagged_line(
-                                    Line::from(vec![
-                                        Span::styled("  │ ", Style::default().fg(theme::p().faint)),
-                                        Span::styled(
-                                            line.to_string(),
-                                            Style::default()
-                                                .fg(theme::p().muted)
-                                                .add_modifier(Modifier::ITALIC),
-                                        ),
-                                    ]),
-                                    Some(idx),
-                                    4,
+                                with_hang(
+                                    tagged_line(
+                                        Line::from(vec![
+                                            Span::styled(
+                                                "  │ ",
+                                                Style::default().fg(theme::p().faint),
+                                            ),
+                                            Span::styled(
+                                                line.to_string(),
+                                                Style::default()
+                                                    .fg(theme::p().muted)
+                                                    .add_modifier(Modifier::ITALIC),
+                                            ),
+                                        ]),
+                                        Some(idx),
+                                        4,
+                                    ),
+                                    "  │ ".to_string(),
                                 ),
                                 idx,
                             ));
@@ -766,13 +777,16 @@ fn build_transcript_lines(app: &AppState, memo: &mut TranscriptBuildMemo) -> Bui
                     let mut spans =
                         vec![Span::styled("▌ ", Style::default().fg(theme::p().accent))];
                     push_user_mention_spans(&mut spans, line, &app.agents, &app.skills);
-                    lines.push(banded_line(Line::from(spans), Some(idx), 2));
+                    lines.push(with_hang(
+                        banded_line(Line::from(spans), Some(idx), 2),
+                        "  ".to_string(),
+                    ));
                 }
             }
             TranscriptEntry::Assistant { text, .. } => {
                 if !text.is_empty() {
                     let mut in_code_block = false;
-                    let rendered = memo.markdown(idx, text);
+                    let rendered = memo.markdown(idx, width, text);
                     for line in rendered.iter() {
                         if line.code && !in_code_block {
                             lines.push(code_line(tagged_line(Line::default(), None, 4)));
@@ -783,9 +797,10 @@ fn build_transcript_lines(app: &AppState, memo: &mut TranscriptBuildMemo) -> Bui
                         }
                         let prefix = if line.code { "    " } else { "  " };
                         let gutter = if line.code { 4 } else { 2 };
+                        let hang = format!("{prefix}{}", line.hang);
                         let mut spans = vec![Span::styled(prefix, Style::default())];
                         spans.extend(line.spans.iter().cloned());
-                        let tagged = tagged_line(Line::from(spans), None, gutter);
+                        let tagged = with_hang(tagged_line(Line::from(spans), None, gutter), hang);
                         lines.push(if line.code { code_line(tagged) } else { tagged });
                     }
                     if in_code_block {
@@ -1563,6 +1578,7 @@ fn wrap_tagged_lines(built: BuiltTranscript, width: usize) -> WrappedTranscript 
             line,
             entry_tag,
             gutter_len,
+            hang,
             band,
             code_band,
             hover_tag,
@@ -1570,52 +1586,22 @@ fn wrap_tagged_lines(built: BuiltTranscript, width: usize) -> WrappedTranscript 
         } = tagged;
         let line_style = line.style;
         let line_start = out.len();
-        let total_chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-        if total_chars == 0 {
+        if line.spans.is_empty() {
             out.push(Line::default().style(line_style));
             doc_lines.push(TranscriptWrappedLine {
                 text: String::new(),
                 gutter_len: 0,
+                hang_len: 0,
                 soft_wrapped_next: false,
             });
         } else {
-            let mut current_spans: Vec<Span<'static>> = Vec::new();
-            let mut current_text = String::new();
-            let mut current_col = 0;
-            let mut is_first_row = true;
-
-            for span in line.spans {
-                let style = span.style;
-                let mut buf = String::new();
-                for ch in span.content.chars() {
-                    if current_col == width {
-                        if !buf.is_empty() {
-                            current_spans.push(Span::styled(std::mem::take(&mut buf), style));
-                        }
-                        out.push(Line::from(std::mem::take(&mut current_spans)).style(line_style));
-                        doc_lines.push(TranscriptWrappedLine {
-                            text: std::mem::take(&mut current_text),
-                            gutter_len: if is_first_row { gutter_len } else { 0 },
-                            soft_wrapped_next: true,
-                        });
-                        is_first_row = false;
-                        current_col = 0;
-                    }
-                    buf.push(ch);
-                    current_text.push(ch);
-                    current_col += 1;
-                }
-                if !buf.is_empty() {
-                    current_spans.push(Span::styled(buf, style));
-                }
-            }
-
-            if !current_spans.is_empty() {
-                out.push(Line::from(current_spans).style(line_style));
+            for row in wrap_line(line.spans, width, &hang, gutter_len) {
+                out.push(Line::from(row.spans).style(line_style));
                 doc_lines.push(TranscriptWrappedLine {
-                    text: current_text,
-                    gutter_len: if is_first_row { gutter_len } else { 0 },
-                    soft_wrapped_next: false,
+                    text: row.text,
+                    gutter_len: row.gutter_len,
+                    hang_len: row.hang_len,
+                    soft_wrapped_next: row.soft_wrapped_next,
                 });
             }
         }
@@ -1738,4 +1724,108 @@ fn wrap_tagged_lines(built: BuiltTranscript, width: usize) -> WrappedTranscript 
         hover_zones,
         hover_text_zones,
     }
+}
+
+struct WrappedRow {
+    spans: Vec<Span<'static>>,
+    text: String,
+    gutter_len: usize,
+    hang_len: usize,
+    soft_wrapped_next: bool,
+}
+
+pub(super) fn markdown_lines(text: &str, width: usize) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    for line in crate::markdown::render(text, width) {
+        let hang = line.hang.clone();
+        for row in wrap_line(line.spans, width, &hang, 0) {
+            out.push(Line::from(row.spans));
+        }
+    }
+    out
+}
+
+fn wrap_line(
+    spans: Vec<Span<'static>>,
+    width: usize,
+    hang: &str,
+    gutter_len: usize,
+) -> Vec<WrappedRow> {
+    let chars: Vec<(char, Style)> = spans
+        .iter()
+        .flat_map(|span| span.content.chars().map(|ch| (ch, span.style)))
+        .collect();
+    if chars.is_empty() {
+        return vec![WrappedRow {
+            spans: Vec::new(),
+            text: String::new(),
+            gutter_len,
+            hang_len: 0,
+            soft_wrapped_next: false,
+        }];
+    }
+    let width = width.max(1);
+    let hang_width = display_width(hang);
+    let hang_len = hang.chars().count();
+    let mut rows = Vec::new();
+    let mut start = 0;
+    let mut first = true;
+    while start < chars.len() {
+        let prefix = if first { "" } else { hang };
+        let prefix_width = if first { 0 } else { hang_width };
+        let available = width.saturating_sub(prefix_width).max(1);
+        let mut column = 0;
+        let mut end = start;
+        while end < chars.len() {
+            let next = char_width(chars[end].0);
+            if end > start && column + next > available {
+                break;
+            }
+            column += next;
+            end += 1;
+        }
+        if end < chars.len()
+            && let Some(position) = (start..end).rev().find(|&idx| chars[idx].0 == ' ')
+        {
+            end = position + 1;
+        }
+        if end == start {
+            end += 1;
+        }
+        let mut row_spans: Vec<Span<'static>> = Vec::new();
+        if !prefix.is_empty() {
+            row_spans.push(Span::styled(
+                prefix.to_string(),
+                Style::default().fg(theme::p().faint),
+            ));
+        }
+        row_spans.extend(spans_from_chars(&chars[start..end]));
+        let mut text = String::with_capacity(prefix.len() + end - start);
+        text.push_str(prefix);
+        text.extend(chars[start..end].iter().map(|(ch, _)| *ch));
+        rows.push(WrappedRow {
+            spans: row_spans,
+            text,
+            gutter_len,
+            hang_len: if first { 0 } else { hang_len },
+            soft_wrapped_next: end < chars.len(),
+        });
+        start = end;
+        first = false;
+    }
+    rows
+}
+
+fn spans_from_chars(chars: &[(char, Style)]) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (ch, style) in chars {
+        if let Some(last) = spans.last_mut()
+            && last.style == *style
+        {
+            last.content.to_mut().push(*ch);
+        } else {
+            spans.push(Span::styled(ch.to_string(), *style));
+        }
+    }
+    spans
 }

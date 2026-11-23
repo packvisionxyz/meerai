@@ -1135,6 +1135,40 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn stream_discarded_clears_the_streaming_tab() {
+        let mut state = AppState::default();
+        apply_view_event(
+            &mut state,
+            ViewEvent::SessionOpened {
+                session: summary("s1", SessionStatus::Idle),
+            },
+        );
+        apply_view_event(
+            &mut state,
+            ViewEvent::TextDelta {
+                session_id: "s1".to_owned(),
+                item_id: "a1".to_owned(),
+                delta: "partial".to_owned(),
+            },
+        );
+        assert_eq!(
+            state.session_tabs.get("s1").unwrap().streaming_text,
+            "partial"
+        );
+
+        apply_view_event(
+            &mut state,
+            ViewEvent::StreamDiscarded {
+                session_id: "s1".to_owned(),
+            },
+        );
+        let tab = state.session_tabs.get("s1").unwrap();
+        assert!(tab.streaming_item_id.is_none());
+        assert!(tab.streaming_text.is_empty());
+        assert!(tab.streaming_reasoning.is_empty());
+    }
 }
 
 #[cfg(test)]

@@ -593,6 +593,28 @@ impl SessionTab {
                 }
                 _ => {}
             },
+            AgentEvent::ItemDiscarded { item_id } => {
+                if let Some(idx) = self.assistant_items.remove(&item_id) {
+                    let pending = self.pending_assistant_idx == Some(idx);
+                    if pending {
+                        self.pending_assistant_idx = None;
+                        if idx + 1 == self.transcript.len() {
+                            self.transcript.remove(idx);
+                            self.assistant_items.retain(|_, mapped| *mapped != idx);
+                        } else if let Some(TranscriptEntry::Assistant {
+                            text,
+                            reasoning,
+                            streaming,
+                            ..
+                        }) = self.transcript.get_mut(idx)
+                        {
+                            text.clear();
+                            reasoning.clear();
+                            *streaming = false;
+                        }
+                    }
+                }
+            }
             AgentEvent::ApprovalRequested { .. } | AgentEvent::ApprovalResolved { .. } => {}
             AgentEvent::QuestionAsked { .. } | AgentEvent::QuestionResolved { .. } => {}
             AgentEvent::RewindCompleted { .. } => {}

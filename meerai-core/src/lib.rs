@@ -11,5 +11,6 @@ pub use genai;
 pub use schemars::JsonSchema;
 pub use tools::{
     CommandError, CommandOutput, EffectClass, FileChangeKind, FileDiff, ObservationStatus,
-    ToolCall, ToolDefinition, ToolError, ToolObservation, ToolOutput, ToolRun, Toolset,
+    SANDBOX_DENIED_HINT, ToolCall, ToolDefinition, ToolError, ToolObservation, ToolOutput, ToolRun,
+    Toolset,
 };

@@ -174,6 +174,12 @@ impl LspToolset {
                     &["--stdio"],
                 ),
                 "go" => ("go", "go", "gopls", &[]),
+                "dart" => (
+                    "dart",
+                    "dart",
+                    "dart",
+                    &["language-server", "--protocol=lsp"],
+                ),
                 "py" | "pyi" => ("python", "python", "pyright-langserver", &["--stdio"]),
                 _ => {
                     if let Some(spec) = self.overrides.get(&ext)
@@ -582,6 +588,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(run.observation.status, ObservationStatus::Refused);
+    }
+
+    #[test]
+    fn resolves_builtin_language_servers() {
+        let dir = TempDir::new().unwrap();
+        let toolset = LspToolset::new(dir.path());
+
+        let (language_id, server_key, spec) =
+            toolset.resolve_server(Path::new("app_shell.dart")).unwrap();
+        assert_eq!(language_id, "dart");
+        assert_eq!(server_key, "dart");
+        assert_eq!(spec.command, "dart");
+        assert_eq!(
+            spec.args,
+            vec!["language-server".to_string(), "--protocol=lsp".to_string()]
+        );
+
+        let (language_id, server_key, spec) = toolset.resolve_server(Path::new("main.rs")).unwrap();
+        assert_eq!(language_id, "rust");
+        assert_eq!(server_key, "rust");
+        assert_eq!(spec.command, "rust-analyzer");
+        assert!(spec.args.is_empty());
     }
 
     #[tokio::test]

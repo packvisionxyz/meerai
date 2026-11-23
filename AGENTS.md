@@ -77,6 +77,8 @@ make verify                                    # fmt --check + clippy + test (al
 - `plan` mode is hard read-only.
 - Do not bypass the outside-workspace approval. Grant resources are literal; rule resources are
   globs.
+- Shell runs in the OS sandbox. A sandbox-escape rerun needs an explicit `SandboxEscape` approval.
+  Never set the hidden `unsandboxed` flag from model input, in `plan` mode, or from a project file.
 - Redaction keeps no log-only copy of a secret.
 - Keep the shell-safety allowlist conservative.
 - Do not let a project file control session retention.
@@ -101,6 +103,9 @@ make verify                                    # fmt --check + clippy + test (al
 - Keep new TUI dialogs narrow; use the width caps in `docs/tui-design.md`.
 - Neither UI spawns tool processes: `!` commands go through `SessionOpener::run_user_shell`.
 - `meerai-web-client` reducers carry no DOM types; UI side effects become explicit `UiEffect` values.
+- Both clients render the same Markdown feature set in `markdown.rs`. Change the TUI and
+  browser renderers together. Keep the TUI width fitting and the browser table alignment in
+  sync.
 - Every user-facing command and workflow gets a dedicated panel or modal in both
   `meerai-tui` and `meerai-web-client`. Do not ship a transcript-only flow in
   one client, or require a typed confirmation argument in one client and a

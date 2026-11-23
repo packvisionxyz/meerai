@@ -1373,7 +1373,7 @@ fn composer_wraps_a_long_prompt_across_rows() {
 
 #[test]
 fn markdown_separates_blocks_with_a_blank_line() {
-    let lines = crate::markdown::render("first paragraph\n\nsecond paragraph");
+    let lines = crate::markdown::render("first paragraph\n\nsecond paragraph", 80);
     let first = lines
         .iter()
         .position(|line| span_text(&line.spans).contains("first paragraph"))
@@ -1388,7 +1388,7 @@ fn markdown_separates_blocks_with_a_blank_line() {
 
 #[test]
 fn markdown_keeps_single_newlines_as_line_breaks() {
-    let lines = crate::markdown::render("first line\nsecond line\nthird line");
+    let lines = crate::markdown::render("first line\nsecond line\nthird line", 80);
     let rows: Vec<String> = lines.iter().map(|line| span_text(&line.spans)).collect();
     assert_eq!(rows, vec!["first line", "second line", "third line"]);
 }
@@ -3379,4 +3379,99 @@ fn transcript_selection_uses_black_text_on_white() {
         .unwrap();
     assert_eq!(cell.bg, ratatui::style::Color::White);
     assert_eq!(cell.fg, ratatui::style::Color::Black);
+}
+
+#[test]
+fn wrapped_rows_break_at_word_boundaries_and_repeat_the_hang() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: "- alpha beta gamma delta epsilon zeta eta theta iota kappa lambda\n".to_string(),
+        reasoning: String::new(),
+        streaming: false,
+        reasoning_expanded: false,
+    });
+    let _ = render_to_string_with_size(&mut app, 36, 24);
+
+    let start = app
+        .transcript_wrapped_lines
+        .iter()
+        .position(|row| row.text.contains("• alpha"))
+        .expect("bullet row");
+    let first = &app.transcript_wrapped_lines[start];
+    assert!(first.soft_wrapped_next, "{:?}", first.text);
+    assert!(first.text.ends_with(' '), "{:?}", first.text);
+
+    let next = &app.transcript_wrapped_lines[start + 1];
+    assert_eq!(next.hang_len, 4);
+    assert!(next.text.starts_with("    "), "{:?}", next.text);
+}
+
+#[test]
+fn wrapped_selection_joins_rows_without_the_hang_prefix() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: "- alpha beta gamma delta epsilon zeta eta theta iota kappa lambda\n".to_string(),
+        reasoning: String::new(),
+        streaming: false,
+        reasoning_expanded: false,
+    });
+    let _ = render_to_string_with_size(&mut app, 36, 24);
+
+    let start = app
+        .transcript_wrapped_lines
+        .iter()
+        .position(|row| row.text.contains("• alpha"))
+        .expect("bullet row");
+    let copied = app.extract_doc_selected_text(crate::app::DocSelection {
+        anchor: crate::app::DocPos {
+            line: start,
+            col: 0,
+        },
+        head: crate::app::DocPos {
+            line: start + 1,
+            col: 200,
+        },
+        active: false,
+    });
+    assert!(copied.starts_with("• alpha"), "{copied:?}");
+    assert!(!copied.contains("    "), "{copied:?}");
+    assert_eq!(copied.matches("alpha").count(), 1);
+}
+
+#[test]
+fn wide_characters_wrap_by_display_width() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "名前".repeat(40),
+    });
+    let _ = render_to_string_with_size(&mut app, 40, 24);
+    let inner = app.transcript_inner_area.width as usize;
+    let rows: Vec<_> = app
+        .transcript_wrapped_lines
+        .iter()
+        .filter(|row| row.text.contains('名'))
+        .collect();
+    assert!(rows.len() > 1);
+    for row in rows {
+        assert!(
+            crate::app::display_width(&row.text) <= inner,
+            "{:?}",
+            row.text
+        );
+    }
+}
+
+#[test]
+fn word_bounds_map_wide_characters_to_display_columns() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "名前 test".to_string(),
+    });
+    let _ = render_to_string_with_size(&mut app, 80, 24);
+    let row = app
+        .transcript_wrapped_lines
+        .iter()
+        .position(|line| line.text.contains("test"))
+        .expect("row");
+    assert_eq!(app.word_bounds_at(row, 7), Some((5, 8)));
 }

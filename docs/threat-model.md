@@ -105,6 +105,12 @@ a `WorkspaceWrite` policy and `sac-run_script` with `ReadOnly`; both pass
   environment and keeps only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`,
   `TERM`, `TMPDIR`, `PWD`, `LANG`, and `LC_*`; the secret scrub also runs
   on the child environment. Tighten-only from a project file.
+- **Explicit escape:** a sandboxed `code-shell` run whose output matches a
+  write-denial marker offers one `ApprovalKind::SandboxEscape`. An accepted
+  rerun uses `SandboxPolicy::Unrestricted` with the same environment scrub.
+  Turn and session grants cover later shell calls in that scope. `plan` mode
+  and `sandbox.require_for_shell` never offer it, and the hidden
+  `unsandboxed` flag is not in the model schema.
 - **Interpreter hardening:** `sac-run_script` runs `python3 -I -B`; Node
   gets `--permission` (or `--experimental-permission`) with
   `--allow-fs-read=<cwd>` when the probe succeeds. Script `path` arguments
@@ -284,15 +290,17 @@ refuses `--acp` and denies `acp-run`. Full boundary: [acp.md](acp.md) §5.
 `max_steps_per_turn` (default 32) and `step_limit_continuations` (default 2,
 so 96 steps; the absolute final step strips tools and asks for a summary;
 subagents get no continuations), `no_progress_fail_steps` (default 12; a
-turn that makes no file change for that many consecutive steps fails, with a
-diagnostic notice at two thirds), per-tool timeout (default 120 s), per-turn wall clock
+turn that makes no file change on that many write steps fails; read-only
+steps do not count; a diagnostic notice fires at two thirds), per-tool
+timeout (default 120 s), per-turn wall clock
 (`max_turn_secs`, default 1800, `0` disables; a subagent child gets the
 parent's remaining turn time minus a 5 s margin, with a 1 s minimum, so it
 normally fails its own turn first), and an optional session token cap with a
 Spend approval pause bound runaway execution. Breakers: the 3rd identical failing call injects a
 diagnostic and the 4th fails the turn; the 3rd identical batch injects a
 diagnostic and the 5th fails; `NoProgress` diagnoses at 8 write-less steps
-and fails at 12 (disabled in `plan` and without a write tool). Provider
+and fails at 12 (disabled in `plan` and without a write tool; read-only
+steps do not increment). Provider
 retries are status-classified, 3 attempts, jittered backoff; one bounded
 recovery turn follows a retryable failure.
 
@@ -481,3 +489,10 @@ emission, or model consumption: environment scrub at spawn (§2.4) →
     escaping, the HTML-as-text rule, link scheme checks, and the CSP reduce the
     injection risk, but a bug in a custom renderer or a missed raw-HTML path
     could still inject markup.
+12. **Approved sandbox escape.** An accepted `SandboxEscape` reruns the
+    approved shell command with `SandboxPolicy::Unrestricted`: the command can
+    read and write anything the user can and can reach the network, with no
+    kernel boundary. The approval is explicit and never derived from model
+    input, but a turn or session grant covers later shell commands in that
+    scope until the turn ends or the session resets. A denied escape keeps the
+    sandboxed failure.

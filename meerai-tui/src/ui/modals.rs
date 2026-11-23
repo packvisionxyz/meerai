@@ -2232,6 +2232,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             );
         }
         ActiveModal::RunDetail { run, scroll, .. } => {
+            let mut report_markdown: Option<String> = None;
             let (title, lines) = match run {
                 RunTarget::Subagent(index) => {
                     let Some(TranscriptEntry::Subagent(subagent)) = app.tab().transcript.get(index)
@@ -2252,10 +2253,10 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                             Style::default().fg(theme::p().faint),
                         ))],
                         _ => match &subagent.report {
-                            Some(report) if !report.trim().is_empty() => report
-                                .lines()
-                                .map(|line| Line::from(line.to_string()))
-                                .collect(),
+                            Some(report) if !report.trim().is_empty() => {
+                                report_markdown = Some(report.clone());
+                                Vec::new()
+                            }
                             _ => vec![Line::from(Span::styled(
                                 "conversation unavailable",
                                 Style::default().fg(theme::p().faint),
@@ -2310,20 +2311,26 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
             let body = rows[0];
             let width = (body.width as usize).max(1);
-            let mut wrapped_lines: Vec<Line<'static>> = Vec::new();
-            for line in lines {
-                let text: String = line
-                    .spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect();
-                for (start, end) in wrap_queued_editor(&text, width) {
-                    wrapped_lines.push(Line::from(Span::styled(
-                        text[start..end].to_string(),
-                        Style::default().fg(theme::p().text),
-                    )));
+            let wrapped_lines: Vec<Line<'static>> = match report_markdown {
+                Some(report) => super::transcript::markdown_lines(&report, width),
+                None => {
+                    let mut wrapped_lines: Vec<Line<'static>> = Vec::new();
+                    for line in lines {
+                        let text: String = line
+                            .spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect();
+                        for (start, end) in wrap_queued_editor(&text, width) {
+                            wrapped_lines.push(Line::from(Span::styled(
+                                text[start..end].to_string(),
+                                Style::default().fg(theme::p().text),
+                            )));
+                        }
+                    }
+                    wrapped_lines
                 }
-            }
+            };
             let max_scroll = wrapped_lines.len().saturating_sub(body.height as usize);
             app.run_detail_max_scroll = max_scroll;
             frame.render_widget(

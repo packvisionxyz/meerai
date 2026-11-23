@@ -366,14 +366,17 @@ impl AppState {
                     if streak >= 2
                         && let Some((start, end)) = self.word_bounds_at(doc_pos.line, doc_pos.col)
                     {
+                        let row = self.transcript_wrapped_lines.get(doc_pos.line);
+                        let start_col = row.map_or(start, |row| char_to_display(&row.text, start));
+                        let end_col = row.map_or(end, |row| char_to_display(&row.text, end));
                         let sel = DocSelection {
                             anchor: DocPos {
                                 line: doc_pos.line,
-                                col: start,
+                                col: start_col,
                             },
                             head: DocPos {
                                 line: doc_pos.line,
-                                col: end,
+                                col: end_col,
                             },
                             active: false,
                         };
@@ -627,13 +630,11 @@ impl AppState {
             return None;
         }
         let is_word = |c: char| c.is_alphanumeric() || c == '_';
-        let click = col.min(chars.len() - 1);
-        let click = if click < row.gutter_len {
-            let first = chars
-                .get(row.gutter_len..)?
-                .iter()
-                .position(|&c| is_word(c))?;
-            row.gutter_len + first
+        let skip = row.gutter_len.max(row.hang_len);
+        let click = display_to_char(&row.text, col).min(chars.len() - 1);
+        let click = if click < skip {
+            let first = chars.get(skip..)?.iter().position(|&c| is_word(c))?;
+            skip + first
         } else {
             click
         };
@@ -641,7 +642,7 @@ impl AppState {
             return None;
         }
         let mut start = click;
-        while start > row.gutter_len && is_word(chars[start - 1]) {
+        while start > skip && is_word(chars[start - 1]) {
             start -= 1;
         }
         let mut end = click;
@@ -726,17 +727,16 @@ impl AppState {
             .skip(start.line)
         {
             let chars: Vec<char> = row.text.chars().collect();
-            let c_start = if line_idx == start.line { start.col } else { 0 };
-            let c_end = if line_idx == end.line {
+            let start_display = if line_idx == start.line { start.col } else { 0 };
+            let end_display = if line_idx == end.line {
                 end.col
             } else {
-                max_width_col.max(chars.len().saturating_sub(1))
+                max_width_col
             };
-            let effective_start = if c_start <= row.gutter_len {
-                row.gutter_len
-            } else {
-                c_start
-            };
+            let c_start = display_to_char(&row.text, start_display);
+            let c_end = display_to_char(&row.text, end_display);
+            let skip = row.gutter_len.max(row.hang_len);
+            let effective_start = c_start.max(skip);
             let slice_str = if effective_start < chars.len() && effective_start <= c_end {
                 let clamped_end = c_end.min(chars.len() - 1);
                 let raw: String = chars[effective_start..=clamped_end].iter().collect();
@@ -988,8 +988,8 @@ impl AppState {
             .map_or(0, |tab| tab.scroll_offset);
         let line_index = scroll + (row - area.y) as usize;
         let line = self.transcript_wrapped_lines.get(line_index)?;
-        let offset = (column - area.x) as usize;
-        if offset < line.gutter_len {
+        let offset = display_to_char(&line.text, (column - area.x) as usize);
+        if offset < line.gutter_len.max(line.hang_len) {
             return None;
         }
         let byte_start = char_to_byte(&line.text, offset);

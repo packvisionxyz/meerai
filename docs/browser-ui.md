@@ -63,7 +63,7 @@ The protocol crate exists because `AgentEvent` lives in `meerai-agents`, which d
 | `state.rs` | Pure reducers: snapshot, view events, tabs, queue, slash commands, mentions, settings form, transcript grouping, history. |
 | `text.rs` | `TextBuffer` replaces the Rune `TextEdit`; no renderer type remains in state. |
 | `transport.rs`, `transport/wasm.rs` | `fetch` for intents and session detail hydration, `EventSource` with `requestAnimationFrame` delta coalescing, snapshot-first attach, resync on an expired cursor, and reconnect. |
-| `markdown.rs` | `comrak` AST to Leptos views. HTML blocks and inline HTML render as text. Links are scheme-checked. Images render as links. |
+| `markdown.rs` | `comrak` AST to Leptos views with the same feature set as the TUI: tables with alignment, task lists, footnotes, description lists, GitHub alerts, math, and front matter. Soft breaks render as line breaks. HTML blocks and inline HTML render as text. Links are scheme-checked. Images render as links. |
 | `highlight.rs` | Lexical highlighting returns semantic spans; CSS owns colour. |
 | `theme.rs` | Validates `ThemeTokensDto` (hex and CSS named colors), computes `color-scheme` and contrast foregrounds, and manages browser-only `BrowserTheme` (`Host`, `System`, `Light`, `Dark`). |
 | `keymap.rs` | Normalizes `KeyboardEvent.code` to app actions, handles modal navigation and `Tab` focus trapping, and keeps text-field handling separate. |

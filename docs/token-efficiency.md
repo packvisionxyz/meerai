@@ -5,7 +5,7 @@ implemented in the tree, the decisions behind it, and what remains planned.
 
 | | |
 | --- | --- |
-| **Status** | Verified against the tree on 2026-11-17 |
+| **Status** | Verified against the tree on 2026-11-23 |
 | **Audience** | Contributors and maintainers of the agent loop, session log, and tools |
 | **Scope** | `meerai-agents`, `meerai-session`, `meerai-tools`, `meerai-core`, `meerai-common`, `meerai-cli`, `meerai-tui` |
 | **Related** | [harness-spec.md](harness-spec.md) · [architecture.md](architecture.md) · [threat-model.md](threat-model.md) · [harness-internals.md](harness-internals.md) |
@@ -131,10 +131,15 @@ Completion can be gated on an external verifier, and loops are bounded.
     the 5th fails the turn. Edit/write-only batches also log
     `CircuitBreaker { RepeatedIdenticalEdit }` events; other batches log the
     diagnostic as a runtime message only.
-  - **NoProgress** — 8 tool steps without a file change (after a write
-    attempt) inject a diagnostic; 12 fail the turn. Disabled in `plan` mode
-    and when no write tool is registered; a `subagent-run`/`acp-run`
-    delegation resets the counter.
+  - **NoProgress** — 8 write steps without a file change inject a diagnostic;
+    12 fail the turn. A read-only step never increments the counter. Disabled
+    in `plan` mode and when no write tool is registered; a
+    `subagent-run`/`acp-run` delegation resets the counter.
+- A provider stream that fails after content discards the started
+  `AgentMessage`/`Reasoning` items (`AgentEvent::ItemDiscarded`) and retries
+  under the transient classification. No partial text reaches the session
+  log, and the worker recovery turn follows when the attempts are spent
+  (`multi_turn_agent/turn.rs`).
 - One bounded recovery turn follows a retryable provider error or a
   `LoopDetected` failure (`multi_turn_agent/worker.rs`,
   `MAX_RECOVERY_ATTEMPTS = 1`). The user-visible prompt names the failure
@@ -231,7 +236,6 @@ Implemented in `meerai-tools/src/world.rs`, `code/shell.rs`,
 | --- | --- | --- |
 | Incremental projection | Cache `derive_messages` incrementally from a tail index and rebuild from a replacement point, instead of the current full-result cache. | Projection-cache seam (§2.7); purity must hold |
 | Stable prefix ordering | Keep `RuntimeContext` / scoped `AGENTS.md` insertions out of the cached prefix so directory switches and repair hints do not drop cache-hit rates. | harness-spec §2.5 multi-section prefix |
-| Partial-stream recovery | Preserve already-received stream chunks or retry safely on mid-stream truncation before a tool call executes. | Stream contract review |
 | Per-turn recovery budget | Replace the single recovery attempt with a configurable `RecoveryBudget` (max retries, max recovery turns, optional ordered model fallback) and feed `PostToolUseFailure`/`TurnFailed` context into the recovery prompt. | Recovery v1 (§2.5) |
 | Subagent/ACP alignment | Expose the `sac-run_script` sandbox posture and per-turn spill thresholds consistently to child sessions; surface cache-hit metrics per turn in headless `--json` and TUI metrics. | Subagent runtime |
 | Read allowlist mounts | Optional allowlist-only read mounts for `SandboxPolicy::ReadOnly` (today both sandbox builders allow host-wide reads so toolchains work). | Empirical read-prefix matrix (open question 3) |

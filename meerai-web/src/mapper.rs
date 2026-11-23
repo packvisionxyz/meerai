@@ -488,6 +488,9 @@ pub fn map_view_event(kind: RegistryEventKind) -> ViewEvent {
             item_id,
             delta,
         },
+        RegistryEventKind::StreamDiscarded { session_id } => ViewEvent::StreamDiscarded {
+            session_id: session_id.to_string(),
+        },
         RegistryEventKind::EntryCompleted { session_id, entry } => ViewEvent::EntryCompleted {
             session_id: session_id.to_string(),
             entry: map_entry(entry),

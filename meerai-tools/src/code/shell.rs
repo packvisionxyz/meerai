@@ -92,6 +92,10 @@ pub(crate) struct ShellArgs {
     #[schemars(description = "Timeout in milliseconds. Defaults to 120000.")]
     #[serde(default, deserialize_with = "meerai_core::lenient::option_u64_value")]
     timeout_ms: Option<u64>,
+
+    #[schemars(skip)]
+    #[serde(default)]
+    unsandboxed: bool,
 }
 
 pub(crate) fn definition(name: &str) -> ToolDefinition {
@@ -173,10 +177,20 @@ impl CodeTools {
         for root in self.extra_roots() {
             writable_roots.push(canonicalize_or_keep(&root).await);
         }
-        let policy = SandboxPolicy::WorkspaceWrite {
-            workspace_root: cwd,
-            writable_roots,
-            allow_network: false,
+        let policy = if args.unsandboxed {
+            if self.require_sandbox() {
+                return refused_run(
+                    "sandbox escape is not allowed while sandbox.require_for_shell is set"
+                        .to_string(),
+                );
+            }
+            SandboxPolicy::Unrestricted
+        } else {
+            SandboxPolicy::WorkspaceWrite {
+                workspace_root: cwd,
+                writable_roots,
+                allow_network: false,
+            }
         };
 
         match self
@@ -193,10 +207,51 @@ impl CodeTools {
                     Some("Narrow the command, or raise timeout_ms and retry.".to_string());
                 run
             }
-            Ok(WorldExecOutcome::Output(output)) => complete(output),
+            Ok(WorldExecOutcome::Output(output)) => {
+                let run = complete(output);
+                let sandboxed = self.execution_world().is_sandboxed();
+                if sandboxed
+                    && !args.unsandboxed
+                    && !self.require_sandbox()
+                    && looks_like_sandbox_denial(
+                        &run.observation.stdout,
+                        &run.observation.stderr,
+                        run.observation.status == ObservationStatus::Success,
+                    )
+                {
+                    mark_sandbox_denial(run)
+                } else {
+                    run
+                }
+            }
             Err(error) => failure_run(format!("cannot start {SHELL_PROGRAM} shell: {error}")),
         }
     }
+}
+
+fn looks_like_sandbox_denial(stdout: &str, stderr: &str, succeeded: bool) -> bool {
+    const STRONG: [&str; 4] = [
+        "operation not permitted",
+        "read-only file system",
+        "failed to open a file",
+        "read/write permissions",
+    ];
+    const WEAK: [&str; 4] = ["permission denied", "eperm", "eacces", "erofs"];
+    let lowered = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    STRONG.iter().any(|marker| lowered.contains(marker))
+        || (!succeeded && WEAK.iter().any(|marker| lowered.contains(marker)))
+}
+
+fn mark_sandbox_denial(mut run: ToolRun) -> ToolRun {
+    run.observation.hint = Some(meerai_core::SANDBOX_DENIED_HINT.to_string());
+    match &mut run.output {
+        ToolOutput::Text(text) | ToolOutput::Fail(text) => {
+            text.push_str("\nHint: ");
+            text.push_str(meerai_core::SANDBOX_DENIED_HINT);
+        }
+        ToolOutput::Stop(_) => {}
+    }
+    run
 }
 
 fn complete(output: Output) -> ToolRun {
@@ -330,6 +385,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sandbox_denial_markers_cover_macos_linux_and_flutter() {
+        assert!(looks_like_sandbox_denial(
+            "",
+            "touch: /Users/u/flutter/cache/lockfile: Operation not permitted",
+            false
+        ));
+        assert!(looks_like_sandbox_denial(
+            "",
+            "touch: cannot touch '/tmp/x': Read-only file system",
+            false
+        ));
+        assert!(looks_like_sandbox_denial(
+            "Flutter failed to open a file at \"/Users/u/flutter/bin/cache/lockfile\".\nPlease ensure that the SDK and/or project is installed in a location that has read/write permissions for the current user.",
+            "",
+            true
+        ));
+        assert!(!looks_like_sandbox_denial(
+            "the tool logged permission denied but exited 0",
+            "",
+            true
+        ));
+        assert!(!looks_like_sandbox_denial(
+            "",
+            "error[E0425]: cannot find value `x` in this scope",
+            false
+        ));
+    }
+
+    #[test]
+    fn shell_schema_hides_the_sandbox_escape_flag() {
+        let schema = definition("code-shell").parameters;
+        let text = schema.to_string();
+        assert!(!text.contains("unsandboxed"), "{text}");
+        assert!(text.contains("command"), "{text}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn shell_invocation_uses_sh_dash_c() {
@@ -393,18 +485,22 @@ mod tests {
             .shell(ShellArgs {
                 command: "echo test".to_string(),
                 timeout_ms: Some(2500),
+                unsandboxed: false,
             })
             .await;
         assert_eq!(run.observation.status, ObservationStatus::Success);
         assert_eq!(run.observation.stdout, "from-world");
 
-        let calls = world.recorded.lock().unwrap();
-        assert_eq!(calls.len(), 1);
+        let recorded = {
+            let calls = world.recorded.lock().unwrap();
+            calls.clone()
+        };
+        assert_eq!(recorded.len(), 1);
         assert_eq!(
-            calls[0].0.removed_env_vars,
+            recorded[0].0.removed_env_vars,
             vec!["CUSTOM_SECRET".to_string()]
         );
-        match &calls[0].1 {
+        match &recorded[0].1 {
             SandboxPolicy::WorkspaceWrite {
                 workspace_root,
                 writable_roots,
@@ -420,6 +516,21 @@ mod tests {
             }
             other => panic!("expected WorkspaceWrite policy, got {other:?}"),
         }
+
+        let run = tools
+            .shell(ShellArgs {
+                command: "echo escape".to_string(),
+                timeout_ms: None,
+                unsandboxed: true,
+            })
+            .await;
+        assert_eq!(run.observation.status, ObservationStatus::Success);
+        let recorded = {
+            let calls = world.recorded.lock().unwrap();
+            calls.clone()
+        };
+        assert_eq!(recorded.len(), 2);
+        assert!(matches!(recorded[1].1, SandboxPolicy::Unrestricted));
     }
 
     #[tokio::test]
@@ -432,6 +543,7 @@ mod tests {
             .shell(ShellArgs {
                 command: "echo hi".to_string(),
                 timeout_ms: None,
+                unsandboxed: false,
             })
             .await;
         assert_eq!(run.observation.status, ObservationStatus::Refused);

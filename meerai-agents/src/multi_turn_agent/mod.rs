@@ -171,8 +171,14 @@ pub(super) struct CollectedStream {
 
 pub(super) enum StreamFailure {
     Cancelled,
-    Provider { error: anyhow::Error, partial: bool },
-    EmptyStream { detail: String, retryable: bool },
+    Provider {
+        error: anyhow::Error,
+        items: Vec<ItemId>,
+    },
+    EmptyStream {
+        detail: String,
+        retryable: bool,
+    },
 }
 
 pub(super) enum BudgetOutcome {
@@ -204,10 +210,10 @@ impl ChatStreamer for Client {
         let response = self
             .exec_chat_stream(model, request, Some(options))
             .await
-            .map_err(|err| anyhow!("LLM stream request failed: {err}"))?;
+            .map_err(|err| anyhow::Error::new(err).context("LLM stream request failed"))?;
         let mapped = response
             .stream
-            .map(|item| item.map_err(|err| anyhow!("LLM stream error: {err}")));
+            .map(|item| item.map_err(|err| anyhow::Error::new(err).context("LLM stream error")));
         Ok(Box::pin(mapped))
     }
 }
@@ -221,6 +227,17 @@ pub(super) fn start_text_item(event_tx: &mpsc::UnboundedSender<AgentEvent>) -> I
         },
     });
     id
+}
+
+pub(super) fn discard_partial_items(
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    items: &[ItemId],
+) {
+    for item_id in items {
+        let _ = event_tx.send(AgentEvent::ItemDiscarded {
+            item_id: item_id.clone(),
+        });
+    }
 }
 
 pub(super) fn start_reasoning_item(event_tx: &mpsc::UnboundedSender<AgentEvent>) -> ItemId {
@@ -440,6 +457,7 @@ pub struct MultiTurnAgent {
     pub(in crate::multi_turn_agent) failure_tracker: FailureTracker,
     pub(super) injected_instruction_dirs: HashSet<PathBuf>,
     pub(super) outside_grants: HashSet<PathBuf>,
+    pub(super) sandbox_escape: Option<GrantScope>,
     pub(super) interceptors: Vec<SharedInterceptor>,
     pub(super) question_cancels: usize,
     pub(super) hooks: Arc<HookEngine>,
@@ -533,6 +551,7 @@ impl MultiTurnAgent {
             failure_tracker: FailureTracker::default(),
             injected_instruction_dirs: HashSet::new(),
             outside_grants: HashSet::new(),
+            sandbox_escape: None,
             interceptors: vec![Arc::new(crate::checkpoint::CheckpointInterceptor)],
             question_cancels: 0,
             hooks: Arc::new(HookEngine::default()),
@@ -1328,6 +1347,7 @@ impl MultiTurnAgent {
         self.failure_tracker = FailureTracker::default();
         self.injected_instruction_dirs.clear();
         self.outside_grants.clear();
+        self.sandbox_escape = None;
         self.question_cancels = 0;
     }
 
@@ -1340,6 +1360,7 @@ impl MultiTurnAgent {
         self.failure_tracker = FailureTracker::default();
         self.injected_instruction_dirs.clear();
         self.outside_grants.clear();
+        self.sandbox_escape = None;
         self.question_cancels = 0;
         self.session_started = false;
         self.projection_cache = None;

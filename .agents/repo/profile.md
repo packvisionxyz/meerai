@@ -269,10 +269,10 @@ Notes:
     and the planner falls back to balanced `StepEnded` boundaries. With no `summarizer_model`, the
     summary request reuses the parent system, tools, and history. Do not clear at log-write time or
     delete a result.
-27. **No-progress breaker:** `NoProgress` logs `CircuitBreaker` at 8 tool steps without a file
-    change and fails the turn at 12. It is disabled in `plan` mode and when no write tool is
-    registered; a `subagent-run`/`acp-run` delegation resets the counter. Do not count read-only
-    exploration as failure.
+27. **No-progress breaker:** `NoProgress` logs `CircuitBreaker` at 8 write steps without a file
+    change and fails the turn at 12. A read-only step never increments the counter. It is disabled in
+    `plan` mode and when no write tool is registered; a `subagent-run`/`acp-run` delegation resets the
+    counter. Do not count read-only exploration as failure.
 28. **Recovery turn:** the worker queues one recovery turn after a retryable provider or
     `LoopDetected` failure. The prompt is user-visible and names the failure. It runs before the
     next queued prompt, at most once per failure streak; budget, config, tool, and non-retryable
@@ -282,7 +282,9 @@ Notes:
     present (408/409/425/429 and 5xx transient; other 4xx permanent) and the message blocklist only
     as a fallback. Backoff is 250/500 ms plus up to 50% jitter. Do not retry a permanent status. An
     empty stream reports provider, model, stop reason, event count, elapsed time, and a hint; a
-    `content_filter`, `max_tokens`, or `stop_sequence` stop reason is non-retryable.
+    `content_filter`, `max_tokens`, or `stop_sequence` stop reason is non-retryable. A mid-stream
+    failure after content discards the started items with `AgentEvent::ItemDiscarded` and retries;
+    never log or project partial stream text.
 30. **Delegated turn budget:** a `subagent-run` child gets the parent's remaining turn deadline
     minus a 5 s margin, with a 1 s minimum (`child_turn_secs`), so the child fails its own budget
     before the parent cancels it. The parent bridge deadline stays as the backstop. Do not set the
@@ -328,6 +330,13 @@ Notes:
     Packs, SubagentSpawn}`; the browser exposes one `WorkspacePanel` modal with
     tabs. Both read the same `meerai-host` data methods and send the same host
     actions. Do not add a workflow to one client alone.
+38. **Markdown parity:** both clients parse the same `comrak` extension set
+    (table, tasklist, footnotes, description lists, alerts, math, front matter,
+    multiline block quotes, superscript, subscript). Soft breaks render as line
+    breaks in both. The TUI fits tables to the width, wraps by display width,
+    and repeats the list or quote prefix on continuation rows; the browser
+    aligns cells and scrolls wide tables. Change both renderers in the same
+    change.
 
 ## 5. Patterns
 
@@ -356,6 +365,7 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 | User questions | `question-ask` tool + `QuestionAsked`/`QuestionResolved` events + `AnswerQuestion`; TUI overlay; headless auto-cancel | `meerai-agents/src/question.rs`, `meerai-tui/src/app/modals.rs` |
 | Rewind | capture before write tools, `Rewind { turn_id, scope }`, `/rewind` menu, one `RewindApplied` event | `meerai-session/src/snapshot.rs`, `meerai-agents/src/multi_turn_agent/tools.rs`, `meerai-tui/src/app/modals.rs` |
 | TUI overlay | `ActiveModal` variant + `handle_agent_event` queue + key handler | `meerai-tui/src/app.rs` (`ActiveModal::Approval`) |
+| Markdown | `comrak` AST walker; the TUI emits width-aware `MarkdownLine`s with a hang prefix, the browser emits Leptos views | `meerai-tui/src/markdown.rs`, `meerai-web-client/src/markdown.rs` |
 | ACP bridge | `connect_with` spawns `AcpAgent`, handshake/`session/load`, typed `AcpEvent`, `AcpWorker` to `AgentCommand`/`AgentEvent`, permission oneshot replies, cancel | `meerai-acp/src/{client,events,worker}.rs`, `meerai-cli/src/{acp_cmd,main,headless}.rs`, `meerai-tui/src/{lib,app,ui}` |
 
 ## 6. Generated and vendored paths
@@ -538,6 +548,10 @@ Detail in [`infra.md`](infra.md). Summary:
   once on a terminal. Hooks run concurrently with a 10 s default timeout (60 s max), fail
   open unless `fail_closed`, log `HookFired`, and may tighten policy but cannot loosen `plan`, an
   explicit `deny`/`ask` rule, or the outside-workspace approval. They run outside `ExecutionWorld`.
+- Shell sandbox escape: a sandboxed `code-shell` run whose output matches a write-denial marker asks
+  for `ApprovalKind::SandboxEscape`. An accepted rerun passes the hidden `unsandboxed` argument and
+  uses `SandboxPolicy::Unrestricted`; turn/session grants cover later shell calls in that scope.
+  Never set the flag from model input, in `plan` mode, or with `sandbox.require_for_shell`.
 - Build surfaces: `meerai-tui` defaults `update` (reqwest); `meerai-cli` defaults `tui`.
   `--no-default-features` drops ratatui, git2, comrak, and the TUI crate; genai still pulls
   reqwest.

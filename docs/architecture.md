@@ -109,9 +109,9 @@ facts:
   run before spill, log, UI, and model text.
 - **Resilience.** Status-classified provider retries (3 attempts,
   250/500 ms + ≤50% jitter), stream header/read timeouts (30 s / 120 s),
-  empty-stream retry, one compaction retry on context overflow, circuit
-  breakers, budgets, and one bounded recovery turn after a retryable
-  failure.
+  empty-stream and partial-stream retry, one compaction retry on context
+  overflow, circuit breakers, budgets, and one bounded recovery turn after a
+  retryable failure.
 - **Extension.** In-loop extensions use the ordered `Interceptor` chain
   (`before_step`, async `before_tool`, `after_tool`, `turn_stopping`);
   checkpoint capture is the built-in interceptor. Hooks use the separate

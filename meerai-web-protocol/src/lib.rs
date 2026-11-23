@@ -815,6 +815,9 @@ pub enum ViewEvent {
         item_id: String,
         delta: String,
     },
+    StreamDiscarded {
+        session_id: String,
+    },
     EntryCompleted {
         session_id: String,
         entry: TranscriptEntryDto,
@@ -1382,6 +1385,9 @@ mod tests {
                 session_id: "sess-1".to_owned(),
                 item_id: "a1".to_owned(),
                 delta: "think".to_owned(),
+            },
+            ViewEvent::StreamDiscarded {
+                session_id: "sess-1".to_owned(),
             },
             ViewEvent::EntryCompleted {
                 session_id: "sess-1".to_owned(),

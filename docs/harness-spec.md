@@ -232,6 +232,7 @@ pub enum AgentEvent {
     ItemStarted   { item },                  // full initial payload
     ItemDelta     { item_id, delta },        // typed incremental updates
     ItemCompleted { item },                  // authoritative final state
+    ItemDiscarded { item_id },               // drop an uncommitted partial item
     ApprovalRequested { request },
     ApprovalResolved  { request_id },
     QuestionAsked     { request },
@@ -291,6 +292,10 @@ Contract rules:
 5. `QuestionAsked` is an interaction request, not a permission (§2.3.1).
 6. `Plan` items are produced by the ACP worker; the native loop has no
    plan producer yet (§3).
+7. `ItemDiscarded` removes an item that never completed, after a mid-stream
+   provider retry. The client drops the item and its deltas; the partial
+   text never reaches the session log, so replay cannot restore it. A
+   discarded item has no `ItemCompleted`.
 
 #### 2.3.1 Questions and choices
 
@@ -395,7 +400,7 @@ Per-model context comes from `ProviderCatalog`. Knobs (`context` in
 | `reasoning_pruning` | true | strip settled-step reasoning from projections |
 | `prompt_caching` | true | request-level `CacheControl::Ephemeral`; cache counts reported |
 | `max_steps_per_turn` | 32 | final step strips tools and asks for a summary |
-| `no_progress_fail_steps` | 12 | fail the turn after this many steps with no file change; the diagnostic notice fires at two thirds |
+| `no_progress_fail_steps` | 12 | fail the turn after this many write steps with no file change; read-only steps do not count; the diagnostic notice fires at two thirds |
 | `tool_timeout_ms` | 120 000 | per-tool wall clock |
 | `max_turn_secs` | 1800 | per-turn wall clock; `0` disables |
 | `max_session_tokens` | unset | session token cap with a Spend approval pause |
@@ -543,7 +548,9 @@ permissions:
 - `Ask` produces `ApprovalRequested`; `AcceptForSession` stores a logged
   Session grant so repeats don't re-prompt. Denied calls return a
   structured refusal to the model and are logged. Outside-workspace
-  access forces an approval that adds a literal path root.
+  access forces an approval that adds a literal path root. A
+  `SandboxEscape` approval reruns a sandbox-denied shell command without the
+  sandbox (§ Sandbox enforcement).
 - **Project overlay.** `<project-root>/.meerai/settings.yml` (root found
   by walking up to `.git` or `.meerai/settings.yml`) merges tighten-only:
   project `ask` rules → user rules → project `deny` rules; `allow` dropped
@@ -569,7 +576,13 @@ permissions:
   network by default, and mask sensitive host and workspace paths.
   `HostWorld` fallback carries a startup warning;
   `sandbox.require_for_shell`/`require_for_scripts` fail closed;
-  `sandbox.strict_env` allowlists the child environment. The trait is a
+  `sandbox.strict_env` allowlists the child environment. A sandboxed shell
+  command whose output matches a write-denial marker offers one
+  `ApprovalKind::SandboxEscape`; an accepted rerun uses
+  `SandboxPolicy::Unrestricted` with the same environment scrub. Turn and
+  session grants cover later shell calls in that scope. `plan` mode and
+  `sandbox.require_for_shell` never offer it, and the `unsandboxed` flag is
+  hidden from the model schema. The trait is a
   seam: a remote/container world can replace host execution without
   changing toolsets. Security effects and residual risks:
   [threat-model.md](threat-model.md).
@@ -640,8 +653,8 @@ a pass clears the baseline. With `context.rollback_on_verify_failure` in
 
 - `max_steps_per_turn` (default 32; the final step strips tools and asks
   for a text summary), `no_progress_fail_steps` (default 12; the turn fails
-  after that many steps with no file change, with a diagnostic at two
-  thirds), per-tool timeouts, per-turn wall clock
+  after that many write steps with no file change, with a diagnostic at two
+  thirds; read-only steps do not count), per-tool timeouts, per-turn wall clock
   (`max_turn_secs`, also bounding streams, summarization, and tool
   batches), and a session token cap with a Spend approval pause
   (`Accept` raises the cap by one context window; `AcceptForSession`
@@ -650,8 +663,9 @@ a pass clears the baseline. With `context.rollback_on_verify_failure` in
   4th fails the turn (`LoopDetected`); the 3rd identical batch injects a
   diagnostic and the 5th fails (edit/write-only batches also log
   `CircuitBreaker { RepeatedIdenticalEdit }`); `NoProgress` diagnoses at 8
-  tool steps without a file change and fails at 12, disabled in `plan`
-  and without a write tool, reset by delegation.
+  write steps without a file change and fails at 12, disabled in `plan`
+  and without a write tool, reset by delegation. A read-only step never
+  increments the counter.
 
 #### Inline guardrails
 
@@ -824,7 +838,7 @@ permission set, and tool subset, exposed as one `subagent-run` tool.
 | v1 | Hierarchical `AGENTS.md`: root in the prefix, per-directory files injected as ephemera when touched | Implemented |
 | v2 | `explore` subagent: parallel read-only calls, spans-only report | Implemented |
 | v2 | AST repo map: `retrieval-repo_map`, tree-sitter (Rust/TS/TSX/JS/Python/Go) + personalized PageRank, ~1500-token budget (200..4000) | Implemented |
-| v3 | LSP tools: `lsp-go_to_definition`, `lsp-find_references`, `lsp-get_diagnostics` over stdio JSON-RPC (`rust-analyzer`, `typescript-language-server`, `gopls`, `pyright-langserver`); opt-in post-edit diagnostics (`context.post_edit_diagnostics`) | Implemented |
+| v3 | LSP tools: `lsp-go_to_definition`, `lsp-find_references`, `lsp-get_diagnostics` over stdio JSON-RPC (`rust-analyzer`, `typescript-language-server`, `gopls`, `dart language-server --protocol=lsp`, `pyright-langserver`); opt-in post-edit diagnostics (`context.post_edit_diagnostics`) | Implemented |
 | v3 | Search-as-Code: `sac-run_script` runs `python3 -I -B` / hardened Node for multi-step analysis; output spilled like any tool result | Implemented |
 
 Rationale: vector embeddings underperform on live code — exact-identifier

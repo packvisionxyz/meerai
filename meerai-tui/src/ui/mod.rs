@@ -210,6 +210,7 @@ struct TaggedTranscriptLine {
     line: Line<'static>,
     entry_tag: Option<usize>,
     gutter_len: usize,
+    hang: String,
     band: bool,
     code_band: bool,
     hover_tag: Option<usize>,
@@ -225,6 +226,7 @@ fn tagged_line(
         line,
         entry_tag,
         gutter_len,
+        hang: String::new(),
         band: false,
         code_band: false,
         hover_tag: None,
@@ -241,11 +243,17 @@ fn banded_line(
         line,
         entry_tag,
         gutter_len,
+        hang: String::new(),
         band: true,
         code_band: false,
         hover_tag: None,
         digest_tag: None,
     }
+}
+
+fn with_hang(mut tagged: TaggedTranscriptLine, hang: String) -> TaggedTranscriptLine {
+    tagged.hang = hang;
+    tagged
 }
 
 fn code_line(mut tagged: TaggedTranscriptLine) -> TaggedTranscriptLine {
