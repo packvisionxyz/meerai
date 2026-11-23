@@ -18,12 +18,13 @@ use wasm_bindgen::closure::Closure;
 
 use crate::keymap::open_command_palette;
 use crate::state::{
-    ActiveModal, CompletionKind, ConnectionState, MentionCategory, SlashCommandSpec,
+    ActiveModal, CompletionKind, ConnectionState, MentionCategory, RunKindDto, SlashCommandSpec,
     accept_completion, activate_and_switch_session, detach_tab_view, format_duration_ms,
     format_ratio, format_tokens, move_tab_to, open_diff_modal, open_diff_modal_with_status,
-    open_model_input, open_provider_select, open_search_modal, open_settings, remove_mention_token,
-    reopen_pending_request, resolved_mention_chips, set_approval_mode, set_status_notice,
-    submit_or_queue_composer, toggle_diagnose, update_completion,
+    open_model_input, open_provider_select, open_runs, open_search_modal, open_settings,
+    remove_mention_token, reopen_pending_request, resolved_mention_chips, running_shell_count,
+    running_subagent_count, set_approval_mode, set_status_notice, submit_or_queue_composer,
+    toggle_diagnose, update_completion,
 };
 use crate::store::StoreHandle;
 use crate::theme::{BrowserTheme, UiTheme};
@@ -650,6 +651,8 @@ fn Composer(store: StoreHandle) -> impl IntoView {
 
     let can_send = Memo::new(move |_| store.with(|s| s.can_submit_composer()));
     let busy = Memo::new(move |_| store.with(|s| s.is_busy()));
+    let run_counts =
+        Memo::new(move |_| store.with(|s| (running_subagent_count(s), running_shell_count(s))));
 
     view! {
         <div class="composer">
@@ -850,6 +853,33 @@ fn Composer(store: StoreHandle) -> impl IntoView {
                 </form>
                 <div class="composer-footer">
                     {move || {
+                        let (agents, shells) = run_counts.get();
+                        (agents > 0 || shells > 0).then(|| {
+                            view! {
+                                <div class="run-chips">
+                                    {(agents > 0).then(|| view! {
+                                        <button
+                                            type="button"
+                                            class="run-chip"
+                                            on:click=move |_| store.update(|s| open_runs(s, RunKindDto::Agents))
+                                        >
+                                            {format!("{agents} {}", if agents == 1 { "agent" } else { "agents" })}
+                                        </button>
+                                    })}
+                                    {(shells > 0).then(|| view! {
+                                        <button
+                                            type="button"
+                                            class="run-chip"
+                                            on:click=move |_| store.update(|s| open_runs(s, RunKindDto::Shells))
+                                        >
+                                            {format!("{shells} {}", if shells == 1 { "shell" } else { "shells" })}
+                                        </button>
+                                    })}
+                                </div>
+                            }
+                        })
+                    }}
+                    {move || {
                         let (_, _, _, _, session_status, active_tool, _, _) = composer_state.get();
                         if busy.get() {
                             let waiting = matches!(
@@ -1003,6 +1033,7 @@ struct SidebarSnapshot {
     usage: UsageDto,
     context: Option<ContextBreakdownDto>,
     diagnose_open: bool,
+    changes_open: bool,
     subagents: Vec<(String, String, String, Option<String>)>,
 }
 
@@ -1024,12 +1055,14 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                         .filter_map(|entry| match entry {
                             meerai_web_protocol::TranscriptEntryDto::Subagent {
                                 id,
+                                name,
                                 agent,
                                 status,
                                 child_session_id,
                                 ..
                             } => Some((
                                 id.clone(),
+                                name.clone(),
                                 agent.clone(),
                                 status.clone(),
                                 child_session_id.clone(),
@@ -1055,6 +1088,7 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                 usage,
                 context,
                 diagnose_open: s.sidebar_diagnose_open,
+                changes_open: s.sidebar_changes_open,
                 subagents,
             }
         })
@@ -1078,6 +1112,7 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                 usage,
                 context,
                 diagnose_open,
+                changes_open,
                 subagents,
             } = sidebar_memo.get();
             if !open {
@@ -1187,6 +1222,12 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                         <div class="side-head">
                             <h2>"Changed files"</h2>
                             <div class="side-head-actions">
+                                <button
+                                    class="btn tiny"
+                                    on:click=move |_| store.update(|s| s.sidebar_changes_open = !s.sidebar_changes_open)
+                                >
+                                    {if changes_open { "Hide" } else { "Show" }}
+                                </button>
                                 {(!changes.is_empty()).then(|| view! {
                                     <>
                                         <span class="badge">{changes.len()}</span>
@@ -1208,7 +1249,14 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                                 >"Refresh"</button>
                             </div>
                         </div>
-                        {if changes.is_empty() {
+                        {if !changes_open {
+                            let summary = if changes.is_empty() {
+                                "Working tree clean".to_owned()
+                            } else {
+                                format!("{} changed file(s)", changes.len())
+                            };
+                            view! { <div class="side-meta">{summary}</div> }.into_any()
+                        } else if changes.is_empty() {
                             view! { <div class="side-empty">"Working tree clean"</div> }.into_any()
                         } else {
                             AnyView::from(Fragment::new(
@@ -1285,14 +1333,16 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                             AnyView::from(Fragment::new(
                                 subagents
                                     .into_iter()
-                                    .map(|(id, agent, status, child)| {
+                                    .map(|(id, name, agent, status, child)| {
                                         let click_id = id.clone();
+                                        let label = name.clone().unwrap_or_else(|| agent.clone());
                                         view! {
                                             <button
                                                 class="side-row"
                                                 on:click=move |_| store.update(|s| {
                                                     s.modal = Some(ActiveModal::SubagentOverlay {
                                                         entry_id: click_id.clone(),
+                                                        name: name.clone(),
                                                         agent: agent.clone(),
                                                         status: status.clone(),
                                                         child_session_id: child.clone(),
@@ -1300,6 +1350,7 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                                                         usage: None,
                                                         loading: child.is_some(),
                                                         error: None,
+                                                        from_runs: None,
                                                     });
                                                     if let Some(child) = child.clone()
                                                         && let Some(t) = crate::transport::current()
@@ -1309,7 +1360,7 @@ fn Sidebar(store: StoreHandle) -> impl IntoView {
                                                 })
                                             >
                                                 <span class=format!("tab-dot {}", if status == "running" { "running" } else { "idle" })></span>
-                                                <span class="side-row-text">{agent.clone()}</span>
+                                                <span class="side-row-text">{label}</span>
                                                 <span class="badge muted">{status.clone()}</span>
                                             </button>
                                         }

@@ -679,6 +679,72 @@ fn submit_while_running_queues_and_keeps_turn() {
 }
 
 #[test]
+fn live_delegation_folds_into_one_subagent_row() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.handle_agent_event(AgentEvent::TurnStarted {
+        turn_id: TurnId::from_raw("turn-live-subagent"),
+        model: "gemini::gemini-3.8-flash".to_string(),
+    });
+
+    let call_item = ItemId::from_raw("item-call-sub");
+    app.handle_agent_event(AgentEvent::ItemStarted {
+        item: SessionItem::ToolCall {
+            id: call_item.clone(),
+            call_id: meerai_agents::CallId::from_raw("call-sub"),
+            name: "subagent-run".to_string(),
+            args: "{}".to_string(),
+            effect: EffectClass::External,
+            status: ItemStatus::Proposed,
+            output: None,
+        },
+    });
+    app.handle_agent_event(AgentEvent::ItemStarted {
+        item: SessionItem::SubagentRun {
+            id: ItemId::from_raw("item-sub-live"),
+            name: None,
+            agent: "explore".to_string(),
+            status: ItemStatus::InProgress,
+            report: None,
+            child_session_id: Some("ses-child-live".to_string()),
+            model: None,
+            approval_mode: ApprovalMode::Ask,
+            steps_used: 0,
+            max_steps: 0,
+            usage: Default::default(),
+            est_cost_usd: None,
+            active_tool: None,
+        },
+    });
+    app.handle_agent_event(AgentEvent::ItemCompleted {
+        item: SessionItem::ToolCall {
+            id: call_item,
+            call_id: meerai_agents::CallId::from_raw("call-sub"),
+            name: "subagent-run".to_string(),
+            args: "{}".to_string(),
+            effect: EffectClass::External,
+            status: ItemStatus::Succeeded,
+            output: Some("done".to_string()),
+        },
+    });
+
+    let delegation_tool_rows = app
+        .tab()
+        .transcript
+        .iter()
+        .filter(|entry| matches!(entry, TranscriptEntry::ToolCall(tc) if tc.name == "subagent-run"))
+        .count();
+    assert_eq!(delegation_tool_rows, 0);
+    assert_eq!(
+        app.tab()
+            .transcript
+            .iter()
+            .filter(|entry| matches!(entry, TranscriptEntry::Subagent(_)))
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn subagent_run_lifecycle_folds_and_renders() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -693,6 +759,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
     app.handle_agent_event(AgentEvent::ItemStarted {
         item: SessionItem::SubagentRun {
             id: subagent_id.clone(),
+            name: None,
             agent: "reviewer".to_string(),
             status: ItemStatus::Proposed,
             report: None,
@@ -710,6 +777,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
         app.tab().transcript.last(),
         Some(&TranscriptEntry::Subagent(SubagentEntry {
             id: "item-sub-1".to_string(),
+            name: None,
             agent: "reviewer".to_string(),
             status: ToolCallStatus::Proposed,
             report: None,
@@ -736,6 +804,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
         app.tab().transcript.last(),
         Some(&TranscriptEntry::Subagent(SubagentEntry {
             id: "item-sub-1".to_string(),
+            name: None,
             agent: "reviewer".to_string(),
             status: ToolCallStatus::Running,
             report: None,
@@ -757,6 +826,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
     app.handle_agent_event(AgentEvent::ItemCompleted {
         item: SessionItem::SubagentRun {
             id: subagent_id,
+            name: None,
             agent: "reviewer".to_string(),
             status: ItemStatus::Succeeded,
             report: Some("Line one\nLine two".to_string()),
@@ -774,6 +844,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
         app.tab().transcript.last(),
         Some(&TranscriptEntry::Subagent(SubagentEntry {
             id: "item-sub-1".to_string(),
+            name: None,
             agent: "reviewer".to_string(),
             status: ToolCallStatus::Succeeded,
             report: Some("Line one\nLine two".to_string()),
@@ -820,6 +891,7 @@ fn subagent_entry_finalizes_on_parent_turn_failure_and_abort() {
     app.handle_agent_event(AgentEvent::ItemStarted {
         item: SessionItem::SubagentRun {
             id: ItemId::from_raw("sub-abort"),
+            name: None,
             agent: "explore".to_string(),
             status: ItemStatus::InProgress,
             report: None,
@@ -853,6 +925,7 @@ fn subagent_entry_finalizes_on_parent_turn_failure_and_abort() {
     app.handle_agent_event(AgentEvent::ItemStarted {
         item: SessionItem::SubagentRun {
             id: ItemId::from_raw("sub-fail"),
+            name: None,
             agent: "build".to_string(),
             status: ItemStatus::InProgress,
             report: None,
@@ -893,6 +966,7 @@ fn child_session_load_queues_action_and_folds_nested_transcript() {
     app.handle_agent_event(AgentEvent::ItemStarted {
         item: SessionItem::SubagentRun {
             id: ItemId::from_raw("sub-read"),
+            name: None,
             agent: "explore".to_string(),
             status: ItemStatus::InProgress,
             report: None,
@@ -918,14 +992,14 @@ fn child_session_load_queues_action_and_folds_nested_transcript() {
         .expect("subagent entry");
     entry.expanded = true;
 
-    app.request_child_session_load("sub-read");
+    app.request_child_session_load("sub-read", false);
     let tab_id = app.tab().tab_id;
     assert!(matches!(
         app.pending_session_actions.last(),
         Some(PendingSessionAction::ReadChildSession { item_id, session_id, tab_id: t })
             if item_id == "sub-read" && session_id.as_str() == "ses-child-read" && *t == tab_id
     ));
-    app.request_child_session_load("sub-read");
+    app.request_child_session_load("sub-read", false);
     assert_eq!(app.pending_session_actions.len(), 1);
 
     let events = vec![
@@ -1222,6 +1296,7 @@ fn subagent_progress_updates_live_telemetry() {
     app.handle_agent_event(AgentEvent::ItemStarted {
         item: SessionItem::SubagentRun {
             id: item_id.clone(),
+            name: None,
             agent: "explore".to_string(),
             status: ItemStatus::InProgress,
             report: None,

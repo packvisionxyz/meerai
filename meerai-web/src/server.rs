@@ -1240,9 +1240,13 @@ async fn handle_user_shell(
             "shell command must not be empty",
         );
     }
-    if let Err(err) = state.registry.begin_user_shell(&session_id, &command) {
-        return host_err_response(err);
-    }
+    let run_id = match state
+        .registry
+        .begin_user_shell(&session_id, &command, body.run_id)
+    {
+        Ok(id) => id,
+        Err(err) => return host_err_response(err),
+    };
     let result = state.opener.run_user_shell(&command).await;
     if let Some(root) = state.opener.workspace_root() {
         refresh_file_changes_once(&root, &state.registry).await;
@@ -1251,14 +1255,14 @@ async fn handle_user_shell(
         Ok(output) => {
             state
                 .registry
-                .finish_user_shell(&session_id, Ok(output.clone()));
+                .finish_user_shell(&session_id, &run_id, Ok(output.clone()));
             json_response(StatusCode::OK, &RunShellResponse { output })
         }
         Err(err) => {
             let msg = err.to_string();
             state
                 .registry
-                .finish_user_shell(&session_id, Err(msg.clone()));
+                .finish_user_shell(&session_id, &run_id, Err(msg.clone()));
             json_error(StatusCode::BAD_REQUEST, ApiErrorCode::BadRequest, &msg)
         }
     }

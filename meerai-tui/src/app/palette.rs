@@ -7,6 +7,7 @@ pub(crate) enum PaletteAction {
     MoveTabLeft,
     MoveTabRight,
     CycleApproval,
+    ToggleChanges,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -150,6 +151,13 @@ pub(crate) const PALETTE_COMMANDS: &[PaletteCommand] = &[
         hint: "/diagnose",
         keywords: "diagnose cache hit ratio context memory tokens prompt",
         action: PaletteAction::Slash("/diagnose"),
+    },
+    PaletteCommand {
+        section: "View",
+        label: "Toggle changed files block",
+        hint: "File Changes",
+        keywords: "changes diff git files sidebar",
+        action: PaletteAction::ToggleChanges,
     },
     PaletteCommand {
         section: "Turn",

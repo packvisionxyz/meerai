@@ -127,6 +127,7 @@ QuestionAsked     { request_id, questions }
 QuestionAnswered  { request_id, answers }
 RewindApplied     { turn_id, scope, restored, replaced }
 HookFired         { event, decision, detail }
+GoalUpdated       { state }
 CheckpointCreated { checkpoint_id, turn_id, paths }
 CircuitBreaker    { kind, action }
 Error             { code, message, retryable }
@@ -241,6 +242,9 @@ pub enum AgentEvent {
     TurnCompleted { turn_id, reason },
     Error         { code, message },
     HookCompleted { event, decision, reason },
+    ContextUpdated { breakdown },
+    GoalUpdated   { state },
+    GoalContinued { turn, max_turns },
 }
 
 pub enum SessionItem {
@@ -346,7 +350,7 @@ turn/start (log)
       after_tool interceptors · PostToolUse hooks · batch notes
     step/end (log)
   } while tools owe another request, or steering arrived
-  turn_stopping interceptors + Stop hook → may continue the turn once
+  turn_stopping interceptors + Stop hook → may continue the turn
   heal dangling calls · turn/end (log, structured reason)
 ```
 
@@ -354,9 +358,12 @@ The extension seam is `meerai_agents::intercept`: an ordered
 `Vec<Arc<dyn Interceptor>>` with `before_step` (may stop the turn), async
 `before_tool` (authorized plan + context, returns session events to log),
 `after_tool` (post-redaction/post-spill outcome, may add one model-visible
-note), and `turn_stopping` (may continue the turn once, consulted only
-when no tool calls were made). Checkpoint capture is the built-in
-`CheckpointInterceptor`. Hooks use the separate `HookEngine` because they
+note), and `turn_stopping` (may continue the turn, consulted only when no
+tool calls were made; a later stop can continue again, bounded by the
+remaining step budget). Checkpoint capture is the built-in
+`CheckpointInterceptor`. The built-in `GoalInterceptor` keeps a goal turn
+alive while the `goal` tool has an open checklist item, up to 24 rounds.
+Hooks use the separate `HookEngine` because they
 await host processes outside the loop. Hot-swappable plugins are out of
 scope (§3, non-goals).
 
@@ -724,6 +731,29 @@ Review the current changes. List findings by severity with file:line references.
   They grant no tools, scripts, MCP, or sandbox. An agent `permissions` block
   tightens a subagent's policy; `allow` entries are dropped. Full tool and
   permission mapping from definitions is planned (§3).
+- One skill is built in (`DefinitionSource::Builtin`): `goal`. It is inserted
+  last, so a user, pack, or project skill with the id `goal` shadows it. Its
+  body drives a loop with three Read-classified tools: `goal-set` stores the
+  goal, done condition, constraints, and checklist; `goal-check` records one
+  item result with evidence and may add items; `goal-status` re-reads the
+  state after compaction or resume. `GoalInterceptor::turn_stopping` continues
+  the turn while an item is open, up to 24 rounds. The TUI and browser accept
+  `@goal` as an alias for `@skill/goal`.
+- The goal loop spans turns. After a turn ends with an open goal (`Ok` or
+  `ErrorCode::Budget`), the worker logs `SessionEvent::GoalUpdated`, emits
+  `AgentEvent::GoalUpdated` and `AgentEvent::GoalContinued`, resets the round
+  count, and pushes one continuation prompt at the front of the queue. It caps
+  the automatic turns at 4. `Cancel`, `Quit`, `Reset`, a queued recovery turn,
+  and headless one-shots opt out.
+- `SessionEvent::GoalUpdated` is durable but not model-visible.
+  `meerai_session::goal::last_goal` restores it in `build_agent` and in host
+  `register_opened`, so the model state and the panel survive `--resume`.
+- `AgentEvent::GoalUpdated` is the live signal. The TUI stores it on the tab;
+  the host stores it on the session record, exposes it in the session detail,
+  and rebroadcasts it as `RegistryEventKind::GoalUpdated` /
+  `ViewEvent::GoalUpdated`. `/goal` opens a read-only panel in both clients.
+  The live goal state lives with the agent; the durable event is the only
+  copy outside a running process.
 
 #### Subagent execution
 
@@ -744,10 +774,17 @@ permission set, and tool subset, exposed as one `subagent-run` tool.
   `ItemStarted { SubagentRun }` → report on idle → `ItemCompleted`. Only
   the final report enters the parent's context — the isolation that makes
   search subagents token-efficient. The TUI expands the child's own
-  conversation from its log.
+  conversation from its log without affecting the row state when the runs
+  dialog reads the same log.
+- The tool accepts an optional `name` for the run. It is carried on
+  `SubagentSpec` and `SessionItem::SubagentRun`, shown in the transcript
+  header, runs list, detail title, and browser card, and recovered from the
+  tool-call arguments on replay. `acp-run` accepts the same argument.
 - Child approvals forward to the parent overlay; usage rolls up into
   parent counters; the parent token cap propagates; children inherit the
-  parent's `ExecutionWorld` and run without a turn clock.
+  parent's `ExecutionWorld` and run without a turn clock. A child
+  `max_tokens` request floors at 50,000, then clamps to the parent's
+  remaining budget.
 - The delegated `acp-run` tool sends one task to an external `agy` child
   session; it has no token/grant rollup ([acp.md](acp.md) §2.8).
 

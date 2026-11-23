@@ -196,11 +196,6 @@ pub(super) fn capture_screen_lines(frame: &mut Frame<'_>, app: &mut AppState) {
 }
 
 pub(super) fn render_selection_highlight(frame: &mut Frame<'_>, app: &AppState) {
-    let highlight = Style::default()
-        .bg(theme::p().accent)
-        .fg(theme::p().background)
-        .add_modifier(Modifier::BOLD);
-
     if let Some(sel) = app.doc_selection
         && sel.anchor != sel.head
         && app.modal.is_none()
@@ -245,7 +240,8 @@ pub(super) fn render_selection_highlight(frame: &mut Frame<'_>, app: &AppState) 
                     .clamp(min_col, max_col);
                     for col in c_start..=c_end {
                         if let Some(cell) = buf.cell_mut((col, row)) {
-                            cell.set_style(highlight);
+                            cell.set_bg(TEXT_SELECTION_BG);
+                            cell.set_fg(TEXT_SELECTION_FG);
                         }
                     }
                 }
@@ -272,7 +268,8 @@ pub(super) fn render_selection_highlight(frame: &mut Frame<'_>, app: &AppState) 
         let c_end = if row == end.row { end.col } else { max_col }.min(max_col);
         for col in c_start..=c_end {
             if let Some(cell) = buf.cell_mut((col, row)) {
-                cell.set_style(highlight);
+                cell.set_bg(TEXT_SELECTION_BG);
+                cell.set_fg(TEXT_SELECTION_FG);
             }
         }
     }

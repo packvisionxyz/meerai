@@ -1,7 +1,7 @@
 use super::statusline::{display_model, format_compact_tokens, key_status_style};
 use super::*;
 
-pub(super) fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
+pub(super) fn render_sidebar_overview(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     frame.render_widget(
         Block::default().style(Style::default().bg(theme::p().surface)),
         area,
@@ -91,12 +91,57 @@ pub(super) fn render_sidebar_overview(frame: &mut Frame<'_>, app: &AppState, are
         },
     ]));
 
+    let mut subagents: Vec<_> = app
+        .tab()
+        .transcript
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Subagent(subagent) => Some((
+                match subagent.named() {
+                    Some(name) => format!("{name} ({})", subagent.agent),
+                    None => subagent.agent.clone(),
+                },
+                subagent.status,
+                subagent.steps_used,
+                subagent.max_steps,
+            )),
+            _ => None,
+        })
+        .collect();
+    subagents.sort_by_key(|(_, status, _, _)| {
+        !matches!(status, ToolCallStatus::Proposed | ToolCallStatus::Running)
+    });
+    const MAX_SUBAGENT_ROWS: usize = 4;
+    for (agent, status, steps_used, max_steps) in subagents.iter().take(MAX_SUBAGENT_ROWS) {
+        let (badge, color) = status_label(*status);
+        let steps = if *max_steps > 0 {
+            format!(" {steps_used}/{max_steps}")
+        } else {
+            String::new()
+        };
+        let name_width = width.saturating_sub(4 + badge.len() + 2 + steps.len());
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  • {} ", truncate_single_line(agent, name_width)),
+                theme::muted(),
+            ),
+            Span::styled(format!("[{badge}]"), Style::default().fg(color)),
+            Span::styled(steps, Style::default().fg(theme::p().faint)),
+        ]));
+    }
+    if subagents.len() > MAX_SUBAGENT_ROWS {
+        lines.push(Line::from(Span::styled(
+            format!("  … {} more", subagents.len() - MAX_SUBAGENT_ROWS),
+            Style::default().fg(theme::p().faint),
+        )));
+    }
+
     let recent_tools: Vec<_> = app
         .tab()
         .transcript
         .iter()
         .filter_map(|e| match e {
-            TranscriptEntry::ToolCall(tc) => Some(tc),
+            TranscriptEntry::ToolCall(tc) if !is_delegation_tool(&tc.name) => Some(tc),
             _ => None,
         })
         .rev()
@@ -164,12 +209,24 @@ pub(super) fn render_sidebar_diagnose(frame: &mut Frame<'_>, app: &mut AppState,
     let width = inner.width as usize;
     let header_area = Rect::new(inner.x, inner.y, inner.width, 1);
     app.sidebar_diagnose_head_area = header_area;
+    let head_hovered = app.hovered_sidebar == Some(SidebarHitKind::DiagnoseHead);
+    if head_hovered {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(theme::p().surface_high)),
+            Rect::new(area.x, header_area.y, area.width, 1),
+        );
+    }
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
                 "DIAGNOSE ",
                 Style::default()
                     .fg(theme::p().text)
+                    .bg(if head_hovered {
+                        theme::p().surface_high
+                    } else {
+                        theme::p().surface
+                    })
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -178,7 +235,17 @@ pub(super) fn render_sidebar_diagnose(frame: &mut Frame<'_>, app: &mut AppState,
                 } else {
                     "[show]"
                 },
-                Style::default().fg(theme::p().faint),
+                Style::default()
+                    .fg(if head_hovered {
+                        theme::p().text
+                    } else {
+                        theme::p().faint
+                    })
+                    .bg(if head_hovered {
+                        theme::p().surface_high
+                    } else {
+                        theme::p().surface
+                    }),
             ),
         ])),
         header_area,
@@ -282,22 +349,62 @@ pub(super) fn render_sidebar_changes(frame: &mut Frame<'_>, app: &mut AppState, 
     let inner = pad_rect(area, 2, 1);
     if inner.width == 0 || inner.height == 0 {
         app.sidebar_changes_inner_area = Rect::default();
+        app.sidebar_changes_head_area = Rect::default();
         app.visible_file_change_rows = 0;
         return;
     }
 
-    let title = format!("File Changes ({})", app.file_changes.len());
     let width = inner.width as usize;
-
+    let action = if app.sidebar_changes_open {
+        "[hide]"
+    } else {
+        "[show]"
+    };
+    let title = format!("File Changes ({})", app.file_changes.len());
+    let title = truncate_single_line(&title, width.saturating_sub(action.chars().count() + 1));
+    let header_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    app.sidebar_changes_head_area = header_area;
+    let head_hovered = app.hovered_sidebar == Some(SidebarHitKind::ChangesHead);
+    let head_bg = if head_hovered {
+        theme::p().surface_high
+    } else {
+        theme::p().surface
+    };
+    if head_hovered {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(head_bg)),
+            Rect::new(area.x, header_area.y, area.width, 1),
+        );
+    }
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            truncate_single_line(&title, width),
-            Style::default()
-                .fg(theme::p().text)
-                .add_modifier(Modifier::BOLD),
-        ))),
-        Rect::new(inner.x, inner.y, inner.width, 1),
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{title} "),
+                Style::default()
+                    .fg(theme::p().text)
+                    .bg(head_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                action,
+                Style::default()
+                    .fg(if head_hovered {
+                        theme::p().text
+                    } else {
+                        theme::p().faint
+                    })
+                    .bg(head_bg),
+            ),
+        ])),
+        header_area,
     );
+    if !app.sidebar_changes_open || inner.height < 2 {
+        app.sidebar_changes_inner_area = Rect::default();
+        app.visible_file_change_rows = 0;
+        app.file_change_more_hit = None;
+        app.hovered_file_change = None;
+        return;
+    }
 
     let top_gap = if inner.height >= 4 { 2 } else { 1 };
     let rows_area = Rect {
@@ -394,10 +501,21 @@ pub(super) fn render_sidebar_changes(frame: &mut Frame<'_>, app: &mut AppState, 
         let footer_y = rows_area.y + shown_count as u16;
         let footer_rect = Rect::new(rows_area.x, footer_y, rows_area.width, 1);
         app.file_change_more_hit = Some(footer_rect);
+        let footer_hovered = app.hovered_sidebar == Some(SidebarHitKind::ChangesMore);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 label,
-                Style::default().fg(theme::p().faint),
+                Style::default()
+                    .fg(if footer_hovered {
+                        theme::p().text
+                    } else {
+                        theme::p().faint
+                    })
+                    .bg(if footer_hovered {
+                        theme::p().surface_high
+                    } else {
+                        theme::p().surface
+                    }),
             ))),
             footer_rect,
         );

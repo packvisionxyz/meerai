@@ -165,7 +165,9 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   warns and skips; missing frontmatter uses the file/directory name. Skills
   advertise one prompt line each (`id: description`, 8 KiB cap,
   screened); `skill-load` reads `SKILL.md` or one supporting file inside the
-  skill directory, 16 KiB cap. Explicit `--skill` bodies keep the 16 KiB /
+  skill directory, 16 KiB cap. One skill is built in (`Builtin` source): `goal`.
+  It is appended after user, pack, and project skills, so a `goal` skill in any
+  of those sources shadows it. Explicit `--skill` bodies keep the 16 KiB /
   32 KiB caps. `--agent` takes one id (repeat is a parse error); `--skill` is
   repeatable; unknown ids fail with the available list. Model precedence:
   `--model` → `MEERAI_MODEL` → agent `model` → settings/provider default;
@@ -285,9 +287,10 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   mode; restored tabs load each session's own mode. A model switch
   persists through `SetModel`/applied agent model (`persist_model`).
 - Headless approvals: tool-call approval fails fast with exit `2` and a
-  `--mode` hint; a Spend approval prints the `max_session_tokens` remedy,
-  declines, and exits `1` (`Failed { Budget }`); external-agent (ACP)
-  permissions decline. Completed is `0`; other failures `1`.
+  `--mode` hint; a Spend approval prints the preview title with the
+  `max_session_tokens` and subagent `max_tokens` remedies, declines, and
+  exits `1` (`Failed { Budget }`); external-agent (ACP) permissions decline.
+  Completed is `0`; other failures `1`.
 
 ### 2.4 Turn loop and context engine
 
@@ -431,6 +434,14 @@ implementation invariants.
   pinned turns, verbatim turns, and cached prompt tokens. The TUI stores
   the latest breakdown per tab; the host registry stores it per live
   session and rebroadcasts `RegistryEventKind::ContextUpdated`.
+- Goal telemetry: `AgentEvent::GoalUpdated` carries the full `GoalState`
+  after each step with an active goal. The TUI stores it per tab; the host
+  stores it per record, adds it to the session detail, and rebroadcasts
+  `RegistryEventKind::GoalUpdated`. The worker logs
+  `SessionEvent::GoalUpdated` at turn end; `meerai_session::goal::last_goal`
+  restores it in `build_agent` and host `register_opened`.
+  `AgentEvent::GoalContinued` announces an automatic follow-up turn and
+  renders as a system row.
 - Routing and spend: `HarnessConfig::routing` holds `ModelRoute` entries.
   `RoutingCoordinator` owns a global and per-provider semaphore from
   `max_concurrency`, plus a USD ledger from `note_cost` and a cap from the
@@ -462,9 +473,18 @@ implementation invariants.
   `ToolPlan`/`ToolContext` and returns `SessionEvent`s to log,
   `after_tool` sees the post-redaction/post-spill `ToolOutcome` and may
   return one model-visible note, and `turn_stopping` may continue the
-  turn once (consulted only when no tool calls were made). Checkpoint
+  turn (consulted only when no tool calls were made). It can continue
+  more than once, bounded by the remaining step budget; the `Stop` hook
+  keeps running at each stop until it blocks once. Checkpoint
   capture is the built-in `CheckpointInterceptor` on `before_tool`
-  (Write-effect tools only). Hooks do **not** use the interceptor chain:
+  (Write-effect tools only). The built-in `GoalInterceptor` continues
+  the turn while the `goal` tool holds an open checklist item, up to
+  `MAX_GOAL_ROUNDS` (24). When the turn still ends with an open goal
+  (`Ok` or `Budget`), the worker logs `SessionEvent::GoalUpdated`, emits
+  `AgentEvent::GoalUpdated` and `GoalContinued`, and pushes one
+  continuation turn (max 4). The `goal-set`, `goal-check`, and
+  `goal-status` tools are Read-classified: they change session state only,
+  never a workspace file. Hooks do **not** use the interceptor chain:
   they use `HookEngine`, because they await host processes at lifecycle
   points outside the loop.
 

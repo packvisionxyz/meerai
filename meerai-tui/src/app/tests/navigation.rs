@@ -482,6 +482,56 @@ fn double_clicking_the_composer_selects_a_word() {
 }
 
 #[test]
+fn composer_up_and_down_follow_wrapped_rows() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.composer_input_area = Rect::new(2, 20, 10, 4);
+    app.tab_mut().input = "abcdefghijklmnopqrst".to_string();
+    app.tab_mut().cursor = 15;
+
+    app.handle_key_event(key(KeyCode::Up));
+    assert_eq!(app.tab().cursor, 5);
+
+    app.handle_key_event(key(KeyCode::Down));
+    assert_eq!(app.tab().cursor, 15);
+}
+
+#[test]
+fn composer_vertical_move_keeps_the_goal_column() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.composer_input_area = Rect::new(2, 20, 10, 4);
+    app.tab_mut().input = "abcdefghij\nxy\nklmnopqrst".to_string();
+    app.tab_mut().cursor = 8;
+
+    app.handle_key_event(key(KeyCode::Down));
+    assert_eq!(app.tab().cursor, 13);
+    app.handle_key_event(key(KeyCode::Down));
+    assert_eq!(app.tab().cursor, 22);
+
+    app.handle_key_event(key(KeyCode::Up));
+    assert_eq!(app.tab().cursor, 13);
+    app.handle_key_event(key(KeyCode::Up));
+    assert_eq!(app.tab().cursor, 8);
+}
+
+#[test]
+fn composer_vertical_move_counts_mention_chips_as_display_width() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.agents = vec![sample_agent(
+        "foo",
+        DefinitionSource::Agents,
+        None,
+        None,
+        "prompt",
+    )];
+    app.composer_input_area = Rect::new(2, 20, 4, 4);
+    app.tab_mut().input = "@agent/foo bar".to_string();
+    app.tab_mut().cursor = 14;
+
+    app.handle_key_event(key(KeyCode::Up));
+    assert_eq!(app.tab().cursor, 10);
+}
+
+#[test]
 fn alt_shift_left_right_moves_the_active_tab() {
     let (mut app, _rx, _secrets) = test_app();
     let first = app.tab().session_id.as_str().to_string();

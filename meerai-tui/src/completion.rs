@@ -60,6 +60,11 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
         false,
     ),
     (
+        "/goal",
+        "Show the active goal checklist (or use @goal <instruction>)",
+        false,
+    ),
+    (
         "/search",
         "Search files by name or content (ripgrep)",
         false,
@@ -569,6 +574,7 @@ fn mention_description(source: &DefinitionSource, description: Option<&str>) -> 
     let source = match source {
         DefinitionSource::User => "user".to_string(),
         DefinitionSource::Pack(id) => format!("pack {id}"),
+        DefinitionSource::Builtin => "built-in".to_string(),
         DefinitionSource::Meerai => ".meerai".to_string(),
         DefinitionSource::Agents => ".agents".to_string(),
         DefinitionSource::Claude => ".claude".to_string(),
@@ -629,14 +635,23 @@ fn build_definition_candidates(
     let mut scored: Vec<(MatchRank, CompletionItem)> = entries
         .iter()
         .filter_map(|entry| {
-            let search = format!("{keyword}/{} {} {keyword}", entry.id, entry.id);
+            let alias = kind == CompletionItemKind::Skill && entry.id == "goal";
+            let search = if alias {
+                format!("goal @goal {}", entry.id)
+            } else {
+                format!("{keyword}/{} {} {keyword}", entry.id, entry.id)
+            };
             let rank = score_candidate(&search, query)?;
             Some((
                 rank,
                 CompletionItem {
                     label: entry.id.clone(),
                     description: entry.description.clone(),
-                    insert_text: format!("@{keyword}/{} ", entry.id),
+                    insert_text: if alias {
+                        "@goal ".to_string()
+                    } else {
+                        format!("@{keyword}/{} ", entry.id)
+                    },
                     item_kind: kind,
                     search,
                 },
@@ -930,6 +945,29 @@ mod tests {
         engine.update("@write", 6);
         assert_eq!(engine.items()[0].label, "writer");
         assert_eq!(engine.items()[0].item_kind, CompletionItemKind::Agent);
+    }
+
+    #[test]
+    fn goal_skill_completes_with_the_bare_alias() {
+        let ws = TempWorkspace::new("goal_alias");
+        let mut engine = CompletionEngine::new(ws.root.clone());
+        engine.set_definitions(
+            &[],
+            &[skill_definition(
+                "goal",
+                DefinitionSource::Builtin,
+                Some("Run a goal loop"),
+            )],
+        );
+
+        engine.update("@goal", 5);
+        assert_eq!(engine.items()[0].label, "goal");
+        assert_eq!(engine.items()[0].item_kind, CompletionItemKind::Skill);
+        assert_eq!(engine.items()[0].insert_text, "@goal ");
+
+        let (accepted, cursor) = engine.accept("@goal", 5).unwrap();
+        assert_eq!(accepted, "@goal ");
+        assert_eq!(cursor, 6);
     }
 
     #[test]

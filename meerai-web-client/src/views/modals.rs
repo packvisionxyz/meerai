@@ -13,11 +13,12 @@ use wasm_bindgen::closure::Closure;
 
 use crate::keymap::build_question_answers;
 use crate::state::{
-    ActiveModal, ProviderModalReturn, activate_provider_from_modal, custom_model_candidate,
-    execute_palette_action, execute_slash_command, filtered_commands, filtered_models_sorted,
-    filtered_palette_actions, filtered_providers_sorted, format_tokens, is_recent_model,
-    is_removable_credential_badge, open_api_key_modal, open_provider_credential_update,
-    open_provider_model_select, open_provider_select, return_from_provider_modal,
+    ActiveModal, ProviderModalReturn, RunKindDto, activate_provider_from_modal, back_to_runs,
+    custom_model_candidate, execute_palette_action, execute_slash_command, filtered_commands,
+    filtered_models_sorted, filtered_palette_actions, filtered_providers_sorted,
+    format_duration_ms, format_tokens, is_recent_model, is_removable_credential_badge,
+    open_api_key_modal, open_provider_credential_update, open_provider_model_select,
+    open_provider_select, open_run_row, return_from_provider_modal, running_subagent_rows,
     set_status_notice, start_oauth_modal, update_completion,
 };
 use crate::store::StoreHandle;
@@ -44,6 +45,8 @@ enum ModalIdentity {
     VaultReset,
     Help,
     SubagentOverlay(String),
+    Runs,
+    ShellRun(String),
     WorkspacePanel,
 }
 
@@ -86,6 +89,8 @@ fn modal_identity(modal: &ActiveModal) -> ModalIdentity {
         ActiveModal::SubagentOverlay { entry_id, .. } => {
             ModalIdentity::SubagentOverlay(entry_id.clone())
         }
+        ActiveModal::Runs { .. } => ModalIdentity::Runs,
+        ActiveModal::ShellRun { run_id, .. } => ModalIdentity::ShellRun(run_id.clone()),
     }
 }
 
@@ -167,6 +172,8 @@ pub fn ModalLayer(store: StoreHandle) -> impl IntoView {
             Some(ModalIdentity::VaultReset) => view! { <VaultResetModal store=store /> }.into_any(),
             Some(ModalIdentity::Help) => help_modal(store),
             Some(ModalIdentity::SubagentOverlay(_)) => view! { <SubagentModal store=store /> }.into_any(),
+            Some(ModalIdentity::Runs) => view! { <RunsModal store=store /> }.into_any(),
+            Some(ModalIdentity::ShellRun(_)) => view! { <ShellRunModal store=store /> }.into_any(),
             Some(ModalIdentity::WorkspacePanel) => view! { <WorkspacePanelModal store=store /> }.into_any(),
         }}
     }
@@ -239,7 +246,7 @@ fn ProviderSelectModal(store: StoreHandle) -> impl IntoView {
     }
     .into_any();
     shell(
-        "Providers",
+        "Connect provider",
         store,
         body,
         view! { <button class="btn" on:click=move |_| store.update(|s| s.modal = None)>"Close"</button> }
@@ -1060,7 +1067,7 @@ fn ModelInputModal(store: StoreHandle) -> impl IntoView {
         }}
     }
     .into_any();
-    shell("Choose a model", store, body, actions)
+    shell("Set model", store, body, actions)
 }
 
 #[component]
@@ -1359,7 +1366,19 @@ fn QuestionModal(store: StoreHandle) -> impl IntoView {
         }}
     }
     .into_any();
-    shell("Question", store, body, actions)
+    let title = move || {
+        store.with(|s| match &s.modal {
+            Some(ActiveModal::Question { request, draft, .. }) => {
+                let step = draft.step.min(request.questions.len().saturating_sub(1));
+                request.questions.get(step).map_or_else(
+                    || "Question".to_owned(),
+                    |q| format!("Question — {}", q.header),
+                )
+            }
+            _ => "Question".to_owned(),
+        })
+    };
+    shell_reactive(title, store, body, actions)
 }
 
 #[component]
@@ -1438,7 +1457,7 @@ fn TerminalModal(store: StoreHandle) -> impl IntoView {
         <button class="btn" on:click=move |_| store.update(|s| s.modal = None)>"Close"</button>
     }
     .into_any();
-    shell("Shell", store, body, actions)
+    shell("Terminal", store, body, actions)
 }
 
 #[component]
@@ -1671,7 +1690,7 @@ fn CommandPaletteModal(store: StoreHandle) -> impl IntoView {
         </div>
     }
     .into_any();
-    shell("Command palette", store, body, empty_actions())
+    shell("Commands", store, body, empty_actions())
 }
 
 #[component]
@@ -1705,7 +1724,7 @@ fn DiffModal(store: StoreHandle) -> impl IntoView {
         }}
     }
     .into_any();
-    shell_wide("Workspace diff", store, body, empty_actions())
+    shell_wide("Diff", store, body, empty_actions())
 }
 
 #[component]
@@ -1913,7 +1932,7 @@ fn SearchModal(store: StoreHandle) -> impl IntoView {
         </div>
     }
     .into_any();
-    shell_wide("Workspace search", store, body, empty_actions())
+    shell_wide("Search", store, body, empty_actions())
 }
 
 fn clear_search_timer(timer: &Mutex<Option<i32>>) {
@@ -1962,6 +1981,7 @@ fn SubagentModal(store: StoreHandle) -> impl IntoView {
         store.with(|s| match &s.modal {
             Some(ActiveModal::SubagentOverlay {
                 entry_id,
+                name,
                 agent,
                 status,
                 child_session_id,
@@ -1969,6 +1989,7 @@ fn SubagentModal(store: StoreHandle) -> impl IntoView {
                 usage,
                 loading,
                 error,
+                ..
             }) => {
                 let live_status = s
                     .active_tab()
@@ -1984,6 +2005,7 @@ fn SubagentModal(store: StoreHandle) -> impl IntoView {
                     })
                     .unwrap_or_else(|| status.clone());
                 Some((
+                    name.clone(),
                     agent.clone(),
                     live_status,
                     child_session_id.clone(),
@@ -2011,7 +2033,7 @@ fn SubagentModal(store: StoreHandle) -> impl IntoView {
             let cb = Closure::<dyn FnMut()>::new(move || {
                 let should_poll = sub_state
                     .get_untracked()
-                    .is_some_and(|(_, status, _, _, _, _, _)| status == "running");
+                    .is_some_and(|(_, _, status, _, _, _, _, _)| status == "running");
                 if should_poll && let Some(t) = crate::transport::current() {
                     t.fetch_session_events(child_id.clone(), true);
                 }
@@ -2037,7 +2059,7 @@ fn SubagentModal(store: StoreHandle) -> impl IntoView {
 
     let body = view! {
         {move || {
-            let Some((agent, status, child_session_id, entries, usage, loading, error)) = sub_state.get() else {
+            let Some((name, agent, status, child_session_id, entries, usage, loading, error)) = sub_state.get() else {
                 return view! { <span></span> }.into_any();
             };
             let lines = entries
@@ -2064,7 +2086,8 @@ fn SubagentModal(store: StoreHandle) -> impl IntoView {
             let refresh_id = child_session_id.clone();
             view! {
                 <div class="modal-form">
-                    <div class="kv"><span>"Agent"</span><strong>{agent}</strong></div>
+                    <div class="kv"><span>"Agent"</span><strong>{name.clone().unwrap_or_else(|| agent.clone())}</strong></div>
+                    {name.map(|_| view! { <div class="kv"><span>"Preset"</span><strong>{agent.clone()}</strong></div> })}
                     <div class="kv"><span>"Status"</span><strong>{status}</strong></div>
                     <div class="kv"><span>"Child session"</span><code>{child_session_id.unwrap_or_else(|| "none".to_owned())}</code></div>
                     {usage.map(|usage| view! {
@@ -2095,13 +2118,276 @@ fn SubagentModal(store: StoreHandle) -> impl IntoView {
         }}
     }
     .into_any();
-    shell(
-        "Subagent",
+    let title = move || {
+        store.with(|s| match &s.modal {
+            Some(ActiveModal::SubagentOverlay { name, agent, .. }) => match name {
+                Some(name) => format!("Agent — {name} ({agent})"),
+                None => format!("Agent — {agent}"),
+            },
+            _ => "Subagent".to_owned(),
+        })
+    };
+    shell_reactive(
+        title,
         store,
         body,
         view! { <button class="btn" on:click=move |_| store.update(|s| s.modal = None)>"Close"</button> }
             .into_any(),
     )
+}
+
+#[component]
+fn RunsModal(store: StoreHandle) -> impl IntoView {
+    let now_ms = RwSignal::new(js_sys::Date::now() as u64);
+    let interval_handle: Arc<Mutex<Option<i32>>> = Arc::new(Mutex::new(None));
+    let interval_cleanup = interval_handle.clone();
+    if let Some(window) = web_sys::window() {
+        let cb = Closure::<dyn FnMut()>::new(move || now_ms.set(js_sys::Date::now() as u64));
+        if let Ok(id) = window.set_interval_with_callback_and_timeout_and_arguments_0(
+            cb.as_ref().unchecked_ref(),
+            1000,
+        ) && let Ok(mut guard) = interval_handle.lock()
+        {
+            *guard = Some(id);
+        }
+        cb.forget();
+    }
+    on_cleanup(move || {
+        if let Ok(mut guard) = interval_cleanup.lock()
+            && let Some(id) = guard.take()
+            && let Some(window) = web_sys::window()
+        {
+            window.clear_interval_with_handle(id);
+        }
+    });
+    let runs_state = Memo::new(move |_| {
+        store.with(|s| match &s.modal {
+            Some(ActiveModal::Runs { kind, selected }) => {
+                let agents = running_subagent_rows(s);
+                let shells = s
+                    .active_session()
+                    .map(|session| session.shell_runs.clone())
+                    .unwrap_or_default();
+                Some((*kind, *selected, agents, shells))
+            }
+            _ => None,
+        })
+    });
+    let body = view! {
+        {move || {
+            let Some((kind, selected, agents, shells)) = runs_state.get() else {
+                return view! { <span></span> }.into_any();
+            };
+            match kind {
+                RunKindDto::Agents => {
+                    if agents.is_empty() {
+                        return view! { <div class="hint">"No running agents"</div> }.into_any();
+                    }
+                    let rows = agents
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, row)| {
+                            let label = row.name.clone().unwrap_or_else(|| row.agent.clone());
+                            let preset = row
+                                .name
+                                .as_ref()
+                                .map(|_| row.agent.clone());
+                            view! {
+                                <button
+                                    class="pick-row"
+                                    class:active=index == selected
+                                    on:click=move |_| store.update(|s| open_run_row(s, RunKindDto::Agents, index))
+                                >
+                                    <span class="pick-title">{label}</span>
+                                    {preset.map(|preset| view! { <span class="pick-meta">{preset}</span> })}
+                                    <span class="pick-meta">{row.status}</span>
+                                    <span class="badge muted">{format!("{}/{} steps", row.steps_used, row.max_steps)}</span>
+                                </button>
+                            }
+                            .into_any()
+                        })
+                        .collect::<Vec<_>>();
+                    view! {
+                        <div class="modal-form">
+                            <div class="pick-list">{AnyView::from(Fragment::new(rows))}</div>
+                        </div>
+                    }
+                    .into_any()
+                }
+                RunKindDto::Shells => {
+                    if shells.is_empty() {
+                        return view! { <div class="hint">"No running shells"</div> }.into_any();
+                    }
+                    let now = now_ms.get();
+                    let rows = shells
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, run)| {
+                            let elapsed = format_duration_ms(now.saturating_sub(run.started_at_ms));
+                            view! {
+                                <button
+                                    class="pick-row"
+                                    class:active=index == selected
+                                    on:click=move |_| store.update(|s| open_run_row(s, RunKindDto::Shells, index))
+                                >
+                                    <span class="pick-title">{format!("!{}", run.command)}</span>
+                                    <span class="pick-meta">{elapsed}</span>
+                                </button>
+                            }
+                            .into_any()
+                        })
+                        .collect::<Vec<_>>();
+                    view! {
+                        <div class="modal-form">
+                            <div class="pick-list">{AnyView::from(Fragment::new(rows))}</div>
+                        </div>
+                    }
+                    .into_any()
+                }
+            }
+        }}
+    }
+    .into_any();
+    let title = move || {
+        store.with(|s| match &s.modal {
+            Some(ActiveModal::Runs { kind, .. }) => match kind {
+                RunKindDto::Agents => {
+                    format!("Agents ({})", crate::state::running_subagent_count(s))
+                }
+                RunKindDto::Shells => format!("Shells ({})", crate::state::running_shell_count(s)),
+            },
+            _ => "Running work".to_owned(),
+        })
+    };
+    shell_reactive(
+        title,
+        store,
+        body,
+        view! {
+            <button class="btn" on:click=move |_| store.update(|s| s.modal = None)>"Close"</button>
+        }
+        .into_any(),
+    )
+}
+
+#[component]
+fn ShellRunModal(store: StoreHandle) -> impl IntoView {
+    let now_ms = RwSignal::new(js_sys::Date::now() as u64);
+    let interval_handle: Arc<Mutex<Option<i32>>> = Arc::new(Mutex::new(None));
+    let interval_cleanup = interval_handle.clone();
+    if let Some(window) = web_sys::window() {
+        let cb = Closure::<dyn FnMut()>::new(move || now_ms.set(js_sys::Date::now() as u64));
+        if let Ok(id) = window.set_interval_with_callback_and_timeout_and_arguments_0(
+            cb.as_ref().unchecked_ref(),
+            1000,
+        ) && let Ok(mut guard) = interval_handle.lock()
+        {
+            *guard = Some(id);
+        }
+        cb.forget();
+    }
+    on_cleanup(move || {
+        if let Ok(mut guard) = interval_cleanup.lock()
+            && let Some(id) = guard.take()
+            && let Some(window) = web_sys::window()
+        {
+            window.clear_interval_with_handle(id);
+        }
+    });
+    let run_state = Memo::new(move |_| {
+        store.with(|s| match &s.modal {
+            Some(ActiveModal::ShellRun {
+                run_id,
+                command,
+                started_at_ms,
+                ..
+            }) => {
+                let running = s
+                    .active_session()
+                    .is_some_and(|session| session.shell_runs.iter().any(|run| &run.id == run_id));
+                let output = s.shell_outputs.get(run_id).cloned();
+                Some((command.clone(), *started_at_ms, running, output))
+            }
+            _ => None,
+        })
+    });
+    let back_label = Memo::new(move |_| {
+        store.with(|s| match &s.modal {
+            Some(ActiveModal::ShellRun {
+                from_runs: Some(_), ..
+            }) => "Back",
+            _ => "Close",
+        })
+    });
+    let body = view! {
+        {move || {
+            let Some((command, started_at_ms, running, output)) = run_state.get() else {
+                return view! { <span></span> }.into_any();
+            };
+            let status = if running {
+                let elapsed = now_ms.get();
+                format!(
+                    "running · {}",
+                    format_duration_ms(elapsed.saturating_sub(started_at_ms))
+                )
+            } else if matches!(&output, Some(Err(_))) {
+                "failed".to_owned()
+            } else {
+                "finished".to_owned()
+            };
+            let output_view = match output {
+                Some(Ok(out)) => view! {
+                    <div class="field">
+                        <span class="field-label">"Output"</span>
+                        <pre class="terminal-output">{out}</pre>
+                    </div>
+                }
+                .into_any(),
+                Some(Err(err)) => view! { <div class="banner error">{err}</div> }.into_any(),
+                None if running => {
+                    view! { <div class="hint">"waiting for output…"</div> }.into_any()
+                }
+                None => view! {
+                    <div class="hint">"finished; output is in the transcript"</div>
+                }
+                .into_any(),
+            };
+            view! {
+                <div class="modal-form">
+                    <div class="kv"><span>"Command"</span><code>{format!("!{command}")}</code></div>
+                    <div class="kv"><span>"Status"</span><strong>{status}</strong></div>
+                    {output_view}
+                </div>
+            }
+            .into_any()
+        }}
+    }
+    .into_any();
+    let actions = view! {
+        <button class="btn" on:click=move |_| {
+            store.update(|s| {
+                let target = match &s.modal {
+                    Some(ActiveModal::ShellRun { from_runs, .. }) => *from_runs,
+                    _ => None,
+                };
+                if let Some(kind) = target {
+                    back_to_runs(s, kind);
+                } else {
+                    s.modal = None;
+                }
+            });
+        }>{move || back_label.get()}</button>
+    }
+    .into_any();
+    let title = move || {
+        store.with(|s| match &s.modal {
+            Some(ActiveModal::ShellRun { command, .. }) => {
+                format!("Shell — !{}", super::truncate(command, 40))
+            }
+            _ => "Shell".to_owned(),
+        })
+    };
+    shell_reactive(title, store, body, actions)
 }
 
 fn shell(title: &str, store: StoreHandle, body: AnyView, actions: AnyView) -> AnyView {
@@ -2110,6 +2396,34 @@ fn shell(title: &str, store: StoreHandle, body: AnyView, actions: AnyView) -> An
 
 fn shell_wide(title: &str, store: StoreHandle, body: AnyView, actions: AnyView) -> AnyView {
     shell_with_width(title, store, body, actions, true)
+}
+
+fn shell_reactive(
+    title: impl Fn() -> String + Send + 'static,
+    store: StoreHandle,
+    body: AnyView,
+    actions: AnyView,
+) -> AnyView {
+    view! {
+        <div
+            class="modal-backdrop"
+            on:click=move |ev| {
+                if ev.target() == ev.current_target() {
+                    store.update(|s| s.modal = None);
+                }
+            }
+        >
+            <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabindex="-1">
+                <div class="modal-head">
+                    <h2 id="dialog-title">{move || title()}</h2>
+                    <button class="modal-close" aria-label="Close dialog" title="Close (Esc)" on:click=move |_| store.update(|s| s.modal = None)>"×"</button>
+                </div>
+                <div class="modal-body">{body}</div>
+                <div class="modal-actions">{actions}</div>
+            </div>
+        </div>
+    }
+    .into_any()
 }
 
 fn shell_with_width(
@@ -2593,6 +2907,7 @@ fn line_no(value: Option<usize>) -> String {
 struct PanelSnapshot {
     tab: crate::state::WorkspacePanelTab,
     context: Option<meerai_web_protocol::ContextBreakdownDto>,
+    goal: Option<meerai_web_protocol::GoalDto>,
     memories: Vec<meerai_web_protocol::MemoryDto>,
     routes: Vec<meerai_web_protocol::RouteDto>,
     packs: Vec<meerai_web_protocol::PackDto>,
@@ -2600,6 +2915,7 @@ struct PanelSnapshot {
     selected: usize,
     loading: bool,
     error: Option<String>,
+    subagent_name: String,
     agent: String,
     task: String,
     model: String,
@@ -2623,6 +2939,7 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
             Some(ActiveModal::WorkspacePanel {
                 tab,
                 context,
+                goal,
                 memories,
                 routes,
                 packs,
@@ -2630,6 +2947,7 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                 selected,
                 loading,
                 error,
+                subagent_name,
                 subagent_agent,
                 subagent_task,
                 subagent_model,
@@ -2648,6 +2966,7 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
             }) => Some(PanelSnapshot {
                 tab: *tab,
                 context: context.as_deref().cloned(),
+                goal: goal.as_deref().cloned(),
                 memories: memories.clone(),
                 routes: routes.clone(),
                 packs: packs.clone(),
@@ -2655,6 +2974,7 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                 selected: *selected,
                 loading: *loading,
                 error: error.clone(),
+                subagent_name: subagent_name.text.clone(),
                 agent: subagent_agent.clone(),
                 task: subagent_task.text.clone(),
                 model: subagent_model.text.clone(),
@@ -2677,6 +2997,9 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
     let reload = {
         let store = store;
         move |tab: crate::state::WorkspacePanelTab| {
+            if tab == crate::state::WorkspacePanelTab::Goal {
+                return;
+            }
             if let Some(transport) = crate::transport::current() {
                 match tab {
                     crate::state::WorkspacePanelTab::Context => {
@@ -2715,6 +3038,7 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                     let Some(PanelSnapshot {
                         tab,
                         context,
+                        goal,
                         memories,
                         routes,
                         packs,
@@ -2722,6 +3046,7 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                         selected,
                         loading,
                         error,
+                        subagent_name,
                         agent,
                         task,
                         model,
@@ -2750,6 +3075,68 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                     };
                     let reload = reload.clone();
                     let body = match tab {
+                        crate::state::WorkspacePanelTab::Goal => {
+                            let Some(g) = goal.as_ref() else {
+                                return view! { <pre class="panel-text">"No active goal. Type @goal <instruction> in the composer to start one."</pre> }.into_any();
+                            };
+                            let mut text = String::new();
+                            if let Some(goal) = g.goal.as_deref() {
+                                text.push_str(&format!("Goal: {goal}\n"));
+                            }
+                            if !g.done_when.is_empty() {
+                                text.push_str("Done when:\n");
+                                for line in &g.done_when {
+                                    text.push_str(&format!("- {line}\n"));
+                                }
+                            }
+                            if !g.constraints.is_empty() {
+                                text.push_str("Constraints:\n");
+                                for line in &g.constraints {
+                                    text.push_str(&format!("- {line}\n"));
+                                }
+                            }
+                            if g.items.is_empty() {
+                                text.push_str("\nItems: (none)\n");
+                            } else {
+                                text.push_str("\nItems:\n");
+                                for item in &g.items {
+                                    let mark = match item.status {
+                                        meerai_web_protocol::GoalItemStatusDto::Done => "x",
+                                        meerai_web_protocol::GoalItemStatusDto::Failed => "!",
+                                        meerai_web_protocol::GoalItemStatusDto::Open => " ",
+                                    };
+                                    text.push_str(&format!("- [{mark}] {}. {}", item.id, item.text));
+                                    if let Some(verify) = item.verify.as_deref() {
+                                        text.push_str(&format!(" (verify: {verify})"));
+                                    }
+                                    if let Some(evidence) = item.evidence.as_deref() {
+                                        text.push_str(&format!("\n  evidence: {evidence}"));
+                                    }
+                                    text.push('\n');
+                                }
+                            }
+                            let done = g
+                                .items
+                                .iter()
+                                .filter(|item| {
+                                    matches!(
+                                        item.status,
+                                        meerai_web_protocol::GoalItemStatusDto::Done
+                                    )
+                                })
+                                .count();
+                            text.push_str(&format!(
+                                "\nProgress: {done}/{} done",
+                                g.items.len()
+                            ));
+                            if g.rounds > 0 {
+                                text.push_str(&format!(" · round {}", g.rounds));
+                            }
+                            if g.turns > 0 {
+                                text.push_str(&format!(" · turn {}", g.turns));
+                            }
+                            view! { <pre class="panel-text">{text}</pre> }.into_any()
+                        }
                         crate::state::WorkspacePanelTab::Context => {
                             let Some(c) = context.as_ref() else {
                                 return view! { <pre class="panel-text">"No context report yet. Press Refresh."</pre> }.into_any();
@@ -3048,6 +3435,7 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                             }.into_any()
                         }
                         crate::state::WorkspacePanelTab::Subagent => {
+                            let store_name = store;
                             let store_agent = store;
                             let store_task = store;
                             let store_model = store;
@@ -3060,6 +3448,7 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                             let mode_label = mode.map(|m| match m { meerai_web_protocol::ApprovalModeDto::Plan => "plan", meerai_web_protocol::ApprovalModeDto::Ask => "ask", meerai_web_protocol::ApprovalModeDto::Auto => "auto" }).unwrap_or("parent");
                             view! {
                                 <div class="panel-form column">
+                                    <label>"Name" <input class="field" placeholder="optional, one word" prop:value=subagent_name.clone() on:input=move |ev| { let v = event_target_value(&ev); store_name.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_name, .. }) = s.modal.as_mut() { subagent_name.replace_text(v); }); } /></label>
                                     <label>"Agent" <input class="field" prop:value=agent.clone() on:input=move |ev| { let v = event_target_value(&ev); store_agent.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_agent, .. }) = s.modal.as_mut() { *subagent_agent = v; }); } /></label>
                                     <label>"Task" <input class="field" prop:value=task.clone() on:input=move |ev| { let v = event_target_value(&ev); store_task.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_task, .. }) = s.modal.as_mut() { subagent_task.replace_text(v); }); } /></label>
                                     <label>"Model" <input class="field" prop:value=model.clone() on:input=move |ev| { let v = event_target_value(&ev); store_model.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_model, .. }) = s.modal.as_mut() { subagent_model.replace_text(v); }); } /></label>
@@ -3078,8 +3467,9 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                                     <label>"Cost USD" <input class="field" placeholder="parent cap" prop:value=subagent_cost.clone() on:input=move |ev| { let v = event_target_value(&ev); store_cost.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_cost, .. }) = s.modal.as_mut() { subagent_cost.replace_text(v); }); } /></label>
                                     <label>"Tools" <input class="field" placeholder="comma-separated subset" prop:value=subagent_tools.clone() on:input=move |ev| { let v = event_target_value(&ev); store_tools.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_tools, .. }) = s.modal.as_mut() { subagent_tools.replace_text(v); }); } /></label>
                                     <button class="btn" on:click=move |_| {
-                                        let (agent, task, model, mode, steps, tokens, cost, tools) = store_spawn.with(|s| match &s.modal {
-                                            Some(ActiveModal::WorkspacePanel { subagent_agent, subagent_task, subagent_model, subagent_mode, subagent_steps, subagent_tokens, subagent_cost, subagent_tools, .. }) => (
+                                        let (name, agent, task, model, mode, steps, tokens, cost, tools) = store_spawn.with(|s| match &s.modal {
+                                            Some(ActiveModal::WorkspacePanel { subagent_name, subagent_agent, subagent_task, subagent_model, subagent_mode, subagent_steps, subagent_tokens, subagent_cost, subagent_tools, .. }) => (
+                                                subagent_name.text.clone(),
                                                 subagent_agent.clone(),
                                                 subagent_task.text.clone(),
                                                 subagent_model.text.clone(),
@@ -3089,10 +3479,11 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                                                 subagent_cost.text.clone(),
                                                 subagent_tools.text.clone(),
                                             ),
-                                            _ => (String::new(), String::new(), String::new(), None, String::new(), String::new(), String::new(), String::new()),
+                                            _ => (String::new(), String::new(), String::new(), String::new(), None, String::new(), String::new(), String::new(), String::new()),
                                         });
                                         if let Some(t) = crate::transport::current() {
                                             let mut command = format!("/subagent {} ", agent);
+                                            if !name.trim().is_empty() { command.push_str(&format!("--name {} ", name.trim())); }
                                             if !model.is_empty() { command.push_str(&format!("--model {model} ")); }
                                             if let Some(mode) = mode { command.push_str(&format!("--mode {} ", match mode { meerai_web_protocol::ApprovalModeDto::Plan => "plan", meerai_web_protocol::ApprovalModeDto::Ask => "ask", meerai_web_protocol::ApprovalModeDto::Auto => "auto" })); }
                                             if !steps.trim().is_empty() { command.push_str(&format!("--steps {} ", steps.trim())); }
@@ -3109,6 +3500,7 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                     };
                     let tabs = [
                         (crate::state::WorkspacePanelTab::Context, "Context"),
+                        (crate::state::WorkspacePanelTab::Goal, "Goal"),
                         (crate::state::WorkspacePanelTab::Memory, "Memory"),
                         (crate::state::WorkspacePanelTab::Subagent, "Subagent"),
                         (crate::state::WorkspacePanelTab::Routing, "Routing"),

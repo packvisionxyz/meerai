@@ -42,9 +42,9 @@ composer, and a one-row statusline.
 │ > You                                           │  model / auth / dir      │
 │   Refactor the agent loop                       │  MCP / agents / tools    │
 │ ▸ 1 command · 2 reads · 1 edit                  │  ─────────────────────── │
-│ ◆ Assistant                                     │  DIAGNOSE [show]         │
+│ ◆ Assistant                                     │  DIAGNOSE [hide]         │
 │                                                 │  ─────────────────────── │
-│                                                 │  File changes            │
+│                                                 │  File changes [hide]     │
 │                                                 │  src/loop.rs  +18 -9     │
 ├─────────────────────────────────────────────────┴──────────────────────────┤
 │ Composer (INS) — @ mentions, / commands                                    │
@@ -57,13 +57,22 @@ composer, and a one-row statusline.
 - The sidebar hides below `MIN_SIDEBAR_WIDTH` and returns on resize.
   `ctrl+b` toggles it. It has three panels on `surface`: the session
   overview (`session`, `provider`, `model`, `auth`, `dir` with `~`
-  shortening, then MCP servers, agents, and tools), the `DIAGNOSE` panel,
-  and the file-changes panel.
-- Each panel has its own height, so expanding `DIAGNOSE` never pushes the
-  session block out. The overview keeps at least 11 content rows. On a short
-  terminal the file-changes panel gives up height first.
-- `DIAGNOSE` is collapsed by default and takes three rows (header only).
-  `/diagnose` or a click on the header expands it to ten rows. The rows are
+  shortening, then MCP servers, a `main` agent row, subagent rows, and
+  tools), the `DIAGNOSE` panel, and the file-changes panel. The `AGENTS`
+  block lists the `main` status and up to four subagents from the
+  transcript, running ones first, each with its status badge and step
+  count. The block is display-only: rows have no click action. Use the
+  statusline `N agents` counter to inspect a running agent. Extra
+  subagents collapse into `… N more`.
+  A live `subagent-run` or `acp-run` tool item and its `SubagentRun` item
+  render as one row: the tool item is replaced when the subagent item
+  starts, so delegation never appears in the `TOOLS` list.
+- Each panel has its own height, so expanding or collapsing `DIAGNOSE` or
+  File Changes never pushes the session block out. The overview keeps its
+  11-content-row floor when the sidebar is tall enough. On a short terminal the
+  file-changes panel gives up height first.
+- `DIAGNOSE` is shown by default and takes nine rows. `/diagnose` or a click
+  on the header collapses it to three rows (header only). The rows are
   last-request tokens (`↑prompt ↓completion`), last-request cache hit ratio
   (`cached_tokens / prompt_tokens` from the provider, not an estimate), last-request cache
   write tokens, context use, memory tokens, and tool schema tokens. A provider
@@ -71,6 +80,10 @@ composer, and a one-row statusline.
   cumulative cache ratio: the percentage is always the last request, and a
   fork or a resumed stored session shows `n/a` until a new request reports
   usage.
+- File Changes is shown by default. A click on its header, or the
+  `[hide]`/`[show]` action, collapses it to three rows (header only). The
+  collapsed header keeps the changed-file count. Hiding either panel gives
+  its rows to the overview.
 - The file list pages with a clickable `… and N more` footer (next page,
   back to top at the end) and scrolls with the mouse wheel. Clicking a
   changed file opens the diff modal.
@@ -133,7 +146,8 @@ order persists in the `user_config` table (`ui_tabs`).
 
 Clipboard writes use OSC 52 plus a native helper (`pbcopy`, `clip`,
 `wl-copy`, `xclip`, `xsel`) when available. Dragging over the transcript
-selects text and copies it on release. There is no keyboard Select mode.
+selects text and copies it on release. The selection band is white with black
+text. There is no keyboard Select mode.
 
 Clicking a file path in the transcript opens it in the editor, at the line
 number when the text carries one (`click_path_at`, `path_reference_at`,
@@ -152,6 +166,9 @@ and click-to-open do not conflict.
 - A multi-line buffer with cursor motions, backspace/delete, and bracketed
   paste. Long lines soft-wrap at the input width; the composer grows to
   8 rows and scrolls beyond that (`wrap_composer`, `ui/composer.rs`).
+  `Up`/`Down` move across wrapped display rows, not only explicit
+  newlines, and keep the goal column when a shorter row clamps the cursor
+  (`composer_vertical_move`).
 - `Enter` submits. `shift+enter`, `alt+enter`, `ctrl+enter`, and `ctrl+j`
   insert a newline; a trailing `\` continues a line.
 - While a turn runs, `Enter` queues the message (`Queued N message(s) ·
@@ -164,7 +181,7 @@ and click-to-open do not conflict.
   a completion; `Esc` dismisses completion, then returns to `NOR` without
   discarding the draft.
 - Composer clicks move the cursor and start a drag selection. Drag paints
-  the selection with the accent background and background-colored text, and
+  the selection as white with black text, and
   the release copies it, like the transcript. The drag target is clamped to
   the composer, so moving the pointer past the box still selects to the line
   end or the last visible row. Backspace/Delete or typing deletes the
@@ -180,9 +197,9 @@ and click-to-open do not conflict.
   `ui/composer.rs`). The band reserves its own layout row through
   `queued_band_rows`, so the composer never covers it. `✕` drops the message;
   `edit` opens the queued-edit dialog, a wrapped multi-line editor with a
-  visible cursor: arrows, Home, and End move it, Backspace and Delete edit
-  around it, `alt+enter` inserts a newline, and `Enter` commits the new text in
-  place.
+  visible cursor: arrows move it across wrapped rows (with a goal column),
+  Home and End move it, Backspace and Delete edit around it,
+  `alt+enter` inserts a newline, and `Enter` commits the new text in place.
 - The composer footer shows the input-mode badge (`INS`/`NOR`), approval
   mode badge, model, provider, and the effective temperature with its tier
   (`temp 0.20 · medium`), driven by `context.effort` and
@@ -210,6 +227,7 @@ Typing `/` opens completion. The implemented handler set
 | `/mode [plan\|ask\|auto]` | Show or set the approval mode |
 | `/compact` | Request context compaction |
 | `/context` | Context panel: token buckets, watermark, projection toggles, turn pin/unpin, summarize-from-here, blob viewer, scroll, refresh |
+| `/goal` | Goal panel: goal, done condition, constraints, items with evidence, round and turn counts. Read-only; `j`/`k`/PageUp/PageDown scroll, `Esc` closes. Use `@goal <instruction>` to start one |
 | `/memory [query]` | Memory panel: list, search, pin, delete |
 | `/remember <note>` | Save a project memory |
 | `/forget <id>`, `/pin <id> [off]` | Delete or pin a project memory |
@@ -261,11 +279,13 @@ description. Rows show the bare id, not the `@agent/` or
   without submitting; Esc dismisses.
 - Accepting inserts `@agent/<id> `, `@skill/<id> `, or `@path ` with one
   trailing space and stays in Insert. An exact agent/skill id keeps the
-  popup open; an exact file path dismisses it.
+  popup open; an exact file path dismisses it. The built-in `goal` skill
+  accepts the shorter `@goal ` alias; `@skill/goal` still works.
 - A known accepted mention renders as an `<id>` chip (bold teal agent, bold
   blue skill) while the raw token stays in the input buffer and submit
   detection. Unknown ids and partial tokens render as typed. Cursor columns
   map through chip display widths; editing operates on the raw text.
+  `@goal` renders as a `goal` skill chip.
 - On submit, skills apply before the agent, mentions are stripped, repeats
   apply once, and an unknown mention stays as text. A mention-only prompt
   applies definitions without starting a turn. A directly submitted user message keeps a
@@ -389,9 +409,9 @@ being replayed.
 open (there it keeps its Up/Down behavior). Rows group into sections
 (Session, Model, Approval, View, Turn, App) with a right-hand shortcut
 column; typing filters; Enter runs the highlighted row. Palette rows run
-through the same slash-command handler; tab, copy, and mode-cycle actions
-use dedicated palette actions. Labels render as `ctrl+<key>`; `ctrl+t` is
-not bound.
+through the same slash-command handler; tab, copy, mode-cycle, and the File
+Changes panel toggle use dedicated palette actions. Labels render as
+`ctrl+<key>`; `ctrl+t` is not bound.
 
 ### 2.14 User shell (`!`)
 
@@ -402,26 +422,42 @@ command in the workspace, for example `!cargo test`. The TUI queues
 so the workspace guards, `ExecutionWorld`, env scrub, `strict_env`, and
 `require_for_shell` all apply. `plan` mode refuses it.
 
-The dialog shows `running…` then the output (`j`/`k` scroll). `Esc`
-backgrounds it: the dialog closes, the statusline shows `shell <command>`,
-and the result lands in the transcript when it finishes. `q` closes the
-dialog. Long commands use the shell timeout (120 s default). The TUI never
-spawns shell or tool processes itself; the only native helpers it spawns
-are the clipboard programs (§2.3).
+Shells run concurrently and each run gets its own id and dialog. The dialog
+shows `running…` then the output (`j`/`k` scroll). `Esc` backgrounds it: the
+dialog closes and the run stays listed in the statusline counter. The result
+lands in the transcript and in the run's detail view. `q` closes the dialog.
+Long commands use the shell timeout (120 s default). The TUI never spawns
+shell or tool processes itself; the only native helpers it spawns are the
+clipboard programs (§2.3).
 
 ### 2.15 Statusline
 
 One monochrome row, left to right: workspace path, git branch (when the
-workspace is a git repo), an optional sandbox warning, the `ACP:agy` badge on ACP tabs, a clickable `web :<port>` badge while `/serve` is running, a backgrounded `shell <cmd>` segment, a clickable `update vX (/update)` hint,
+workspace is a git repo), an optional sandbox warning, the `ACP:agy` badge on ACP tabs, clickable `N agents` and `N shells` counters for running work, a clickable `web :<port>` badge while `/serve` is running, a clickable `update vX (/update)` hint,
 throughput after the first measured stream, and a braille spinner with the
-active tool or running agent names. Token and cache counters belong to the
+active tool. Token and cache counters belong to the
 sidebar `DIAGNOSE` panel, so the statusline stays one row of state, not a
 second usage report. Short notices replace the right side temporarily.
 
-While `subagent-run` is active the statusline names the running agents.
-Clicking that segment opens a `SubagentOverlay` above the composer; a row
-click expands that child session in the transcript and keeps the overlay;
-Esc or a click outside closes it.
+The counters include running work only and appear only when the count is
+non-zero. Each clickable statusline item (both counters, the `web` badge, and
+the update hint) gets a `surface_high` background and `text` foreground while
+the pointer is over it. Clicking `N agents` or `N shells` opens the `Runs` modal
+for that kind. A row lists one running agent (name, preset, status, steps) or one
+running shell (`!command`, elapsed). `Enter` or a row click opens the detail view.
+`Esc` in the detail returns to the list; a second `Esc` closes it. The agent
+detail shows the child conversation and refreshes while the agent runs, without
+expanding the same subagent row in the transcript. The shell detail shows the
+command, status, elapsed time, and output. The list uses the normal modal frame,
+so it blocks composer input and mouse actions behind it.
+
+A subagent run can carry an optional `name` (`subagent-run` or `acp-run`
+argument, `/subagent --name`, or the spawn panel `Name` field). The transcript
+header, `Runs` row, agent detail title, and web agent card show the name with the
+preset in parentheses; without a name they show the preset.
+
+The sidebar `AGENTS` block stays display-only: it lists the main agent and the
+subagents with their status, but a row is not clickable.
 
 The model picker (`/model`, `ctrl+o`) lists catalog, saved, and recent
 models. `ctrl+d` removes the highlighted model, or the typed model id when
@@ -569,9 +605,25 @@ New dialogs stay narrow. Current caps (`meerai-tui/src/ui/modals.rs`):
 | Serve dialog | 64 |
 | Queued edit | 64 |
 | Question | ≤ 76 |
+| Context | ≤ 78 |
+| Memory | ≤ 86 |
+| Routing | ≤ 80 |
+| Packs | ≤ 84 |
+| Sampling | ≤ 68 |
+| Vault reset | ≤ 72 |
+| Subagent spawn | ≤ 70 |
+| Runs | ≤ 68 |
+| Run detail | 84% of the terminal |
 | Diff | 92% of the terminal |
 | Search | 90% of the terminal |
 | Terminal (`!`) | 80% of the terminal |
+
+Every dismissible dialog uses the same frame: a bold one-line title band, a
+close control, a key-hint footer with the primary action first and the exit
+hint last, and the shared list selection and hover styles. Approval and
+Question are not dismissible: they have no close control and must resolve or
+cancel. Titles use sentence case and append `(/command)` when a slash command
+opens the dialog.
 
 ## 5. Invariants
 
@@ -615,7 +667,9 @@ New dialogs stay narrow. Current caps (`meerai-tui/src/ui/modals.rs`):
   `SessionOpener::read_session_events` and refreshed about once per second
   while the child runs. Nested folds cap at the newest 60 entries. The
   nested view is display-only: its lines share the parent hit zone, so any
-  click collapses the group.
+  click collapses the group. The `N agents` statusline counter opens the
+  same conversation in the `Runs` detail modal instead, and that modal
+  never expands the transcript row.
 - **Markdown spacing.** Assistant markdown keeps the model's line breaks:
   a single newline renders as a line break, a blank line separates blocks
   with one empty row, and transcript entries get two empty rows between

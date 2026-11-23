@@ -29,6 +29,7 @@ pub struct ReplayToolCall {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplaySubagent {
     pub id: String,
+    pub name: Option<String>,
     pub agent: String,
     pub status: ToolCallStatus,
     pub report: Option<String>,
@@ -178,8 +179,17 @@ pub fn replay_from_events(events: &[LoggedEvent]) -> Vec<ReplayEntry> {
                         .map(str::to_string)
                 })
                 .unwrap_or_else(|| "subagent".to_string());
+            let name = serde_json::from_str::<serde_json::Value>(&tc.args)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("name")
+                        .and_then(|name| name.as_str())
+                        .map(str::to_string)
+                });
             *entry = ReplayEntry::Subagent(ReplaySubagent {
                 id: tc.call_id.clone(),
+                name,
                 agent,
                 status: tc.status,
                 report: tc.output.clone(),
@@ -483,7 +493,8 @@ mod tests {
                 event: SessionEvent::ToolCall {
                     call_id: CallId::from_raw("sub-call"),
                     name: "subagent-run".to_string(),
-                    args: "{\"agent\":\"explore\",\"task\":\"find it\"}".to_string(),
+                    args: "{\"agent\":\"explore\",\"task\":\"find it\",\"name\":\"parser scan\"}"
+                        .to_string(),
                 },
             },
             LoggedEvent {
@@ -502,6 +513,7 @@ mod tests {
             replay_from_events(&events),
             vec![ReplayEntry::Subagent(ReplaySubagent {
                 id: "sub-call".to_string(),
+                name: Some("parser scan".to_string()),
                 agent: "explore".to_string(),
                 status: ToolCallStatus::Succeeded,
                 report: Some("found it\nHint: child_session_id: ses-child-replay".to_string()),
@@ -537,6 +549,7 @@ mod tests {
             replay_from_events(&events),
             vec![ReplayEntry::Subagent(ReplaySubagent {
                 id: "acp-call".to_string(),
+                name: None,
                 agent: "agy".to_string(),
                 status: ToolCallStatus::Succeeded,
                 report: Some("test fixed\nHint: child_session_id: ses-acp-child".to_string()),

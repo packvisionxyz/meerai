@@ -158,12 +158,24 @@ impl AppState {
                     AgentEvent::ContextUpdated { breakdown } => Some(breakdown.clone()),
                     _ => None,
                 };
+                let goal_update = match &other {
+                    AgentEvent::GoalUpdated { state } => Some(state.clone()),
+                    _ => None,
+                };
                 self.tabs[tab_idx].apply_agent_event(other);
                 if is_active
                     && let Some(breakdown) = context_update
                     && let Some(ActiveModal::Context(panel)) = self.modal.as_mut()
                 {
                     panel.breakdown = Some(breakdown);
+                }
+                if is_active
+                    && let Some(state) = goal_update
+                    && let Some(ActiveModal::Goal {
+                        state: modal_state, ..
+                    }) = self.modal.as_mut()
+                {
+                    *modal_state = Some(state);
                 }
                 let after_queued = self.tabs[tab_idx].queued.len();
                 if is_active
@@ -306,6 +318,7 @@ impl SessionTab {
                 }
                 SessionItem::SubagentRun {
                     id,
+                    name,
                     agent,
                     status,
                     report,
@@ -319,26 +332,45 @@ impl SessionTab {
                     active_tool,
                 } => {
                     self.finalize_pending_assistant();
-                    let idx = self.transcript.len();
-                    self.transcript
-                        .push(TranscriptEntry::Subagent(SubagentEntry {
-                            id: id.to_string(),
-                            agent,
-                            status: map_item_status(status),
-                            model,
-                            approval_mode: approval_mode.label().to_string(),
-                            steps_used,
-                            max_steps,
-                            usage,
-                            est_cost_usd,
-                            active_tool,
-                            report,
-                            child_session_id,
-                            expanded: false,
-                            nested: None,
-                            nested_refreshed_at: None,
-                            nested_loading: false,
-                        }));
+                    let entry = TranscriptEntry::Subagent(SubagentEntry {
+                        id: id.to_string(),
+                        name,
+                        agent,
+                        status: map_item_status(status),
+                        model,
+                        approval_mode: approval_mode.label().to_string(),
+                        steps_used,
+                        max_steps,
+                        usage,
+                        est_cost_usd,
+                        active_tool,
+                        report,
+                        child_session_id,
+                        expanded: false,
+                        nested: None,
+                        nested_refreshed_at: None,
+                        nested_loading: false,
+                    });
+                    let idx = match self.transcript.iter().position(|entry| match entry {
+                        TranscriptEntry::ToolCall(tc) => {
+                            is_delegation_tool(&tc.name)
+                                && matches!(
+                                    tc.status,
+                                    ToolCallStatus::Proposed | ToolCallStatus::Running
+                                )
+                        }
+                        _ => false,
+                    }) {
+                        Some(idx) => {
+                            self.transcript[idx] = entry;
+                            idx
+                        }
+                        None => {
+                            let idx = self.transcript.len();
+                            self.transcript.push(entry);
+                            idx
+                        }
+                    };
                     self.subagent_items.insert(id, idx);
                 }
                 _ => {}
@@ -462,7 +494,7 @@ impl SessionTab {
                         if output.is_some() {
                             entry.output = output;
                         }
-                    } else {
+                    } else if !is_delegation_tool(&name) {
                         self.transcript
                             .push(TranscriptEntry::ToolCall(ToolCallEntry {
                                 call_id,
@@ -479,6 +511,7 @@ impl SessionTab {
                 }
                 SessionItem::SubagentRun {
                     id,
+                    name,
                     agent,
                     status,
                     report,
@@ -511,6 +544,9 @@ impl SessionTab {
                     if let Some(TranscriptEntry::Subagent(entry)) =
                         target_idx.and_then(|i| self.transcript.get_mut(i))
                     {
+                        if name.is_some() {
+                            entry.name = name;
+                        }
                         entry.agent = agent;
                         entry.status = status;
                         entry.model = model;
@@ -531,6 +567,7 @@ impl SessionTab {
                         self.transcript
                             .push(TranscriptEntry::Subagent(SubagentEntry {
                                 id: id_str,
+                                name,
                                 agent,
                                 status,
                                 model,
@@ -561,6 +598,14 @@ impl SessionTab {
             AgentEvent::RewindCompleted { .. } => {}
             AgentEvent::ContextUpdated { breakdown } => {
                 self.context = Some(breakdown);
+            }
+            AgentEvent::GoalUpdated { state } => {
+                self.goal = Some(state);
+            }
+            AgentEvent::GoalContinued { turn, max_turns } => {
+                self.transcript.push(TranscriptEntry::System {
+                    text: format!("Goal continues (turn {turn}/{max_turns})"),
+                });
             }
             AgentEvent::HookCompleted {
                 event,
@@ -777,6 +822,7 @@ impl From<ReplaySubagent> for SubagentEntry {
     fn from(subagent: ReplaySubagent) -> Self {
         Self {
             id: subagent.id,
+            name: subagent.name,
             agent: subagent.agent,
             status: subagent.status,
             model: None,
@@ -820,7 +866,7 @@ impl From<ReplayEntry> for TranscriptEntry {
 }
 
 impl AppState {
-    pub(super) fn request_child_session_load(&mut self, item_id: &str) {
+    pub(super) fn request_child_session_load(&mut self, item_id: &str, force: bool) {
         let action = {
             let tab = self.tab_mut();
             let Some(entry) = tab.transcript.iter_mut().find_map(|entry| match entry {
@@ -829,10 +875,11 @@ impl AppState {
             }) else {
                 return;
             };
-            if !entry.expanded || entry.nested_loading {
+            if entry.nested_loading {
                 return;
             }
-            if entry.nested.is_some()
+            if !force
+                && entry.nested.is_some()
                 && entry
                     .nested_refreshed_at
                     .is_some_and(|t| t.elapsed() < CHILD_REFRESH_INTERVAL)
@@ -857,13 +904,27 @@ impl AppState {
         if !self.tab().is_running {
             return;
         }
+        let detail_item = match &self.modal {
+            Some(ActiveModal::RunDetail {
+                run: RunTarget::Subagent(index),
+                ..
+            }) => self
+                .tab()
+                .transcript
+                .get(*index)
+                .and_then(|entry| match entry {
+                    TranscriptEntry::Subagent(sub) => Some(sub.id.clone()),
+                    _ => None,
+                }),
+            _ => None,
+        };
         let stale: Vec<String> = self
             .tab()
             .transcript
             .iter()
             .filter_map(|entry| match entry {
                 TranscriptEntry::Subagent(sub)
-                    if sub.expanded
+                    if (sub.expanded || detail_item.as_deref() == Some(sub.id.as_str()))
                         && matches!(
                             sub.status,
                             ToolCallStatus::Running | ToolCallStatus::Proposed
@@ -878,7 +939,7 @@ impl AppState {
             })
             .collect();
         for id in stale {
-            self.request_child_session_load(&id);
+            self.request_child_session_load(&id, false);
         }
     }
 

@@ -544,6 +544,9 @@ impl MultiTurnAgent {
         }) else {
             return BudgetOutcome::Continue;
         };
+        if cap == 0 {
+            return BudgetOutcome::Continue;
+        }
 
         let used = self
             .cumulative_usage

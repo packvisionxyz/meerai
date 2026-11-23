@@ -4,7 +4,7 @@ mod input;
 mod modals;
 mod palette;
 mod reload;
-mod subagent_overlay;
+mod runs;
 #[cfg(test)]
 mod tests;
 
@@ -83,6 +83,7 @@ pub struct ContextPanel {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SubagentSpawnPanel {
+    pub name: String,
     pub agent: String,
     pub task: String,
     pub model: String,
@@ -162,9 +163,19 @@ pub enum ActiveModal {
         focus: usize,
     },
     Terminal {
+        run_id: u64,
         command: String,
         output: Option<String>,
         running: bool,
+        scroll: usize,
+    },
+    Runs {
+        kind: RunKind,
+        selected: usize,
+    },
+    RunDetail {
+        run: RunTarget,
+        selected: usize,
         scroll: usize,
     },
     RewindMenu {
@@ -200,6 +211,10 @@ pub enum ActiveModal {
         error: Option<String>,
     },
     Context(ContextPanel),
+    Goal {
+        state: Option<meerai_session::GoalState>,
+        scroll: usize,
+    },
     Memory {
         entries: Vec<meerai_host::ProjectMemory>,
         query: String,
@@ -305,6 +320,7 @@ pub enum PendingSessionAction {
     },
     RunUserShell {
         tab_id: u64,
+        run_id: u64,
         command: String,
     },
     HostAction {
@@ -454,10 +470,55 @@ pub struct ModalHitZone {
     pub kind: ModalHitKind,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunKind {
+    Agents,
+    Shells,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusHitKind {
+    Run(RunKind),
+    Update,
+    WebServer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarHitKind {
+    DiagnoseHead,
+    ChangesHead,
+    ChangesMore,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellRunStatus {
+    Running,
+    Succeeded,
+    Failed,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SubagentOverlay {
-    pub selected: usize,
-    pub entries: Vec<usize>,
+pub struct ShellRun {
+    pub id: u64,
+    pub command: String,
+    pub status: ShellRunStatus,
+    pub output: Option<String>,
+    pub started_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunTarget {
+    Subagent(usize),
+    Shell(u64),
+}
+
+impl RunTarget {
+    pub fn kind(self) -> RunKind {
+        match self {
+            Self::Subagent(_) => RunKind::Agents,
+            Self::Shell(_) => RunKind::Shells,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -467,6 +528,10 @@ pub struct CompletionHitZone {
 }
 
 pub use meerai_session::replay::ToolCallStatus;
+
+pub(crate) fn is_delegation_tool(name: &str) -> bool {
+    matches!(name, "subagent-run" | "acp-run")
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolCallEntry {
@@ -481,6 +546,7 @@ pub struct ToolCallEntry {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SubagentEntry {
     pub id: String,
+    pub name: Option<String>,
     pub agent: String,
     pub status: ToolCallStatus,
     pub model: Option<String>,
@@ -499,6 +565,16 @@ pub struct SubagentEntry {
 }
 
 pub use meerai_host::diff::FileChangeEntry;
+
+impl SubagentEntry {
+    pub fn named(&self) -> Option<&str> {
+        self.name.as_deref().filter(|name| *name != self.agent)
+    }
+
+    pub fn display_name(&self) -> &str {
+        self.named().unwrap_or(&self.agent)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScreenPos {
@@ -637,8 +713,11 @@ pub struct SessionTab {
     pub usage: UsageStats,
     pub metrics: TurnMetrics,
     pub context: Option<meerai_session::ContextBreakdown>,
+    pub goal: Option<meerai_session::GoalState>,
     pub is_running: bool,
     pub queued: Vec<String>,
+    pub shell_runs: Vec<ShellRun>,
+    pub(super) next_shell_run_id: u64,
     pub user_turns: HashMap<usize, TurnId>,
     pub turn_activity: HashMap<usize, bool>,
     pub turn_id: Option<TurnId>,
@@ -683,8 +762,11 @@ impl SessionTab {
             usage: UsageStats::default(),
             metrics: TurnMetrics::default(),
             context: None,
+            goal: None,
             is_running: false,
             queued: Vec::new(),
+            shell_runs: Vec::new(),
+            next_shell_run_id: 0,
             pending_questions: Vec::new(),
             user_turns: HashMap::new(),
             turn_activity: HashMap::new(),
@@ -706,6 +788,12 @@ impl SessionTab {
 
     pub fn is_acp(&self) -> bool {
         matches!(self.backend, Backend::Acp { .. })
+    }
+
+    pub fn has_running_shell(&self) -> bool {
+        self.shell_runs
+            .iter()
+            .any(|run| run.status == ShellRunStatus::Running)
     }
 
     pub fn acp_preset(&self) -> Option<&str> {
@@ -840,13 +928,18 @@ impl EntryFingerprint {
                 },
             },
             TranscriptEntry::Subagent(subagent) => Self {
-                size: subagent.agent.len()
+                size: subagent.display_name().len()
+                    + subagent.agent.len()
                     + subagent.report.as_ref().map_or(0, |report| report.len()),
                 state: EntryState::Subagent {
                     status: subagent.status,
                     expanded: subagent.expanded,
                     loading: subagent.nested_loading,
-                    nested_entries: nested_size(&subagent.nested),
+                    nested_entries: if subagent.expanded {
+                        nested_size(&subagent.nested)
+                    } else {
+                        None
+                    },
                 },
             },
             TranscriptEntry::Question {
@@ -1192,6 +1285,8 @@ pub struct AppState {
     pub show_sidebar: bool,
     pub sidebar_diagnose_open: bool,
     pub sidebar_diagnose_head_area: Rect,
+    pub sidebar_changes_open: bool,
+    pub sidebar_changes_head_area: Rect,
     pub terminal_width: u16,
     pub file_changes: Vec<FileChangeEntry>,
     pub mcp_servers: Vec<String>,
@@ -1210,10 +1305,8 @@ pub struct AppState {
     pub file_change_scroll: usize,
     pub file_change_more_hit: Option<Rect>,
     pub hovered_file_change: Option<usize>,
-    pub subagent_overlay: Option<SubagentOverlay>,
-    pub subagent_overlay_zones: Vec<(Rect, usize)>,
-    pub subagent_hit: Option<Rect>,
-    pub user_shell_running: Option<String>,
+    pub runs_hits: Vec<(Rect, RunKind)>,
+    pub(super) run_detail_max_scroll: usize,
     pub thinking_hit_zones: Vec<ThinkingHitZone>,
     pub digest_hit_zones: Vec<ThinkingHitZone>,
     pub hover_zones: Vec<HoverZone>,
@@ -1238,6 +1331,8 @@ pub struct AppState {
     pub update_hit: Option<Rect>,
     pub web_server: Option<RunningWebServer>,
     pub web_server_hit: Option<Rect>,
+    pub hovered_status: Option<StatusHitKind>,
+    pub hovered_sidebar: Option<SidebarHitKind>,
     pub registry: Option<Arc<SessionRegistry>>,
     pub web_launcher: Option<Arc<dyn WebServerLauncher>>,
     pub(crate) tui_prompt_echoes: VecDeque<(SessionId, String)>,
@@ -1245,6 +1340,9 @@ pub struct AppState {
     pub composer_input_area: Rect,
     pub composer_scroll: usize,
     pub composer_selection: Option<(usize, usize)>,
+    pub(super) composer_goal_col: Option<usize>,
+    pub queued_editor_width: u16,
+    pub(super) queued_editor_goal_col: Option<usize>,
     pub queued_band_area: Rect,
     pub queued_hit_zones: Vec<QueuedHitZone>,
     pub hovered_queued: Option<QueuedHitKind>,
@@ -1365,8 +1463,10 @@ impl AppState {
             login_cancel: None,
             spinner_tick: 0,
             show_sidebar: true,
-            sidebar_diagnose_open: false,
+            sidebar_diagnose_open: true,
             sidebar_diagnose_head_area: Rect::default(),
+            sidebar_changes_open: true,
+            sidebar_changes_head_area: Rect::default(),
             terminal_width: 120,
             file_changes: Vec::new(),
             mcp_servers: Vec::new(),
@@ -1384,10 +1484,8 @@ impl AppState {
             sandbox_warning: None,
             file_change_scroll: 0,
             file_change_more_hit: None,
-            subagent_overlay: None,
-            subagent_overlay_zones: Vec::new(),
-            subagent_hit: None,
-            user_shell_running: None,
+            runs_hits: Vec::new(),
+            run_detail_max_scroll: 0,
             hovered_file_change: None,
             thinking_hit_zones: Vec::new(),
             digest_hit_zones: Vec::new(),
@@ -1413,6 +1511,8 @@ impl AppState {
             update_hit: None,
             web_server: None,
             web_server_hit: None,
+            hovered_status: None,
+            hovered_sidebar: None,
             registry: None,
             web_launcher: None,
             tui_prompt_echoes: VecDeque::new(),
@@ -1420,6 +1520,9 @@ impl AppState {
             composer_input_area: Rect::default(),
             composer_scroll: 0,
             composer_selection: None,
+            composer_goal_col: None,
+            queued_editor_width: 0,
+            queued_editor_goal_col: None,
             queued_band_area: Rect::default(),
             queued_hit_zones: Vec::new(),
             hovered_queued: None,
@@ -1569,6 +1672,8 @@ impl AppState {
         self.transcript_cache.clear();
         self.queued_hit_zones.clear();
         self.hovered_queued = None;
+        self.hovered_status = None;
+        self.hovered_sidebar = None;
         self.file_change_scroll = 0;
         self.file_change_more_hit = None;
         self.pending_g = false;
@@ -1756,6 +1861,7 @@ impl AppState {
         tab.transcript = transcript_from_events(&opened.events);
         tab.user_turns = user_turn_map(&tab.transcript, &opened.events);
         tab.seed_usage_from_events(&opened.events);
+        tab.goal = meerai_session::goal::last_goal(&opened.events);
 
         if mode == SessionOpenMode::ReplaceEmpty && self.should_replace_active_tab() {
             if matches!(self.modal, Some(ActiveModal::Approval { .. })) {

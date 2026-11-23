@@ -93,6 +93,8 @@ pub fn spawn_worker(
                         let mut pending_model_window: Option<u64> = None;
                         let mut pending_plan_usage: Option<bool> = None;
                         let mut recovery: Option<QueuedPrompt> = None;
+                        let mut turn_ok = false;
+                        let mut budget_ended = false;
                         let recovery_model = agent
                             .harness
                             .as_ref()
@@ -116,8 +118,12 @@ pub fn spawn_worker(
                                                     res = &mut turn_fut => {
                                                         let (turn_id, outcome) = res;
                                                         match outcome {
-                                                            Ok(_) => recovery_attempts = 0,
+                                                            Ok(_) => {
+                                                                turn_ok = true;
+                                                                recovery_attempts = 0;
+                                                            }
                                                             Err(err) => {
+                                                                budget_ended = err.code == ErrorCode::Budget;
                                                                 let message = err.message();
                                                                 let recoverable = match err.code {
                                                                     ErrorCode::Provider => err.retryable,
@@ -247,11 +253,65 @@ pub fn spawn_worker(
                             agent.reset();
                             agent.start_session(&event_tx).await;
                         }
+                        let had_recovery = recovery.is_some();
                         if !pending_quit
                             && !pending_reset
                             && let Some(recovery) = recovery.take()
                         {
                             queued.push_front(recovery);
+                        }
+                        if let Some(goal) = agent.goal_handle() {
+                            let state = goal.snapshot();
+                            if state.active() {
+                                agent
+                                    .log_event(
+                                        &event_tx,
+                                        SessionEvent::GoalUpdated {
+                                            state: state.clone(),
+                                        },
+                                    )
+                                    .await;
+                                let _ = event_tx.send(AgentEvent::GoalUpdated { state });
+                            }
+                        }
+                        if !pending_quit
+                            && !pending_reset
+                            && !cancel.is_cancelled()
+                            && !had_recovery
+                            && agent.goal_auto_continue()
+                            && let Some(goal) = agent.goal_handle()
+                        {
+                            let max_turns = crate::goal::MAX_GOAL_TURNS;
+                            let planned = {
+                                let mut state = goal.lock();
+                                if state.active()
+                                    && !state.all_done()
+                                    && state.turns < max_turns
+                                    && (budget_ended || (turn_ok && state.pending_turn))
+                                {
+                                    state.turns += 1;
+                                    let turn = state.turns;
+                                    state.reset_rounds();
+                                    let prompt = state.turn_prompt(turn, max_turns);
+                                    Some((turn, prompt, state.clone()))
+                                } else {
+                                    None
+                                }
+                            };
+                            if let Some((turn, prompt, snapshot)) = planned {
+                                let _ =
+                                    event_tx.send(AgentEvent::GoalContinued { turn, max_turns });
+                                agent
+                                    .log_event(
+                                        &event_tx,
+                                        SessionEvent::GoalUpdated { state: snapshot },
+                                    )
+                                    .await;
+                                queued.push_front(QueuedPrompt {
+                                    text: prompt,
+                                    model: None,
+                                });
+                            }
                         }
                         if pending_quit {
                             break 'worker;

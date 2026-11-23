@@ -198,6 +198,7 @@ mod tests {
             active_tool: None,
             turn_started_at_ms: None,
             user_shell_running: false,
+            shell_runs: Vec::new(),
         }
     }
 

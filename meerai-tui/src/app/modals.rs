@@ -965,8 +965,10 @@ impl AppState {
                 match key.code {
                     KeyCode::Esc => {
                         self.modal = None;
-                        self.status_notice =
-                            Some("Shell running in background; output will appear here".into());
+                        self.status_notice = Some(
+                            "Shell running in background; output will appear in the transcript"
+                                .into(),
+                        );
                         return true;
                     }
                     KeyCode::Char('q') => {
@@ -992,6 +994,7 @@ impl AppState {
                     _ => {}
                 }
                 if let Some(ActiveModal::Terminal {
+                    run_id,
                     command,
                     output,
                     running,
@@ -999,12 +1002,76 @@ impl AppState {
                 }) = self.modal.take()
                 {
                     self.modal = Some(ActiveModal::Terminal {
+                        run_id,
                         command,
                         output,
                         running,
                         scroll,
                     });
                 }
+            }
+            ActiveModal::Runs { kind, mut selected } => {
+                let count = self.run_count(kind);
+                match key.code {
+                    KeyCode::Esc => {
+                        self.modal = None;
+                        return true;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        selected = selected.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if count > 0 {
+                            selected = (selected + 1).min(count - 1);
+                        }
+                    }
+                    KeyCode::Enter => {
+                        self.open_run_detail(kind, selected);
+                        return true;
+                    }
+                    _ => {}
+                }
+                self.modal = Some(ActiveModal::Runs { kind, selected });
+            }
+            ActiveModal::RunDetail {
+                run,
+                selected,
+                mut scroll,
+            } => {
+                let max = self.run_detail_max_scroll;
+                match key.code {
+                    KeyCode::Esc => {
+                        self.modal = Some(ActiveModal::Runs {
+                            kind: run.kind(),
+                            selected,
+                        });
+                        return true;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        scroll = scroll.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        scroll = (scroll + 1).min(max);
+                    }
+                    KeyCode::PageUp => {
+                        scroll = scroll.saturating_sub(10);
+                    }
+                    KeyCode::PageDown => {
+                        scroll = (scroll + 10).min(max);
+                    }
+                    KeyCode::Home | KeyCode::Char('g') => {
+                        scroll = 0;
+                    }
+                    KeyCode::End | KeyCode::Char('G') => {
+                        scroll = max;
+                    }
+                    _ => {}
+                }
+                self.modal = Some(ActiveModal::RunDetail {
+                    run,
+                    selected,
+                    scroll,
+                });
             }
             ActiveModal::Question {
                 request,
@@ -1399,6 +1466,9 @@ impl AppState {
                 mut error,
             } => {
                 let mut keep_open = true;
+                if !matches!(key.code, KeyCode::Up | KeyCode::Down) {
+                    self.queued_editor_goal_col = None;
+                }
                 match key.code {
                     KeyCode::Esc => {
                         self.modal = None;
@@ -1460,6 +1530,24 @@ impl AppState {
                             .find('\n')
                             .map(|idx| idx + cursor.min(input.len()))
                             .unwrap_or(input.len());
+                    }
+                    KeyCode::Up | KeyCode::Down => {
+                        let delta = if key.code == KeyCode::Up { -1 } else { 1 };
+                        let width = if self.queued_editor_width == 0 {
+                            56
+                        } else {
+                            self.queued_editor_width as usize
+                        };
+                        if let Some((next, goal)) = crate::ui::modals::queued_editor_vertical(
+                            &input,
+                            cursor,
+                            width,
+                            delta,
+                            self.queued_editor_goal_col,
+                        ) {
+                            cursor = next;
+                            self.queued_editor_goal_col = Some(goal);
+                        }
                     }
                     KeyCode::Char(c) if !has_ctrl && !has_alt => {
                         cursor = cursor.min(input.len());
@@ -1807,6 +1895,28 @@ impl AppState {
                     _ => {}
                 }
                 self.modal = Some(ActiveModal::Context(panel));
+            }
+            ActiveModal::Goal { state, mut scroll } => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => self.modal = None,
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        scroll = scroll.saturating_add(1);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        scroll = scroll.saturating_sub(1);
+                    }
+                    KeyCode::PageDown => {
+                        scroll = scroll.saturating_add(10);
+                    }
+                    KeyCode::PageUp => {
+                        scroll = scroll.saturating_sub(10);
+                    }
+                    KeyCode::Home | KeyCode::Char('g') => scroll = 0,
+                    _ => {}
+                }
+                if self.modal.is_some() {
+                    self.modal = Some(ActiveModal::Goal { state, scroll });
+                }
             }
             ActiveModal::Memory {
                 entries,
@@ -2193,7 +2303,7 @@ impl AppState {
                 }
             },
             ActiveModal::SubagentSpawn(mut panel) => {
-                const FIELDS: usize = 7;
+                const FIELDS: usize = 9;
                 match key.code {
                     KeyCode::Esc => {
                         self.modal = None;
@@ -2211,7 +2321,7 @@ impl AppState {
                         };
                         panel.error = None;
                     }
-                    KeyCode::Char('m') if panel.field == 3 => {
+                    KeyCode::Char('m') if panel.field == 4 => {
                         panel.mode = match panel.mode {
                             None => Some(ApprovalMode::Plan),
                             Some(ApprovalMode::Plan) => Some(ApprovalMode::Ask),
@@ -2222,12 +2332,13 @@ impl AppState {
                     }
                     KeyCode::Backspace => {
                         let field = match panel.field {
-                            0 => &mut panel.agent,
-                            1 => &mut panel.task,
-                            2 => &mut panel.model,
-                            3 => &mut panel.steps,
-                            4 => &mut panel.tokens,
-                            5 => &mut panel.cost,
+                            0 => &mut panel.name,
+                            1 => &mut panel.agent,
+                            2 => &mut panel.task,
+                            3 => &mut panel.model,
+                            5 => &mut panel.steps,
+                            6 => &mut panel.tokens,
+                            7 => &mut panel.cost,
                             _ => &mut panel.tools,
                         };
                         field.pop();
@@ -2250,12 +2361,13 @@ impl AppState {
                     }
                     KeyCode::Char(c) if !has_ctrl && !has_alt => {
                         let field = match panel.field {
-                            0 => &mut panel.agent,
-                            1 => &mut panel.task,
-                            2 => &mut panel.model,
-                            3 => &mut panel.steps,
-                            4 => &mut panel.tokens,
-                            5 => &mut panel.cost,
+                            0 => &mut panel.name,
+                            1 => &mut panel.agent,
+                            2 => &mut panel.task,
+                            3 => &mut panel.model,
+                            5 => &mut panel.steps,
+                            6 => &mut panel.tokens,
+                            7 => &mut panel.cost,
                             _ => &mut panel.tools,
                         };
                         field.push(c);
@@ -2592,11 +2704,18 @@ impl AppState {
                     error,
                 });
             }
+            (ActiveModal::Runs { kind, .. }, ModalHitKind::ListItem(index)) => {
+                self.open_run_detail(kind, index);
+            }
+            (ActiveModal::Runs { .. } | ActiveModal::RunDetail { .. }, ModalHitKind::Close) => {
+                self.modal = None;
+            }
             (ActiveModal::Terminal { running, .. }, ModalHitKind::Close) => {
                 self.modal = None;
                 if running {
-                    self.status_notice =
-                        Some("Shell running in background; output will appear here".into());
+                    self.status_notice = Some(
+                        "Shell running in background; output will appear in the transcript".into(),
+                    );
                 }
             }
             (
@@ -3014,6 +3133,9 @@ impl AppState {
             PaletteAction::CycleApproval => {
                 self.cycle_approval_mode();
             }
+            PaletteAction::ToggleChanges => {
+                self.toggle_changes_panel();
+            }
         }
     }
 
@@ -3040,6 +3162,20 @@ impl AppState {
         }
     }
 
+    pub(super) fn toggle_changes_panel(&mut self) {
+        if self.is_sidebar_visible() {
+            self.sidebar_changes_open = !self.sidebar_changes_open;
+        } else {
+            self.show_sidebar = true;
+            self.sidebar_changes_open = true;
+            if self.terminal_width < MIN_SIDEBAR_WIDTH {
+                self.status_notice = Some(format!(
+                    "File Changes needs a terminal width >= {MIN_SIDEBAR_WIDTH} cols"
+                ));
+            }
+        }
+    }
+
     pub(super) fn click_sidebar_diagnose_at(&mut self, column: u16, row: u16) -> bool {
         if self.modal.is_some() || !self.is_sidebar_visible() {
             return false;
@@ -3055,6 +3191,24 @@ impl AppState {
             return false;
         }
         self.sidebar_diagnose_open = !self.sidebar_diagnose_open;
+        true
+    }
+
+    pub(super) fn click_sidebar_changes_at(&mut self, column: u16, row: u16) -> bool {
+        if self.modal.is_some() || !self.is_sidebar_visible() {
+            return false;
+        }
+        let area = self.sidebar_changes_head_area;
+        if area.width == 0
+            || area.height == 0
+            || column < area.x
+            || column >= area.x + area.width
+            || row < area.y
+            || row >= area.y + area.height
+        {
+            return false;
+        }
+        self.sidebar_changes_open = !self.sidebar_changes_open;
         true
     }
 
@@ -3245,6 +3399,7 @@ fn subagent_spec_from_panel(panel: &SubagentSpawnPanel) -> Option<meerai_agents:
         (!tools.is_empty()).then_some(tools)
     };
     Some(meerai_agents::SubagentSpec {
+        name: (!panel.name.trim().is_empty()).then(|| panel.name.trim().to_string()),
         agent: panel.agent.trim().to_string(),
         task: panel.task.trim().to_string(),
         model: (!panel.model.trim().is_empty()).then(|| panel.model.trim().to_string()),

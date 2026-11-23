@@ -561,11 +561,14 @@ impl WasmTransport {
         });
     }
 
-    pub fn run_shell(&self, session_id: String, command: String) {
+    pub fn run_shell(&self, session_id: String, command: String, run_id: String) {
         let handle = self.handle;
         spawn_local(async move {
             let path = format!("/api/sessions/{session_id}/shell");
-            let Ok(payload) = serde_json::to_string(&RunShellRequest { command }) else {
+            let Ok(payload) = serde_json::to_string(&RunShellRequest {
+                command,
+                run_id: Some(run_id.clone()),
+            }) else {
                 return;
             };
             let res = match fetch_text("POST", &path, Some(&payload)).await {
@@ -576,7 +579,7 @@ impl WasmTransport {
                 Ok((status, body)) => Err(format_api_error(status, &body)),
                 Err(err) => Err(err),
             };
-            handle.update(move |state| apply_shell_output(state, &session_id, res));
+            handle.update(move |state| apply_shell_output(state, &session_id, &run_id, res));
         });
     }
 

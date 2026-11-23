@@ -330,7 +330,7 @@ fn discovers_and_indexes_a_project_skill() {
     .unwrap();
     std::fs::write(skill_dir.join("notes.md"), "Details").unwrap();
 
-    let catalog = load_definitions(&dir);
+    let catalog = meerai_common::definitions::load_definitions(&dir);
     let composed = compose_definition_prompt("BASE".to_string(), &[], None, &catalog.skills);
 
     assert!(composed.contains("- review: Review a diff for regressions"));
@@ -1355,6 +1355,7 @@ fn plain_event_printer_renders_subagent_run_lifecycle() {
             &AgentEvent::ItemStarted {
                 item: SessionItem::SubagentRun {
                     id: item_id.clone(),
+                    name: None,
                     agent: "explore".to_string(),
                     status: ItemStatus::InProgress,
                     report: None,
@@ -1385,6 +1386,7 @@ fn plain_event_printer_renders_subagent_run_lifecycle() {
             &AgentEvent::ItemCompleted {
                 item: SessionItem::SubagentRun {
                     id: item_id,
+                    name: None,
                     agent: "explore".to_string(),
                     status: ItemStatus::Succeeded,
                     report: Some("done".to_string()),

@@ -16,9 +16,10 @@ use regex::Regex;
 
 use crate::app::{
     ActiveModal, AppState, CompletionHitZone, DocPos, HoverZone, InputMode, MentionKind,
-    ModalHitKind, ModalHitZone, QueuedHitKind, QueuedHitZone, TabHitKind, TabHitZone,
-    ThinkingHitZone, ToolCallStatus, TranscriptEntry, TranscriptWrappedLine, UserAction,
-    mention_is_known, normalize_selection_in_bounds, parse_mention_token,
+    ModalHitKind, ModalHitZone, QueuedHitKind, QueuedHitZone, RunKind, RunTarget, ShellRunStatus,
+    SidebarHitKind, StatusHitKind, TabHitKind, TabHitZone, ThinkingHitZone, ToolCallStatus,
+    TranscriptEntry, TranscriptWrappedLine, UserAction, is_delegation_tool, mention_is_known,
+    normalize_selection_in_bounds, parse_mention_token,
 };
 use crate::completion::{CompletionItemKind, CompletionKind};
 use crate::diff::{DiffCell, DiffRowKind};
@@ -27,11 +28,10 @@ use crate::theme;
 
 mod anchors;
 pub(crate) mod composer;
-mod modals;
+pub(crate) mod modals;
 mod selection;
 mod sidebar;
-mod statusline;
-mod subagent_overlay;
+pub(crate) mod statusline;
 pub(crate) mod transcript;
 
 #[cfg(test)]
@@ -76,20 +76,30 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
         .split(main_area);
         let sidebar = cols[3];
         let gap = 1u16.min(sidebar.height);
-        let diagnose_height = if app.sidebar_diagnose_open { 10 } else { 3 };
+        let diagnose_height = if app.sidebar_diagnose_open { 9 } else { 3 };
         let leftover = sidebar
             .height
             .saturating_sub(diagnose_height)
             .saturating_sub(gap.saturating_mul(2));
-        let overview_min = 13.min(leftover);
-        let changes_min = 3.min(leftover.saturating_sub(overview_min));
-        let top = ((leftover as u32 * 55 / 100) as u16)
-            .clamp(overview_min, leftover.saturating_sub(changes_min));
-        let middle = leftover.saturating_sub(top);
-        let overview_area = Rect::new(sidebar.x, sidebar.y, sidebar.width, top);
+        let overview_floor = if app.sidebar_diagnose_open { 11 } else { 13 };
+        let overview_min = overview_floor.min(leftover);
+        let changes_min = if app.sidebar_changes_open { 4 } else { 3 };
+        let changes_min = changes_min.min(leftover);
+        let max_overview = leftover.saturating_sub(changes_min).max(overview_min);
+        let top = ((leftover as u32 * 55 / 100) as u16).clamp(overview_min, max_overview);
+        let changes_height = if app.sidebar_changes_open {
+            leftover.saturating_sub(top)
+        } else {
+            3.min(leftover)
+        };
+        let overview_height = leftover.saturating_sub(changes_height);
+        let overview_area = Rect::new(sidebar.x, sidebar.y, sidebar.width, overview_height);
         let diagnose_area = Rect::new(
             sidebar.x,
-            sidebar.y.saturating_add(top).saturating_add(gap),
+            sidebar
+                .y
+                .saturating_add(overview_height)
+                .saturating_add(gap),
             sidebar.width,
             diagnose_height,
         );
@@ -100,7 +110,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
                 .saturating_add(diagnose_height)
                 .saturating_add(gap),
             sidebar.width,
-            middle,
+            changes_height,
         );
 
         sidebar::render_sidebar_overview(frame, app, overview_area);
@@ -110,6 +120,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
     } else {
         app.sidebar_changes_inner_area = Rect::default();
         app.sidebar_diagnose_head_area = Rect::default();
+        app.sidebar_changes_head_area = Rect::default();
         app.visible_file_change_rows = 0;
         app.file_change_more_hit = None;
         app.hovered_file_change = None;
@@ -118,9 +129,19 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
         cols[0]
     };
 
-    let composer_input_width = (chat_col.width.saturating_sub(8) as usize).max(1);
-    let composer_lines =
-        composer::composer_rows(&app.tab().input, composer_input_width).clamp(1, 8) as u16;
+    let composer_input_width = if chat_col.width >= 16 {
+        chat_col.width.saturating_sub(8)
+    } else {
+        chat_col.width.saturating_sub(4)
+    }
+    .max(1) as usize;
+    let composer_lines = composer::composer_rows(
+        &app.tab().input,
+        composer_input_width,
+        &app.agents,
+        &app.skills,
+    )
+    .clamp(1, 8) as u16;
     let composer_bottom_margin: u16 = if main_area.height >= 14 { 1 } else { 0 };
     let composer_height = composer_lines + 4 + composer_bottom_margin;
 
@@ -165,7 +186,6 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
         render_toast(frame, app, transcript_area);
     }
     composer::render_completion_popup(frame, app, transcript_area, composer_area);
-    subagent_overlay::render_subagent_overlay(frame, app, composer_area);
     modals::render_active_modal(frame, app, area);
     selection::capture_screen_lines(frame, app);
     selection::render_selection_highlight(frame, app);
@@ -526,6 +546,9 @@ fn selection_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+const TEXT_SELECTION_BG: Color = Color::White;
+const TEXT_SELECTION_FG: Color = Color::Black;
+
 fn hover_row_style() -> Style {
     Style::default()
         .bg(theme::p().surface_high)
@@ -609,4 +632,13 @@ fn key_hints_line(hints: &[(&str, &str)]) -> Line<'static> {
         }
     }
     Line::from(spans)
+}
+
+pub(super) fn status_label(status: ToolCallStatus) -> (&'static str, Color) {
+    match status {
+        ToolCallStatus::Proposed | ToolCallStatus::Running => ("running", theme::p().warning),
+        ToolCallStatus::Succeeded => ("done", theme::p().success),
+        ToolCallStatus::Failed => ("failed", theme::p().error),
+        ToolCallStatus::Stopped | ToolCallStatus::Cancelled => ("stopped", theme::p().muted),
+    }
 }

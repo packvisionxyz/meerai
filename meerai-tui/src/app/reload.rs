@@ -1,5 +1,5 @@
 use meerai_agents::AgentCommand;
-use meerai_common::definitions::{load_definitions, load_definitions_for};
+use meerai_common::definitions::{load_definitions_for, load_definitions_with_builtins};
 use meerai_common::hooks::load_hooks_for_run;
 use meerai_common::settings::{
     Temperature, find_project_root, load_project_settings, load_settings_from,
@@ -45,7 +45,7 @@ impl AppState {
 
         let definitions = match open_store_for_config_dir(self.config_dir.as_deref()) {
             Ok(store) => load_definitions_for(&store, self.config_dir.as_deref(), &project_root),
-            Err(_) => load_definitions(&project_root),
+            Err(_) => load_definitions_with_builtins(&project_root),
         };
         warnings.extend(definitions.warnings.clone());
         self.agents = definitions

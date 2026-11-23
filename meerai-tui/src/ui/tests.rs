@@ -199,8 +199,8 @@ fn composer_drag_selects_text_and_delete_removes_it() {
         .buffer()
         .cell((input_area.x, input_area.y))
         .unwrap();
-    assert_eq!(cell.bg, theme::p().accent);
-    assert_eq!(cell.fg, theme::p().background);
+    assert_eq!(cell.bg, ratatui::style::Color::White);
+    assert_eq!(cell.fg, ratatui::style::Color::Black);
 
     assert!(app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
     assert_eq!(app.tab().input, "world");
@@ -211,6 +211,7 @@ fn composer_drag_selects_text_and_delete_removes_it() {
 #[test]
 fn sidebar_shows_the_workspace_without_duplicated_metrics() {
     let mut app = test_app();
+    app.sidebar_diagnose_open = false;
     let rendered = render_to_string(&mut app);
     assert!(rendered.contains("dir"));
     assert!(!rendered.contains("tokens "));
@@ -254,7 +255,7 @@ fn clicking_a_sampling_tier_sets_the_effort() {
 fn opening_diagnose_keeps_the_session_block_visible() {
     let mut app = test_app();
     app.sidebar_diagnose_open = true;
-    let rendered = render_to_string(&mut app);
+    let rendered = render_to_string_with_size(&mut app, 120, 40);
     assert!(rendered.contains("DIAGNOSE [hide]"));
     assert!(rendered.contains("SESSION"));
     assert!(rendered.contains("AGENTS"));
@@ -325,21 +326,64 @@ fn clicking_the_diagnose_header_toggles_the_block() {
 
     let head = app.sidebar_diagnose_head_area;
     assert!(head.width > 0 && head.height == 1);
-    assert!(!app.sidebar_diagnose_open);
+    assert!(app.sidebar_diagnose_open);
 
     assert!(app.handle_mouse_event(mouse(
         MouseEventKind::Down(MouseButton::Left),
         head.x,
         head.y
     )));
-    assert!(app.sidebar_diagnose_open);
+    assert!(!app.sidebar_diagnose_open);
 
     terminal
         .draw(|frame| render(frame, &mut app))
-        .expect("redraw expanded sidebar");
+        .expect("redraw collapsed sidebar");
     let head = app.sidebar_diagnose_head_area;
     assert!(app.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), head.x, head.y)));
-    assert!(app.sidebar_diagnose_open, "release must not toggle again");
+    assert!(!app.sidebar_diagnose_open, "release must not toggle again");
+}
+
+#[test]
+fn clicking_the_file_changes_header_toggles_the_block() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    let mut app = test_app();
+    app.file_changes.push(crate::app::FileChangeEntry {
+        status: "M".to_string(),
+        path: "src/lib.rs".to_string(),
+    });
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("draw sidebar");
+
+    let head = app.sidebar_changes_head_area;
+    assert!(head.width > 0 && head.height == 1);
+    assert!(app.sidebar_changes_open);
+
+    assert!(app.handle_mouse_event(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        head.x,
+        head.y
+    )));
+    assert!(!app.sidebar_changes_open);
+    let collapsed = render_to_string_with_size(&mut app, 120, 40);
+    assert!(collapsed.contains("File Changes (1) [show]"));
+    assert!(!collapsed.contains("src/lib.rs"));
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("redraw collapsed sidebar");
+    let head = app.sidebar_changes_head_area;
+    assert!(app.handle_mouse_event(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        head.x,
+        head.y
+    )));
+    assert!(app.sidebar_changes_open);
+    let expanded = render_to_string_with_size(&mut app, 120, 40);
+    assert!(expanded.contains("File Changes (1) [hide]"));
+    assert!(expanded.contains("src/lib.rs"));
 }
 
 #[test]
@@ -729,6 +773,7 @@ fn subagent_expands_to_show_child_conversation() {
         .transcript
         .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
             id: "sub-1".to_string(),
+            name: None,
             agent: "explore".to_string(),
             status: ToolCallStatus::Succeeded,
             report: Some("final report".to_string()),
@@ -804,6 +849,42 @@ fn subagent_expands_to_show_child_conversation() {
     let recollapsed = render_to_string(&mut app);
     assert!(recollapsed.contains("final report"));
     assert!(!recollapsed.contains("you: find the bug"));
+}
+
+#[test]
+fn sidebar_lists_subagents_without_click_actions() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "go".to_string(),
+    });
+    app.tab_mut()
+        .transcript
+        .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
+            id: "sub-sidebar".to_string(),
+            name: None,
+            agent: "explore".to_string(),
+            status: ToolCallStatus::Running,
+            report: None,
+            child_session_id: Some("ses-child".to_string()),
+            model: None,
+            approval_mode: "ask".to_string(),
+            steps_used: 2,
+            max_steps: 16,
+            usage: Default::default(),
+            est_cost_usd: None,
+            active_tool: Some("code-grep".to_string()),
+            expanded: false,
+            nested: None,
+            nested_refreshed_at: None,
+            nested_loading: false,
+        }));
+    app.tab_mut().turn_activity.insert(1, true);
+
+    let rendered = render_to_string_with_size(&mut app, 120, 40);
+    assert!(rendered.contains("AGENTS"));
+    assert!(rendered.contains("explore"));
+    assert!(rendered.contains("[running]"));
+    assert!(rendered.contains("2/16"));
 }
 
 #[test]
@@ -928,7 +1009,7 @@ fn expanded_edit_renders_colored_diff_with_counts() {
 }
 
 #[test]
-fn statusline_shows_running_subagent_names() {
+fn statusline_shows_the_running_agent_count() {
     let mut app = test_app();
     app.tab_mut().is_running = true;
     app.tab_mut().active_tool = Some("subagent-run".to_string());
@@ -937,6 +1018,7 @@ fn statusline_shows_running_subagent_names() {
             .transcript
             .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
                 id: id.to_string(),
+                name: None,
                 agent: agent.to_string(),
                 status: ToolCallStatus::Running,
                 report: None,
@@ -955,7 +1037,8 @@ fn statusline_shows_running_subagent_names() {
             }));
     }
     let rendered = render_to_string(&mut app);
-    assert!(rendered.contains("explore, build"));
+    assert!(rendered.contains("2 agents"));
+    assert!(rendered.contains("subagent-run"));
 }
 
 #[test]
@@ -1247,11 +1330,16 @@ fn composer_cursor_sits_right_after_a_selected_skill_chip() {
 
 #[test]
 fn composer_rows_counts_wrapped_and_explicit_rows() {
-    assert_eq!(super::composer::composer_rows("", 10), 1);
-    assert_eq!(super::composer::composer_rows("short", 10), 1);
-    assert_eq!(super::composer::composer_rows("abcdefghijklmno", 10), 2);
-    assert_eq!(super::composer::composer_rows("a\nbbbbbbbbbbbb", 10), 3);
-    assert_eq!(super::composer::composer_rows("a\nb\nc", 10), 3);
+    let agents: Vec<meerai_common::definitions::AgentDefinition> = Vec::new();
+    let skills: Vec<meerai_common::definitions::SkillDefinition> = Vec::new();
+    let rows = |input, width| super::composer::composer_rows(input, width, &agents, &skills);
+    assert_eq!(rows("", 10), 1);
+    assert_eq!(rows("short", 10), 1);
+    assert_eq!(rows("abcdefghijklmno", 10), 2);
+    assert_eq!(rows("a\nbbbbbbbbbbbb", 10), 3);
+    assert_eq!(rows("a\nb\nc", 10), 3);
+    assert_eq!(rows("aa bb cc", 5), 2);
+    assert_eq!(rows("a bbbbbbbbbbbbbbbb", 10), 3);
 }
 
 #[test]
@@ -1259,11 +1347,15 @@ fn composer_word_wraps_at_spaces_and_maps_rows() {
     let agents: Vec<meerai_common::definitions::AgentDefinition> = Vec::new();
     let skills: Vec<meerai_common::definitions::SkillDefinition> = Vec::new();
     let input = "alpha beta gamma delta";
-    let row = |index| super::composer::composer_row_start(input, 0, 10, index, &agents, &skills);
-    assert_eq!(row(0), (0, 0));
-    assert_eq!(row(1), (0, 11));
-    assert_eq!(row(2), (0, 17));
-    assert_eq!(row(3), (0, 17));
+    let row = |index| super::composer::composer_row(input, 0, 10, index, &agents, &skills);
+    let bounds = |index| {
+        let row = row(index);
+        (row.logical_line, row.start)
+    };
+    assert_eq!(bounds(0), (0, 0));
+    assert_eq!(bounds(1), (0, 11));
+    assert_eq!(bounds(2), (0, 17));
+    assert_eq!(bounds(3), (0, 17));
 }
 
 #[test]
@@ -1531,7 +1623,7 @@ fn renders_provider_apikey_masked_and_model_modals() {
         selected: 0,
     });
     let provider_screen = render_to_string(&mut app);
-    assert!(provider_screen.contains("Connect Provider (/connect)"));
+    assert!(provider_screen.contains("Connect provider (/connect)"));
 
     app.modal = Some(ActiveModal::ApiKeyInput {
         provider_id: "opencode-go".to_string(),
@@ -1553,7 +1645,7 @@ fn renders_provider_apikey_masked_and_model_modals() {
         error: None,
     });
     let model_screen = render_to_string(&mut app);
-    assert!(model_screen.contains("Set Model [gemini] (/model)"));
+    assert!(model_screen.contains("Set model [gemini] (/model)"));
 
     app.modal = Some(ActiveModal::DiffView {
         file_index: 0,
@@ -1919,7 +2011,7 @@ fn renders_session_tabs_badges_and_session_select_modal() {
     });
 
     let modal_screen = render_to_string(&mut app);
-    assert!(modal_screen.contains("Switch Session (/sessions)"));
+    assert!(modal_screen.contains("Switch session (/sessions)"));
     assert!(modal_screen.contains("[tab 1*]"));
     assert!(modal_screen.contains("[tab 2]"));
     assert!(modal_screen.contains("Other Task"));
@@ -1978,7 +2070,7 @@ fn sidebar_padding_hover_and_click_alignment() {
         },
     ];
 
-    let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("terminal");
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
     terminal
         .draw(|frame| render(frame, &mut app))
         .expect("draw sidebar");
@@ -1986,9 +2078,10 @@ fn sidebar_padding_hover_and_click_alignment() {
     let changes = app.sidebar_changes_inner_area;
     assert!(changes.width > 0 && changes.height >= 2);
     let header_row = {
+        let head = app.sidebar_changes_head_area;
         let buf = terminal.backend().buffer();
         (0..120)
-            .map(|x| buf[(x, changes.y - 2)].symbol())
+            .map(|x| buf[(x, head.y)].symbol())
             .collect::<String>()
     };
     assert!(
@@ -2316,6 +2409,7 @@ fn transcript_document_rebuilds_when_nested_subagent_content_arrives() {
         .transcript
         .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
             id: "sub-cache".to_string(),
+            name: None,
             agent: "explore".to_string(),
             status: ToolCallStatus::Running,
             report: None,
@@ -2528,7 +2622,7 @@ fn question_overlay_shows_mode_and_an_other_row() {
 }
 
 #[test]
-fn statusline_subagent_click_opens_overlay_and_shows_work() {
+fn statusline_agents_counter_opens_runs_and_detail() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
     let mut app = test_app();
@@ -2536,6 +2630,132 @@ fn statusline_subagent_click_opens_overlay_and_shows_work() {
         .transcript
         .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
             id: "sub-1".to_string(),
+            name: None,
+            agent: "explore".to_string(),
+            status: ToolCallStatus::Running,
+            report: None,
+            child_session_id: Some("ses-child".to_string()),
+            model: None,
+            approval_mode: "ask".to_string(),
+            steps_used: 0,
+            max_steps: 0,
+            usage: Default::default(),
+            est_cost_usd: None,
+            active_tool: None,
+            expanded: false,
+            nested: None,
+            nested_refreshed_at: None,
+            nested_loading: false,
+        }));
+    app.tab_mut().is_running = true;
+    app.tab_mut().active_tool = Some("subagent-run".to_string());
+    let _ = render_to_string(&mut app);
+
+    let (hit, _) = app
+        .runs_hits
+        .iter()
+        .find(|(_, kind)| *kind == RunKind::Agents)
+        .copied()
+        .expect("statusline agents counter");
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: hit.x,
+        row: hit.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::Runs {
+            kind: RunKind::Agents,
+            ..
+        })
+    ));
+
+    let _ = render_to_string(&mut app);
+    let row = app
+        .modal_hit_zones
+        .iter()
+        .find(|zone| matches!(zone.kind, ModalHitKind::ListItem(0)))
+        .map(|zone| zone.rect)
+        .expect("runs list row");
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: row.x + 1,
+        row: row.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::RunDetail {
+            run: RunTarget::Subagent(0),
+            ..
+        })
+    ));
+    let Some(TranscriptEntry::Subagent(entry)) = app.tab().transcript.first() else {
+        panic!("subagent entry");
+    };
+    assert!(!entry.expanded, "run detail must not expand the transcript");
+    assert!(matches!(
+        app.pending_session_actions.last(),
+        Some(crate::app::PendingSessionAction::ReadChildSession { item_id, .. })
+            if item_id == "sub-1"
+    ));
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(app.modal, Some(ActiveModal::Runs { .. })));
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.modal.is_none());
+}
+
+#[test]
+fn named_subagent_shows_its_name_in_transcript_runs_and_detail() {
+    let mut app = test_app();
+    app.tab_mut()
+        .transcript
+        .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
+            id: "sub-1".to_string(),
+            name: Some("parser scan".to_string()),
+            agent: "explore".to_string(),
+            status: ToolCallStatus::Running,
+            report: None,
+            child_session_id: None,
+            model: None,
+            approval_mode: "ask".to_string(),
+            steps_used: 0,
+            max_steps: 4,
+            usage: Default::default(),
+            est_cost_usd: None,
+            active_tool: None,
+            expanded: false,
+            nested: None,
+            nested_refreshed_at: None,
+            nested_loading: false,
+        }));
+    app.tab_mut().turn_activity.insert(0, true);
+
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("parser scan (explore)"));
+
+    app.open_runs(RunKind::Agents);
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("parser scan"));
+    assert!(rendered.contains("explore"));
+
+    app.open_run_detail(RunKind::Agents, 0);
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("Agent — parser scan (explore)"));
+}
+
+#[test]
+fn statusline_counter_highlights_on_hover() {
+    use crossterm::event::{MouseEvent, MouseEventKind};
+
+    let mut app = test_app();
+    app.tab_mut()
+        .transcript
+        .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
+            id: "sub-1".to_string(),
+            name: None,
             agent: "explore".to_string(),
             status: ToolCallStatus::Running,
             report: None,
@@ -2548,39 +2768,43 @@ fn statusline_subagent_click_opens_overlay_and_shows_work() {
             est_cost_usd: None,
             active_tool: None,
             expanded: false,
-            nested: Some(Vec::new()),
+            nested: None,
             nested_refreshed_at: None,
             nested_loading: false,
         }));
-    app.tab_mut().is_running = true;
-    app.tab_mut().active_tool = Some("subagent-run".to_string());
     let _ = render_to_string(&mut app);
+    let (hit, kind) = app
+        .runs_hits
+        .iter()
+        .find(|(_, kind)| *kind == RunKind::Agents)
+        .copied()
+        .expect("statusline agents counter");
 
-    let hit = app.subagent_hit.expect("statusline subagent hit");
     app.handle_mouse_event(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: hit.x,
+        kind: MouseEventKind::Moved,
+        column: hit.x + 1,
         row: hit.y,
         modifiers: KeyModifiers::NONE,
     });
-    assert!(app.subagent_overlay.is_some());
+    assert_eq!(app.hovered_status, Some(StatusHitKind::Run(kind)));
 
-    let _ = render_to_string(&mut app);
-    let zone = app.subagent_overlay_zones[0].0;
+    let backend = TestBackend::new(120, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let hover_bg = crate::theme::p().surface_high;
+    assert!(
+        (hit.x..hit.x + hit.width).all(|x| buffer[(x, hit.y)].bg == hover_bg),
+        "hovered counter uses the hover background"
+    );
+
     app.handle_mouse_event(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: zone.x,
-        row: zone.y,
+        kind: MouseEventKind::Moved,
+        column: 0,
+        row: 0,
         modifiers: KeyModifiers::NONE,
     });
-    assert!(matches!(
-        app.tab().transcript.last(),
-        Some(TranscriptEntry::Subagent(subagent)) if subagent.expanded
-    ));
-    assert!(app.subagent_overlay.is_some());
-
-    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(app.subagent_overlay.is_none());
+    assert_eq!(app.hovered_status, None);
 }
 
 #[test]
@@ -2594,7 +2818,7 @@ fn sidebar_more_row_makes_the_file_list_scrollable() {
             path: format!("src/file{index}.rs"),
         });
     }
-    let _ = render_to_string(&mut app);
+    let _ = render_to_string_with_size(&mut app, 120, 40);
     assert!(app.is_sidebar_visible());
     let more = app.file_change_more_hit.expect("more row");
 
@@ -3075,4 +3299,84 @@ fn queued_edit_dialog_wraps_and_keeps_the_cursor_visible() {
     let rendered = render_to_string(&mut app);
     assert!(rendered.matches('›').count() > 1, "text should wrap");
     assert!(rendered.contains("omega"), "cursor tail should be visible");
+}
+
+#[test]
+fn statusline_shells_counter_opens_the_shell_detail() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = test_app();
+    let (_, run_id) = app.start_shell_run("sleep 5".to_string());
+    let _ = render_to_string(&mut app);
+
+    let (hit, _) = app
+        .runs_hits
+        .iter()
+        .find(|(_, kind)| *kind == RunKind::Shells)
+        .copied()
+        .expect("statusline shells counter");
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: hit.x,
+        row: hit.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::Runs {
+            kind: RunKind::Shells,
+            ..
+        })
+    ));
+
+    let _ = render_to_string(&mut app);
+    let row = app
+        .modal_hit_zones
+        .iter()
+        .find(|zone| matches!(zone.kind, ModalHitKind::ListItem(0)))
+        .map(|zone| zone.rect)
+        .expect("shells list row");
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: row.x + 1,
+        row: row.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::RunDetail {
+            run: RunTarget::Shell(id),
+            ..
+        }) if id == run_id
+    ));
+
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("sleep 5"));
+    assert!(rendered.contains("waiting for output"));
+}
+
+#[test]
+fn transcript_selection_uses_black_text_on_white() {
+    let mut app = test_app();
+    app.tab_mut().transcript.push(TranscriptEntry::User {
+        text: "select me".to_string(),
+    });
+    let _ = render_to_string(&mut app);
+    let inner = app.transcript_inner_area;
+    app.doc_selection = Some(crate::app::DocSelection {
+        anchor: crate::app::DocPos { line: 0, col: 0 },
+        head: crate::app::DocPos { line: 0, col: 5 },
+        active: true,
+    });
+
+    let backend = TestBackend::new(120, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    let cell = terminal
+        .backend()
+        .buffer()
+        .cell((inner.x + 1, inner.y))
+        .unwrap();
+    assert_eq!(cell.bg, ratatui::style::Color::White);
+    assert_eq!(cell.fg, ratatui::style::Color::Black);
 }

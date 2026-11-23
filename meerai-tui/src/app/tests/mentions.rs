@@ -40,6 +40,28 @@ fn mention_parser_applies_skills_then_agent_and_cleans_text() {
 }
 
 #[test]
+fn bare_goal_mention_applies_the_builtin_skill() {
+    let skills = vec![sample_skill(
+        "goal",
+        DefinitionSource::Builtin,
+        Some("Run a goal loop"),
+        "Body.",
+    )];
+
+    let plan = parse_mentions("@goal ship the fix", &[], &skills);
+    assert_eq!(plan.skill_indices, vec![0]);
+    assert_eq!(plan.text.as_deref(), Some("ship the fix"));
+
+    let unknown = parse_mentions("@goalkeeper keep", &[], &skills);
+    assert!(unknown.skill_indices.is_empty());
+    assert_eq!(unknown.text, None);
+
+    let without_goal = parse_mentions("@goal ship", &[], &[]);
+    assert!(without_goal.skill_indices.is_empty());
+    assert_eq!(without_goal.text, None);
+}
+
+#[test]
 fn submitting_mention_applies_agent_and_keeps_it_in_the_bubble() {
     let (mut app, mut rx, _secrets) = test_app();
     app.agents = vec![sample_agent(
@@ -71,6 +93,38 @@ fn submitting_mention_applies_agent_and_keeps_it_in_the_bubble() {
         app.tab().transcript.last(),
         Some(&TranscriptEntry::User {
             text: "@agent/reviewer do the task".to_string()
+        })
+    );
+}
+
+#[test]
+fn submitting_bare_goal_applies_the_builtin_skill() {
+    let (mut app, mut rx, _secrets) = test_app();
+    app.skills = vec![sample_skill(
+        "goal",
+        DefinitionSource::Builtin,
+        Some("Run a goal loop"),
+        "Goal body.",
+    )];
+
+    submit(&mut app, "@goal ship the fix");
+
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::ApplySkill {
+            name: "goal".to_string(),
+            instructions: "Goal body.".to_string(),
+        }
+    );
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::SubmitPrompt("ship the fix".to_string())
+    );
+    assert!(app.tab().is_running);
+    assert_eq!(
+        app.tab().transcript.last(),
+        Some(&TranscriptEntry::User {
+            text: "@goal ship the fix".to_string()
         })
     );
 }

@@ -60,6 +60,8 @@ struct AcpRunArgs {
     agent: String,
     task: String,
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     timeout_secs: Option<u64>,
 }
 
@@ -124,6 +126,10 @@ impl Toolset for AcpRunToolset {
                         "type": "string",
                         "description": "Task instructions for the external agent"
                     },
+                    "name": {
+                        "type": "string",
+                        "description": "Optional short display name for this run, shown in the agents list and transcript"
+                    },
                     "timeout_secs": {
                         "type": "integer",
                         "description": "Wall-clock timeout in seconds (default 600, clamped to 30..=3600)"
@@ -179,6 +185,10 @@ impl Toolset for AcpRunToolset {
                 "acp task must not be empty".to_string(),
             )));
         }
+        let name = parsed
+            .name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
 
         let Some(bridge) = SUBAGENT_BRIDGE.try_with(Clone::clone).ok() else {
             return Ok(ToolRun::from_output(ToolOutput::Fail(
@@ -206,13 +216,14 @@ impl Toolset for AcpRunToolset {
             return Ok(ToolRun::from_output(ToolOutput::Fail(reason)));
         }
 
-        let title: String = task
-            .lines()
-            .next()
-            .unwrap_or("acp task")
-            .chars()
-            .take(60)
-            .collect();
+        let title: String = name
+            .clone()
+            .or_else(|| {
+                task.lines()
+                    .next()
+                    .map(|line| line.chars().take(60).collect())
+            })
+            .unwrap_or_else(|| "acp task".to_string());
         let child_session = parent
             .create_child(Some("acp:agy".to_string()), Some(title))
             .await
@@ -223,6 +234,7 @@ impl Toolset for AcpRunToolset {
         let _ = bridge.event_tx.send(AgentEvent::ItemStarted {
             item: SessionItem::SubagentRun {
                 id: item_id.clone(),
+                name: name.clone(),
                 agent: AGENT_ID.to_string(),
                 status: ItemStatus::InProgress,
                 report: None,
@@ -372,6 +384,7 @@ impl Toolset for AcpRunToolset {
         let _ = bridge.event_tx.send(AgentEvent::ItemCompleted {
             item: SessionItem::SubagentRun {
                 id: item_id,
+                name,
                 agent: AGENT_ID.to_string(),
                 status,
                 report: Some(text.clone()),

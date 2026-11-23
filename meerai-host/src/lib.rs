@@ -22,9 +22,9 @@ pub use meerai_store::{
     RoutingSettings, TaskType,
 };
 pub use registry::{
-    ChatGptLoginStatus, HostError, LiveEntry, LiveSessionDetail, LiveSessionSummary, RegistryEvent,
-    RegistryEventKind, RegistrySnapshot, SessionRegistry, SessionStatus, SubscribeResult,
-    TurnMetricsSnapshot, UsageStatsSnapshot,
+    ChatGptLoginStatus, HostError, LiveEntry, LiveSessionDetail, LiveSessionSummary, LiveShellRun,
+    RegistryEvent, RegistryEventKind, RegistrySnapshot, SessionRegistry, SessionStatus,
+    SubscribeResult, TurnMetricsSnapshot, UsageStatsSnapshot,
 };
 pub use search::{
     MatchRank, SearchMatch, SearchMode, SearchPreview, build_search_preview,

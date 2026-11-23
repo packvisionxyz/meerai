@@ -126,6 +126,8 @@ pub enum LiveEntry {
     },
     Subagent {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
         agent: String,
         status: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,6 +159,13 @@ pub enum LiveEntry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveShellRun {
+    pub id: String,
+    pub command: String,
+    pub started_at_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveSessionSummary {
     pub session_id: SessionId,
     pub title: Option<String>,
@@ -169,6 +178,8 @@ pub struct LiveSessionSummary {
     pub active_tool: Option<String>,
     pub turn_started_at_ms: Option<u64>,
     pub user_shell_running: bool,
+    #[serde(default)]
+    pub shell_runs: Vec<LiveShellRun>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -184,6 +195,8 @@ pub struct LiveSessionDetail {
     pub metrics: TurnMetricsSnapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<meerai_session::ContextBreakdown>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<meerai_session::GoalState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -231,6 +244,10 @@ pub enum RegistryEventKind {
     ContextUpdated {
         session_id: SessionId,
         breakdown: meerai_session::ContextBreakdown,
+    },
+    GoalUpdated {
+        session_id: SessionId,
+        state: meerai_session::GoalState,
     },
     SessionActivated {
         session_id: SessionId,
@@ -352,6 +369,7 @@ struct SessionRecord {
     usage: UsageStatsSnapshot,
     metrics: TurnMetricsSnapshot,
     context: Option<meerai_session::ContextBreakdown>,
+    goal: Option<meerai_session::GoalState>,
     turn_started_instant: Option<Instant>,
     tool_items: HashMap<ItemId, String>,
     recovery_pending: bool,
@@ -370,6 +388,7 @@ impl SessionRecord {
             usage: self.usage.clone(),
             metrics: self.metrics.clone(),
             context: self.context.clone(),
+            goal: self.goal.clone(),
         }
     }
 
@@ -531,6 +550,7 @@ impl SessionRegistry {
             active_tool: None,
             turn_started_at_ms: None,
             user_shell_running: false,
+            shell_runs: Vec::new(),
         };
 
         let mut state = self.inner.state.lock().unwrap();
@@ -551,6 +571,7 @@ impl SessionRegistry {
             usage: UsageStatsSnapshot::default(),
             metrics,
             context: None,
+            goal: last_goal_from_events(&opened.events),
             turn_started_instant: None,
             tool_items: HashMap::new(),
             recovery_pending: false,
@@ -1363,7 +1384,12 @@ impl SessionRegistry {
             .map_err(|_| HostError::WorkerClosed)
     }
 
-    pub fn begin_user_shell(&self, session_id: &SessionId, command: &str) -> Result<(), HostError> {
+    pub fn begin_user_shell(
+        &self,
+        session_id: &SessionId,
+        command: &str,
+        run_id: Option<String>,
+    ) -> Result<String, HostError> {
         let mut state = self.inner.state.lock().unwrap();
         let Some(record) = state.sessions.get(session_id) else {
             return Err(HostError::SessionNotFound(session_id.clone()));
@@ -1373,8 +1399,13 @@ impl SessionRegistry {
                 "shell commands are disabled in plan mode".to_string(),
             ));
         }
-        if record.summary.user_shell_running {
-            return Err(HostError::Busy);
+        let run_id = run_id
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| format!("shell-{}", now_millis()));
+        if record.summary.shell_runs.iter().any(|run| run.id == run_id) {
+            return Err(HostError::InvalidInput(
+                "shell run id is already active".to_string(),
+            ));
         }
         let entry_id = state.next_entry_id();
         let entry = LiveEntry::User {
@@ -1383,6 +1414,11 @@ impl SessionRegistry {
             text: format!("!{command}"),
         };
         let record = state.sessions.get_mut(session_id).unwrap();
+        record.summary.shell_runs.push(LiveShellRun {
+            id: run_id.clone(),
+            command: command.to_string(),
+            started_at_ms: now_millis(),
+        });
         record.summary.user_shell_running = true;
         record.entries.push(entry.clone());
         let summary = record.summary.clone();
@@ -1397,10 +1433,15 @@ impl SessionRegistry {
             &self.inner.broadcast_tx,
             RegistryEventKind::SessionUpdated { session: summary },
         );
-        Ok(())
+        Ok(run_id)
     }
 
-    pub fn finish_user_shell(&self, session_id: &SessionId, result: Result<String, String>) {
+    pub fn finish_user_shell(
+        &self,
+        session_id: &SessionId,
+        run_id: &str,
+        result: Result<String, String>,
+    ) {
         let mut state = self.inner.state.lock().unwrap();
         if !state.sessions.contains_key(session_id) {
             return;
@@ -1417,7 +1458,8 @@ impl SessionRegistry {
             },
         };
         let record = state.sessions.get_mut(session_id).unwrap();
-        record.summary.user_shell_running = false;
+        record.summary.shell_runs.retain(|run| run.id != run_id);
+        record.summary.user_shell_running = !record.summary.shell_runs.is_empty();
         record.entries.push(entry.clone());
         let summary = record.summary.clone();
         state.push_event(
@@ -1678,6 +1720,7 @@ fn apply_agent_event(
             }
             SessionItem::SubagentRun {
                 id,
+                name,
                 agent,
                 status,
                 report,
@@ -1694,6 +1737,7 @@ fn apply_agent_event(
                 let entry_id = id.to_string();
                 let entry = LiveEntry::Subagent {
                     id: entry_id.clone(),
+                    name,
                     agent: agent.clone(),
                     status: item_status_str(status).to_string(),
                     report,
@@ -1957,6 +2001,7 @@ fn apply_agent_event(
             }
             SessionItem::SubagentRun {
                 id,
+                name,
                 agent,
                 status,
                 report,
@@ -1968,6 +2013,7 @@ fn apply_agent_event(
                     let entry = update_or_push_subagent_entry(
                         record,
                         &id,
+                        name,
                         agent.clone(),
                         completed_item_status_str(status),
                         report,
@@ -2109,6 +2155,35 @@ fn apply_agent_event(
                 RegistryEventKind::ContextUpdated {
                     session_id: session_id.clone(),
                     breakdown,
+                },
+            );
+        }
+        AgentEvent::GoalUpdated { state: goal } => {
+            state.sessions.get_mut(session_id).unwrap().goal = Some(goal.clone());
+            state.push_event(
+                broadcast_tx,
+                RegistryEventKind::GoalUpdated {
+                    session_id: session_id.clone(),
+                    state: goal,
+                },
+            );
+        }
+        AgentEvent::GoalContinued { turn, max_turns } => {
+            let entry = LiveEntry::System {
+                id: state.next_entry_id(),
+                text: format!("Goal continues (turn {turn}/{max_turns})"),
+            };
+            state
+                .sessions
+                .get_mut(session_id)
+                .unwrap()
+                .entries
+                .push(entry.clone());
+            state.push_event(
+                broadcast_tx,
+                RegistryEventKind::EntryCompleted {
+                    session_id: session_id.clone(),
+                    entry,
                 },
             );
         }
@@ -2473,6 +2548,7 @@ fn update_or_push_tool_entry(
 fn update_or_push_subagent_entry(
     record: &mut SessionRecord,
     item_id: &ItemId,
+    name: Option<String>,
     agent: String,
     status: &str,
     report: Option<String>,
@@ -2487,6 +2563,7 @@ fn update_or_push_subagent_entry(
         .find(|entry| matches!(entry, LiveEntry::Subagent { id, .. } if *id == entry_id))
     {
         if let LiveEntry::Subagent {
+            name: slot_name,
             agent: slot_agent,
             status: slot_status,
             report: slot_report,
@@ -2494,6 +2571,9 @@ fn update_or_push_subagent_entry(
             ..
         } = existing
         {
+            if name.is_some() {
+                *slot_name = name;
+            }
             *slot_agent = agent;
             *slot_status = status.to_string();
             if report.is_some() {
@@ -2507,6 +2587,7 @@ fn update_or_push_subagent_entry(
     }
     let entry = LiveEntry::Subagent {
         id: entry_id,
+        name,
         agent,
         status: status.to_string(),
         report,
@@ -2521,6 +2602,10 @@ fn update_or_push_subagent_entry(
     };
     record.entries.push(entry.clone());
     entry
+}
+
+fn last_goal_from_events(events: &[LoggedEvent]) -> Option<meerai_session::GoalState> {
+    meerai_session::goal::last_goal(events)
 }
 
 fn collect_user_turn_ids(events: &[LoggedEvent]) -> Vec<Option<TurnId>> {
@@ -2605,6 +2690,7 @@ fn replay_entry_to_live(
         }
         ReplayEntry::Subagent(sub) => LiveEntry::Subagent {
             id: sub.id,
+            name: sub.name,
             agent: sub.agent,
             status: replay_status_str(sub.status).to_string(),
             report: sub.report,
@@ -3263,5 +3349,38 @@ mod tests {
             }
         }
         assert!(disconnected);
+    }
+
+    #[tokio::test]
+    async fn tracks_multiple_user_shell_runs() {
+        let registry = SessionRegistry::new();
+        let worker = open_test_session(&registry, "ses-shells", Some("Shells"), Vec::new());
+
+        let first = registry
+            .begin_user_shell(&worker.session_id, "sleep 1", Some("run-1".to_string()))
+            .unwrap();
+        let second = registry
+            .begin_user_shell(&worker.session_id, "sleep 2", None)
+            .unwrap();
+        assert_ne!(first, second);
+        let summary = registry.session_summary(&worker.session_id).unwrap();
+        assert_eq!(summary.shell_runs.len(), 2);
+        assert!(summary.user_shell_running);
+        assert!(
+            summary
+                .shell_runs
+                .iter()
+                .any(|run| run.command == "sleep 2")
+        );
+
+        registry.finish_user_shell(&worker.session_id, &first, Ok("done".to_string()));
+        let summary = registry.session_summary(&worker.session_id).unwrap();
+        assert_eq!(summary.shell_runs.len(), 1);
+        assert_eq!(summary.shell_runs[0].id, second);
+
+        registry.finish_user_shell(&worker.session_id, &second, Err("boom".to_string()));
+        let summary = registry.session_summary(&worker.session_id).unwrap();
+        assert!(summary.shell_runs.is_empty());
+        assert!(!summary.user_shell_running);
     }
 }

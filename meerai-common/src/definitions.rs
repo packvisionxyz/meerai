@@ -24,6 +24,7 @@ const MAX_SKILL_DESCRIPTION_CHARS: usize = 1024;
 pub enum DefinitionSource {
     User,
     Pack(String),
+    Builtin,
     Meerai,
     Agents,
     Claude,
@@ -34,6 +35,7 @@ impl DefinitionSource {
         match self {
             Self::User => "user".to_string(),
             Self::Pack(id) => format!("pack:{id}"),
+            Self::Builtin => "built-in".to_string(),
             Self::Meerai => ".meerai".to_string(),
             Self::Agents => ".agents".to_string(),
             Self::Claude => ".claude".to_string(),
@@ -171,7 +173,52 @@ pub fn load_definitions_for(
     project_root: &Path,
 ) -> DefinitionCatalog {
     let pack_roots = crate::packs::trusted_pack_roots(store);
-    load_definitions_with_sources(project_root, config_dir, &pack_roots)
+    with_builtin_definitions(load_definitions_with_sources(
+        project_root,
+        config_dir,
+        &pack_roots,
+    ))
+}
+
+pub fn load_definitions_with_builtins(project_root: &Path) -> DefinitionCatalog {
+    with_builtin_definitions(load_definitions(project_root))
+}
+
+const BUILTIN_ROOT: &str = "<builtin>";
+const BUILTIN_GOAL_SKILL: &str = include_str!("../skills/goal/SKILL.md");
+
+pub fn builtin_skills() -> Vec<SkillDefinition> {
+    vec![SkillDefinition {
+        id: "goal".to_string(),
+        source: DefinitionSource::Builtin,
+        description: Some(
+            "Run a goal loop: frame the goal and done condition, plan a verifiable checklist, \
+             then repeat act, observe, and adjust until every item is done. Use it for long \
+             multi-step tasks that must not stop early."
+                .to_string(),
+        ),
+        model_invocable: true,
+        body: BUILTIN_GOAL_SKILL.to_string(),
+        path: PathBuf::from(BUILTIN_ROOT).join("goal/SKILL.md"),
+        directory: PathBuf::from(BUILTIN_ROOT).join("goal"),
+        token_estimate: token_estimate(BUILTIN_GOAL_SKILL),
+        warnings: Vec::new(),
+        supporting_files: Vec::new(),
+    }]
+}
+
+pub fn with_builtin_definitions(mut catalog: DefinitionCatalog) -> DefinitionCatalog {
+    for skill in builtin_skills() {
+        if !catalog
+            .skills
+            .iter()
+            .any(|existing| existing.id == skill.id)
+        {
+            catalog.skills.push(skill);
+        }
+    }
+    catalog.skills.sort_by(|a, b| a.id.cmp(&b.id));
+    catalog
 }
 
 pub fn load_definitions_with_sources(
@@ -1246,6 +1293,40 @@ mod tests {
         assert_eq!(DefinitionSource::Meerai.label(), ".meerai");
         assert_eq!(DefinitionSource::Agents.label(), ".agents");
         assert_eq!(DefinitionSource::Claude.label(), ".claude");
+        assert_eq!(DefinitionSource::Builtin.label(), "built-in");
+    }
+
+    #[test]
+    fn builtin_goal_skill_loads_and_a_project_can_shadow_it() {
+        let dir = temp_dir("builtin_goal");
+
+        let catalog = load_definitions_with_builtins(&dir);
+        let goal = catalog
+            .skills
+            .iter()
+            .find(|skill| skill.id == "goal")
+            .expect("built-in goal skill");
+        assert_eq!(goal.source, DefinitionSource::Builtin);
+        assert!(goal.model_invocable);
+        assert!(goal.description.is_some());
+        assert!(goal.supporting_files.is_empty());
+        assert!(goal.body.contains("goal-set"));
+        assert!(goal.body.contains("goal-check"));
+
+        write_file(
+            &dir.join(".agents/skills/goal/SKILL.md"),
+            "---\nname: goal\ndescription: Local goal\n---\nLocal body.\n",
+        );
+        let shadowed = load_definitions_with_builtins(&dir);
+        let goal = shadowed
+            .skills
+            .iter()
+            .find(|skill| skill.id == "goal")
+            .expect("shadowed goal skill");
+        assert_eq!(goal.source, DefinitionSource::Agents);
+        assert_eq!(goal.body, "Local body.");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

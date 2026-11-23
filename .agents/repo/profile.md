@@ -46,18 +46,18 @@
 | `meerai-core/` | `Toolset` trait (`effect_of`, `effect_of_call`, `invoke_structured`), `ToolOutput`, `ToolError`, `EffectClass`, `ToolObservation`, `ToolRun`, `FileDiff`; re-exports `genai`, `async_trait`, `schemars::JsonSchema` |
 | `meerai-macros/` | Proc-macros `#[tool]` and `#[derive(Toolset)]` (`darling` + `syn` + `quote`), `insta` snapshot tests; test-only dependencies are dev-dependencies |
 | `meerai-store/` | Embedded SQLite store (`meerai.db`): WAL, FTS5, schema v1, private-file permissions, typed repositories (`config`, `memory`, `packs`, `routes`, `usage`) |
-| `meerai-session/` | `Session` append-only `SessionEvent` log in SQLite, recovery, `derive_messages`, replay projection (`replay`), fork/rewind (`latest_closed_turn`, `fork_latest`, `create_child`), SQLite snapshot store (`session_snapshots`), SQLite blob store (`session_blobs`), spill, compaction primitives, session list/delete/prune support |
+| `meerai-session/` | `Session` append-only `SessionEvent` log in SQLite, recovery, `derive_messages`, replay projection (`replay`), fork/rewind (`latest_closed_turn`, `fork_latest`, `create_child`), SQLite snapshot store (`session_snapshots`), SQLite blob store (`session_blobs`), spill, compaction primitives, the serde `GoalState` DTO and `last_goal`, session list/delete/prune support |
 | `meerai-policy/` | `PolicyEngine`: ordered permission rules, `ApprovalMode`, turn/session grants, YAML parsing |
 | `meerai-tools/` | `code` (`CodeTools`, seven `code-*` tools, path guards, unified diffs, `ToolRun` observations, secret env scrub), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`; opt-in post-edit diagnostics via `context.post_edit_diagnostics`), `search_as_code` (`SearchAsCodeToolset`) |
 | `meerai-common/` | SQLite-backed `AppSettings`, project-root discovery (`find_project_root`) plus project settings load/merge (`load_project_settings`, `merge_project_settings`), markdown agent/skill discovery (`definitions`: `load_definitions`, `load_definitions_for`, user/pack/project sources, diagnostics), hook configuration (`hooks`: `HookEvent`, `HookEntry`, `load_hooks`), declarative packs (`packs`) |
 | `meerai-client/` | Client-facing provider surface: `ProviderCatalog` + `providers.yml`, `ModelInfo`, `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract, `MemorySecretStore`, auth listing |
 | `meerai-providers/` | `genai` client factory + AEAD `VaultSecretStore` (ChaCha20-Poly1305, OS keychain DEK or Argon2id passphrase); re-exports the client surface |
-| `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig` (+ `TokenPricing`), `AgentEvent`, `intercept` (`Interceptor`/`StepPlan`/`ToolPlan`/`ToolContext`/`ToolOutcome`, async `before_tool`), hook engine (`hooks`: `HookEngine`/`HookContext`/`HookReport`, `HookFired` logging), `question-ask` (`QuestionAsked`/`AnswerQuestion`, not an approval), `skill-load` (`skill_tool`), `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins + custom child runs filtered by `mode` and tightened by definition `permissions`, `child_session_id` on `SubagentRun`), delegated `acp-run` (`acp_subagent`: `AcpRunToolset`/`AcpSpawner`), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
+| `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig` (+ `TokenPricing`), `AgentEvent`, `intercept` (`Interceptor`/`StepPlan`/`ToolPlan`/`ToolContext`/`ToolOutcome`, async `before_tool`), hook engine (`hooks`: `HookEngine`/`HookContext`/`HookReport`, `HookFired` logging), `question-ask` (`QuestionAsked`/`AnswerQuestion`, not an approval), `skill-load` (`skill_tool`), the built-in goal loop (`goal`, `goal_tool`: `goal-set`/`goal-check`/`goal-status` + `GoalInterceptor`), `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins + custom child runs filtered by `mode` and tightened by definition `permissions`, `child_session_id` on `SubagentRun`), delegated `acp-run` (`acp_subagent`: `AcpRunToolset`/`AcpSpawner`), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
 | `meerai-host/` | UI-neutral host seams (`SessionOpener`, `OpenedSession`, `WorkspaceQuery`/`LocalWorkspace`, `WebServerLauncher`), shared `diff`/`search`/`syntax`/`theme`/`update`, and live `SessionRegistry` event pump/ring |
 | `meerai-web-protocol/` | Serde-only Wasm-safe wire DTOs (`SnapshotResponse`, `ViewEvent`, `HostInfoDto`, `ProvidersResponse`, `SettingsSnapshotDto`, `ApiError`) |
 | `meerai-web/` | Loopback HTTP/SSE server (`hyper` + `subtle` Basic auth, `Host`/`Origin`/JSON checks, parity REST/SSE routes, embedded Wasm bundle serving) |
-| `meerai-web-client/` | Leptos 0.8 CSR Wasm browser client ([browser-ui.md](../../docs/browser-ui.md)): DOM transcript, Markdown + code highlighting, left Sessions sidebar plus TUI modal surfaces, approval scopes, Settings, palette actions, `@` mentions, completions, a collapsible sidebar Diagnose block (cache hit/write, context, memory), built via `scripts/build-web.py` |
-| `meerai-tui/` | Modal TUI library (`ratatui` + `crossterm`) split into `ui/` panels and `app/` modules, transcript replay, `/serve`, tabs, collapsible digests and sidebar Diagnose block, turn-anchor rail, diff/search, re-exporting `meerai-host` seams (no `meerai-tools`, `meerai-providers`, or `meerai-web` dependency) |
+| `meerai-web-client/` | Leptos 0.8 CSR Wasm browser client ([browser-ui.md](../../docs/browser-ui.md)): DOM transcript, Markdown + code highlighting, left Sessions sidebar plus TUI modal surfaces, approval scopes, Settings, palette actions, `@` mentions, completions, a sidebar Diagnose block shown by default (cache hit/write, context, memory) and a collapsible changed-files block, built via `scripts/build-web.py` |
+| `meerai-tui/` | Modal TUI library (`ratatui` + `crossterm`) split into `ui/` panels and `app/` modules, transcript replay, `/serve`, tabs, collapsible digests, a sidebar `AGENTS` list (main + subagents, display-only), a sidebar Diagnose block shown by default, and a collapsible File Changes block, turn-anchor rail, diff/search, re-exporting `meerai-host` seams (no `meerai-tools`, `meerai-providers`, or `meerai-web` dependency) |
 | `meerai-syntax/` | Tree-sitter highlighting for Rust, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML, CSS, and JSON plus a lexical fallback; `highlight_block` returns per-line `Token`s; depends only on grammar crates |
 | `meerai-cli/` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions` (`list`, `rm`, `prune`, `fork`) / `serve` (feature `web`) subcommands, and TUI launcher |
 | `.agents/agents/`, `.agents/skills/` | Default agent (`*.md`) and skill (`*/SKILL.md`) definitions, read at runtime |
@@ -219,7 +219,18 @@ Notes:
     `--agent` takes one id (repeating is an error); `--skill` is repeatable; unknown ids fail with
     the available ids. The TUI exposes `/agent`/`/skill`, `/agents`/`/skills` pickers, and a `@`
     Mentions popup (agents, skills, files; ids colored teal for agents and blue for skills; Tab
-    accepts, Enter accepts without submitting, Esc dismisses).
+    accepts, Enter accepts without submitting, Esc dismisses). One skill is built in
+    (`DefinitionSource::Builtin`): `goal`. It is inserted last, so any user, pack, or project skill
+    with the id `goal` shadows it. Its three tools are Read-classified: `goal-set` stores the goal,
+    done condition, and checklist; `goal-check` records evidence and may add items; `goal-status`
+    re-reads the state. `GoalInterceptor::turn_stopping` continues the turn while an item is open,
+    up to 24 rounds. After a turn ends with an open goal (`Ok` or `ErrorCode::Budget`), the worker
+    logs `SessionEvent::GoalUpdated`, emits `AgentEvent::GoalUpdated` and `GoalContinued`, resets
+    the round count, and pushes one continuation turn (max 4). `Cancel`, `Quit`, `Reset`, a queued
+    recovery turn, and headless one-shots opt out. `meerai_session::goal::last_goal` restores the
+    state in `build_agent` and in host `register_opened`. `/goal` opens a read-only Goal panel in
+    both clients; `GoalUpdated` mirrors the state to the tab, the host record, and the browser.
+    Both clients accept `@goal` as an alias for `@skill/goal`.
 22. **ACP client (M13, agy):** `--acp` drives `agy acp`; `/acp` opens a new tab; `acp doctor`
     prints the handshake. `AcpWorker` maps `AcpEvent` to `AgentEvent` and `SessionEvent`, sets
     `harness: acp:agy`/`remote_session_id`, and uses `session/load` for resume. Pre-`Connected`
@@ -275,7 +286,8 @@ Notes:
 30. **Delegated turn budget:** a `subagent-run` child gets the parent's remaining turn deadline
     minus a 5 s margin, with a 1 s minimum (`child_turn_secs`), so the child fails its own budget
     before the parent cancels it. The parent bridge deadline stays as the backstop. Do not set the
-    child clock to `0` while the parent is bounded.
+    child clock to `0` while the parent is bounded. A requested child `max_tokens` floors at 50,000
+    before it clamps to the parent remaining budget, so a model cannot buy a cap below one request.
 31. **Step-budget continuations:** a turn gets `max_steps_per_turn` plus
     `step_limit_continuations` extra budgets (default 32 + two x 32 = 96).
     Each boundary logs `STEP_CONTINUE_NOTICE` and keeps tools; only the
@@ -338,6 +350,7 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 | Prompt | `BASE_SYSTEM_PROMPT` + `compose_system_prompt` + scoped `AGENTS.md` injection | `meerai-agents/src/prompt.rs`, `multi_turn_agent.rs` |
 | Agent loop | item protocol + `AgentHarness` (session dual-write, `derive_messages` requests, policy + approvals, spill, compaction, budgets, breakers) | `meerai-agents/src/multi_turn_agent/`, `harness.rs` |
 | Loop extension | `Interceptor` chain (`before_step`, async `before_tool`, `after_tool`, `turn_stopping`) registered on the agent; `CheckpointInterceptor` is the built-in pre-tool capture | `meerai-agents/src/intercept.rs`, `checkpoint.rs` |
+| Goal loop | `GoalToolset` (`goal-set`/`goal-check`/`goal-status`) and `GoalInterceptor` share one `GoalHandle`; the worker owns across-turn continuations; `GoalUpdated` is live and durable | `meerai-session/src/goal.rs`, `meerai-agents/src/goal.rs`, `meerai-agents/src/goal_tool.rs`, `meerai-agents/src/multi_turn_agent/worker.rs` |
 | Hooks | `HookEngine` + `HookContext` + `HookReport`; loader in `meerai-common::hooks`; trust gate in `meerai-cli`; live `AgentEvent::HookCompleted` to the TUI/headless | `meerai-agents/src/hooks.rs`, `meerai-agents/src/events.rs`, `meerai-common/src/hooks.rs`, `meerai-cli/src/main.rs` |
 | ACP delegation | `AcpRunToolset` (`acp-run`) uses `SUBAGENT_BRIDGE`, creates a child session, forwards permissions, emits `SubagentRun`, returns the report; `AcpSpawner` is injected by the CLI | `meerai-agents/src/acp_subagent.rs`, `meerai-cli/src/main.rs` |
 | User questions | `question-ask` tool + `QuestionAsked`/`QuestionResolved` events + `AnswerQuestion`; TUI overlay; headless auto-cancel | `meerai-agents/src/question.rs`, `meerai-tui/src/app/modals.rs` |
@@ -505,9 +518,17 @@ Detail in [`infra.md`](infra.md). Summary:
   batch, uses `QuestionAsked`/`AnswerQuestion`, records no grant, and is not registered for
   subagents. Headless auto-cancels with a hint.
 - Loop extension: M6 checkpoint capture is the built-in `CheckpointInterceptor` on async
-  `before_tool`; do not add branches to `turn.rs`. M7 hooks use the separate `HookEngine`, not the
-  interceptor chain, because they await host processes at lifecycle points outside the loop.
-  `SessionEvent::HookFired` keeps its `event`/`decision` strings and adds `detail: Option<HookDetail>`.
+  `before_tool`; do not add loop-semantics branches to `turn.rs`. `turn_stopping` may continue the
+  turn more than once; the remaining step budget bounds repeats, and the Stop hook keeps running at
+  each stop until it blocks once. The goal loop is the built-in `GoalInterceptor` plus the
+  `goal-set`/`goal-check`/`goal-status` tools on one shared `GoalHandle`; the CLI registers both on
+  the main agent only, so subagents do not inherit them. The worker, not `turn.rs`, owns the
+  across-turn continuation; it is gated by cancel/quit/reset, a queued recovery turn, and the
+  `MAX_GOAL_TURNS` cap. `AgentEvent::GoalUpdated` and `SessionEvent::GoalUpdated` are the live and
+  durable signals; the durable one is not model-visible. M7 hooks use the separate `HookEngine`, not
+  the interceptor chain, because they await host processes at lifecycle points outside the loop.
+  `SessionEvent::HookFired` keeps its `event`/`decision` strings and adds
+  `detail: Option<HookDetail>`.
 - Hooks: user hooks load from `<config-dir>/hooks.json`; project hooks from
   `<project-root>/.meerai/hooks.json` only with `MEERAI_TRUST_PROJECT_HOOKS=1|true|yes`, user
   `hooks.trust_project: true`, or a canonical path in user `hooks.trusted_projects`.
@@ -523,6 +544,23 @@ Detail in [`infra.md`](infra.md). Summary:
 - TUI client seam: `WorkspaceQuery` supplies file listing and content search; the local
   implementation lives in `meerai-tui/src/workspace.rs` and is injectable through
   `TuiLaunchConfig::workspace_query`. Do not re-add `meerai-tools` to the TUI.
+- TUI input: the composer and the queued-edit dialog are the only multi-line editors. Both wrap
+  visually; `Up`/`Down` move across wrapped display rows and keep the goal column, and cursor
+  placement must map display columns through mention chips (`composer_row`,
+  `composer_vertical_move`, `queued_editor_vertical`). Composer height uses the same wrap
+  (`composer_rows`) so word-wrapped rows are never clipped. All other modal fields are
+  single-line append/backspace inputs without a movable cursor.
+- Running work: the statusline shows clickable `N agents` and `N shells` counters for running
+  work only. They open `ActiveModal::Runs`; a row opens `RunDetail` (the child conversation or the
+  shell command, status, and output) without expanding the transcript row. `Esc` steps detail →
+  list → closed. Clickable statusline items and sidebar panel headers get a `surface_high` hover
+  highlight. Shells are concurrent:
+  `SessionTab.shell_runs` carries a per-run id, and the host registry exposes `LiveShellRun` /
+  `ShellRunDto` with `user_shell_running` derived from the list. The sidebar `AGENTS` block is
+  display-only; the statusline counter is the interactive path.
+- Subagent names: `subagent-run` and `acp-run` accept an optional `name`, carried by `SubagentSpec`
+  and `SessionItem::SubagentRun`, and by `LiveEntry::Subagent` / `TranscriptEntryDto::Subagent` to
+  the UIs. Replay reads it from the recorded tool-call arguments.
 - Session titles: first user prompt, single line, 80 chars; no retitle when the session already has
   a user message. `context.summarizer_model` overrides the compaction model (default: session
   model); summarizer usage counts toward the session token cap.

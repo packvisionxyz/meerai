@@ -26,6 +26,7 @@ use crate::multi_turn_agent::{ChatStreamer, MultiTurnAgent, MultiTurnAgentConfig
 const TOOLSET_NAME: &str = "subagent";
 const TOOL_RUN: &str = "subagent-run";
 const CUSTOM_AGENT_MAX_STEPS: usize = 16;
+const MIN_CHILD_TOKEN_CAP: u64 = 50_000;
 pub(crate) const SUBAGENT_TURN_DEADLINE_MARGIN_SECS: u64 = 5;
 
 pub const READ_ONLY_SUBAGENT_TOOLS: &[&str] = &[
@@ -139,6 +140,8 @@ tokio::task_local! {
 struct SubagentRunArgs {
     agent: String,
     task: String,
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default, deserialize_with = "meerai_core::lenient::option_bool_value")]
     fork_session: Option<bool>,
     #[serde(default)]
@@ -155,6 +158,23 @@ struct SubagentRunArgs {
     max_cost_usd: Option<f64>,
     #[serde(default)]
     item_id: Option<ItemId>,
+}
+
+impl SubagentRunArgs {
+    fn normalized(mut self) -> Self {
+        self.name = self
+            .name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        self.model = self.model.filter(|model| !model.trim().is_empty());
+        self.allowed_tools = self.allowed_tools.filter(|tools| !tools.is_empty());
+        self.max_steps = self.max_steps.filter(|steps| *steps > 0);
+        self.max_tokens = self.max_tokens.filter(|tokens| *tokens > 0);
+        self.max_cost_usd = self
+            .max_cost_usd
+            .filter(|cost| cost.is_finite() && *cost > 0.0);
+        self
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -515,6 +535,22 @@ async fn create_child_session(
         .ok()
 }
 
+fn child_session_token_cap(
+    parent_cap: Option<u64>,
+    parent_used: u64,
+    seeded: u64,
+    requested: Option<u64>,
+) -> Option<u64> {
+    let requested = requested.map(|tokens| tokens.max(MIN_CHILD_TOKEN_CAP));
+    match parent_cap {
+        Some(cap) => {
+            let remaining = cap.saturating_sub(parent_used);
+            Some(seeded.saturating_add(remaining.min(requested.unwrap_or(u64::MAX))))
+        }
+        None => requested.map(|tokens| seeded.saturating_add(tokens)),
+    }
+}
+
 pub(crate) fn child_turn_secs(deadline: Option<Instant>, now: Instant) -> u64 {
     let Some(deadline) = deadline else {
         return 0;
@@ -548,6 +584,10 @@ impl Toolset for SubagentToolset {
                         "type": "string",
                         "description": "Focused task instructions for the subagent"
                     },
+                    "name": {
+                        "type": "string",
+                        "description": "Optional short display name for this run, shown in the agents list and transcript"
+                    },
                     "fork_session": {
                         "type": "boolean",
                         "description": "Fork the parent session transcript instead of starting a fresh child session (default: false)"
@@ -564,19 +604,19 @@ impl Toolset for SubagentToolset {
                     "allowed_tools": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Optional tool name subset for the child; it can only narrow the agent preset"
+                        "description": "Optional tool name subset for the child; it can only narrow the agent preset. Omit it or send an empty list to keep the preset"
                     },
                     "max_steps": {
                         "type": "integer",
-                        "description": "Optional step cap for the child; it is clamped to the preset and the parent turn cap"
+                        "description": "Optional step cap for the child; it is clamped to the preset and the parent turn cap. Omit it or send 0 to use the preset"
                     },
                     "max_tokens": {
                         "type": "integer",
-                        "description": "Optional child session token cap, clamped to the parent remaining budget"
+                        "description": "Optional child session token cap, at least 50000 and clamped to the parent remaining budget. Omit it or send 0 for no cap"
                     },
                     "max_cost_usd": {
                         "type": "number",
-                        "description": "Optional child cost cap in USD; the child is cancelled when it is exceeded"
+                        "description": "Optional child cost cap in USD; the child is cancelled when it is exceeded. Omit it or send 0 for no cap"
                     }
                 },
                 "required": ["agent", "task"]
@@ -623,8 +663,9 @@ impl Toolset for SubagentToolset {
             return Err(ToolError::InvalidFunctionName(fn_name.to_string()));
         }
 
-        let parsed: SubagentRunArgs =
-            serde_json::from_str(args).map_err(ToolError::WrongArguments)?;
+        let parsed = serde_json::from_str::<SubagentRunArgs>(args)
+            .map_err(ToolError::WrongArguments)?
+            .normalized();
         if parsed.task.trim().is_empty() {
             return Ok(ToolRun::from_output(ToolOutput::Fail(
                 "subagent task must not be empty".to_string(),
@@ -760,18 +801,14 @@ impl Toolset for SubagentToolset {
                 config: child_harness_config,
                 routing: bridge.routing.clone(),
             });
-            let requested_tokens = parsed.max_tokens.unwrap_or(u64::MAX);
-            if let Some(cap) = bridge.parent_harness_config.max_session_tokens {
-                let child_seeded = child_agent.cumulative_usage_tokens();
-                let remaining = cap.saturating_sub(bridge.parent_used_tokens);
-                let adjusted = child_seeded.saturating_add(remaining.min(requested_tokens));
-                child_initial_cap = Some(adjusted);
-                child_agent.set_max_session_tokens(Some(adjusted));
-            } else if parsed.max_tokens.is_some() {
-                let seeded = child_agent.cumulative_usage_tokens();
-                let adjusted = seeded.saturating_add(requested_tokens);
-                child_initial_cap = Some(adjusted);
-                child_agent.set_max_session_tokens(Some(adjusted));
+            if let Some(cap) = child_session_token_cap(
+                bridge.parent_harness_config.max_session_tokens,
+                bridge.parent_used_tokens,
+                child_agent.cumulative_usage_tokens(),
+                parsed.max_tokens,
+            ) {
+                child_initial_cap = Some(cap);
+                child_agent.set_max_session_tokens(Some(cap));
             }
         }
 
@@ -779,6 +816,7 @@ impl Toolset for SubagentToolset {
             let _ = bridge.event_tx.send(AgentEvent::ItemStarted {
                 item: SessionItem::SubagentRun {
                     id: item_id.clone(),
+                    name: parsed.name.clone(),
                     agent: agent_id.clone(),
                     status: ItemStatus::InProgress,
                     report: None,
@@ -801,9 +839,7 @@ impl Toolset for SubagentToolset {
             .map(|bridge| bridge.cancel.child_token())
             .unwrap_or_default();
 
-        let max_cost_usd = parsed
-            .max_cost_usd
-            .filter(|cost| cost.is_finite() && *cost > 0.0);
+        let max_cost_usd = parsed.max_cost_usd;
         let mut monitor = SubagentMonitor::new(item_id.clone(), max_steps, max_cost_usd);
         let child_result = {
             let mut turn_fut = std::pin::pin!(child_agent.prompt_streaming_with_commands(
@@ -896,6 +932,7 @@ impl Toolset for SubagentToolset {
             let _ = bridge.event_tx.send(AgentEvent::ItemCompleted {
                 item: SessionItem::SubagentRun {
                     id: item_id,
+                    name: parsed.name.clone(),
                     agent: agent_id,
                     status: final_status,
                     report: Some(report),
@@ -1055,6 +1092,55 @@ mod lenient_tests {
             Some(vec!["shell".to_string()])
         );
         assert_eq!(intersect_allowed_tools(None, None), None);
+    }
+
+    #[test]
+    fn zero_and_empty_optional_limits_mean_unset() {
+        let args = serde_json::from_str::<SubagentRunArgs>(
+            r#"{"agent":"explore","task":"x","model":"  ","allowed_tools":[],"max_steps":0,"max_tokens":0,"max_cost_usd":0}"#,
+        )
+        .unwrap()
+        .normalized();
+        assert_eq!(args.model, None);
+        assert_eq!(args.allowed_tools, None);
+        assert_eq!(args.max_steps, None);
+        assert_eq!(args.max_tokens, None);
+        assert_eq!(args.max_cost_usd, None);
+    }
+
+    #[test]
+    fn positive_optional_limits_are_kept() {
+        let args = serde_json::from_str::<SubagentRunArgs>(
+            r#"{"agent":"explore","task":"x","model":"gpt-6","allowed_tools":["code-grep"],"max_steps":12,"max_tokens":4000,"max_cost_usd":1.5}"#,
+        )
+        .unwrap()
+        .normalized();
+        assert_eq!(args.model.as_deref(), Some("gpt-6"));
+        assert_eq!(args.allowed_tools, Some(vec!["code-grep".to_string()]));
+        assert_eq!(args.max_steps, Some(12));
+        assert_eq!(args.max_tokens, Some(4000));
+        assert_eq!(args.max_cost_usd, Some(1.5));
+    }
+
+    #[test]
+    fn child_token_cap_floors_small_requests_and_respects_the_parent() {
+        assert_eq!(
+            child_session_token_cap(None, 0, 0, Some(4_500)),
+            Some(MIN_CHILD_TOKEN_CAP)
+        );
+        assert_eq!(child_session_token_cap(None, 0, 0, None), None);
+        assert_eq!(
+            child_session_token_cap(Some(80_000), 10_000, 0, Some(4_500)),
+            Some(MIN_CHILD_TOKEN_CAP)
+        );
+        assert_eq!(
+            child_session_token_cap(Some(20_000), 5_000, 0, Some(4_500)),
+            Some(15_000)
+        );
+        assert_eq!(
+            child_session_token_cap(None, 0, 1_000, Some(60_000)),
+            Some(61_000)
+        );
     }
 
     #[test]

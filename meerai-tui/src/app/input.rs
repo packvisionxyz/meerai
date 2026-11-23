@@ -56,9 +56,12 @@ impl AppState {
                         | ActiveModal::ProviderConnection { .. }
                         | ActiveModal::Question { .. }
                         | ActiveModal::Context(_)
+                        | ActiveModal::Goal { .. }
                         | ActiveModal::Memory { .. }
                         | ActiveModal::Routing { .. }
                         | ActiveModal::Packs { .. }
+                        | ActiveModal::Runs { .. }
+                        | ActiveModal::RunDetail { .. }
                         | ActiveModal::RewindMenu { .. } => {}
                         ActiveModal::VaultReset { input, error } => {
                             input.push_str(&clean);
@@ -195,40 +198,21 @@ impl AppState {
             };
         }
 
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-            if self
-                .subagent_hit
-                .is_some_and(|hit| rect_contains(hit, mouse.column, mouse.row))
-            {
-                self.toggle_subagent_overlay();
-                return true;
-            }
-            if self.subagent_overlay.is_some() {
-                return self.subagent_overlay_click(mouse.column, mouse.row);
-            }
-        }
-
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && let Some(hit) = self.update_hit
-            && mouse.column >= hit.x
-            && mouse.column < hit.x + hit.width
-            && mouse.row >= hit.y
-            && mouse.row < hit.y + hit.height
+            && let Some(hit) = self.status_hit_at(mouse.column, mouse.row)
         {
-            self.handle_slash_command("/update");
-            return true;
-        }
-
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && let Some(hit) = self.web_server_hit
-            && mouse.column >= hit.x
-            && mouse.column < hit.x + hit.width
-            && mouse.row >= hit.y
-            && mouse.row < hit.y + hit.height
-            && let Some(server) = self.web_server.clone()
-        {
-            self.copy_text_to_clipboard(&server.url);
-            self.status_notice = Some(format!("Copied {}", server.url));
+            match hit {
+                StatusHitKind::Run(kind) => self.open_runs(kind),
+                StatusHitKind::Update => {
+                    self.handle_slash_command("/update");
+                }
+                StatusHitKind::WebServer => {
+                    if let Some(server) = self.web_server.clone() {
+                        self.copy_text_to_clipboard(&server.url);
+                        self.status_notice = Some(format!("Copied {}", server.url));
+                    }
+                }
+            }
             return true;
         }
 
@@ -292,18 +276,24 @@ impl AppState {
             let hovered_completion = self.completion_hit_at(mouse.column, mouse.row);
             let hovered_rail = self.anchor_rail_hover_row(mouse.column, mouse.row);
             let hovered_queued = self.queued_hit_at(mouse.column, mouse.row);
+            let hovered_status = self.status_hit_at(mouse.column, mouse.row);
+            let hovered_sidebar = self.sidebar_hit_at(mouse.column, mouse.row);
             let changed = hovered_entry != self.hovered_entry
                 || hovered_tab != self.hovered_tab
                 || hovered_file != self.hovered_file_change
                 || hovered_completion != self.hovered_completion
                 || hovered_rail != self.anchor_rail_hover
-                || hovered_queued != self.hovered_queued;
+                || hovered_queued != self.hovered_queued
+                || hovered_status != self.hovered_status
+                || hovered_sidebar != self.hovered_sidebar;
             self.hovered_entry = hovered_entry;
             self.hovered_tab = hovered_tab;
             self.hovered_file_change = hovered_file;
             self.hovered_completion = hovered_completion;
             self.anchor_rail_hover = hovered_rail;
             self.hovered_queued = hovered_queued;
+            self.hovered_status = hovered_status;
+            self.hovered_sidebar = hovered_sidebar;
             return changed;
         }
 
@@ -320,6 +310,11 @@ impl AppState {
                     return true;
                 }
                 if self.click_sidebar_diagnose_at(mouse.column, mouse.row) {
+                    self.selection = None;
+                    self.doc_selection = None;
+                    return true;
+                }
+                if self.click_sidebar_changes_at(mouse.column, mouse.row) {
                     self.selection = None;
                     self.doc_selection = None;
                     return true;
@@ -552,6 +547,20 @@ impl AppState {
                 }
                 MouseEventKind::ScrollDown => {
                     *scroll = (*scroll + 3).min(max);
+                    true
+                }
+                _ => false,
+            };
+        }
+        let detail_max = self.run_detail_max_scroll;
+        if let Some(ActiveModal::RunDetail { scroll, .. }) = &mut self.modal {
+            return match kind {
+                MouseEventKind::ScrollUp => {
+                    *scroll = scroll.saturating_sub(3);
+                    true
+                }
+                MouseEventKind::ScrollDown => {
+                    *scroll = (*scroll + 3).min(detail_max);
                     true
                 }
                 _ => false,
@@ -861,6 +870,53 @@ impl AppState {
             (self.file_change_scroll + 1).min(max_start)
         };
         true
+    }
+
+    pub fn sidebar_hit_at(&self, column: u16, row: u16) -> Option<SidebarHitKind> {
+        if self.modal.is_some() || !self.is_sidebar_visible() {
+            return None;
+        }
+        let contains = |area: Rect| {
+            area.width > 0
+                && area.height > 0
+                && column >= area.x
+                && column < area.x + area.width
+                && row >= area.y
+                && row < area.y + area.height
+        };
+        if contains(self.sidebar_diagnose_head_area) {
+            return Some(SidebarHitKind::DiagnoseHead);
+        }
+        if contains(self.sidebar_changes_head_area) {
+            return Some(SidebarHitKind::ChangesHead);
+        }
+        if self.file_change_more_hit.is_some_and(contains) {
+            return Some(SidebarHitKind::ChangesMore);
+        }
+        None
+    }
+
+    pub fn status_hit_at(&self, column: u16, row: u16) -> Option<StatusHitKind> {
+        if let Some((_, kind)) = self
+            .runs_hits
+            .iter()
+            .find(|(rect, _)| rect_contains(*rect, column, row))
+        {
+            return Some(StatusHitKind::Run(*kind));
+        }
+        if self
+            .update_hit
+            .is_some_and(|hit| rect_contains(hit, column, row))
+        {
+            return Some(StatusHitKind::Update);
+        }
+        if self
+            .web_server_hit
+            .is_some_and(|hit| rect_contains(hit, column, row))
+        {
+            return Some(StatusHitKind::WebServer);
+        }
+        None
     }
 
     pub fn hovered_file_change_at(&self, column: u16, row: u16) -> Option<usize> {
@@ -1219,7 +1275,7 @@ impl AppState {
             _ => false,
         };
         if let Some(item_id) = load_child {
-            self.request_child_session_load(&item_id);
+            self.request_child_session_load(&item_id, false);
         }
         toggled
     }
@@ -1268,6 +1324,7 @@ impl AppState {
     pub(super) fn restore_composer_message(&mut self, message: String) {
         self.mode = InputMode::Insert;
         self.composer_selection = None;
+        self.composer_goal_col = None;
         self.composer_drag_anchor = None;
         let tab = self.tab_mut();
         tab.cursor = message.len();
@@ -1333,6 +1390,7 @@ impl AppState {
             }
             QueuedHitKind::Edit(idx) => {
                 if let Some(text) = self.tab().queued.get(idx).cloned() {
+                    self.queued_editor_goal_col = None;
                     self.modal = Some(ActiveModal::QueuedEdit {
                         index: idx,
                         cursor: text.len(),
@@ -1351,6 +1409,7 @@ impl AppState {
         };
         let cursor = cursor.min(self.tab().input.len());
         self.composer_selection = None;
+        self.composer_goal_col = None;
         self.composer_drag_anchor = Some(cursor);
         self.tab_mut().cursor = cursor;
         self.mode = InputMode::Insert;
@@ -1393,7 +1452,6 @@ impl AppState {
             return Some(self.tab().cursor);
         }
         let input = self.tab().input.clone();
-        let lines: Vec<&str> = input.split('\n').collect();
         let visual_row = if row < area.y {
             self.composer_scroll
         } else {
@@ -1401,7 +1459,7 @@ impl AppState {
             self.composer_scroll + relative.min(area.height.saturating_sub(1) as usize)
         };
         let display_col = column.saturating_sub(area.x) as usize;
-        let (logical_line, logical_start) = crate::ui::composer::composer_row_start(
+        let row = crate::ui::composer::composer_row(
             &input,
             self.tab().cursor,
             area.width as usize,
@@ -1409,24 +1467,13 @@ impl AppState {
             &self.agents,
             &self.skills,
         );
-        let line = lines.get(logical_line).copied().unwrap_or_default();
-        let char_idx = display_col_to_char_index(
-            line,
-            logical_start + display_col,
+        Some(crate::ui::composer::composer_byte_at(
+            &input,
+            row.logical_line,
+            row.start + display_col.min(row.width),
             &self.agents,
             &self.skills,
-        );
-        let line_start: usize = input
-            .split('\n')
-            .take(logical_line)
-            .map(|line| line.len() + 1)
-            .sum();
-        let byte_in_line = line
-            .char_indices()
-            .nth(char_idx)
-            .map(|(idx, _)| idx)
-            .unwrap_or(line.len());
-        Some((line_start + byte_in_line).min(input.len()))
+        ))
     }
 
     fn composer_word_bounds_at(&self, cursor: usize) -> Option<(usize, usize)> {
@@ -1499,11 +1546,6 @@ impl AppState {
 
         if self.modal.is_some() {
             return self.handle_modal_key(key);
-        }
-
-        if self.subagent_overlay.is_some() && key.code == KeyCode::Esc {
-            self.close_subagent_overlay();
-            return true;
         }
 
         if key.code == KeyCode::BackTab {
@@ -1665,6 +1707,10 @@ impl AppState {
         let has_shift_or_alt = key.modifiers.contains(KeyModifiers::SHIFT)
             || key.modifiers.contains(KeyModifiers::ALT);
         let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        if !matches!(key.code, KeyCode::Up | KeyCode::Down) {
+            self.composer_goal_col = None;
+        }
 
         if self.completion.is_active() {
             match key.code {
@@ -1973,19 +2019,23 @@ impl AppState {
                 self.completion.reset();
                 return;
             }
+            let (tab_id, run_id) = self.start_shell_run(command.clone());
             let tab = self.tab_mut();
             tab.auto_follow = true;
             tab.transcript_version = tab.transcript_version.wrapping_add(1);
-            let tab_id = tab.tab_id;
             self.modal = Some(ActiveModal::Terminal {
+                run_id,
                 command: command.clone(),
                 output: None,
                 running: true,
                 scroll: 0,
             });
-            self.user_shell_running = Some(command.clone());
             self.pending_session_actions
-                .push(PendingSessionAction::RunUserShell { tab_id, command });
+                .push(PendingSessionAction::RunUserShell {
+                    tab_id,
+                    run_id,
+                    command,
+                });
             self.completion.reset();
             return;
         }
@@ -2191,44 +2241,52 @@ impl AppState {
 
     fn move_up(&mut self) {
         self.composer_selection = None;
-        let tab = self.tab_mut();
-        let before = &tab.input[..tab.cursor];
-        let Some(cur_line_break) = before.rfind('\n') else {
-            return;
+        let (input, cursor) = {
+            let tab = self.tab();
+            (tab.input.clone(), tab.cursor)
         };
-        let col_chars = before[cur_line_break + 1..].chars().count();
-        let prev_line_start = before[..cur_line_break]
-            .rfind('\n')
-            .map(|idx| idx + 1)
-            .unwrap_or(0);
-        let prev_line = &tab.input[prev_line_start..cur_line_break];
-        tab.cursor = prev_line_start + char_col_to_byte_idx(prev_line, col_chars);
+        if let Some((next, goal)) = crate::ui::composer::composer_vertical_move(
+            &input,
+            cursor,
+            self.composer_width(),
+            -1,
+            self.composer_goal_col,
+            &self.agents,
+            &self.skills,
+        ) {
+            self.tab_mut().cursor = next;
+            self.composer_goal_col = Some(goal);
+        }
     }
 
     fn move_down(&mut self) {
         self.composer_selection = None;
-        let tab = self.tab_mut();
-        let before = &tab.input[..tab.cursor];
-        let cur_line_start = before.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
-        let col_chars = before[cur_line_start..].chars().count();
-        let Some(rel_next_break) = tab.input[tab.cursor..].find('\n') else {
-            return;
+        let (input, cursor) = {
+            let tab = self.tab();
+            (tab.input.clone(), tab.cursor)
         };
-        let next_line_start = tab.cursor + rel_next_break + 1;
-        let next_line_end = tab.input[next_line_start..]
-            .find('\n')
-            .map(|rel| next_line_start + rel)
-            .unwrap_or(tab.input.len());
-        let next_line = &tab.input[next_line_start..next_line_end];
-        tab.cursor = next_line_start + char_col_to_byte_idx(next_line, col_chars);
+        if let Some((next, goal)) = crate::ui::composer::composer_vertical_move(
+            &input,
+            cursor,
+            self.composer_width(),
+            1,
+            self.composer_goal_col,
+            &self.agents,
+            &self.skills,
+        ) {
+            self.tab_mut().cursor = next;
+            self.composer_goal_col = Some(goal);
+        }
     }
-}
 
-fn char_col_to_byte_idx(line: &str, target_chars: usize) -> usize {
-    line.char_indices()
-        .nth(target_chars)
-        .map(|(idx, _)| idx)
-        .unwrap_or(line.len())
+    fn composer_width(&self) -> usize {
+        let width = self.composer_input_area.width;
+        if width > 0 {
+            width as usize
+        } else {
+            self.terminal_width.saturating_sub(4).max(1) as usize
+        }
+    }
 }
 
 pub fn clamp_pos_to_bounds(pos: ScreenPos, bounds: Rect) -> Option<ScreenPos> {
@@ -2338,35 +2396,6 @@ pub(super) fn write_system_clipboard(text: &str) {
 
 #[cfg(test)]
 pub(super) fn write_system_clipboard(_text: &str) {}
-
-fn display_col_to_char_index(
-    line: &str,
-    display_col: usize,
-    agents: &[meerai_common::definitions::AgentDefinition],
-    skills: &[meerai_common::definitions::SkillDefinition],
-) -> usize {
-    let mut display = 0usize;
-    let mut index = 0usize;
-    while index < line.len() && display < display_col {
-        if let Some((kind, id, end)) = parse_mention_token(line, index)
-            && mention_is_known(kind, id, agents, skills)
-        {
-            let width = id.chars().count();
-            if display + width > display_col {
-                return line[..end].chars().count();
-            }
-            display += width;
-            index = end;
-            continue;
-        }
-        let Some(ch) = line[index..].chars().next() else {
-            break;
-        };
-        display += 1;
-        index += ch.len_utf8();
-    }
-    line[..index].chars().count()
-}
 
 fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
     rect.width > 0

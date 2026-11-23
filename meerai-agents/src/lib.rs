@@ -1,6 +1,8 @@
 mod acp_subagent;
 mod checkpoint;
 pub mod events;
+mod goal;
+mod goal_tool;
 mod harness;
 pub mod hooks;
 pub mod intercept;
@@ -22,6 +24,11 @@ pub use events::{
     ItemStatus, PlanStep, PlanStepStatus, QuestionAnswer, QuestionOption, QuestionPrompt,
     QuestionRequest, RewindScope, SessionItem, SubagentSpec, TurnEndReason, TurnId, Usage,
 };
+pub use goal::{
+    GoalHandle, GoalInterceptor, GoalItem, GoalItemStatus, GoalState, MAX_GOAL_ROUNDS,
+    new_goal_handle,
+};
+pub use goal_tool::{GOAL_CHECK, GOAL_SET, GOAL_STATUS, GoalToolset};
 pub use harness::{AgentHarness, HarnessConfig, TokenPricing};
 pub use hooks::{HookContext, HookDecision, HookEngine, HookFiring, HookReport};
 pub use intercept::{

@@ -174,8 +174,9 @@ line is planned (§3).
 ### 2.8 Delegated `acp-run`
 
 The top-level native agent can call `acp-run` with
-`{"agent":"agy","task":"..."}` (`meerai-agents/src/acp_subagent.rs`). The
-tool:
+`{"agent":"agy","task":"..."}` (`meerai-agents/src/acp_subagent.rs`). An
+optional `name` gives the run a display label and names the child session.
+The tool:
 
 - creates a child session (`parent_session_id`, `harness: acp:agy`,
   `remote_session_id`) that appears under the parent; the nested TUI view

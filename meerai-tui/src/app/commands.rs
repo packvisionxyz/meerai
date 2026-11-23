@@ -467,6 +467,10 @@ impl AppState {
                 }));
                 let _ = self.tab().cmd_tx.send(AgentCommand::InspectContext);
             }
+            "/goal" => {
+                let state = self.tab().goal.clone();
+                self.modal = Some(ActiveModal::Goal { state, scroll: 0 });
+            }
             "/memory" => {
                 self.modal = Some(ActiveModal::Memory {
                     entries: Vec::new(),
@@ -790,6 +794,7 @@ fn format_help_text() -> String {
             "/temperature" => "/temperature [0.0..2.0|default]".to_string(),
             "/agent" => "/agent <id> (or @agent/<id>)".to_string(),
             "/skill" => "/skill <id> (or @skill/<id>)".to_string(),
+            "/goal" => "/goal (or @goal <instruction>)".to_string(),
             "/mode" => "/mode [plan|ask|auto]".to_string(),
             "/search" => "/search [query]".to_string(),
             "/grep" => "/grep [query]".to_string(),
@@ -897,9 +902,14 @@ pub(crate) fn parse_mention_token(text: &str, start: usize) -> Option<(MentionKi
     let rest = text.get(start + 1..)?;
     let (kind, rest) = if let Some(rest) = rest.strip_prefix("agent/") {
         (MentionKind::Agent, rest)
-    } else {
-        let rest = rest.strip_prefix("skill/")?;
+    } else if let Some(rest) = rest.strip_prefix("skill/") {
         (MentionKind::Skill, rest)
+    } else {
+        let after = rest.strip_prefix("goal")?;
+        if after.chars().next().is_some_and(is_mention_id_char) {
+            return None;
+        }
+        return Some((MentionKind::Skill, "goal", start + 5));
     };
     let id_len = rest
         .char_indices()

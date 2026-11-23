@@ -1,7 +1,7 @@
 use wasm_bindgen::JsCast;
 
 use crate::state::{
-    ActiveModal, ProviderModalReturn, accept_completion, activate_provider_from_modal,
+    ActiveModal, ProviderModalReturn, RunKindDto, accept_completion, activate_provider_from_modal,
     copy_last_reply, custom_model_candidate, cycle_approval_mode, cycle_tab, detach_tab_view,
     execute_palette_action, execute_slash_command, filtered_commands, filtered_models_sorted,
     filtered_palette_actions, filtered_providers_sorted, open_diff_modal, open_model_input,
@@ -9,6 +9,13 @@ use crate::state::{
     steer_or_send_queued, submit_or_queue_composer, update_completion,
 };
 use crate::store::StoreHandle;
+
+enum EscapeAction {
+    Ignore,
+    ApprovalReason,
+    Close,
+    BackToRuns(RunKindDto),
+}
 
 pub fn open_command_palette(store: StoreHandle) {
     store.update(|s| {
@@ -30,27 +37,43 @@ pub fn handle_global_key(store: StoreHandle, ev: &web_sys::KeyboardEvent) {
     let text_target = is_text_target(ev);
 
     if key == "Escape" {
-        let handled = store.with(|s| match &s.modal {
+        let action = store.with(|s| match &s.modal {
+            None => EscapeAction::Ignore,
             Some(ActiveModal::Approval {
                 showing_reason: true,
                 ..
-            }) => 1u8,
-            Some(_) => 2u8,
-            None => 0u8,
+            }) => EscapeAction::ApprovalReason,
+            Some(ActiveModal::ShellRun {
+                from_runs: Some(kind),
+                ..
+            })
+            | Some(ActiveModal::SubagentOverlay {
+                from_runs: Some(kind),
+                ..
+            }) => EscapeAction::BackToRuns(*kind),
+            Some(_) => EscapeAction::Close,
         });
-        if handled == 1 {
-            store.update(|s| {
-                if let Some(ActiveModal::Approval { showing_reason, .. }) = &mut s.modal {
-                    *showing_reason = false;
-                }
-            });
-            ev.prevent_default();
-            return;
-        }
-        if handled == 2 {
-            store.update(|s| s.modal = None);
-            ev.prevent_default();
-            return;
+        match action {
+            EscapeAction::Ignore => {}
+            EscapeAction::ApprovalReason => {
+                store.update(|s| {
+                    if let Some(ActiveModal::Approval { showing_reason, .. }) = &mut s.modal {
+                        *showing_reason = false;
+                    }
+                });
+                ev.prevent_default();
+                return;
+            }
+            EscapeAction::BackToRuns(kind) => {
+                store.update(|s| crate::state::back_to_runs(s, kind));
+                ev.prevent_default();
+                return;
+            }
+            EscapeAction::Close => {
+                store.update(|s| s.modal = None);
+                ev.prevent_default();
+                return;
+            }
         }
     }
 

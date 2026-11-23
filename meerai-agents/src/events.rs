@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubagentSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub agent: String,
     pub task: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,6 +101,8 @@ pub enum SessionItem {
     },
     SubagentRun {
         id: ItemId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
         agent: String,
         status: ItemStatus,
         report: Option<String>,
@@ -243,6 +247,13 @@ pub enum AgentEvent {
     ContextUpdated {
         breakdown: ContextBreakdown,
     },
+    GoalUpdated {
+        state: meerai_session::GoalState,
+    },
+    GoalContinued {
+        turn: usize,
+        max_turns: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -358,6 +369,7 @@ mod tests {
     fn spawned_subagent_spec_round_trips() {
         let command = AgentCommand::SpawnSubagent {
             spec: SubagentSpec {
+                name: Some("parser scan".to_string()),
                 agent: "explore".to_string(),
                 task: "find the parser".to_string(),
                 model: Some("anthropic::fast".to_string()),

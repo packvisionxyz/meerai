@@ -197,10 +197,17 @@ impl PlainEventPrinter {
             AgentEvent::ItemStarted {
                 item:
                     SessionItem::SubagentRun {
-                        id, agent, status, ..
+                        id,
+                        name,
+                        agent,
+                        status,
+                        ..
                     },
             } => {
-                let label = format!("subagent {agent}");
+                let label = match name.as_deref() {
+                    Some(name) => format!("subagent {name}"),
+                    None => format!("subagent {agent}"),
+                };
                 self.item_labels.insert(id.clone(), label.clone());
                 self.write_status_line(out, &label, *status)?;
             }
@@ -244,11 +251,19 @@ impl PlainEventPrinter {
             AgentEvent::ItemCompleted {
                 item:
                     SessionItem::SubagentRun {
-                        id, agent, status, ..
+                        id,
+                        name,
+                        agent,
+                        status,
+                        ..
                     },
             } => {
                 self.item_labels.remove(id);
-                self.write_status_line(out, &format!("subagent {agent}"), *status)?;
+                let label = match name.as_deref() {
+                    Some(name) => format!("subagent {name}"),
+                    None => format!("subagent {agent}"),
+                };
+                self.write_status_line(out, &label, *status)?;
             }
             AgentEvent::Error { message, .. } => {
                 self.close_open_line(out)?;
@@ -332,7 +347,8 @@ pub(crate) async fn run_headless_channels(
                         );
                     }
                     HeadlessApprovalAction::Decline { .. } => eprintln!(
-                        "session token budget reached; raise context.max_session_tokens in the user settings or unset it"
+                        "{}: headless mode declines budget approvals; raise or unset the limit (context.max_session_tokens, or the subagent max_tokens argument)",
+                        request.preview.title
                     ),
                     HeadlessApprovalAction::Cancel => {
                         eprintln!("approval required: {}", request.preview.title);

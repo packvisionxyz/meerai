@@ -116,15 +116,18 @@ Run `meerai --help` for the generated command and option list. Common commands:
 In the TUI, type `!` before a command to run it in the workspace, for example
 `!cargo test`. It runs through the same sandbox, environment scrub, and
 `strict_env` policy as agent shell calls; `plan` mode refuses it. Output opens in
-a scrollable Terminal dialog (`j`/`k`). `Esc` backgrounds it: the dialog closes,
-the statusline shows `shell <command>`, and the result lands in the transcript
-when it finishes; `q` closes the dialog. Long commands use the shell timeout
-(120 s).
+a scrollable Terminal dialog (`j`/`k`). `Esc` backgrounds it: the dialog closes and
+the run stays listed. Several shells can run at once. The statusline shows
+clickable `N agents` and `N shells` counters for running work; a counter opens a
+list of runs, and a row opens the agent conversation or the shell output. The
+result also lands in the transcript when it finishes; `q` closes the dialog.
+Long commands use the shell timeout (120 s).
 
 In the TUI: `/sessions`, `/new`, `/close`, `/connect`, `/models`, `/mode`,
-`/agent`, `/skill`, `/compact`, `/context`, `/diagnose`, `/memory`, `/remember`,
-`/routing`, `/subagent`, `/packs`, `/definitions`, `/effort`, `/sampling`,
-`/temperature`, `/vault-reset`, `/open`, `/diff`, `/rewind`, `/fork`, `/help`.
+`/agent`, `/skill`, `/goal`, `/compact`, `/context`, `/diagnose`, `/memory`,
+`/remember`, `/routing`, `/subagent`, `/packs`, `/definitions`, `/effort`,
+`/sampling`, `/temperature`, `/vault-reset`, `/open`, `/diff`, `/rewind`, `/fork`,
+`/help`.
 
 Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 `AgentEvent` per line and requires `--prompt`. The default approval mode is
@@ -145,7 +148,8 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   `python3` or `node`. Shell and script children run in the OS sandbox when one
   is available, with provider secrets removed from the environment.
 - **Agents, skills, and packs:** read-only markdown definitions from user
-  config, trusted packs, `.meerai`, `.agents`, then `.claude`. The model sees a
+  config, trusted packs, `.meerai`, `.agents`, then `.claude`, plus one built-in
+  `goal` skill that runs a bounded act/observe/adjust loop. The model sees a
   skill list
   with one line per described skill and loads a skill on demand. An applied
   definition adds prompt text; agent `permissions` can tighten a subagent's
@@ -153,7 +157,9 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   [Agents and skills](#agents-and-skills).
 - **Subagents and routing:** isolated child sessions with `explore`, `plan`,
   `build`, and `general` profiles, plus custom `mode: subagent` definitions,
-  forwarded approvals, and usage rollup; task
+  an optional run `name` shown in the transcript, runs list, and browser
+  agent card, forwarded approvals, and usage rollup; a child `max_tokens` cap
+  floors at 50,000 and clamps to the parent budget; task
   routes for `default`, `explore`, `plan`, `build`, `review`, `compact`,
   `recovery`, and `memory` with their own model, caps, and concurrency.
 - **Sessions and checkpoints:** an append-only event log, `--continue`,
@@ -304,8 +310,10 @@ The provider reports token counters, never a cache percentage. meerai computes
 the hit ratio as `cached_tokens / prompt_tokens`. That ratio is exact because
 the provider adds cached tokens to `prompt_tokens` on every supported route.
 Cache writes come from `cache_creation_tokens`. The sidebar `DIAGNOSE` block
-(`/diagnose`) shows the last request's hit ratio and cache writes, the context
-use, and the memory and tool-schema tokens. It does not show a cumulative cache
+(`/diagnose`) is shown by default; a click on its header collapses it. It shows
+the last request's hit ratio and cache writes, the context
+use, and the memory and tool-schema tokens. The sidebar File Changes block is
+also shown by default and has its own `hide`/`show` toggle. Neither block shows a cumulative cache
 ratio. A fork or a resumed stored session shows `n/a` until a new request
 reports usage.
 
@@ -316,7 +324,8 @@ Gemini cache the prefix automatically, so their session ratio rises with the
 transcript.
 
 The TUI statusline shows the workspace, branch, approval mode, model,
-provider, temperature, throughput, and the active tool. Token counters live
+provider, temperature, throughput, the active tool, and clickable counters for
+running agents and shells. Token counters live
 in the sidebar `DIAGNOSE` block, not the statusline. `--json` reports the raw
 counters. Counters are cumulative for the session, so a resumed run continues
 from the last value. USD cost appears only when the provider catalog has
@@ -463,6 +472,13 @@ to the `subagent-run` tool.
 - Definitions are repository-controlled prompt text. They cannot run tools,
   grant permissions, or imply a sandbox; agent `permissions` can only tighten a
   subagent. Treat them as untrusted content.
+- One skill is built in: `goal`. It runs a bounded goal loop with the
+  `goal-set`, `goal-check`, and `goal-status` tools. `@goal <instruction>` (or
+  `@skill/goal`, `/skill goal`, `--skill goal`) starts it. While an item is
+  open, the harness continues the turn with the open checklist, up to 24
+  rounds and the normal step, time, and token budgets. A user, pack, or project
+  skill with the id `goal` shadows the built-in. In headless mode, use
+  `--mode auto`: the first write asks for approval in `ask` mode and exits `2`.
 
 Startup flags apply definitions to the system prompt:
 
@@ -492,6 +508,7 @@ TUI commands and mentions:
 | `@` | Open the Mentions popup: agents and skills interleaved, then files |
 | `@agent/<id>` | Apply an agent, then send the rest of the prompt |
 | `@skill/<id>` | Apply a skill, then send the rest of the prompt |
+| `@goal` | Apply the built-in goal skill, then send the rest of the prompt |
 
 Typing `@` opens one **Mentions** popup: agent and skill rows interleaved, then
 files, so a skill stays visible when the project has many agents. A typed
@@ -500,14 +517,45 @@ Tab accepts; Enter accepts the highlighted row without sending; Esc dismisses.
 Accepting inserts the mention and one trailing space, so a second Enter sends
 the prompt.
 
-A known `@agent/<id>` or `@skill/<id>` shows as a compact chip in the composer.
-The model and the session log receive the stripped prompt. Unknown ids stay as
-typed. On submit, skills apply before the agent, and repeats apply once; a
-prompt that is only mentions applies the definitions without starting a turn.
+A known `@agent/<id>`, `@skill/<id>`, or `@goal` shows as a compact chip in the
+composer. The model and the session log receive the stripped prompt. Unknown
+ids stay as typed. On submit, skills apply before the agent, and repeats apply
+once; a prompt that is only mentions applies the definitions without starting a
+turn.
 
 `/agent` and `/skill` are shortcuts for the same thing. An unknown or missing id
 prints an error and sends nothing. `/agents` opens the Mentions popup filtered to
 agents; `/skills` shows the discovered skills.
+
+#### Goal loop
+
+`@goal <instruction>` applies the built-in `goal` skill and sends the rest of
+the prompt. The model frames the goal and done condition, plans 3-8 verifiable
+items, and repeats one item at a time:
+
+1. **Act** on the first open item.
+2. **Observe** with that item's verification command.
+3. **Adjust** with `goal-check`: `done` needs evidence, `failed` stays open, and
+   new work is added to the same checklist.
+4. Continue until every item is done, or a budget, a repeated failure, or a
+   user decision stops it.
+
+The harness enforces the loop. When the model stops with an open item,
+`GoalInterceptor` re-enters the turn with the open checklist, up to 24 rounds.
+If the turn still ends with open items (the round cap, the step budget, or the
+30-minute clock), the worker starts a follow-up turn with the same checklist,
+up to 4 turns; each turn resets the round count. The normal step budget (96
+steps per turn), token cap, approvals, cancellation, and `quit` still apply.
+
+`/goal` opens a read-only Goal panel in the TUI and the browser. It shows the
+goal, the done condition, constraints, each item with its evidence, and the
+round and turn counts. The last checklist is saved as a `GoalUpdated` session
+event, so the panel and the model state come back after `--resume`.
+
+`goal-status` re-reads the in-process checklist after compaction. A headless
+one-shot runs one turn only: use `--mode auto` and raise
+`context.max_steps_per_turn` for a longer run. In `ask` mode the first write
+stops the run with exit `2`.
 
 ### Headless exit codes
 

@@ -73,7 +73,7 @@ enum LoopMsg {
     },
     UserShellDone {
         tab_id: u64,
-        command: String,
+        run_id: u64,
         result: Result<String>,
     },
     LoginDone {
@@ -180,7 +180,10 @@ pub async fn run_event_loop(
                 }
             }
             _ = ticker.tick() => {
-                let any_running = app.tabs.iter().any(|tab| tab.is_running);
+                let any_running = app
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.is_running || tab.has_running_shell());
                 let had_notice = app.status_notice.is_some();
                 app.on_tick();
                 if any_running || (had_notice && app.status_notice.is_none()) {
@@ -544,7 +547,11 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
                     });
                 });
             }
-            PendingSessionAction::RunUserShell { tab_id, command } => {
+            PendingSessionAction::RunUserShell {
+                tab_id,
+                run_id,
+                command,
+            } => {
                 let Some(opener) = opener.clone() else {
                     continue;
                 };
@@ -553,7 +560,7 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
                     let result = opener.run_user_shell(&command).await;
                     let _ = tx.send(LoopMsg::UserShellDone {
                         tab_id,
-                        command,
+                        run_id,
                         result,
                     });
                 });
@@ -964,46 +971,14 @@ fn handle_loop_msg(
         }
         LoopMsg::UserShellDone {
             tab_id,
-            command,
+            run_id,
             result,
         } => {
-            if app.user_shell_running.as_deref() == Some(command.as_str()) {
-                app.user_shell_running = None;
+            let known = app.tab_index_by_id(tab_id).is_some();
+            if known {
+                app.complete_shell_run(tab_id, run_id, result.map_err(|error| error.to_string()));
             }
-            if let Some(idx) = app.tab_index_by_id(tab_id) {
-                let text = match result {
-                    Ok(output) if output.trim().is_empty() => {
-                        format!("$ {command}\n(no output)")
-                    }
-                    Ok(output) => output,
-                    Err(error) => format!("$ {command}\nfailed: {error:#}"),
-                };
-                let updated_modal = match &mut app.modal {
-                    Some(ActiveModal::Terminal {
-                        command: active,
-                        output,
-                        running,
-                        scroll,
-                    }) if *active == command => {
-                        *output = Some(text.clone());
-                        *running = false;
-                        *scroll = 0;
-                        true
-                    }
-                    _ => false,
-                };
-                if !updated_modal {
-                    app.tabs[idx]
-                        .transcript
-                        .push(TranscriptEntry::System { text });
-                    app.tabs[idx].transcript_version =
-                        app.tabs[idx].transcript_version.wrapping_add(1);
-                }
-                app.tabs[idx].auto_follow = true;
-                true
-            } else {
-                false
-            }
+            known
         }
         LoopMsg::SessionDeleted(result) => {
             match result {
@@ -1430,6 +1405,7 @@ fn live_to_transcript(entry: LiveEntry) -> TranscriptEntry {
         }),
         LiveEntry::Subagent {
             id,
+            name,
             agent,
             status,
             report,
@@ -1437,6 +1413,7 @@ fn live_to_transcript(entry: LiveEntry) -> TranscriptEntry {
             ..
         } => TranscriptEntry::Subagent(crate::app::SubagentEntry {
             id,
+            name,
             agent,
             status: map_status_str(&status),
             report,
@@ -1573,6 +1550,19 @@ fn handle_registry_event(app: &mut AppState, ev: RegistryEvent) -> bool {
                 app.settings = user;
             }
             true
+        }
+        RegistryEventKind::GoalUpdated { session_id, state } => {
+            if let Some(idx) = app.tab_index_for_session(&session_id) {
+                app.tabs[idx].goal = Some(state.clone());
+                if app.active_tab == idx
+                    && let Some(ActiveModal::Goal {
+                        state: modal_state, ..
+                    }) = &mut app.modal
+                {
+                    *modal_state = Some(state);
+                }
+            }
+            false
         }
         _ => false,
     }

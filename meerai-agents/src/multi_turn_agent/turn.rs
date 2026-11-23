@@ -852,6 +852,7 @@ impl MultiTurnAgent {
             };
             self.log_step_ended(event_tx, &step_id, finish).await;
             self.emit_context_updated(event_tx);
+            self.emit_goal_updated(event_tx);
 
             if cancel.is_cancelled() {
                 return Ok(aborted(event_tx, turn_id));
@@ -938,6 +939,8 @@ impl MultiTurnAgent {
                 if self.apply_pending_steers(event_tx).await {
                     continue;
                 }
+                let mut reason = None;
+                let mut blocked = false;
                 if !stop_hook_used {
                     let report = self
                         .run_hook(
@@ -950,34 +953,36 @@ impl MultiTurnAgent {
                             event_tx,
                         )
                         .await;
-                    let blocked = matches!(
+                    blocked = matches!(
                         report.decision,
                         crate::hooks::HookDecision::Deny | crate::hooks::HookDecision::Block
                     );
-                    let mut reason = if blocked {
-                        Some(report.reason().unwrap_or("blocked by hook").to_string())
-                    } else {
-                        self.run_turn_stopping(turn_id, step_index)
-                    };
-                    if let Some(reason) = reason.as_mut() {
+                    if blocked {
+                        reason = Some(report.reason().unwrap_or("blocked by hook").to_string());
+                    }
+                }
+                if reason.is_none() {
+                    reason = self.run_turn_stopping(turn_id, step_index);
+                }
+                if let Some(reason) = reason.as_mut() {
+                    if blocked {
                         stop_hook_used = true;
-                        if blocked
-                            && let Some(notice) =
-                                self.rollback_after_verify_failure(turn_id, event_tx).await
+                        if let Some(notice) =
+                            self.rollback_after_verify_failure(turn_id, event_tx).await
                         {
                             reason.push_str("\n\n");
                             reason.push_str(&notice);
                         }
-                        self.log_event(
-                            event_tx,
-                            SessionEvent::UserMessage {
-                                source: InputSource::RuntimeContext,
-                                content: vec![ContentBlock::Text(reason.clone())],
-                            },
-                        )
-                        .await;
-                        continue;
                     }
+                    self.log_event(
+                        event_tx,
+                        SessionEvent::UserMessage {
+                            source: InputSource::RuntimeContext,
+                            content: vec![ContentBlock::Text(reason.clone())],
+                        },
+                    )
+                    .await;
+                    continue;
                 }
                 return Ok(completed(event_tx, turn_id, final_text));
             }

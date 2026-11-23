@@ -167,8 +167,8 @@ pub(super) fn render_composer(frame: &mut Frame<'_>, app: &mut AppState, area: R
         let input = app.tab().input.clone();
         let (start_line, start_col) = wrapped.position(&input, start, &app.agents, &app.skills);
         let (end_line, end_col) = wrapped.position(&input, end, &app.agents, &app.skills);
-        let highlight = theme::p().accent;
-        let highlight_fg = theme::p().background;
+        let highlight = TEXT_SELECTION_BG;
+        let highlight_fg = TEXT_SELECTION_FG;
         let buf = frame.buffer_mut();
         for line in start_line..=end_line {
             if line < scroll_y || line >= scroll_y + content.height as usize {
@@ -262,21 +262,114 @@ fn wrapped_chars(spans: &[Span<'static>]) -> Vec<(char, Style)> {
         .collect()
 }
 
-pub(crate) fn composer_row_start(
+#[derive(Default)]
+pub(crate) struct ComposerRow {
+    pub logical_line: usize,
+    pub start: usize,
+    pub width: usize,
+}
+
+pub(crate) fn composer_row(
     input: &str,
     cursor: usize,
     width: usize,
     row: usize,
     agents: &[AgentDefinition],
     skills: &[SkillDefinition],
-) -> (usize, usize) {
+) -> ComposerRow {
     let wrapped = wrap_composer(input, cursor, width.max(1), agents, skills);
     let row = row.min(wrapped.rows.len().saturating_sub(1));
     wrapped
         .rows
         .get(row)
-        .map(|target| (target.logical_line, target.logical_start))
-        .unwrap_or((0, 0))
+        .map(|target| ComposerRow {
+            logical_line: target.logical_line,
+            start: target.logical_start,
+            width: wrapped_width(target),
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn composer_byte_at(
+    input: &str,
+    logical_line: usize,
+    display_col: usize,
+    agents: &[AgentDefinition],
+    skills: &[SkillDefinition],
+) -> usize {
+    let mut line_start = 0usize;
+    let mut line = "";
+    for (index, text) in input.split('\n').enumerate() {
+        if index == logical_line {
+            line = text;
+            break;
+        }
+        line_start += text.len() + 1;
+    }
+    let char_idx = display_col_to_char_index(line, display_col, agents, skills);
+    line_start + byte_at_char(line, char_idx)
+}
+
+pub(crate) fn composer_vertical_move(
+    input: &str,
+    cursor: usize,
+    width: usize,
+    delta: isize,
+    goal_col: Option<usize>,
+    agents: &[AgentDefinition],
+    skills: &[SkillDefinition],
+) -> Option<(usize, usize)> {
+    let wrapped = wrap_composer(input, cursor, width.max(1), agents, skills);
+    let target_row = wrapped.cursor_row.checked_add_signed(delta)?;
+    let target = wrapped.rows.get(target_row)?;
+    let goal = goal_col.unwrap_or(wrapped.cursor_col);
+    let col = goal.min(wrapped_width(target));
+    Some((
+        composer_byte_at(
+            input,
+            target.logical_line,
+            target.logical_start + col,
+            agents,
+            skills,
+        ),
+        goal,
+    ))
+}
+
+fn byte_at_char(line: &str, char_index: usize) -> usize {
+    line.char_indices()
+        .nth(char_index)
+        .map(|(index, _)| index)
+        .unwrap_or(line.len())
+}
+
+pub(crate) fn display_col_to_char_index(
+    line: &str,
+    display_col: usize,
+    agents: &[AgentDefinition],
+    skills: &[SkillDefinition],
+) -> usize {
+    let mut display = 0usize;
+    let mut index = 0usize;
+    while index < line.len() && display < display_col {
+        if let Some((kind, id, end)) = parse_mention_token(line, index)
+            && mention_is_known(kind, id, agents, skills)
+        {
+            let width = id.chars().count();
+            if display + width > display_col {
+                return line[..end].chars().count();
+            }
+            display += width;
+            index = end;
+            continue;
+        }
+        let Some(ch) = line[index..].chars().next() else {
+            break;
+        };
+        display += 1;
+        index += ch.len_utf8();
+    }
+    line[..index].chars().count()
 }
 
 fn wrap_line(
@@ -349,15 +442,15 @@ fn wrap_composer(
     wrapped
 }
 
-pub(crate) fn composer_rows(input: &str, width: usize) -> usize {
-    let width = width.max(1);
-    if input.is_empty() {
-        return 1;
-    }
-    input
-        .split('\n')
-        .map(|line| line.chars().count().max(1).div_ceil(width))
-        .sum::<usize>()
+pub(crate) fn composer_rows(
+    input: &str,
+    width: usize,
+    agents: &[AgentDefinition],
+    skills: &[SkillDefinition],
+) -> usize {
+    wrap_composer(input, input.len(), width.max(1), agents, skills)
+        .rows
+        .len()
         .max(1)
 }
 

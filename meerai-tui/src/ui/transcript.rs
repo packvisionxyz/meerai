@@ -538,26 +538,6 @@ pub(crate) fn is_activity_group_start(transcript: &[TranscriptEntry], idx: usize
         .any(|seg| matches!(seg, TranscriptSegment::Digest(group) if group.start_idx == idx))
 }
 
-pub(crate) fn activity_group_start(
-    transcript: &[TranscriptEntry],
-    entry_idx: usize,
-) -> Option<usize> {
-    segment_transcript(transcript)
-        .into_iter()
-        .find_map(|seg| match seg {
-            TranscriptSegment::Digest(group)
-                if group.items.iter().any(|item| match *item {
-                    DigestItem::Reasoning(i)
-                    | DigestItem::ToolCall(i)
-                    | DigestItem::Subagent(i) => i == entry_idx,
-                }) =>
-            {
-                Some(group.start_idx)
-            }
-            _ => None,
-        })
-}
-
 fn digest_line(digest: &TurnDigest, expanded: bool) -> Option<Line<'static>> {
     if digest.is_empty() {
         return None;
@@ -1044,19 +1024,25 @@ fn build_transcript_lines(app: &AppState, memo: &mut TranscriptBuildMemo) -> Bui
                 } else {
                     "+ [subagent] "
                 };
-                let header = vec![
+                let mut header = vec![
                     Span::styled(lead, lead_style),
-                    Span::styled(sub.agent.clone(), name_style),
-                    Span::styled(" ", Style::default()),
-                    Span::styled(format!("[{badge}]"), badge_style),
+                    Span::styled(sub.display_name().to_string(), name_style),
                 ];
+                if sub.named().is_some() {
+                    header.push(Span::styled(
+                        format!(" ({})", sub.agent),
+                        Style::default().fg(theme::p().faint),
+                    ));
+                }
+                header.push(Span::styled(" ", Style::default()));
+                header.push(Span::styled(format!("[{badge}]"), badge_style));
                 lines.push(with_hover(
                     banded_line(Line::from(header), Some(idx), 2),
                     idx,
                 ));
                 if sub.expanded {
                     match &sub.nested {
-                        Some(nested) => render_nested_conversation(&mut lines, nested, idx),
+                        Some(nested) => render_nested_conversation(&mut lines, nested, idx, 12),
                         None => {
                             let label = if sub.nested_loading {
                                 "loading conversation…"
@@ -1407,13 +1393,23 @@ fn nested_line(parent_idx: usize, text: String, faint: bool) -> TaggedTranscript
     )
 }
 
+pub(crate) fn nested_conversation_lines(
+    nested: &[TranscriptEntry],
+    parent_idx: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    render_nested_conversation(&mut lines, nested, parent_idx, usize::MAX);
+    lines.into_iter().map(|tagged| tagged.line).collect()
+}
+
 fn render_nested_conversation(
     lines: &mut Vec<TaggedTranscriptLine>,
     nested: &[TranscriptEntry],
     parent_idx: usize,
+    max_text_lines: usize,
 ) {
     const MAX_ENTRIES: usize = 60;
-    const MAX_TEXT_LINES: usize = 12;
+    let max_text_lines = max_text_lines.max(1);
     let start = nested.len().saturating_sub(MAX_ENTRIES);
     if start > 0 {
         lines.push(nested_line(
@@ -1446,10 +1442,10 @@ fn render_nested_conversation(
                 }
                 let total = text.lines().count();
                 for (index, line) in text.lines().enumerate() {
-                    if index >= MAX_TEXT_LINES {
+                    if index >= max_text_lines {
                         lines.push(nested_line(
                             parent_idx,
-                            format!("… {} more lines", total - MAX_TEXT_LINES),
+                            format!("… {} more lines", total - max_text_lines),
                             true,
                         ));
                         break;

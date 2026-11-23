@@ -349,6 +349,9 @@ pub enum SessionEvent {
         turn_id: TurnId,
         pinned: bool,
     },
+    GoalUpdated {
+        state: crate::goal::GoalState,
+    },
     CheckpointCreated {
         checkpoint_id: CheckpointId,
         turn_id: TurnId,

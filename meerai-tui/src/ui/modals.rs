@@ -23,7 +23,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
         ActiveModal::ProviderSelect { filter, selected } => {
             let popup = cap_width(centered_rect(area, 68, 72, 46, 12), 68);
             dim_backdrop(frame, area, popup);
-            let inner = dialog_frame(frame, app, popup, "Connect Provider (/connect)", true);
+            let inner = dialog_frame(frame, app, popup, "Connect provider (/connect)", true);
 
             let rows = Layout::vertical([
                 Constraint::Length(1),
@@ -521,7 +521,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             };
             let popup = centered_rect_fixed(area, 64, height);
             dim_backdrop(frame, area, popup);
-            let title = format!("Set Model [{active_provider}] (/model)");
+            let title = format!("Set model [{active_provider}] (/model)");
             let inner = dialog_frame(frame, app, popup, &title, true);
 
             let rows = Layout::vertical([
@@ -655,7 +655,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 format!(" [{}/{}]", file_index + 1, app.file_changes.len())
             };
             let title = format!(
-                "Diff: {} ({}) +{} -{}{file_pos}",
+                "Diff (/diff): {} ({}) +{} -{}{file_pos}",
                 diff.path, diff.status, diff.additions, diff.deletions
             );
             let inner = dialog_frame(frame, app, popup, &title, true);
@@ -1069,6 +1069,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
         } => {
             let popup_width = area.width.saturating_sub(2).min(64);
             let editor_width = popup_width.saturating_sub(8).max(1) as usize;
+            app.queued_editor_width = editor_width as u16;
             let wrapped = wrap_queued_editor(&input, editor_width);
             let editor_lines = wrapped.len() as u16;
             let popup_height = (editor_lines + 6)
@@ -1157,7 +1158,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
         } => {
             let popup = centered_rect_fixed(area, 64, 14);
             dim_backdrop(frame, area, popup);
-            let inner = dialog_frame(frame, app, popup, "Start Browser UI (/serve)", !busy);
+            let inner = dialog_frame(frame, app, popup, "Start browser UI (/serve)", !busy);
 
             let rows = Layout::vertical([
                 Constraint::Length(1),
@@ -1292,7 +1293,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
         ActiveModal::RewindMenu { selected, .. } => {
             let popup = cap_width(centered_rect(area, 60, 48, 44, 11), 60);
             dim_backdrop(frame, area, popup);
-            let inner = dialog_frame(frame, app, popup, "Rewind", true);
+            let inner = dialog_frame(frame, app, popup, "Rewind (/rewind)", true);
 
             let rows = Layout::vertical([
                 Constraint::Length(1),
@@ -1500,6 +1501,28 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 rows[2],
             );
         }
+        ActiveModal::Goal { state, scroll } => {
+            let popup = cap_width(centered_rect(area, 78, 58, 50, 14), 78);
+            dim_backdrop(frame, area, popup);
+            let inner = dialog_frame(frame, app, popup, "Goal (/goal)", true);
+            let rows = Layout::vertical([Constraint::Min(6), Constraint::Length(1)]).split(inner);
+            let text = match state {
+                Some(state) => state.render(),
+                None => "No active goal.\n\nType @goal <instruction> in the composer to start one."
+                    .to_string(),
+            };
+            frame.render_widget(
+                Paragraph::new(text)
+                    .style(Style::default().fg(theme::p().text))
+                    .scroll((scroll as u16, 0))
+                    .wrap(Wrap { trim: false }),
+                rows[0],
+            );
+            frame.render_widget(
+                key_hints_line(&[("j/k", "scroll"), ("Esc", "close")]),
+                rows[1],
+            );
+        }
         ActiveModal::Memory {
             entries,
             query,
@@ -1509,7 +1532,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
         } => {
             let popup = cap_width(centered_rect(area, 86, 64, 50, 14), 86);
             dim_backdrop(frame, area, popup);
-            let inner = dialog_frame(frame, app, popup, "Project Memory (/memory)", true);
+            let inner = dialog_frame(frame, app, popup, "Project memory (/memory)", true);
             let rows = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Min(4),
@@ -1596,7 +1619,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
         } => {
             let popup = cap_width(centered_rect(area, 80, 58, 50, 12), 80);
             dim_backdrop(frame, area, popup);
-            let inner = dialog_frame(frame, app, popup, "Model Routing (/routing)", true);
+            let inner = dialog_frame(frame, app, popup, "Model routing (/routing)", true);
             let rows = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Min(4),
@@ -1670,7 +1693,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
         } => {
             let popup = cap_width(centered_rect(area, 84, 64, 50, 14), 84);
             dim_backdrop(frame, area, popup);
-            let inner = dialog_frame(frame, app, popup, "Skills & Packs (/packs)", true);
+            let inner = dialog_frame(frame, app, popup, "Skills and packs (/packs)", true);
             let rows = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Min(4),
@@ -1912,7 +1935,13 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
         ActiveModal::VaultReset { input, error } => {
             let popup = cap_width(centered_rect(area, 72, 45, 46, 12), 72);
             dim_backdrop(frame, area, popup);
-            let inner = dialog_frame(frame, app, popup, "Reset Credential Vault", true);
+            let inner = dialog_frame(
+                frame,
+                app,
+                popup,
+                "Reset credential vault (/vault-reset)",
+                true,
+            );
             let rows = Layout::vertical([
                 Constraint::Length(4),
                 Constraint::Length(3),
@@ -1963,7 +1992,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
         ActiveModal::SubagentSpawn(panel) => {
             let popup = cap_width(centered_rect(area, 70, 52, 48, 14), 70);
             dim_backdrop(frame, area, popup);
-            let inner = dialog_frame(frame, app, popup, "Spawn Subagent (/subagent)", true);
+            let inner = dialog_frame(frame, app, popup, "Spawn subagent (/subagent)", true);
             let rows = Layout::vertical([
                 Constraint::Min(5),
                 Constraint::Length(1),
@@ -1972,6 +2001,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             .split(inner);
             let mode_label = panel.mode.map_or("parent", |mode| mode.label());
             let fields = [
+                format!("Name    {}", blank_as(&panel.name, "optional")),
                 format!("Agent   {}", panel.agent),
                 format!("Task    {}", panel.task),
                 format!(
@@ -2036,6 +2066,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             );
         }
         ActiveModal::Terminal {
+            run_id: _,
             command,
             output,
             running,
@@ -2084,6 +2115,225 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                     ("q", "close"),
                 ])),
                 rows[2],
+            );
+        }
+        ActiveModal::Runs { kind, selected } => {
+            let title = match kind {
+                RunKind::Agents => format!("Agents ({})", app.running_subagents().len()),
+                RunKind::Shells => format!("Shells ({})", app.running_shells().len()),
+            };
+            let popup = cap_width(centered_rect(area, 66, 50, 42, 12), 68);
+            dim_backdrop(frame, area, popup);
+            let inner = dialog_frame(frame, app, popup, &title, true);
+            let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+            let body = rows[0];
+            let mut items: Vec<ListItem<'static>> = Vec::new();
+            let hovered = app.hovered_modal_hit;
+            match kind {
+                RunKind::Agents => {
+                    for (row_index, index) in app.running_subagents().into_iter().enumerate() {
+                        let Some(TranscriptEntry::Subagent(subagent)) =
+                            app.tab().transcript.get(index)
+                        else {
+                            continue;
+                        };
+                        let (badge, color) = status_label(subagent.status);
+                        let steps = if subagent.max_steps > 0 {
+                            format!(" {}/{}", subagent.steps_used, subagent.max_steps)
+                        } else {
+                            String::new()
+                        };
+                        let name = truncate_single_line(
+                            subagent.display_name(),
+                            (body.width as usize).saturating_sub(14),
+                        );
+                        let mut spans =
+                            vec![Span::styled(name, Style::default().fg(theme::p().text))];
+                        if subagent.named().is_some() {
+                            spans.push(Span::styled(
+                                format!(" · {}", subagent.agent),
+                                Style::default().fg(theme::p().faint),
+                            ));
+                        }
+                        spans.push(Span::styled(
+                            format!(" [{badge}]"),
+                            Style::default().fg(color),
+                        ));
+                        spans.push(Span::styled(steps, Style::default().fg(theme::p().faint)));
+                        let item = ListItem::new(Line::from(spans));
+                        if hovered == Some(ModalHitKind::ListItem(row_index))
+                            && row_index != selected
+                        {
+                            items.push(item.style(hover_row_style()));
+                        } else {
+                            items.push(item);
+                        }
+                    }
+                }
+                RunKind::Shells => {
+                    for (row_index, id) in app.running_shells().into_iter().enumerate() {
+                        let Some(run) = app.shell_run(id) else {
+                            continue;
+                        };
+                        let elapsed = crate::ui::statusline::format_compact_ms(
+                            meerai_core::env::now_millis().saturating_sub(run.started_ms),
+                        );
+                        let command = truncate_single_line(
+                            &format!("!{}", run.command),
+                            (body.width as usize).saturating_sub(10),
+                        );
+                        let item = ListItem::new(Line::from(vec![
+                            Span::styled(command, Style::default().fg(theme::p().text)),
+                            Span::styled(
+                                format!(" · {elapsed}"),
+                                Style::default().fg(theme::p().faint),
+                            ),
+                        ]));
+                        if hovered == Some(ModalHitKind::ListItem(row_index))
+                            && row_index != selected
+                        {
+                            items.push(item.style(hover_row_style()));
+                        } else {
+                            items.push(item);
+                        }
+                    }
+                }
+            }
+            if items.is_empty() {
+                let label = match kind {
+                    RunKind::Agents => "No running agents",
+                    RunKind::Shells => "No running shells",
+                };
+                items.push(ListItem::new(Line::from(Span::styled(
+                    label,
+                    Style::default().fg(theme::p().faint),
+                ))));
+            }
+            let has_rows = match kind {
+                RunKind::Agents => !app.running_subagents().is_empty(),
+                RunKind::Shells => !app.running_shells().is_empty(),
+            };
+            let mut state = ListState::default();
+            if has_rows {
+                state.select(Some(selected.min(items.len().saturating_sub(1))));
+            }
+            let list = List::new(items).highlight_style(selection_style());
+            frame.render_stateful_widget(list, body, &mut state);
+            if has_rows {
+                register_list_hit_zones(app, body, state.offset(), app.run_count(kind));
+            }
+            frame.render_widget(
+                Paragraph::new(key_hints_line(&[
+                    ("Enter", "view"),
+                    ("↑↓", "move"),
+                    ("Esc", "close"),
+                ])),
+                rows[1],
+            );
+        }
+        ActiveModal::RunDetail { run, scroll, .. } => {
+            let (title, lines) = match run {
+                RunTarget::Subagent(index) => {
+                    let Some(TranscriptEntry::Subagent(subagent)) = app.tab().transcript.get(index)
+                    else {
+                        return;
+                    };
+                    let title = if subagent.named().is_some() {
+                        format!("Agent — {} ({})", subagent.display_name(), subagent.agent)
+                    } else {
+                        format!("Agent — {}", subagent.agent)
+                    };
+                    let lines = match &subagent.nested {
+                        Some(nested) if !nested.is_empty() => {
+                            crate::ui::transcript::nested_conversation_lines(nested, index)
+                        }
+                        _ if subagent.nested_loading => vec![Line::from(Span::styled(
+                            "loading conversation…",
+                            Style::default().fg(theme::p().faint),
+                        ))],
+                        _ => match &subagent.report {
+                            Some(report) if !report.trim().is_empty() => report
+                                .lines()
+                                .map(|line| Line::from(line.to_string()))
+                                .collect(),
+                            _ => vec![Line::from(Span::styled(
+                                "conversation unavailable",
+                                Style::default().fg(theme::p().faint),
+                            ))],
+                        },
+                    };
+                    (title, lines)
+                }
+                RunTarget::Shell(id) => {
+                    let Some(run) = app.shell_run(id) else {
+                        return;
+                    };
+                    let elapsed = crate::ui::statusline::format_compact_ms(
+                        meerai_core::env::now_millis().saturating_sub(run.started_ms),
+                    );
+                    let title = format!("Shell — !{}", truncate_single_line(&run.command, 40));
+                    let (status, color) = match run.status {
+                        ShellRunStatus::Running => {
+                            (format!("running · {elapsed}"), theme::p().warning)
+                        }
+                        ShellRunStatus::Succeeded => ("finished".to_string(), theme::p().success),
+                        ShellRunStatus::Failed => ("failed".to_string(), theme::p().error),
+                    };
+                    let mut lines = vec![
+                        Line::from(vec![
+                            Span::styled("$ ", Style::default().fg(theme::p().accent)),
+                            Span::styled(
+                                run.command.clone(),
+                                Style::default()
+                                    .fg(theme::p().text)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]),
+                        Line::from(Span::styled(status, Style::default().fg(color))),
+                        Line::from(""),
+                    ];
+                    match &run.output {
+                        Some(output) => {
+                            lines.extend(output.lines().map(|line| Line::from(line.to_string())))
+                        }
+                        None => lines.push(Line::from(Span::styled(
+                            "waiting for output…",
+                            Style::default().fg(theme::p().faint),
+                        ))),
+                    }
+                    (title, lines)
+                }
+            };
+            let popup = centered_rect(area, 84, 76, 56, 14);
+            dim_backdrop(frame, area, popup);
+            let inner = dialog_frame(frame, app, popup, &title, true);
+            let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+            let body = rows[0];
+            let width = (body.width as usize).max(1);
+            let mut wrapped_lines: Vec<Line<'static>> = Vec::new();
+            for line in lines {
+                let text: String = line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+                for (start, end) in wrap_queued_editor(&text, width) {
+                    wrapped_lines.push(Line::from(Span::styled(
+                        text[start..end].to_string(),
+                        Style::default().fg(theme::p().text),
+                    )));
+                }
+            }
+            let max_scroll = wrapped_lines.len().saturating_sub(body.height as usize);
+            app.run_detail_max_scroll = max_scroll;
+            frame.render_widget(
+                Paragraph::new(wrapped_lines)
+                    .scroll((scroll.min(max_scroll).min(u16::MAX as usize) as u16, 0)),
+                body,
+            );
+            frame.render_widget(
+                Paragraph::new(key_hints_line(&[("j/k", "scroll"), ("Esc", "back")])),
+                rows[1],
             );
         }
         ActiveModal::Question {
@@ -2491,7 +2741,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
         } => {
             let popup = cap_width(centered_rect(area, 68, 74, 48, 13), 72);
             dim_backdrop(frame, area, popup);
-            let inner = dialog_frame(frame, app, popup, "Switch Session (/sessions)", true);
+            let inner = dialog_frame(frame, app, popup, "Switch session (/sessions)", true);
 
             let rows = Layout::vertical([
                 Constraint::Length(1),
@@ -2949,7 +3199,7 @@ fn blank_as<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     }
 }
 
-fn wrap_queued_editor(text: &str, width: usize) -> Vec<(usize, usize)> {
+pub(crate) fn wrap_queued_editor(text: &str, width: usize) -> Vec<(usize, usize)> {
     let width = width.max(1);
     let mut lines = Vec::new();
     let mut line_start = 0usize;
@@ -2991,17 +3241,40 @@ fn wrap_queued_editor(text: &str, width: usize) -> Vec<(usize, usize)> {
     lines
 }
 
-fn queued_editor_cursor(lines: &[(usize, usize)], text: &str, cursor: usize) -> (usize, usize) {
+pub(crate) fn queued_editor_cursor(
+    lines: &[(usize, usize)],
+    text: &str,
+    cursor: usize,
+) -> (usize, usize) {
     let cursor = cursor.min(text.len());
-    for (row, (start, end)) in lines.iter().enumerate() {
-        if cursor >= *start && cursor <= *end {
-            let col = text[*start..cursor].chars().count();
-            return (row, col);
-        }
-    }
-    let last = lines.len().saturating_sub(1);
-    let start = lines.get(last).map(|(start, _)| *start).unwrap_or(0);
-    (last, text[start..cursor].chars().count())
+    let row = lines
+        .iter()
+        .rposition(|(start, _)| *start <= cursor)
+        .unwrap_or(0);
+    let (start, end) = lines[row];
+    let cursor = cursor.min(end);
+    (row, text[start..cursor].chars().count())
+}
+
+pub(crate) fn queued_editor_vertical(
+    text: &str,
+    cursor: usize,
+    width: usize,
+    delta: isize,
+    goal_col: Option<usize>,
+) -> Option<(usize, usize)> {
+    let lines = wrap_queued_editor(text, width.max(1));
+    let (row, col) = queued_editor_cursor(&lines, text, cursor);
+    let target_row = row.checked_add_signed(delta)?;
+    let (start, end) = *lines.get(target_row)?;
+    let goal = goal_col.unwrap_or(col);
+    let body = &text[start..end];
+    let offset = body
+        .char_indices()
+        .nth(goal)
+        .map(|(index, _)| index)
+        .unwrap_or(body.len());
+    Some((start + offset, goal))
 }
 
 #[cfg(test)]

@@ -629,6 +629,28 @@ fn effort_command_updates_state_queues_sync_and_appears_in_help() {
 }
 
 #[test]
+fn goal_command_opens_the_read_only_panel() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.tab_mut().goal = Some(meerai_session::GoalState {
+        goal: Some("Ship the change".to_string()),
+        items: vec![meerai_session::GoalItem {
+            id: 1,
+            text: "Fix it".to_string(),
+            status: meerai_session::GoalItemStatus::Open,
+            ..meerai_session::GoalItem::default()
+        }],
+        ..meerai_session::GoalState::default()
+    });
+
+    type_text(&mut app, "/goal");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(matches!(app.modal, Some(ActiveModal::Goal { .. })));
+
+    app.handle_key_event(key(KeyCode::Esc));
+    assert!(app.modal.is_none());
+}
+
+#[test]
 fn host_action_commands_queue_and_context_is_local() {
     let (mut app, mut rx, _secrets) = test_app();
 

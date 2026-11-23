@@ -16,11 +16,12 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
         area,
     );
     app.update_hit = None;
-    app.subagent_hit = None;
+    app.runs_hits.clear();
     app.web_server_hit = None;
     let mut update_hit: Option<Rect> = None;
-    let mut subagent_hit: Option<Rect> = None;
+    let mut runs_hits: Vec<(Rect, RunKind)> = Vec::new();
     let mut web_server_hit: Option<Rect> = None;
+    let mut triggers: Vec<(usize, StatusHitKind)> = Vec::new();
     let tab = app.tab();
 
     let mut spans = vec![Span::styled(" ", Style::default().bg(theme::p().surface))];
@@ -55,13 +56,31 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
         ));
     }
 
-    if let Some(command) = &app.user_shell_running {
-        let command = truncate_single_line(command, 32);
-        spans.push(Span::styled(
-            format!(" · shell {command}"),
-            Style::default().fg(theme::p().muted),
-        ));
+    for (kind, color) in [
+        (RunKind::Agents, theme::p().accent),
+        (RunKind::Shells, theme::p().info),
+    ] {
+        let count = app.run_count(kind);
+        if count == 0 {
+            continue;
+        }
+        let noun = match kind {
+            RunKind::Agents if count == 1 => "agent",
+            RunKind::Agents => "agents",
+            RunKind::Shells if count == 1 => "shell",
+            RunKind::Shells => "shells",
+        };
+        let label = format!(" · {count} {noun}");
+        let offset: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+        let width = label.chars().count() as u16;
+        let x = area.x.saturating_add(offset as u16);
+        if x.saturating_add(width) <= area.x.saturating_add(area.width) {
+            runs_hits.push((Rect::new(x, area.y, width, 1), kind));
+            triggers.push((spans.len(), StatusHitKind::Run(kind)));
+            spans.push(Span::styled(label, Style::default().fg(color)));
+        }
     }
+
     if let Some(latest) = app.update_available.clone() {
         let label = format!(" · update v{latest} (/update)");
         let offset: usize = spans.iter().map(|span| span.content.chars().count()).sum();
@@ -69,6 +88,7 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
         let x = area.x.saturating_add(offset as u16);
         if x.saturating_add(width) <= area.x.saturating_add(area.width) {
             update_hit = Some(Rect::new(x, area.y, width, 1));
+            triggers.push((spans.len(), StatusHitKind::Update));
             spans.push(Span::styled(label, Style::default().fg(theme::p().warning)));
         }
     }
@@ -80,6 +100,7 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
         let x = area.x.saturating_add(offset as u16);
         if x.saturating_add(width) <= area.x.saturating_add(area.width) {
             web_server_hit = Some(Rect::new(x, area.y, width, 1));
+            triggers.push((spans.len(), StatusHitKind::WebServer));
             spans.push(Span::styled(label, Style::default().fg(theme::p().accent)));
         }
     }
@@ -98,45 +119,10 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
             .elapsed_ms()
             .map(|ms| format!(" ({})", format_compact_ms(ms)))
             .unwrap_or_default();
-        let mut subagent_activity = false;
         let activity = match &tab.active_tool {
-            Some(tool) if tool == "subagent-run" => {
-                let agents: Vec<&str> = tab
-                    .transcript
-                    .iter()
-                    .filter_map(|entry| match entry {
-                        TranscriptEntry::Subagent(sub)
-                            if matches!(
-                                sub.status,
-                                ToolCallStatus::Running | ToolCallStatus::Proposed
-                            ) =>
-                        {
-                            Some(sub.agent.as_str())
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                let label = if agents.is_empty() {
-                    "subagents".to_string()
-                } else if agents.len() <= 2 {
-                    agents.join(", ")
-                } else {
-                    format!("{}, +{}", agents[..2].join(", "), agents.len() - 2)
-                };
-                subagent_activity = true;
-                format!(" · {frame_char} {label}{elapsed}")
-            }
             Some(tool) => format!(" · {frame_char} {tool}{elapsed}"),
             None => format!(" · {frame_char} running{elapsed}"),
         };
-        if subagent_activity {
-            let offset: usize = spans.iter().map(|span| span.content.chars().count()).sum();
-            let width = activity.chars().count() as u16;
-            let x = area.x.saturating_add(offset as u16);
-            if x.saturating_add(width) <= area.x.saturating_add(area.width) {
-                subagent_hit = Some(Rect::new(x, area.y, width, 1));
-            }
-        }
         spans.push(Span::styled(
             activity,
             Style::default().fg(theme::p().warning),
@@ -183,12 +169,21 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
     }
 
     app.update_hit = update_hit;
-    app.subagent_hit = subagent_hit;
+    app.runs_hits = runs_hits;
     app.web_server_hit = web_server_hit;
+    let hovered_status = app.hovered_status;
     let spans: Vec<Span<'static>> = spans
         .into_iter()
-        .map(|span| {
-            let style = Style::default().fg(theme::p().muted);
+        .enumerate()
+        .map(|(idx, span)| {
+            let hovered = triggers
+                .iter()
+                .any(|(trigger_idx, kind)| *trigger_idx == idx && Some(*kind) == hovered_status);
+            let style = if hovered {
+                hover_row_style()
+            } else {
+                Style::default().fg(theme::p().muted)
+            };
             Span::styled(span.content, style)
         })
         .collect();
@@ -212,7 +207,7 @@ pub(super) fn format_compact_tokens(count: u64) -> String {
     }
 }
 
-pub(super) fn format_compact_ms(ms: u64) -> String {
+pub(crate) fn format_compact_ms(ms: u64) -> String {
     if ms >= 60_000 {
         let total_secs = ms / 1000;
         format!("{}m{}s", total_secs / 60, total_secs % 60)

@@ -640,6 +640,7 @@ fn render_subagent(
 ) -> AnyView {
     let TranscriptEntryDto::Subagent {
         id,
+        name,
         agent,
         status,
         report,
@@ -763,13 +764,16 @@ fn render_subagent(
     let report = report.unwrap_or_else(|| view! { <span></span> }.into_any());
     let entry_id = id.clone();
     let agent_name = agent.clone();
+    let entry_name = name.clone();
     let status_text = status.clone();
     let child_id = child_session_id.clone();
+    let display_name = name.clone().unwrap_or_else(|| agent.clone());
     view! {
         <div class="subagent">
             <div class="subagent-head">
                 <span class=format!("tab-dot {}", if status == "running" { "running" } else { "idle" })></span>
-                <span class="subagent-name">{agent.clone()}</span>
+                <span class="subagent-name">{display_name}</span>
+                {name.clone().map(|_| view! { <span class="subagent-preset">{format!("({agent})")}</span> })}
                 <span class="subagent-status">{status.clone()}</span>
                 <span class="subagent-telemetry">{telemetry.clone()}</span>
                 <button class="btn tiny" on:click=move |_| {
@@ -777,6 +781,7 @@ fn render_subagent(
                     store.update(|s| {
                         s.modal = Some(crate::state::ActiveModal::SubagentOverlay {
                             entry_id: entry_id.clone(),
+                            name: entry_name.clone(),
                             agent: agent_name.clone(),
                             status: status_text.clone(),
                             child_session_id: child.clone(),
@@ -784,6 +789,7 @@ fn render_subagent(
                             usage: None,
                             loading: child.is_some(),
                             error: None,
+                            from_runs: None,
                         });
                         if let Some(child) = child
                             && let Some(t) = crate::transport::current()

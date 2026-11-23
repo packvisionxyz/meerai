@@ -259,11 +259,11 @@ impl TransportClient {
         let _ = (session_id, request_id);
     }
 
-    pub fn run_shell(&self, session_id: String, command: String) {
+    pub fn run_shell(&self, session_id: String, command: String, run_id: String) {
         #[cfg(target_arch = "wasm32")]
-        self.inner.run_shell(session_id, command);
+        self.inner.run_shell(session_id, command, run_id);
         #[cfg(not(target_arch = "wasm32"))]
-        let _ = (session_id, command);
+        let _ = (session_id, command, run_id);
     }
 
     pub fn fetch_workspace_files(&self) {

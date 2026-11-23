@@ -74,6 +74,7 @@ mod tests {
             active_tool: None,
             turn_started_at_ms: None,
             user_shell_running: false,
+            shell_runs: Vec::new(),
         }
     }
 
@@ -105,6 +106,7 @@ mod tests {
                 usage: UsageDto::default(),
                 metrics: TurnMetricsDto::default(),
                 context: None,
+                goal: None,
             }),
             file_changes: Vec::new(),
             host_info: Some(HostInfoDto {
@@ -432,6 +434,7 @@ mod tests {
             pending_approvals: Vec::new(),
             pending_questions: Vec::new(),
             context: None,
+            goal: None,
         };
         apply_session_detail(&mut state, detail);
         let tab = state.session_tabs.get("s-1").unwrap();
@@ -546,6 +549,41 @@ mod tests {
         let unknown = extract_mentions("@skill/missing keep", &host);
         assert!(unknown.skills.is_empty());
         assert_eq!(unknown.cleaned, "@skill/missing keep");
+    }
+
+    #[test]
+    fn the_goal_skill_accepts_a_bare_at_alias() {
+        let mut host = HostInfoDto::default();
+        host.skills.push(SkillInfoDto {
+            id: "goal".to_owned(),
+            source: "built-in".to_owned(),
+            description: Some("Run a goal loop".to_owned()),
+        });
+
+        let mentions = extract_mentions("@goal ship the fix", &host);
+        assert_eq!(mentions.skills, vec!["goal".to_owned()]);
+        assert_eq!(mentions.cleaned, "ship the fix");
+        assert!(!mentions.mention_only);
+
+        let chips = resolved_mention_chips("@goal ship the fix", &host);
+        assert_eq!(
+            chips,
+            vec![(
+                MentionCategory::Skill,
+                "goal".to_owned(),
+                "@goal".to_owned(),
+            )]
+        );
+        let segments = mention_segments("@goal ship", &host);
+        assert_eq!(segments[0].category, Some(MentionCategory::Skill));
+        assert_eq!(segments[0].text, "goal");
+
+        let unknown = extract_mentions("@goalkeeper keep", &host);
+        assert!(unknown.skills.is_empty());
+        assert_eq!(unknown.cleaned, "@goalkeeper keep");
+
+        let items = crate::state::mention_completion_items("goal", &host, &[]);
+        assert!(items.iter().any(|item| item.insert == "@goal"));
     }
 
     #[test]
@@ -1079,6 +1117,15 @@ mod tests {
             })
         ));
         state.modal = None;
+        execute_slash_command(&mut state, "/goal");
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::WorkspacePanel {
+                tab: crate::state::WorkspacePanelTab::Goal,
+                ..
+            })
+        ));
+        state.modal = None;
         execute_slash_command(&mut state, "/subagent");
         assert!(matches!(
             state.modal,
@@ -1093,6 +1140,47 @@ mod tests {
 #[cfg(test)]
 mod panel_tests {
     use super::*;
+
+    #[test]
+    fn goal_updates_reach_the_tab_and_the_open_panel() {
+        let mut state = AppState {
+            active_session_id: Some("s1".to_owned()),
+            ..AppState::default()
+        };
+        let goal = meerai_web_protocol::GoalDto {
+            goal: Some("Ship the change".to_owned()),
+            items: vec![meerai_web_protocol::GoalItemDto {
+                id: 1,
+                text: "Fix".to_owned(),
+                status: meerai_web_protocol::GoalItemStatusDto::Done,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        crate::state::open_workspace_panel(&mut state, crate::state::WorkspacePanelTab::Goal);
+        apply_view_event(
+            &mut state,
+            meerai_web_protocol::ViewEvent::GoalUpdated {
+                session_id: "s1".to_owned(),
+                goal: goal.clone(),
+            },
+        );
+        assert_eq!(
+            state
+                .session_tabs
+                .get("s1")
+                .and_then(|tab| tab.goal.clone()),
+            Some(goal.clone())
+        );
+        assert!(matches!(
+            state.modal,
+            Some(ActiveModal::WorkspacePanel {
+                tab: crate::state::WorkspacePanelTab::Goal,
+                goal: Some(ref panel),
+                ..
+            }) if **panel == goal
+        ));
+    }
 
     #[test]
     fn panel_data_land_in_the_open_panel() {

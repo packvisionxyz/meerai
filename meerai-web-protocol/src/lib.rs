@@ -312,6 +312,8 @@ pub enum TranscriptEntryDto {
     },
     Subagent {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
         agent: String,
         status: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -344,6 +346,14 @@ pub enum TranscriptEntryDto {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ShellRunDto {
+    pub id: String,
+    pub command: String,
+    pub started_at_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionSummaryDto {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -362,6 +372,8 @@ pub struct SessionSummaryDto {
     pub turn_started_at_ms: Option<u64>,
     #[serde(default)]
     pub user_shell_running: bool,
+    #[serde(default)]
+    pub shell_runs: Vec<ShellRunDto>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -383,6 +395,46 @@ pub struct SessionDetailDto {
     pub metrics: TurnMetricsDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<ContextBreakdownDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<GoalDto>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+    #[serde(default)]
+    pub done_when: Vec<String>,
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    #[serde(default)]
+    pub items: Vec<GoalItemDto>,
+    #[serde(default)]
+    pub rounds: usize,
+    #[serde(default)]
+    pub turns: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalItemDto {
+    pub id: u32,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<String>,
+    pub status: GoalItemStatusDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalItemStatusDto {
+    #[default]
+    Open,
+    Done,
+    Failed,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -716,6 +768,10 @@ pub enum ViewEvent {
         session_id: String,
         breakdown: ContextBreakdownDto,
     },
+    GoalUpdated {
+        session_id: String,
+        goal: GoalDto,
+    },
     SessionActivated {
         session_id: String,
     },
@@ -946,6 +1002,8 @@ pub struct QuestionAnswerRequest {
 #[serde(rename_all = "camelCase")]
 pub struct RunShellRequest {
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1122,6 +1180,7 @@ mod tests {
             active_tool: None,
             turn_started_at_ms: None,
             user_shell_running: false,
+            shell_runs: Vec::new(),
         }
     }
 
@@ -1185,6 +1244,7 @@ mod tests {
             },
             TranscriptEntryDto::Subagent {
                 id: "sa-1".to_owned(),
+                name: Some("scan".to_owned()),
                 agent: "research".to_owned(),
                 status: "running".to_owned(),
                 report: None,
@@ -1266,6 +1326,7 @@ mod tests {
                 usage: UsageDto::default(),
                 metrics: TurnMetricsDto::default(),
                 context: None,
+                goal: None,
             }),
             file_changes: vec![FileChangeDto {
                 status: "M".to_owned(),

@@ -421,6 +421,7 @@ fn event_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::RewindApplied { .. } => "rewind_applied",
         SessionEvent::HookFired { .. } => "hook_fired",
         SessionEvent::ContextTurnPinned { .. } => "context_turn_pinned",
+        SessionEvent::GoalUpdated { .. } => "goal_updated",
         SessionEvent::CheckpointCreated { .. } => "checkpoint_created",
         SessionEvent::CircuitBreaker { .. } => "circuit_breaker",
         SessionEvent::Error { .. } => "error",
@@ -3091,6 +3092,37 @@ async fn token_cap_accept_raises_the_limit() {
         Some(15 + 128_000)
     );
     assert_eq!(streamer.requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn zero_token_cap_means_unlimited() {
+    let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("no cap"),
+    )]]));
+
+    let session = memory_session();
+    let config = HarnessConfig {
+        max_session_tokens: Some(0),
+        ..HarnessConfig::default()
+    };
+    let mut agent = harness_agent(streamer.clone(), vec![], "", &session, auto_mode(), config);
+
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &event_tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "no cap");
+
+    let mut spend_requests = 0;
+    while let Ok(event) = event_rx.try_recv() {
+        if let AgentEvent::ApprovalRequested { request } = event
+            && request.kind == ApprovalKind::Spend
+        {
+            spend_requests += 1;
+        }
+    }
+    assert_eq!(spend_requests, 0);
 }
 
 #[tokio::test]
@@ -7357,6 +7389,184 @@ async fn turn_stopping_can_continue_the_turn_once() {
     assert_eq!(recorder.plans.lock().unwrap().len(), 2);
 }
 
+struct CountingStopInterceptor {
+    left: Mutex<usize>,
+}
+
+impl Interceptor for CountingStopInterceptor {
+    fn turn_stopping(&self, _turn_id: &TurnId, _step_index: usize) -> TurnStopAction {
+        let mut left = self.left.lock().unwrap();
+        if *left == 0 {
+            return TurnStopAction::Finish;
+        }
+        *left -= 1;
+        TurnStopAction::Continue {
+            reason: "keep going".to_string(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn turn_stopping_can_continue_more_than_once() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(text_end("first"))],
+        vec![ChatStreamEvent::End(text_end("second"))],
+        vec![ChatStreamEvent::End(text_end("third"))],
+        vec![ChatStreamEvent::End(text_end("fourth"))],
+    ]));
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        Vec::new(),
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+    agent.add_shared_interceptor(Arc::new(CountingStopInterceptor {
+        left: Mutex::new(2),
+    }));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "third");
+    assert_eq!(streamer.requests.lock().unwrap().len(), 3);
+}
+
+fn goal_call(call_id: &str, fn_name: &str, args: serde_json::Value) -> ToolCall {
+    ToolCall {
+        call_id: call_id.to_string(),
+        fn_name: fn_name.to_string(),
+        fn_arguments: args,
+        thought_signatures: None,
+    }
+}
+
+#[tokio::test]
+async fn the_goal_loop_continues_until_every_item_is_done() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![goal_call(
+            "g1",
+            "goal-set",
+            serde_json::json!({
+                "goal": "Fix the failing test",
+                "done_when": ["cargo test passes"],
+                "items": [{ "text": "Fix it", "verify": "cargo test" }]
+            }),
+        )]))],
+        vec![ChatStreamEvent::End(text_end("done early"))],
+        vec![ChatStreamEvent::End(tool_end(vec![goal_call(
+            "g2",
+            "goal-check",
+            serde_json::json!({
+                "item_id": 1,
+                "status": "done",
+                "evidence": "cargo test passed"
+            }),
+        )]))],
+        vec![ChatStreamEvent::End(text_end("complete"))],
+    ]));
+    let session = memory_session();
+    let goal = crate::goal::new_goal_handle();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![Box::new(crate::goal_tool::GoalToolset::new(goal.clone()))],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+    agent.add_shared_interceptor(Arc::new(crate::goal::GoalInterceptor::new(goal.clone())));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("ship the fix", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "complete");
+    assert_eq!(streamer.requests.lock().unwrap().len(), 4);
+    assert!(goal.lock().all_done());
+
+    let continued = session.events().iter().any(|entry| matches!(
+        &entry.event,
+        SessionEvent::UserMessage { source: InputSource::RuntimeContext, content }
+            if matches!(content.first(), Some(ContentBlock::Text(text)) if text.contains("Goal round 1/"))
+    ));
+    assert!(continued, "the early stop must be continued once");
+}
+
+#[tokio::test]
+async fn the_worker_starts_a_new_turn_while_the_goal_has_open_items() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(text_end("blocked"))],
+        vec![ChatStreamEvent::End(tool_end(vec![goal_call(
+            "g1",
+            "goal-check",
+            serde_json::json!({
+                "item_id": 1,
+                "status": "done",
+                "evidence": "fixed"
+            }),
+        )]))],
+        vec![ChatStreamEvent::End(text_end("complete"))],
+    ]));
+    let session = memory_session();
+    let goal = crate::goal::new_goal_handle();
+    {
+        let mut state = goal.lock();
+        state.goal = Some("Fix it".to_string());
+        state.items = vec![crate::goal::GoalItem {
+            id: 1,
+            text: "Fix".to_string(),
+            status: crate::goal::GoalItemStatus::Open,
+            ..crate::goal::GoalItem::default()
+        }];
+        state.rounds = crate::goal::MAX_GOAL_ROUNDS;
+    }
+    let mut agent = harness_agent(
+        streamer,
+        vec![Box::new(crate::goal_tool::GoalToolset::new(goal.clone()))],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+    agent.set_goal_handle(goal.clone());
+    agent.add_shared_interceptor(Arc::new(crate::goal::GoalInterceptor::new(goal.clone())));
+
+    let (cmd_tx, mut event_rx) = spawn_worker(agent);
+    cmd_tx
+        .send(AgentCommand::SubmitPrompt("go".to_string()))
+        .unwrap();
+
+    let mut starts = 0usize;
+    let mut continued = false;
+    let deadline = tokio::time::Duration::from_secs(5);
+    tokio::time::timeout(deadline, async {
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                AgentEvent::TurnStarted { .. } => starts += 1,
+                AgentEvent::GoalContinued { turn, .. } => {
+                    assert_eq!(turn, 1);
+                    continued = true;
+                }
+                AgentEvent::TurnCompleted { .. } if starts >= 2 => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("worker did not finish");
+
+    let _ = cmd_tx.send(AgentCommand::Quit);
+    assert!(continued, "the worker must announce the goal continuation");
+    assert_eq!(starts, 2, "the goal must run one follow-up turn");
+    assert!(goal.lock().all_done());
+}
+
 #[tokio::test]
 async fn usage_reports_estimated_cost_when_pricing_is_configured() {
     let streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
@@ -9100,6 +9310,7 @@ async fn manual_subagent_spawn_emits_items_and_clamps_plan_mode() {
     agent
         .spawn_manual_subagent(
             crate::events::SubagentSpec {
+                name: Some("parser scan".to_string()),
                 agent: "explore".to_string(),
                 task: "find the parser".to_string(),
                 model: None,
@@ -9117,24 +9328,30 @@ async fn manual_subagent_spawn_emits_items_and_clamps_plan_mode() {
     assert!(deferred.is_empty());
 
     let mut started = None;
+    let mut started_name = None;
     let mut completed = None;
     while let Ok(event) = rx.try_recv() {
         match event {
             AgentEvent::ItemStarted {
                 item:
                     SessionItem::SubagentRun {
+                        name,
                         approval_mode,
                         max_steps,
                         model,
                         ..
                     },
-            } => started = Some((approval_mode, max_steps, model)),
+            } => {
+                started_name = name;
+                started = Some((approval_mode, max_steps, model));
+            }
             AgentEvent::ItemCompleted {
                 item: SessionItem::SubagentRun { status, .. },
             } => completed = Some(status),
             _ => {}
         }
     }
+    assert_eq!(started_name.as_deref(), Some("parser scan"));
     assert_eq!(
         started,
         Some((ApprovalMode::Plan, 2, Some("gpt-4o-mini".to_string())))

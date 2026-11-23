@@ -451,6 +451,8 @@ pub struct MultiTurnAgent {
     pub(super) subagent_agents: Vec<meerai_common::definitions::AgentDefinition>,
     pub(super) active_subagents: HashMap<ItemId, CancellationToken>,
     pub(super) memory_capture: Option<crate::memory::MemoryCapture>,
+    pub(super) goal: Option<crate::goal::GoalHandle>,
+    pub(super) goal_auto_continue: bool,
 }
 
 impl std::fmt::Debug for MultiTurnAgent {
@@ -542,6 +544,8 @@ impl MultiTurnAgent {
             subagent_agents: Vec::new(),
             active_subagents: HashMap::new(),
             memory_capture: None,
+            goal: None,
+            goal_auto_continue: true,
         }
     }
 
@@ -571,6 +575,31 @@ impl MultiTurnAgent {
 
     pub fn set_hooks(&mut self, hooks: Arc<HookEngine>) {
         self.hooks = hooks;
+    }
+
+    pub fn set_goal_handle(&mut self, goal: crate::goal::GoalHandle) {
+        self.goal = Some(goal);
+    }
+
+    pub fn goal_handle(&self) -> Option<&crate::goal::GoalHandle> {
+        self.goal.as_ref()
+    }
+
+    pub fn set_goal_auto_continue(&mut self, auto: bool) {
+        self.goal_auto_continue = auto;
+    }
+
+    pub fn goal_auto_continue(&self) -> bool {
+        self.goal_auto_continue
+    }
+
+    pub fn emit_goal_updated(&self, event_tx: &mpsc::UnboundedSender<AgentEvent>) {
+        if let Some(goal) = &self.goal {
+            let state = goal.snapshot();
+            if state.active() {
+                let _ = event_tx.send(AgentEvent::GoalUpdated { state });
+            }
+        }
     }
 
     pub fn set_memory_capture(&mut self, capture: crate::memory::MemoryCapture) {
@@ -755,6 +784,9 @@ impl MultiTurnAgent {
             "task": spec.task,
             "item_id": item_id.to_string(),
         });
+        if let Some(name) = spec.name {
+            args["name"] = serde_json::Value::String(name);
+        }
         if let Some(model) = spec.model {
             args["model"] = serde_json::Value::String(model);
         }
@@ -878,6 +910,7 @@ impl MultiTurnAgent {
             event_tx,
         )
         .await;
+        self.emit_goal_updated(event_tx);
     }
 
     pub async fn end_session(&mut self, event_tx: &mpsc::UnboundedSender<AgentEvent>) {

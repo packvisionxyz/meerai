@@ -8,7 +8,7 @@ use crate::text::{TextBuffer, UiEffects};
 use meerai_web_protocol::{
     ApprovalModeDto, ApprovalRequestDto, BackendKind, ChatGptLoginStateDto, ContextBreakdownDto,
     ContextSettingsDto, DefinitionsDiagnosticsDto, EffortDto, FileChangeDto, FileDiffResponse,
-    HostInfoDto, MemoryDto, ModelItemDto, PackDto, ProviderItemDto, ProvidersResponse,
+    GoalDto, HostInfoDto, MemoryDto, ModelItemDto, PackDto, ProviderItemDto, ProvidersResponse,
     QuestionRequestDto, ReloadResponse, RewindScopeDto, RouteDto, SandboxSettingsDto,
     SessionDetailDto, SessionSettingsDto, SessionStatus, SessionSummaryDto, SnapshotResponse,
     ThemeOverrideDto, TranscriptEntryDto, TurnMetricsDto, UpdateSettingsRequest, UsageDto,
@@ -211,6 +211,12 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         cmd: "/skills",
         args: "",
         desc: "Show discovered skills, warnings, and token estimates",
+        takes_arg: false,
+    },
+    SlashCommandSpec {
+        cmd: "/goal",
+        args: "",
+        desc: "Show the active goal checklist (or use @goal <instruction>)",
         takes_arg: false,
     },
     SlashCommandSpec {
@@ -433,6 +439,11 @@ pub const PALETTE_ACTIONS: &[PaletteActionSpec] = &[
         hint: "/diagnose",
     },
     PaletteActionSpec {
+        key: "toggle-changes",
+        label: "Toggle changed files block",
+        hint: "File Changes",
+    },
+    PaletteActionSpec {
         key: "open-diff",
         label: "Inspect workspace diff",
         hint: "Alt+Shift+D",
@@ -502,6 +513,7 @@ pub fn execute_palette_action(state: &mut AppState, tx: &mut UiEffects, key: &st
         }
         "toggle-sidebar" => state.sidebar_open = !state.sidebar_open,
         "toggle-diagnose" => toggle_diagnose(state),
+        "toggle-changes" => toggle_changes(state),
         "open-diff" => open_diff_modal(state, None),
         "open-search" => open_search_modal(state, meerai_web_protocol::SearchModeDto::Content, ""),
         "open-settings" => open_settings(state, None),
@@ -778,10 +790,28 @@ impl QuestionDraft {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspacePanelTab {
     Context,
+    Goal,
     Memory,
     Subagent,
     Routing,
     Packs,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunKindDto {
+    Agents,
+    Shells,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunningSubagent {
+    pub entry_id: String,
+    pub name: Option<String>,
+    pub agent: String,
+    pub status: String,
+    pub child_session_id: Option<String>,
+    pub steps_used: usize,
+    pub max_steps: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -789,6 +819,7 @@ pub enum ActiveModal {
     WorkspacePanel {
         tab: WorkspacePanelTab,
         context: Option<Box<ContextBreakdownDto>>,
+        goal: Option<Box<GoalDto>>,
         memories: Vec<MemoryDto>,
         routes: Vec<RouteDto>,
         packs: Vec<PackDto>,
@@ -796,6 +827,7 @@ pub enum ActiveModal {
         selected: usize,
         loading: bool,
         error: Option<String>,
+        subagent_name: Box<TextBuffer>,
         subagent_agent: String,
         subagent_task: Box<TextBuffer>,
         subagent_model: Box<TextBuffer>,
@@ -895,6 +927,17 @@ pub enum ActiveModal {
         output: Option<String>,
         running: bool,
         error: Option<String>,
+        run_id: Option<String>,
+    },
+    Runs {
+        kind: RunKindDto,
+        selected: usize,
+    },
+    ShellRun {
+        run_id: String,
+        command: String,
+        started_at_ms: u64,
+        from_runs: Option<RunKindDto>,
     },
     RewindMenu {
         turns: Vec<(String, String)>,
@@ -918,6 +961,7 @@ pub enum ActiveModal {
     Help,
     SubagentOverlay {
         entry_id: String,
+        name: Option<String>,
         agent: String,
         status: String,
         child_session_id: Option<String>,
@@ -925,6 +969,7 @@ pub enum ActiveModal {
         usage: Option<UsageDto>,
         loading: bool,
         error: Option<String>,
+        from_runs: Option<RunKindDto>,
     },
 }
 
@@ -941,6 +986,7 @@ pub struct SessionTabState {
     pub usage: UsageDto,
     pub metrics: TurnMetricsDto,
     pub context: Option<ContextBreakdownDto>,
+    pub goal: Option<GoalDto>,
     pub pending_submit: Option<String>,
     pub pending_queue: VecDeque<String>,
     pub draft_text: String,
@@ -976,6 +1022,7 @@ pub struct AppState {
     pub sidebar_open: bool,
     pub sidebar_tools_expanded: bool,
     pub sidebar_diagnose_open: bool,
+    pub sidebar_changes_open: bool,
     pub modal: Option<ActiveModal>,
     pub sending: bool,
     pub reset_confirm_pending: bool,
@@ -983,6 +1030,8 @@ pub struct AppState {
     pub status_notice: Option<String>,
     pub notice_seq: u64,
     pub last_title_sent: String,
+    pub shell_outputs: HashMap<String, Result<String, String>>,
+    pub next_shell_run_id: u64,
 }
 
 impl Default for AppState {
@@ -1008,7 +1057,8 @@ impl Default for AppState {
             completion: CompletionState::default(),
             sidebar_open: true,
             sidebar_tools_expanded: false,
-            sidebar_diagnose_open: false,
+            sidebar_diagnose_open: true,
+            sidebar_changes_open: true,
             modal: None,
             sending: false,
             reset_confirm_pending: false,
@@ -1016,6 +1066,8 @@ impl Default for AppState {
             status_notice: None,
             notice_seq: 0,
             last_title_sent: String::new(),
+            shell_outputs: HashMap::new(),
+            next_shell_run_id: 0,
         }
     }
 }
@@ -1058,7 +1110,7 @@ impl AppState {
         self.sending
             || self
                 .active_session()
-                .is_some_and(|s| s.status != SessionStatus::Idle || s.user_shell_running)
+                .is_some_and(|s| s.status != SessionStatus::Idle)
     }
 
     pub fn window_title(&self) -> String {
@@ -1174,6 +1226,7 @@ pub fn apply_active_detail(state: &mut AppState, detail: SessionDetailDto) {
     tab.usage = detail.usage;
     tab.metrics = detail.metrics;
     tab.context = detail.context;
+    tab.goal = detail.goal;
     tab.unread = false;
     sync_pending_modal_for_active(state);
 }
@@ -1193,6 +1246,7 @@ pub fn apply_session_detail(state: &mut AppState, detail: SessionDetailDto) {
     tab.usage = detail.usage;
     tab.metrics = detail.metrics;
     tab.context = detail.context;
+    tab.goal = detail.goal;
     if state.active_session_id.as_deref() == Some(id.as_str()) {
         tab.unread = false;
         sync_pending_modal_for_active(state);
@@ -1503,6 +1557,19 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
             }
             EventEffect::None
         }
+        ViewEvent::GoalUpdated { session_id, goal } => {
+            let tab = state.session_tabs.entry(session_id).or_default();
+            tab.goal = Some(goal.clone());
+            if let Some(ActiveModal::WorkspacePanel {
+                tab: WorkspacePanelTab::Goal,
+                goal: panel_goal,
+                ..
+            }) = state.modal.as_mut()
+            {
+                *panel_goal = Some(Box::new(goal));
+            }
+            EventEffect::None
+        }
         ViewEvent::TurnCompleted {
             session_id,
             turn_id: _,
@@ -1657,16 +1724,148 @@ pub fn apply_reload_response(state: &mut AppState, resp: ReloadResponse) {
     }
 }
 
-pub fn apply_shell_output(state: &mut AppState, _session_id: &str, result: Result<String, String>) {
+pub fn running_subagent_rows(state: &AppState) -> Vec<RunningSubagent> {
+    let Some(tab) = state.active_tab() else {
+        return Vec::new();
+    };
+    tab.entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntryDto::Subagent {
+                id,
+                name,
+                agent,
+                status,
+                child_session_id,
+                steps_used,
+                max_steps,
+                ..
+            } if status == "running" || status == "proposed" => Some(RunningSubagent {
+                entry_id: id.clone(),
+                name: name.clone(),
+                agent: agent.clone(),
+                status: status.clone(),
+                child_session_id: child_session_id.clone(),
+                steps_used: *steps_used,
+                max_steps: *max_steps,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn running_subagent_count(state: &AppState) -> usize {
+    running_subagent_rows(state).len()
+}
+
+pub fn running_shell_count(state: &AppState) -> usize {
+    state.active_session().map_or(0, |s| s.shell_runs.len())
+}
+
+pub fn open_runs(state: &mut AppState, kind: RunKindDto) {
+    state.modal = Some(ActiveModal::Runs { kind, selected: 0 });
+}
+
+pub fn open_run_row(state: &mut AppState, kind: RunKindDto, index: usize) {
+    match kind {
+        RunKindDto::Agents => {
+            let Some(row) = running_subagent_rows(state).into_iter().nth(index) else {
+                return;
+            };
+            let child = row.child_session_id.clone();
+            state.modal = Some(ActiveModal::SubagentOverlay {
+                entry_id: row.entry_id,
+                name: row.name,
+                agent: row.agent,
+                status: row.status,
+                child_session_id: child.clone(),
+                entries: Vec::new(),
+                usage: None,
+                loading: child.is_some(),
+                error: None,
+                from_runs: Some(RunKindDto::Agents),
+            });
+            if let Some(child) = child
+                && let Some(t) = crate::transport::current()
+            {
+                t.fetch_session_events(child, true);
+            }
+        }
+        RunKindDto::Shells => {
+            let Some(run) = state
+                .active_session()
+                .and_then(|s| s.shell_runs.get(index))
+                .cloned()
+            else {
+                return;
+            };
+            state.modal = Some(ActiveModal::ShellRun {
+                run_id: run.id,
+                command: run.command,
+                started_at_ms: run.started_at_ms,
+                from_runs: Some(RunKindDto::Shells),
+            });
+        }
+    }
+}
+
+pub fn back_to_runs(state: &mut AppState, kind: RunKindDto) {
+    state.modal = Some(ActiveModal::Runs { kind, selected: 0 });
+}
+
+fn next_shell_run(state: &mut AppState) -> String {
+    let run_id = format!(
+        "web-{}-{}",
+        shell_run_timestamp_ms(),
+        state.next_shell_run_id
+    );
+    state.next_shell_run_id = state.next_shell_run_id.wrapping_add(1);
+    run_id
+}
+
+#[cfg(target_arch = "wasm32")]
+fn shell_run_timestamp_ms() -> u64 {
+    js_sys::Date::now() as u64
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn shell_run_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
+pub fn apply_shell_output(
+    state: &mut AppState,
+    _session_id: &str,
+    run_id: &str,
+    result: Result<String, String>,
+) {
     if let Err(err) = &result {
         state.error_banner = Some(err.clone());
     }
+    state
+        .shell_outputs
+        .insert(run_id.to_owned(), result.clone());
+    while state.shell_outputs.len() > 32 {
+        let Some(key) = state
+            .shell_outputs
+            .keys()
+            .find(|key| key.as_str() != run_id)
+            .cloned()
+        else {
+            break;
+        };
+        state.shell_outputs.remove(&key);
+    }
     if let Some(ActiveModal::Terminal {
+        run_id: modal_run,
         output,
         running,
         error,
         ..
     }) = &mut state.modal
+        && modal_run.as_deref() == Some(run_id)
     {
         *running = false;
         match result {
@@ -2207,6 +2406,7 @@ pub fn execute_user_shell(state: &mut AppState, cmd: &str) {
             output: None,
             running: false,
             error: None,
+            run_id: None,
         });
         return;
     }
@@ -2222,28 +2422,33 @@ pub fn execute_user_shell(state: &mut AppState, cmd: &str) {
         return;
     };
     if let Some(t) = crate::transport::current() {
+        let run_id = next_shell_run(state);
         state.modal = Some(ActiveModal::Terminal {
             command: TextBuffer::new(cmd),
             output: None,
             running: true,
             error: None,
+            run_id: Some(run_id.clone()),
         });
-        t.run_shell(sid, cmd.to_owned());
+        t.run_shell(sid, cmd.to_owned(), run_id);
     }
 }
 
 pub fn open_workspace_panel(state: &mut AppState, tab: WorkspacePanelTab) {
     let context = state.active_tab().and_then(|tab| tab.context.clone());
+    let goal = state.active_tab().and_then(|tab| tab.goal.clone());
     state.modal = Some(ActiveModal::WorkspacePanel {
         tab,
         context: context.map(Box::new),
+        goal: goal.map(Box::new),
         memories: Vec::new(),
         routes: Vec::new(),
         packs: Vec::new(),
         definitions: Box::default(),
         selected: 0,
-        loading: true,
+        loading: !matches!(tab, WorkspacePanelTab::Goal),
         error: None,
+        subagent_name: Box::default(),
         subagent_agent: "explore".to_owned(),
         subagent_task: Box::default(),
         subagent_model: Box::default(),
@@ -2365,6 +2570,15 @@ pub fn toggle_diagnose(state: &mut AppState) {
     }
 }
 
+pub fn toggle_changes(state: &mut AppState) {
+    if state.sidebar_open {
+        state.sidebar_changes_open = !state.sidebar_changes_open;
+    } else {
+        state.sidebar_open = true;
+        state.sidebar_changes_open = true;
+    }
+}
+
 pub fn execute_slash_command(state: &mut AppState, raw: &str) {
     let trimmed = raw.trim();
     let mut parts = trimmed.splitn(2, char::is_whitespace);
@@ -2479,6 +2693,9 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
             if let Some(transport) = crate::transport::current() {
                 transport.run_host_action("/context".to_owned());
             }
+        }
+        "/goal" => {
+            open_workspace_panel(state, WorkspacePanelTab::Goal);
         }
         "/memory" => {
             open_workspace_panel(state, WorkspacePanelTab::Memory);
@@ -3233,8 +3450,16 @@ fn scan_mention<'a>(
     let rest = input.get(at + 1..)?;
     let (category, rest) = if let Some(rest) = rest.strip_prefix("agent/") {
         (MentionCategory::Agent, rest)
+    } else if let Some(rest) = rest.strip_prefix("skill/") {
+        (MentionCategory::Skill, rest)
     } else {
-        (MentionCategory::Skill, rest.strip_prefix("skill/")?)
+        let after = rest.strip_prefix("goal")?;
+        if after.chars().next().is_some_and(is_mention_id_char) {
+            return None;
+        }
+        return skill_ids
+            .contains("goal")
+            .then_some((MentionCategory::Skill, "goal", at + 5));
     };
     let id_len = rest
         .char_indices()
@@ -3330,6 +3555,8 @@ pub fn resolved_mention_chips(
             && seen.insert(token.to_owned())
         {
             out.push((MentionCategory::Skill, name.to_owned(), token.to_owned()));
+        } else if token == "@goal" && skill_ids.contains("goal") && seen.insert(token.to_owned()) {
+            out.push((MentionCategory::Skill, "goal".to_owned(), token.to_owned()));
         }
     }
     out
@@ -3437,7 +3664,11 @@ pub fn mention_completion_items(
 
     if kind_filter.is_none() || kind_filter == Some(MentionCategory::Skill) {
         for skill in &host.skills {
-            let label = format!("@skill/{}", skill.id);
+            let label = if skill.id == "goal" {
+                "@goal".to_string()
+            } else {
+                format!("@skill/{}", skill.id)
+            };
             if needle.is_empty()
                 || skill.id.to_ascii_lowercase().contains(needle)
                 || skill
@@ -4087,6 +4318,18 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_blocks_start_open() {
+        let mut state = AppState::default();
+        assert!(state.sidebar_diagnose_open);
+        assert!(state.sidebar_changes_open);
+
+        toggle_diagnose(&mut state);
+        assert!(!state.sidebar_diagnose_open);
+        toggle_changes(&mut state);
+        assert!(!state.sidebar_changes_open);
+    }
+
+    #[test]
     fn activity_summary_uses_tui_phrasing() {
         let running = activity_summary(&[("code-read_file", true), ("code-grep", false)], 0);
         assert_eq!(running, "1 tool · Reading 1");
@@ -4156,6 +4399,7 @@ mod tests {
             assistant("a5", "....", "t5"),
             TranscriptEntryDto::Subagent {
                 id: "sub1".to_owned(),
+                name: None,
                 agent: "explore".to_owned(),
                 status: "succeeded".to_owned(),
                 report: None,
@@ -4225,6 +4469,7 @@ mod tests {
             active_tool: None,
             turn_started_at_ms: None,
             user_shell_running: false,
+            shell_runs: Vec::new(),
         });
         state
             .session_tabs
@@ -4300,5 +4545,148 @@ mod tests {
         assert_eq!(format_duration_ms(450), "450ms");
         assert_eq!(format_duration_ms(4_250), "4.2s");
         assert_eq!(format_duration_ms(125_000), "2m 05s");
+    }
+
+    fn subagent(id: &str, agent: &str, status: &str) -> TranscriptEntryDto {
+        TranscriptEntryDto::Subagent {
+            id: id.to_owned(),
+            name: None,
+            agent: agent.to_owned(),
+            status: status.to_owned(),
+            report: None,
+            child_session_id: Some(format!("{id}-child")),
+            model: None,
+            approval_mode: "ask".to_owned(),
+            steps_used: 2,
+            max_steps: 32,
+            usage: UsageDto::default(),
+            est_cost_usd: None,
+            active_tool: None,
+        }
+    }
+
+    fn shell_run(id: &str, command: &str) -> meerai_web_protocol::ShellRunDto {
+        meerai_web_protocol::ShellRunDto {
+            id: id.to_owned(),
+            command: command.to_owned(),
+            started_at_ms: 1_000,
+        }
+    }
+
+    #[test]
+    fn running_counts_include_only_running_work() {
+        let mut state = state_with_tab();
+        let tab = state.session_tabs.get_mut("ses-1").unwrap();
+        tab.entries.push(subagent("sa-1", "explore", "running"));
+        tab.entries.push(subagent("sa-2", "plan", "proposed"));
+        tab.entries.push(subagent("sa-3", "build", "completed"));
+        state.sessions[0].shell_runs = vec![
+            shell_run("run-1", "cargo test"),
+            shell_run("run-2", "cargo clippy"),
+        ];
+        assert_eq!(running_subagent_count(&state), 2);
+        assert_eq!(running_shell_count(&state), 2);
+        assert_eq!(running_subagent_rows(&state).len(), 2);
+
+        state.sessions[0].shell_runs.clear();
+        assert_eq!(running_shell_count(&state), 0);
+    }
+
+    #[test]
+    fn runs_navigation_opens_rows_and_returns_to_the_list() {
+        let mut state = state_with_tab();
+        state.sessions[0].shell_runs = vec![shell_run("run-1", "cargo test")];
+
+        open_runs(&mut state, RunKindDto::Shells);
+        assert!(matches!(
+            &state.modal,
+            Some(ActiveModal::Runs {
+                kind: RunKindDto::Shells,
+                ..
+            })
+        ));
+
+        open_run_row(&mut state, RunKindDto::Shells, 0);
+        match &state.modal {
+            Some(ActiveModal::ShellRun {
+                run_id,
+                command,
+                started_at_ms,
+                from_runs,
+            }) => {
+                assert_eq!(run_id, "run-1");
+                assert_eq!(command, "cargo test");
+                assert_eq!(*started_at_ms, 1_000);
+                assert_eq!(*from_runs, Some(RunKindDto::Shells));
+            }
+            other => panic!("unexpected modal: {other:?}"),
+        }
+
+        back_to_runs(&mut state, RunKindDto::Shells);
+        assert!(matches!(
+            &state.modal,
+            Some(ActiveModal::Runs {
+                kind: RunKindDto::Shells,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn agent_rows_open_the_subagent_overlay() {
+        let mut state = state_with_tab();
+        state
+            .session_tabs
+            .get_mut("ses-1")
+            .unwrap()
+            .entries
+            .push(subagent("sa-1", "explore", "running"));
+
+        open_run_row(&mut state, RunKindDto::Agents, 0);
+        match &state.modal {
+            Some(ActiveModal::SubagentOverlay {
+                entry_id,
+                agent,
+                status,
+                child_session_id,
+                from_runs,
+                ..
+            }) => {
+                assert_eq!(entry_id, "sa-1");
+                assert_eq!(agent, "explore");
+                assert_eq!(status, "running");
+                assert_eq!(child_session_id.as_deref(), Some("sa-1-child"));
+                assert_eq!(*from_runs, Some(RunKindDto::Agents));
+            }
+            other => panic!("unexpected modal: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_shell_output_records_result_by_run_id() {
+        let mut state = state_with_tab();
+        apply_shell_output(&mut state, "ses-1", "run-1", Ok("done".to_owned()));
+        assert_eq!(
+            state.shell_outputs.get("run-1"),
+            Some(&Ok("done".to_owned()))
+        );
+
+        apply_shell_output(&mut state, "ses-1", "run-2", Err("boom".to_owned()));
+        assert_eq!(
+            state.shell_outputs.get("run-2"),
+            Some(&Err("boom".to_owned()))
+        );
+    }
+
+    #[test]
+    fn composer_submits_prompts_while_a_shell_runs() {
+        let mut state = state_with_tab();
+        state.sessions[0].user_shell_running = true;
+        state.draft.replace_text("next task");
+        assert!(state.can_submit_composer());
+        submit_or_queue_composer(&mut state);
+        let tab = state.active_tab().unwrap();
+        assert!(tab.pending_queue.is_empty());
+        assert_eq!(tab.pending_submit.as_deref(), Some("next task"));
     }
 }

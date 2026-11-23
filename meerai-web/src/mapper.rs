@@ -26,14 +26,15 @@ use meerai_web_protocol::{
     ApprovalModeDto, ApprovalRequestDto, AuthKindDto, BackendKind, ChatGptLoginStateDto,
     ContextBreakdownDto, ContextSettingsDto, DefinitionInfoDto, DefinitionsDiagnosticsDto,
     DiffCellDto, DiffRowDto, DiffRowKindDto, EffectClassDto, EffortDto, FileChangeDto,
-    FileDiffResponse, GrantScopeDto, HostInfoDto, McpServerInfoDto, MemoryDto, ModelItemDto,
-    PackDto, ProviderItemDto, ProvidersResponse, QuestionAnswerDto, QuestionOptionDto,
-    QuestionPromptDto, QuestionRequestDto, RewindScopeDto, RouteDto, SandboxSettingsDto,
-    SearchModeDto, SessionDetailDto, SessionSettingsDto, SessionStatus, SessionSummaryDto,
-    SettingsSnapshotDto, ShadowedDefinitionDto, SkillInfoDto, SnapshotResponse, ThemeOverrideDto,
-    ThemeTokensDto, TranscriptEntryDto, TurnMetricsDto, UnifiedLineDto, UnifiedLineKindDto,
-    UpdateSettingsRequest, UsageDto, ViewEvent, WorkspacePreviewLineDto, WorkspacePreviewResponse,
-    WorkspaceSearchMatchDto, WorkspaceSearchResponse,
+    FileDiffResponse, GoalDto, GoalItemDto, GoalItemStatusDto, GrantScopeDto, HostInfoDto,
+    McpServerInfoDto, MemoryDto, ModelItemDto, PackDto, ProviderItemDto, ProvidersResponse,
+    QuestionAnswerDto, QuestionOptionDto, QuestionPromptDto, QuestionRequestDto, RewindScopeDto,
+    RouteDto, SandboxSettingsDto, SearchModeDto, SessionDetailDto, SessionSettingsDto,
+    SessionStatus, SessionSummaryDto, SettingsSnapshotDto, ShadowedDefinitionDto, ShellRunDto,
+    SkillInfoDto, SnapshotResponse, ThemeOverrideDto, ThemeTokensDto, TranscriptEntryDto,
+    TurnMetricsDto, UnifiedLineDto, UnifiedLineKindDto, UpdateSettingsRequest, UsageDto, ViewEvent,
+    WorkspacePreviewLineDto, WorkspacePreviewResponse, WorkspaceSearchMatchDto,
+    WorkspaceSearchResponse,
 };
 use serde::Serialize;
 
@@ -68,6 +69,15 @@ pub fn map_summary(summary: LiveSessionSummary) -> SessionSummaryDto {
         active_tool: summary.active_tool,
         turn_started_at_ms: summary.turn_started_at_ms,
         user_shell_running: summary.user_shell_running,
+        shell_runs: summary
+            .shell_runs
+            .into_iter()
+            .map(|run| ShellRunDto {
+                id: run.id,
+                command: run.command,
+                started_at_ms: run.started_at_ms,
+            })
+            .collect(),
     }
 }
 
@@ -91,6 +101,32 @@ pub fn map_detail(detail: LiveSessionDetail) -> SessionDetailDto {
         usage: map_usage(detail.usage),
         metrics: map_metrics(detail.metrics),
         context: detail.context.map(map_context_breakdown),
+        goal: detail.goal.map(map_goal),
+    }
+}
+
+fn map_goal(goal: meerai_session::GoalState) -> GoalDto {
+    GoalDto {
+        goal: goal.goal,
+        done_when: goal.done_when,
+        constraints: goal.constraints,
+        items: goal
+            .items
+            .into_iter()
+            .map(|item| GoalItemDto {
+                id: item.id,
+                text: item.text,
+                verify: item.verify,
+                status: match item.status {
+                    meerai_session::GoalItemStatus::Open => GoalItemStatusDto::Open,
+                    meerai_session::GoalItemStatus::Done => GoalItemStatusDto::Done,
+                    meerai_session::GoalItemStatus::Failed => GoalItemStatusDto::Failed,
+                },
+                evidence: item.evidence,
+            })
+            .collect(),
+        rounds: goal.rounds,
+        turns: goal.turns,
     }
 }
 
@@ -232,6 +268,7 @@ pub fn map_entry(entry: LiveEntry) -> TranscriptEntryDto {
         },
         LiveEntry::Subagent {
             id,
+            name,
             agent,
             status,
             report,
@@ -245,6 +282,7 @@ pub fn map_entry(entry: LiveEntry) -> TranscriptEntryDto {
             active_tool,
         } => TranscriptEntryDto::Subagent {
             id,
+            name,
             agent,
             status,
             report,
@@ -316,6 +354,7 @@ pub fn map_stored_events(events: &[LoggedEvent]) -> (Vec<TranscriptEntryDto>, Us
             },
             ReplayEntry::Subagent(sub) => TranscriptEntryDto::Subagent {
                 id: sub.id,
+                name: sub.name,
                 agent: sub.agent,
                 status: match sub.status {
                     ToolCallStatus::Proposed => "proposed",
@@ -378,6 +417,10 @@ pub fn map_view_event(kind: RegistryEventKind) -> ViewEvent {
         } => ViewEvent::ContextUpdated {
             session_id: session_id.to_string(),
             breakdown: map_context_breakdown(breakdown),
+        },
+        RegistryEventKind::GoalUpdated { session_id, state } => ViewEvent::GoalUpdated {
+            session_id: session_id.to_string(),
+            goal: map_goal(state),
         },
         RegistryEventKind::SessionActivated { session_id } => ViewEvent::SessionActivated {
             session_id: session_id.to_string(),

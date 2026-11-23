@@ -1454,8 +1454,9 @@ fn packs_modal_toggles_state_and_subagent_form_spawns() {
     app.modal = None;
 
     app.modal = Some(ActiveModal::SubagentSpawn(SubagentSpawnPanel {
+        name: "parser scan".to_string(),
         agent: "explore".to_string(),
-        field: 1,
+        field: 2,
         ..SubagentSpawnPanel::default()
     }));
     for ch in "find the parser".chars() {
@@ -1466,7 +1467,9 @@ fn packs_modal_toggles_state_and_subagent_form_spawns() {
     assert!(matches!(
         rx.try_recv().unwrap(),
         AgentCommand::SpawnSubagent { spec }
-            if spec.agent == "explore" && spec.task == "find the parser"
+            if spec.agent == "explore"
+                && spec.task == "find the parser"
+                && spec.name.as_deref() == Some("parser scan")
     ));
 }
 
@@ -1605,4 +1608,84 @@ fn sampling_panel_sets_effort_and_temperature_together() {
             .iter()
             .any(|action| { matches!(action, PendingSessionAction::SyncContext) })
     );
+}
+
+#[test]
+fn queued_edit_arrows_move_across_wrapped_rows() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.queued_editor_width = 5;
+    app.tab_mut().queued = vec!["abcdefghijkl".to_string()];
+    app.modal = Some(ActiveModal::QueuedEdit {
+        index: 0,
+        input: "abcdefghijkl".to_string(),
+        cursor: 7,
+        error: None,
+    });
+
+    app.handle_key_event(key(KeyCode::Up));
+    let Some(ActiveModal::QueuedEdit { cursor, .. }) = &app.modal else {
+        panic!("queued edit modal should stay open");
+    };
+    assert_eq!(*cursor, 2);
+
+    app.handle_key_event(key(KeyCode::Down));
+    let Some(ActiveModal::QueuedEdit { cursor, .. }) = &app.modal else {
+        panic!("queued edit modal should stay open");
+    };
+    assert_eq!(*cursor, 7);
+}
+
+#[test]
+fn queued_edit_arrows_keep_the_goal_column() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.queued_editor_width = 5;
+    app.tab_mut().queued = vec!["abcdefghij\nxy\nklmnopqrst".to_string()];
+    app.modal = Some(ActiveModal::QueuedEdit {
+        index: 0,
+        input: "abcdefghij\nxy\nklmnopqrst".to_string(),
+        cursor: 8,
+        error: None,
+    });
+
+    app.handle_key_event(key(KeyCode::Down));
+    let Some(ActiveModal::QueuedEdit { cursor, .. }) = &app.modal else {
+        panic!("queued edit modal should stay open");
+    };
+    assert_eq!(*cursor, 13);
+
+    app.handle_key_event(key(KeyCode::Down));
+    let Some(ActiveModal::QueuedEdit { cursor, .. }) = &app.modal else {
+        panic!("queued edit modal should stay open");
+    };
+    assert_eq!(*cursor, 17);
+
+    app.handle_key_event(key(KeyCode::Up));
+    app.handle_key_event(key(KeyCode::Up));
+    let Some(ActiveModal::QueuedEdit { cursor, .. }) = &app.modal else {
+        panic!("queued edit modal should stay open");
+    };
+    assert_eq!(*cursor, 8);
+}
+
+#[test]
+fn shell_runs_track_concurrent_commands_and_output() {
+    let (mut app, _rx, _secrets) = test_app();
+    let (tab_id, first) = app.start_shell_run("sleep 1".to_string());
+    let (_, second) = app.start_shell_run("cargo test".to_string());
+    assert_eq!(app.run_count(RunKind::Shells), 2);
+
+    app.complete_shell_run(tab_id, first, Ok("done".to_string()));
+    assert_eq!(app.run_count(RunKind::Shells), 1);
+    assert_eq!(
+        app.shell_run(first).and_then(|run| run.output.as_deref()),
+        Some("done")
+    );
+    assert_eq!(
+        app.shell_run(second).map(|run| run.status),
+        Some(ShellRunStatus::Running)
+    );
+    assert!(matches!(
+        app.tab().transcript.last(),
+        Some(TranscriptEntry::System { text }) if text == "done"
+    ));
 }

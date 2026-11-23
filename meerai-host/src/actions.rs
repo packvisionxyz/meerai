@@ -305,6 +305,7 @@ fn parse_subagent(rest: &str) -> Option<HostAction> {
     let mut task_parts: Vec<&str> = Vec::new();
     while let Some(token) = tokens.next() {
         match token {
+            "--name" => spec.name = Some(tokens.next()?.to_string()),
             "--model" => spec.model = Some(tokens.next()?.to_string()),
             "--mode" => {
                 spec.approval_mode = Some(ApprovalMode::parse(tokens.next()?)?);
