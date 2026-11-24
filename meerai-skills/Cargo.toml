@@ -1,0 +1,25 @@
+[package]
+name = "meerai-skills"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+meerai-common = { path = "../meerai-common/" }
+meerai-core = { path = "../meerai-core/" }
+meerai-session = { path = "../meerai-session/" }
+meerai-store = { path = "../meerai-store/" }
+
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }

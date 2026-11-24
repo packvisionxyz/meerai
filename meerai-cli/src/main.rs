@@ -28,20 +28,16 @@ use meerai_acp::{AGY, AcpStart, AcpWorkerConfig, spawn_acp_worker};
 #[cfg(any(feature = "tui", feature = "web"))]
 use meerai_agents::spawn_worker;
 use meerai_agents::{
-    AcpChild, AcpRunToolset, AcpSpawner, AgentHarness, DEFAULT_GLOBAL_CONCURRENCY, GoalInterceptor,
-    GoalToolset, HarnessConfig, HookEngine, MemoryCapture, MemoryToolset, MultiTurnAgent,
-    QuestionToolset, RoutingCoordinator, SKILL_TOOL, SkillToolset, SubagentToolFactory,
-    SubagentToolset, TokenPricing, new_goal_handle,
+    AcpChild, AcpRunToolset, AcpSpawner, AgentHarness, DEFAULT_GLOBAL_CONCURRENCY, HarnessConfig,
+    HookEngine, LoopInterceptor, MemoryCapture, MemoryToolset, MultiTurnAgent, QuestionToolset,
+    RoutingCoordinator, SubagentToolFactory, SubagentToolset, TokenPricing,
 };
 use meerai_client::providers::{
     ProviderAuthKind, ProviderCatalog, RuntimeProviderState, canonical_provider_id,
     check_key_status, first_configured_provider, resolve_credential,
 };
 use meerai_client::secrets::{Credential, SecretStore};
-use meerai_common::definitions::{
-    AgentDefinition, SkillDefinition, load_definitions_for, load_definitions_with_builtins,
-    validate_agent_model,
-};
+use meerai_common::definitions::{AgentDefinition, SkillDefinition, validate_agent_model};
 use meerai_common::hooks::{add_trusted_project, load_hooks_for_run, project_is_trusted};
 #[cfg(feature = "tui")]
 use meerai_common::settings::Temperature;
@@ -65,8 +61,12 @@ use meerai_policy::{ApprovalMode, PolicyEngine, parse_approval_mode, rules_from_
 use meerai_providers::providers::build_genai_client;
 use meerai_providers::secrets::default_secret_store;
 use meerai_session::{
-    GoalState, LoggedEvent, Session, SessionConfig, SessionId, SessionSummary, TurnId,
+    LoggedEvent, LoopState, Session, SessionConfig, SessionId, SessionSummary, TurnId,
     default_sessions_root, delete_session as delete_session_dir, list_sessions,
+};
+use meerai_skills::{
+    LoopToolset, SKILL_TOOL, SkillToolset, load_definitions_for, load_definitions_with_builtins,
+    new_loop_handle,
 };
 use meerai_store::{
     InstalledPack, ModelRoute, NewProjectMemory, ProjectMemory, RoutingSettings, Store, TaskType,
@@ -199,8 +199,8 @@ fn load_definitions_for_runtime(
     }
 }
 
-fn last_goal_state(session: &Session) -> Option<GoalState> {
-    meerai_session::goal::last_goal(&session.events())
+fn last_loop_state(session: &Session) -> Option<LoopState> {
+    meerai_session::last_loop(&session.events())
 }
 
 fn compose_definition_prompt(
@@ -808,7 +808,7 @@ async fn main() -> Result<()> {
         }
         let mut agent =
             host.build_agent(session, &active_provider, &active_model, initial_system)?;
-        agent.set_goal_auto_continue(false);
+        agent.set_loop_auto_continue(false);
         if let Err(err) =
             meerai_providers::oauth::ensure_fresh_credential(secrets.as_ref(), &active_provider)
                 .await
@@ -1422,13 +1422,13 @@ impl CliSessionHost {
         };
 
         let mut agent = MultiTurnAgent::new(self.client.clone(), model_spec, initial_tools, system);
-        let goal = new_goal_handle();
-        if let Some(state) = last_goal_state(&session) {
-            *goal.lock() = state;
+        let state = new_loop_handle();
+        if let Some(saved) = last_loop_state(&session) {
+            *state.lock() = saved;
         }
-        agent.set_goal_handle(goal.clone());
-        agent.add_tool(GoalToolset::new(goal.clone()));
-        agent.add_shared_interceptor(Arc::new(GoalInterceptor::new(goal)));
+        agent.set_loop_handle(state.clone());
+        agent.add_tool(LoopToolset::new(state.clone()));
+        agent.add_shared_interceptor(Arc::new(LoopInterceptor::new(state)));
         agent.set_hooks(self.hooks.clone());
         agent.set_memory_capture(MemoryCapture::new(
             store,

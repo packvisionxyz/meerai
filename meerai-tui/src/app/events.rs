@@ -158,8 +158,8 @@ impl AppState {
                     AgentEvent::ContextUpdated { breakdown } => Some(breakdown.clone()),
                     _ => None,
                 };
-                let goal_update = match &other {
-                    AgentEvent::GoalUpdated { state } => Some(state.clone()),
+                let loop_update = match &other {
+                    AgentEvent::LoopUpdated { state } => Some(state.clone()),
                     _ => None,
                 };
                 self.tabs[tab_idx].apply_agent_event(other);
@@ -170,8 +170,8 @@ impl AppState {
                     panel.breakdown = Some(breakdown);
                 }
                 if is_active
-                    && let Some(state) = goal_update
-                    && let Some(ActiveModal::Goal {
+                    && let Some(state) = loop_update
+                    && let Some(ActiveModal::Loop {
                         state: modal_state, ..
                     }) = self.modal.as_mut()
                 {
@@ -621,12 +621,12 @@ impl SessionTab {
             AgentEvent::ContextUpdated { breakdown } => {
                 self.context = Some(breakdown);
             }
-            AgentEvent::GoalUpdated { state } => {
-                self.goal = Some(state);
+            AgentEvent::LoopUpdated { state } => {
+                self.loop_state = Some(state);
             }
-            AgentEvent::GoalContinued { turn, max_turns } => {
+            AgentEvent::LoopContinued { turn, max_turns } => {
                 self.transcript.push(TranscriptEntry::System {
-                    text: format!("Goal continues (turn {turn}/{max_turns})"),
+                    text: format!("Loop continues (turn {turn}/{max_turns})"),
                 });
             }
             AgentEvent::HookCompleted {

@@ -250,10 +250,10 @@ pub enum AgentEvent {
     ContextUpdated {
         breakdown: ContextBreakdown,
     },
-    GoalUpdated {
-        state: meerai_session::GoalState,
+    LoopUpdated {
+        state: meerai_session::LoopState,
     },
-    GoalContinued {
+    LoopContinued {
         turn: usize,
         max_turns: usize,
     },

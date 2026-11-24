@@ -60,10 +60,11 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
         false,
     ),
     (
-        "/goal",
-        "Show the active goal checklist (or use @goal <instruction>)",
+        "/loop",
+        "Show the active loop checklist (or use @goal <instruction>)",
         false,
     ),
+    ("/goal", "Alias for /loop", false),
     (
         "/search",
         "Search files by name or content (ripgrep)",

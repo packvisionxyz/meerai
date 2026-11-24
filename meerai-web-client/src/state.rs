@@ -8,7 +8,7 @@ use crate::text::{TextBuffer, UiEffects};
 use meerai_web_protocol::{
     ApprovalModeDto, ApprovalRequestDto, BackendKind, ChatGptLoginStateDto, ContextBreakdownDto,
     ContextSettingsDto, DefinitionsDiagnosticsDto, EffortDto, FileChangeDto, FileDiffResponse,
-    GoalDto, HostInfoDto, MemoryDto, ModelItemDto, PackDto, ProviderItemDto, ProvidersResponse,
+    HostInfoDto, LoopDto, MemoryDto, ModelItemDto, PackDto, ProviderItemDto, ProvidersResponse,
     QuestionRequestDto, ReloadResponse, RewindScopeDto, RouteDto, SandboxSettingsDto,
     SessionDetailDto, SessionSettingsDto, SessionStatus, SessionSummaryDto, SnapshotResponse,
     ThemeOverrideDto, TranscriptEntryDto, TurnMetricsDto, UpdateSettingsRequest, UsageDto,
@@ -214,9 +214,9 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         takes_arg: false,
     },
     SlashCommandSpec {
-        cmd: "/goal",
+        cmd: "/loop",
         args: "",
-        desc: "Show the active goal checklist (or use @goal <instruction>)",
+        desc: "Show the active loop checklist (or use @goal <instruction>)",
         takes_arg: false,
     },
     SlashCommandSpec {
@@ -793,7 +793,7 @@ impl QuestionDraft {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspacePanelTab {
     Context,
-    Goal,
+    Loop,
     Memory,
     Subagent,
     Routing,
@@ -822,7 +822,7 @@ pub enum ActiveModal {
     WorkspacePanel {
         tab: WorkspacePanelTab,
         context: Option<Box<ContextBreakdownDto>>,
-        goal: Option<Box<GoalDto>>,
+        loop_state: Option<Box<LoopDto>>,
         memories: Vec<MemoryDto>,
         routes: Vec<RouteDto>,
         packs: Vec<PackDto>,
@@ -989,7 +989,7 @@ pub struct SessionTabState {
     pub usage: UsageDto,
     pub metrics: TurnMetricsDto,
     pub context: Option<ContextBreakdownDto>,
-    pub goal: Option<GoalDto>,
+    pub loop_state: Option<LoopDto>,
     pub pending_submit: Option<String>,
     pub pending_queue: VecDeque<String>,
     pub draft_text: String,
@@ -1229,7 +1229,7 @@ pub fn apply_active_detail(state: &mut AppState, detail: SessionDetailDto) {
     tab.usage = detail.usage;
     tab.metrics = detail.metrics;
     tab.context = detail.context;
-    tab.goal = detail.goal;
+    tab.loop_state = detail.loop_state;
     tab.unread = false;
     sync_pending_modal_for_active(state);
 }
@@ -1249,7 +1249,7 @@ pub fn apply_session_detail(state: &mut AppState, detail: SessionDetailDto) {
     tab.usage = detail.usage;
     tab.metrics = detail.metrics;
     tab.context = detail.context;
-    tab.goal = detail.goal;
+    tab.loop_state = detail.loop_state;
     if state.active_session_id.as_deref() == Some(id.as_str()) {
         tab.unread = false;
         sync_pending_modal_for_active(state);
@@ -1566,16 +1566,19 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
             }
             EventEffect::None
         }
-        ViewEvent::GoalUpdated { session_id, goal } => {
+        ViewEvent::LoopUpdated {
+            session_id,
+            state: loop_state,
+        } => {
             let tab = state.session_tabs.entry(session_id).or_default();
-            tab.goal = Some(goal.clone());
+            tab.loop_state = Some(loop_state.clone());
             if let Some(ActiveModal::WorkspacePanel {
-                tab: WorkspacePanelTab::Goal,
-                goal: panel_goal,
+                tab: WorkspacePanelTab::Loop,
+                loop_state: panel_state,
                 ..
             }) = state.modal.as_mut()
             {
-                *panel_goal = Some(Box::new(goal));
+                *panel_state = Some(Box::new(loop_state));
             }
             EventEffect::None
         }
@@ -2445,17 +2448,17 @@ pub fn execute_user_shell(state: &mut AppState, cmd: &str) {
 
 pub fn open_workspace_panel(state: &mut AppState, tab: WorkspacePanelTab) {
     let context = state.active_tab().and_then(|tab| tab.context.clone());
-    let goal = state.active_tab().and_then(|tab| tab.goal.clone());
+    let loop_state = state.active_tab().and_then(|tab| tab.loop_state.clone());
     state.modal = Some(ActiveModal::WorkspacePanel {
         tab,
         context: context.map(Box::new),
-        goal: goal.map(Box::new),
+        loop_state: loop_state.map(Box::new),
         memories: Vec::new(),
         routes: Vec::new(),
         packs: Vec::new(),
         definitions: Box::default(),
         selected: 0,
-        loading: !matches!(tab, WorkspacePanelTab::Goal),
+        loading: !matches!(tab, WorkspacePanelTab::Loop),
         error: None,
         subagent_name: Box::default(),
         subagent_agent: "explore".to_owned(),
@@ -2703,8 +2706,8 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
                 transport.run_host_action("/context".to_owned());
             }
         }
-        "/goal" => {
-            open_workspace_panel(state, WorkspacePanelTab::Goal);
+        "/goal" | "/loop" => {
+            open_workspace_panel(state, WorkspacePanelTab::Loop);
         }
         "/memory" => {
             open_workspace_panel(state, WorkspacePanelTab::Memory);

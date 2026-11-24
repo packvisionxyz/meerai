@@ -137,7 +137,7 @@ fn submitting_bare_goal_applies_the_builtin_skill() {
 #[test]
 fn submitting_bare_goal_uses_the_builtin_goal_skill() {
     let (mut app, mut rx, _secrets) = test_app();
-    app.skills = meerai_common::definitions::builtin_skills();
+    app.skills = meerai_skills::builtin_skills();
 
     submit(&mut app, "@goal ship the fix");
 

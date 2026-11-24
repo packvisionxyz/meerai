@@ -521,6 +521,7 @@ fn event_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::HookFired { .. } => "hook_fired",
         SessionEvent::ContextTurnPinned { .. } => "context_turn_pinned",
         SessionEvent::GoalUpdated { .. } => "goal_updated",
+        SessionEvent::LoopUpdated { .. } => "loop_updated",
         SessionEvent::CheckpointCreated { .. } => "checkpoint_created",
         SessionEvent::CircuitBreaker { .. } => "circuit_breaker",
         SessionEvent::Error { .. } => "error",
@@ -5445,7 +5446,7 @@ fn subagent_presets_and_effect_of_call_classification() {
     use meerai_core::PermissionAction;
 
     let presets = builtin_agents();
-    assert_eq!(presets.len(), 4);
+    assert_eq!(presets.len(), 6);
     let explore = find_builtin_agent("explore").unwrap();
     assert_eq!(explore.effect, EffectClass::Read);
     assert!(explore.read_only);
@@ -5465,6 +5466,14 @@ fn subagent_presets_and_effect_of_call_classification() {
     assert_eq!(general.effect, EffectClass::Write);
     assert!(!general.read_only);
     assert_eq!(general.max_steps, 16);
+
+    let researcher = find_builtin_agent("research").unwrap();
+    assert_eq!(researcher.effect, EffectClass::Read);
+    assert!(researcher.read_only);
+
+    let reviewer = find_builtin_agent("review").unwrap();
+    assert_eq!(reviewer.effect, EffectClass::Read);
+    assert!(reviewer.read_only);
 
     let streamer = Arc::new(FakeStreamer::new(vec![]));
     let model = Arc::new(std::sync::RwLock::new("gpt-4o-mini".to_string()));
@@ -7848,7 +7857,7 @@ async fn turn_stopping_can_continue_more_than_once() {
     assert_eq!(streamer.requests.lock().unwrap().len(), 3);
 }
 
-fn goal_call(call_id: &str, fn_name: &str, args: serde_json::Value) -> ToolCall {
+fn loop_call(call_id: &str, fn_name: &str, args: serde_json::Value) -> ToolCall {
     ToolCall {
         call_id: call_id.to_string(),
         fn_name: fn_name.to_string(),
@@ -7858,40 +7867,55 @@ fn goal_call(call_id: &str, fn_name: &str, args: serde_json::Value) -> ToolCall 
 }
 
 #[tokio::test]
-async fn the_goal_loop_continues_until_every_item_is_done() {
+async fn the_loop_continues_until_every_item_is_done() {
     let streamer = Arc::new(FakeStreamer::new(vec![
-        vec![ChatStreamEvent::End(tool_end(vec![goal_call(
-            "g1",
-            "goal-set",
+        vec![ChatStreamEvent::End(tool_end(vec![loop_call(
+            "l1",
+            "loop-plan",
             serde_json::json!({
-                "goal": "Fix the failing test",
+                "objective": "Fix the failing test",
                 "done_when": ["cargo test passes"],
-                "items": [{ "text": "Fix it", "verify": "cargo test" }]
+                "items": [{ "text": "Fix it", "expect": "cargo test passes" }]
             }),
         )]))],
         vec![ChatStreamEvent::End(text_end("done early"))],
-        vec![ChatStreamEvent::End(tool_end(vec![goal_call(
-            "g2",
-            "goal-check",
-            serde_json::json!({
-                "item_id": 1,
-                "status": "done",
-                "evidence": "cargo test passed"
-            }),
-        )]))],
+        vec![ChatStreamEvent::End(tool_end(vec![
+            loop_call(
+                "l2",
+                "loop-act",
+                serde_json::json!({
+                    "item_id": 1,
+                    "action": "changed the assertion",
+                    "expect": "cargo test passes"
+                }),
+            ),
+            loop_call(
+                "l3",
+                "loop-observe",
+                serde_json::json!({
+                    "item_id": 1,
+                    "observation": "test result: ok. 12 passed"
+                }),
+            ),
+            loop_call(
+                "l4",
+                "loop-adjust",
+                serde_json::json!({ "item_id": 1, "status": "done" }),
+            ),
+        ]))],
         vec![ChatStreamEvent::End(text_end("complete"))],
     ]));
     let session = memory_session();
-    let goal = crate::goal::new_goal_handle();
+    let state = meerai_skills::new_loop_handle();
     let mut agent = harness_agent(
         streamer.clone(),
-        vec![Box::new(crate::goal_tool::GoalToolset::new(goal.clone()))],
+        vec![Box::new(meerai_skills::LoopToolset::new(state.clone()))],
         "",
         &session,
         auto_mode(),
         HarnessConfig::default(),
     );
-    agent.add_shared_interceptor(Arc::new(crate::goal::GoalInterceptor::new(goal.clone())));
+    agent.add_shared_interceptor(Arc::new(crate::LoopInterceptor::new(state.clone())));
 
     let (tx, _rx) = mpsc::unbounded_channel();
     let out = agent
@@ -7900,54 +7924,72 @@ async fn the_goal_loop_continues_until_every_item_is_done() {
         .unwrap();
     assert_eq!(out, "complete");
     assert_eq!(streamer.requests.lock().unwrap().len(), 4);
-    assert!(goal.lock().all_done());
+    assert!(state.lock().all_done());
 
     let continued = session.events().iter().any(|entry| matches!(
         &entry.event,
         SessionEvent::UserMessage { source: InputSource::RuntimeContext, content }
-            if matches!(content.first(), Some(ContentBlock::Text(text)) if text.contains("Goal round 1/"))
+            if matches!(content.first(), Some(ContentBlock::Text(text)) if text.contains("Loop round 1/"))
     ));
     assert!(continued, "the early stop must be continued once");
 }
 
 #[tokio::test]
-async fn the_worker_starts_a_new_turn_while_the_goal_has_open_items() {
+async fn the_worker_starts_a_new_turn_while_the_loop_has_open_items() {
     let streamer = Arc::new(FakeStreamer::new(vec![
         vec![ChatStreamEvent::End(text_end("blocked"))],
-        vec![ChatStreamEvent::End(tool_end(vec![goal_call(
-            "g1",
-            "goal-check",
-            serde_json::json!({
-                "item_id": 1,
-                "status": "done",
-                "evidence": "fixed"
-            }),
-        )]))],
+        vec![ChatStreamEvent::End(tool_end(vec![
+            loop_call(
+                "l1",
+                "loop-plan",
+                serde_json::json!({
+                    "objective": "Fix it",
+                    "items": [{ "text": "Fix", "expect": "it passes" }]
+                }),
+            ),
+            loop_call(
+                "l2",
+                "loop-act",
+                serde_json::json!({ "item_id": 1, "action": "fixed it" }),
+            ),
+            loop_call(
+                "l3",
+                "loop-observe",
+                serde_json::json!({ "item_id": 1, "observation": "it passes" }),
+            ),
+            loop_call(
+                "l4",
+                "loop-adjust",
+                serde_json::json!({ "item_id": 1, "status": "done" }),
+            ),
+        ]))],
         vec![ChatStreamEvent::End(text_end("complete"))],
     ]));
     let session = memory_session();
-    let goal = crate::goal::new_goal_handle();
+    let state = meerai_skills::new_loop_handle();
     {
-        let mut state = goal.lock();
-        state.goal = Some("Fix it".to_string());
-        state.items = vec![crate::goal::GoalItem {
+        let mut state = state.lock();
+        state.objective = Some("Fix it".to_string());
+        state.items = vec![meerai_session::LoopItem {
             id: 1,
             text: "Fix".to_string(),
-            status: crate::goal::GoalItemStatus::Open,
-            ..crate::goal::GoalItem::default()
+            status: meerai_session::LoopItemStatus::Open,
+            ..meerai_session::LoopItem::default()
         }];
-        state.rounds = crate::goal::MAX_GOAL_ROUNDS;
+        state.current = Some(1);
+        state.phase = meerai_session::LoopPhase::Act;
+        state.rounds = meerai_session::MAX_LOOP_ROUNDS;
     }
     let mut agent = harness_agent(
         streamer,
-        vec![Box::new(crate::goal_tool::GoalToolset::new(goal.clone()))],
+        vec![Box::new(meerai_skills::LoopToolset::new(state.clone()))],
         "",
         &session,
         auto_mode(),
         HarnessConfig::default(),
     );
-    agent.set_goal_handle(goal.clone());
-    agent.add_shared_interceptor(Arc::new(crate::goal::GoalInterceptor::new(goal.clone())));
+    agent.set_loop_handle(state.clone());
+    agent.add_shared_interceptor(Arc::new(crate::LoopInterceptor::new(state.clone())));
 
     let (cmd_tx, mut event_rx) = spawn_worker(agent);
     cmd_tx
@@ -7961,7 +8003,7 @@ async fn the_worker_starts_a_new_turn_while_the_goal_has_open_items() {
         while let Some(event) = event_rx.recv().await {
             match event {
                 AgentEvent::TurnStarted { .. } => starts += 1,
-                AgentEvent::GoalContinued { turn, .. } => {
+                AgentEvent::LoopContinued { turn, .. } => {
                     assert_eq!(turn, 1);
                     continued = true;
                 }
@@ -7974,9 +8016,9 @@ async fn the_worker_starts_a_new_turn_while_the_goal_has_open_items() {
     .expect("worker did not finish");
 
     let _ = cmd_tx.send(AgentCommand::Quit);
-    assert!(continued, "the worker must announce the goal continuation");
-    assert_eq!(starts, 2, "the goal must run one follow-up turn");
-    assert!(goal.lock().all_done());
+    assert!(continued, "the worker must announce the loop continuation");
+    assert_eq!(starts, 2, "the loop must run one follow-up turn");
+    assert!(state.lock().all_done());
 }
 
 #[tokio::test]

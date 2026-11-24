@@ -106,7 +106,7 @@ mod tests {
                 usage: UsageDto::default(),
                 metrics: TurnMetricsDto::default(),
                 context: None,
-                goal: None,
+                loop_state: None,
             }),
             file_changes: Vec::new(),
             host_info: Some(HostInfoDto {
@@ -434,7 +434,7 @@ mod tests {
             pending_approvals: Vec::new(),
             pending_questions: Vec::new(),
             context: None,
-            goal: None,
+            loop_state: None,
         };
         apply_session_detail(&mut state, detail);
         let tab = state.session_tabs.get("s-1").unwrap();
@@ -1218,7 +1218,7 @@ mod tests {
         assert!(matches!(
             state.modal,
             Some(ActiveModal::WorkspacePanel {
-                tab: crate::state::WorkspacePanelTab::Goal,
+                tab: crate::state::WorkspacePanelTab::Loop,
                 ..
             })
         ));
@@ -1278,38 +1278,38 @@ mod panel_tests {
             active_session_id: Some("s1".to_owned()),
             ..AppState::default()
         };
-        let goal = meerai_web_protocol::GoalDto {
-            goal: Some("Ship the change".to_owned()),
-            items: vec![meerai_web_protocol::GoalItemDto {
+        let loop_state = meerai_web_protocol::LoopDto {
+            objective: Some("Ship the change".to_owned()),
+            items: vec![meerai_web_protocol::LoopItemDto {
                 id: 1,
                 text: "Fix".to_owned(),
-                status: meerai_web_protocol::GoalItemStatusDto::Done,
+                status: meerai_web_protocol::LoopItemStatusDto::Done,
                 ..Default::default()
             }],
             ..Default::default()
         };
-        crate::state::open_workspace_panel(&mut state, crate::state::WorkspacePanelTab::Goal);
+        crate::state::open_workspace_panel(&mut state, crate::state::WorkspacePanelTab::Loop);
         apply_view_event(
             &mut state,
-            meerai_web_protocol::ViewEvent::GoalUpdated {
+            meerai_web_protocol::ViewEvent::LoopUpdated {
                 session_id: "s1".to_owned(),
-                goal: goal.clone(),
+                state: loop_state.clone(),
             },
         );
         assert_eq!(
             state
                 .session_tabs
                 .get("s1")
-                .and_then(|tab| tab.goal.clone()),
-            Some(goal.clone())
+                .and_then(|tab| tab.loop_state.clone()),
+            Some(loop_state.clone())
         );
         assert!(matches!(
             state.modal,
             Some(ActiveModal::WorkspacePanel {
-                tab: crate::state::WorkspacePanelTab::Goal,
-                goal: Some(ref panel),
+                tab: crate::state::WorkspacePanelTab::Loop,
+                loop_state: Some(ref panel),
                 ..
-            }) if **panel == goal
+            }) if **panel == loop_state
         ));
     }
 

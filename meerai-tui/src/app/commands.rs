@@ -480,9 +480,9 @@ impl AppState {
                 }));
                 let _ = self.tab().cmd_tx.send(AgentCommand::InspectContext);
             }
-            "/goal" => {
-                let state = self.tab().goal.clone();
-                self.modal = Some(ActiveModal::Goal { state, scroll: 0 });
+            "/goal" | "/loop" => {
+                let state = self.tab().loop_state.clone();
+                self.modal = Some(ActiveModal::Loop { state, scroll: 0 });
             }
             "/memory" => {
                 self.modal = Some(ActiveModal::Memory {
@@ -814,7 +814,7 @@ fn format_help_text() -> String {
             "/temperature" => "/temperature [0.0..2.0|default]".to_string(),
             "/agent" => "/agent <id> (or @agent/<id>)".to_string(),
             "/skill" => "/skill <id> (or @skill/<id>)".to_string(),
-            "/goal" => "/goal (or @goal <instruction>)".to_string(),
+            "/goal" | "/loop" => "/loop (or /goal, @goal <instruction>)".to_string(),
             "/mode" => "/mode [plan|ask|auto]".to_string(),
             "/search" => "/search [query]".to_string(),
             "/grep" => "/grep [query]".to_string(),

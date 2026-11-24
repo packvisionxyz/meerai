@@ -10,7 +10,7 @@
 
 - **Product:** `meerai` (Pack Vision) — a pure, provider-agnostic terminal agent harness
   written in Rust, featuring a selection-first modal TUI and a scriptable headless CLI mode.
-- **Shape:** Rust Cargo workspace (`edition = "2024"`, toolchain pinned to `1.100.0`). Sixteen
+- **Shape:** Rust Cargo workspace (`edition = "2024"`, toolchain pinned to `1.100.0`). Seventeen
   library crates plus the `meerai` binary, built by `meerai-cli`. Milestones M1–M13 of
   `docs/harness-spec.md` have landed; the repo is distribution-hardened (Apache-2.0
   license, CI, tag-driven releases, Pages site) and includes project-root config discovery, TUI
@@ -46,13 +46,14 @@
 | `meerai-core/` | `Toolset` trait (`effect_of`, `effect_of_call`, `invoke_structured`), `ToolOutput`, `ToolError`, `EffectClass`, `ToolObservation`, `ToolRun`, `FileDiff`; re-exports `genai`, `async_trait`, `schemars::JsonSchema` |
 | `meerai-macros/` | Proc-macros `#[tool]` and `#[derive(Toolset)]` (`darling` + `syn` + `quote`), `insta` snapshot tests; test-only dependencies are dev-dependencies |
 | `meerai-store/` | Embedded SQLite store (`meerai.db`): WAL, FTS5, schema v1, private-file permissions, typed repositories (`config`, `memory`, `packs`, `routes`, `usage`) |
-| `meerai-session/` | `Session` append-only `SessionEvent` log in SQLite, recovery, `derive_messages`, replay projection (`replay`), fork/rewind (`latest_closed_turn`, `fork_latest`, `create_child`), SQLite snapshot store (`session_snapshots`), SQLite blob store (`session_blobs`), spill, compaction primitives, the serde `GoalState` DTO and `last_goal`, session list/delete/prune support |
+| `meerai-session/` | `Session` append-only `SessionEvent` log in SQLite, recovery, `derive_messages`, replay projection (`replay`), fork/rewind (`latest_closed_turn`, `fork_latest`, `create_child`), SQLite snapshot store (`session_snapshots`), SQLite blob store (`session_blobs`), spill, compaction primitives, the serde `LoopState` DTO and `last_loop` (legacy `GoalState` still deserializes), session list/delete/prune support |
 | `meerai-policy/` | `PolicyEngine`: ordered permission rules, `ApprovalMode`, turn/session grants, YAML parsing |
 | `meerai-tools/` | `code` (`CodeTools`, seven `code-*` tools, path guards, unified diffs, `ToolRun` observations, secret env scrub), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`; opt-in post-edit diagnostics via `context.post_edit_diagnostics`), `search_as_code` (`SearchAsCodeToolset`), `web` (`WebTools`; `web-fetch`, `web-search`, private-address guard) |
-| `meerai-common/` | SQLite-backed `AppSettings`, project-root discovery (`find_project_root`) plus project settings load/merge (`load_project_settings`, `merge_project_settings`), markdown agent/skill discovery (`definitions`: `load_definitions`, `load_definitions_for`, user/pack/project sources, diagnostics), hook configuration (`hooks`: `HookEvent`, `HookEntry`, `load_hooks`), declarative packs (`packs`) |
+| `meerai-common/` | SQLite-backed `AppSettings`, project-root discovery (`find_project_root`) plus project settings load/merge (`load_project_settings`, `merge_project_settings`), markdown agent/skill discovery (`definitions`: `load_definitions`, user/pack/project sources, diagnostics), hook configuration (`hooks`: `HookEvent`, `HookEntry`, `load_hooks`), declarative packs (`packs`) |
 | `meerai-client/` | Client-facing provider surface: `ProviderCatalog` + `providers.yml` plus the generated `models.yml` model table (context windows, prices, per-model `effort_levels`), `ModelInfo`, `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract, `MemorySecretStore`, auth listing |
 | `meerai-providers/` | `genai` client factory + AEAD `VaultSecretStore` (ChaCha20-Poly1305, OS keychain DEK or Argon2id passphrase); re-exports the client surface |
-| `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig` (+ `TokenPricing`), `AgentEvent`, `intercept` (`Interceptor`/`StepPlan`/`ToolPlan`/`ToolContext`/`ToolOutcome`, async `before_tool`), hook engine (`hooks`: `HookEngine`/`HookContext`/`HookReport`, `HookFired` logging), `question-ask` (`QuestionAsked`/`AnswerQuestion`, not an approval), `skill-load` (`skill_tool`), the built-in goal loop (`goal`, `goal_tool`: `goal-set`/`goal-check`/`goal-status` + `GoalInterceptor`), `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins + custom child runs filtered by `mode` and tightened by definition `permissions`, `child_session_id` on `SubagentRun`), delegated `acp-run` (`acp_subagent`: `AcpRunToolset`/`AcpSpawner`), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
+| `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig` (+ `TokenPricing`), `AgentEvent`, `intercept` (`Interceptor`/`StepPlan`/`ToolPlan`/`ToolContext`/`ToolOutcome`, async `before_tool`), hook engine (`hooks`: `HookEngine`/`HookContext`/`HookReport`, `HookFired` logging), `question-ask` (`QuestionAsked`/`AnswerQuestion`, not an approval), the `LoopInterceptor` adapter over `meerai-skills`, `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins `explore`/`plan`/`build`/`general`/`research`/`review` + custom child runs filtered by `mode` and tightened by definition `permissions`, `child_session_id` on `SubagentRun`), delegated `acp-run` (`acp_subagent`: `AcpRunToolset`/`AcpSpawner`), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
+| `meerai-skills/` | Built-in `goal` and `orchestrate` skill bodies (`skills/`), `builtin` catalog merge, `skill-load` (`SkillToolset`), the shared four-phase loop engine (`LoopHandle`, `LoopState` render/prompts, `turn_stopping`/`follow_up_turn`), and `loop-*` (`loop-plan`/`loop-act`/`loop-observe`/`loop-adjust`/`loop-status`) |
 | `meerai-host/` | UI-neutral host seams (`SessionOpener`, `OpenedSession`, `WorkspaceQuery`/`LocalWorkspace`, `WebServerLauncher`), shared `diff`/`search`/`syntax`/`theme`/`update`, and live `SessionRegistry` event pump/ring |
 | `meerai-web-protocol/` | Serde-only Wasm-safe wire DTOs (`SnapshotResponse`, `ViewEvent`, `HostInfoDto`, `ProvidersResponse`, `SettingsSnapshotDto`, `ApiError`) |
 | `meerai-web/` | Loopback HTTP/SSE server (`hyper` + `subtle` Basic auth, `Host`/`Origin`/JSON checks, parity REST/SSE routes, embedded Wasm bundle serving) |
@@ -221,18 +222,21 @@ Notes:
     `--agent` takes one id (repeating is an error); `--skill` is repeatable; unknown ids fail with
     the available ids. The TUI exposes `/agent`/`/skill`, `/agents`/`/skills` pickers, and a `@`
     Mentions popup (agents, skills, files; ids colored teal for agents and blue for skills; Tab
-    accepts, Enter accepts without submitting, Esc dismisses). One skill is built in
-    (`DefinitionSource::Builtin`): `goal`. It is inserted last, so any user, pack, or project skill
-    with the id `goal` shadows it. Its three tools are Read-classified: `goal-set` stores the goal,
-    done condition, and checklist; `goal-check` records evidence and may add items; `goal-status`
-    re-reads the state. `GoalInterceptor::turn_stopping` continues the turn while an item is open,
-    up to 24 rounds. After a turn ends with an open goal (`Ok` or `ErrorCode::Budget`), the worker
-    logs `SessionEvent::GoalUpdated`, emits `AgentEvent::GoalUpdated` and `GoalContinued`, resets
-    the round count, and pushes one continuation turn (max 4). `Cancel`, `Quit`, `Reset`, a queued
-    recovery turn, and headless one-shots opt out. `meerai_session::goal::last_goal` restores the
-    state in `build_agent` and in host `register_opened`. `/goal` opens a read-only Goal panel in
-    both clients; `GoalUpdated` mirrors the state to the tab, the host record, and the browser.
-    Both clients accept `@goal` as an alias for `@skill/goal`.
+    accepts, Enter accepts without submitting, Esc dismisses). Two skills are built in
+    (`DefinitionSource::Builtin`): `goal` and `orchestrate`, merged by `meerai-skills::builtin`.
+    A user, pack, or project skill with either id shadows it. Both use five Read-classified tools:
+    `loop-plan` stores the objective, done condition, constraints, and items; `loop-act` records an
+    action and expected observation; `loop-observe` records the evidence; `loop-adjust` records
+    done/open/failed and may add items; `loop-status` re-reads the state.
+    `LoopInterceptor::turn_stopping` continues the turn while an item is open, up to 24 rounds.
+    After a turn ends with an open item (`Ok` or `ErrorCode::Budget`), the worker logs
+    `SessionEvent::LoopUpdated`, emits `AgentEvent::LoopUpdated` and `LoopContinued`, resets the
+    round count, and pushes one continuation turn (max 4). `Cancel`, `Quit`, `Reset`, a queued
+    recovery turn, and headless one-shots opt out. `meerai_session::last_loop` restores the state in
+    `build_agent` and in host `register_opened`. `/loop` (or `/goal`) opens a read-only Loop panel
+    in both clients; `LoopUpdated` mirrors the state to the tab, the host record, and the browser.
+    Both clients accept `@goal` as an alias for `@skill/goal`; `orchestrate` uses
+    `@skill/orchestrate`.
 22. **ACP client (M13, agy):** `--acp` drives `agy acp`; `/acp` opens a new tab; `acp doctor`
     prints the handshake. `AcpWorker` maps `AcpEvent` to `AgentEvent` and `SessionEvent`, sets
     `harness: acp:agy`/`remote_session_id`, and uses `session/load` for resume. Pre-`Connected`
@@ -372,7 +376,7 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 | Free-fn tool | `#[tool(...)] async fn` generating `<PascalName>Toolset` | `meerai-macros/src/tool/attribute_tool.rs` |
 | Hand-written toolset | `impl Toolset` with `definition`/`contain`/`effect_of`/`invoke_structured` | `meerai-tools/src/code/mod.rs` |
 | Config | `AppSettings` + `find_project_root` + `load_settings_from` + `load_project_settings`/`merge_project_settings` + `${VAR\|default}` expansion | `meerai-common/src/settings.rs` |
-| Definitions | `load_definitions(&project_root)` → `DefinitionCatalog`; `.meerai` before `.agents` before `.claude`, duplicate warning, sorted by id | `meerai-common/src/definitions.rs` |
+| Definitions | `load_definitions(&project_root)` → `DefinitionCatalog`; `.meerai` before `.agents` before `.claude`, duplicate warning, sorted by id; built-ins merged by `meerai-skills::builtin` | `meerai-common/src/definitions.rs`, `meerai-skills/src/builtin.rs` |
 | Secrets | AEAD vault (`vault_secrets`) for API keys and ChatGPT plan OAuth, OS keychain DEK (macOS through `/usr/bin/security`, not a per-app boundary) or `MEERAI_VAULT_PASSPHRASE`, no plaintext fallback | `meerai-providers/src/secrets/vault.rs`, `meerai-store/src/v1.sql` |
 | Redaction | `redact_run` patterns and `[REDACTED:<kind>]` replacement before settle | `meerai-agents/src/redact.rs`, `multi_turn_agent.rs` |
 | Session log | `Session::append` event, `derive_messages` projection | `meerai-session/src/session.rs`, `projection.rs` |
@@ -382,7 +386,7 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 | Prompt | `BASE_SYSTEM_PROMPT` + `compose_system_prompt` + scoped `AGENTS.md` injection | `meerai-agents/src/prompt.rs`, `multi_turn_agent.rs` |
 | Agent loop | item protocol + `AgentHarness` (session dual-write, `derive_messages` requests, policy + approvals, spill, compaction, budgets, breakers) | `meerai-agents/src/multi_turn_agent/`, `harness.rs` |
 | Loop extension | `Interceptor` chain (`before_step`, async `before_tool`, `after_tool`, `turn_stopping`) registered on the agent; `CheckpointInterceptor` is the built-in pre-tool capture | `meerai-agents/src/intercept.rs`, `checkpoint.rs` |
-| Goal loop | `GoalToolset` (`goal-set`/`goal-check`/`goal-status`) and `GoalInterceptor` share one `GoalHandle`; the worker owns across-turn continuations; `GoalUpdated` is live and durable | `meerai-session/src/goal.rs`, `meerai-agents/src/goal.rs`, `meerai-agents/src/goal_tool.rs`, `meerai-agents/src/multi_turn_agent/worker.rs` |
+| Skill loop | `LoopToolset` (`loop-plan`/`loop-act`/`loop-observe`/`loop-adjust`/`loop-status`) and `LoopInterceptor` share one `LoopHandle`; the worker owns across-turn continuations; `LoopUpdated` is live and durable | `meerai-session/src/loop_state.rs`, `meerai-skills/src/loop_engine.rs`, `meerai-skills/src/loop_tool.rs`, `meerai-agents/src/loop_interceptor.rs`, `meerai-agents/src/multi_turn_agent/worker.rs` |
 | Hooks | `HookEngine` + `HookContext` + `HookReport`; loader in `meerai-common::hooks`; trust gate in `meerai-cli`; live `AgentEvent::HookCompleted` to the TUI/headless | `meerai-agents/src/hooks.rs`, `meerai-agents/src/events.rs`, `meerai-common/src/hooks.rs`, `meerai-cli/src/main.rs` |
 | ACP delegation | `AcpRunToolset` (`acp-run`) uses `SUBAGENT_BRIDGE`, creates a child session, forwards permissions, emits `SubagentRun`, returns the report; `AcpSpawner` is injected by the CLI | `meerai-agents/src/acp_subagent.rs`, `meerai-cli/src/main.rs` |
 | User questions | `question-ask` tool + `QuestionAsked`/`QuestionResolved` events + `AnswerQuestion`; TUI overlay; headless auto-cancel | `meerai-agents/src/question.rs`, `meerai-tui/src/app/modals.rs` |
@@ -412,6 +416,7 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 | `meerai-policy` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-policy` |
 | `meerai-tools` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-tools` |
 | `meerai-agents` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-agents` |
+| `meerai-skills` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-skills` |
 | `meerai-tui` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-tui` |
 | `meerai-host` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-host` |
 | `meerai-web-protocol` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-web-protocol` |
@@ -557,12 +562,13 @@ Detail in [`infra.md`](infra.md). Summary:
 - Loop extension: M6 checkpoint capture is the built-in `CheckpointInterceptor` on async
   `before_tool`; do not add loop-semantics branches to `turn.rs`. `turn_stopping` may continue the
   turn more than once; the remaining step budget bounds repeats, and the Stop hook keeps running at
-  each stop until it blocks once. The goal loop is the built-in `GoalInterceptor` plus the
-  `goal-set`/`goal-check`/`goal-status` tools on one shared `GoalHandle`; the CLI registers both on
-  the main agent only, so subagents do not inherit them. The worker, not `turn.rs`, owns the
-  across-turn continuation; it is gated by cancel/quit/reset, a queued recovery turn, and the
-  `MAX_GOAL_TURNS` cap. `AgentEvent::GoalUpdated` and `SessionEvent::GoalUpdated` are the live and
-  durable signals; the durable one is not model-visible. M7 hooks use the separate `HookEngine`, not
+  each stop until it blocks once. The skill loop is the built-in `LoopInterceptor` plus the
+  `loop-plan`/`loop-act`/`loop-observe`/`loop-adjust`/`loop-status` tools on one shared
+  `LoopHandle`; the CLI registers both on the main agent only, so subagents do not inherit them.
+  The worker, not `turn.rs`, owns the across-turn continuation; it is gated by
+  cancel/quit/reset, a queued recovery turn, and the `MAX_LOOP_TURNS` cap. `AgentEvent::LoopUpdated`
+  and `SessionEvent::LoopUpdated` are the live and durable signals; the durable one is not
+  model-visible. M7 hooks use the separate `HookEngine`, not
   the interceptor chain, because they await host processes at lifecycle points outside the loop.
   `SessionEvent::HookFired` keeps its `event`/`decision` strings and adds
   `detail: Option<HookDetail>`.
@@ -674,7 +680,7 @@ Detail in [`infra.md`](infra.md). Summary:
 | :--- | :--- |
 | How are tool calls and observations modeled? | `meerai-core/src/tools.rs` |
 | How are providers, auth, and the genai client built? | `meerai-providers/src/providers.rs`, `secrets.rs`, `meerai-common/src/settings.rs` |
-| How are agent and skill definitions discovered, deduplicated, and applied? | `meerai-common/src/definitions.rs`, `meerai-cli/src/main.rs` (`load_definitions`, `select_definition`, `compose_definition_prompt`, model precedence), `meerai-tui/src/app/` (`/agent`, `/skill`, `parse_mentions`, `apply_mentions`), `meerai-agents/src/multi_turn_agent/mod.rs` (`apply_instructions`) |
+| How are agent and skill definitions discovered, deduplicated, and applied? | `meerai-common/src/definitions.rs`, `meerai-skills/src/builtin.rs`, `meerai-cli/src/main.rs` (`load_definitions`, `select_definition`, `compose_definition_prompt`, model precedence), `meerai-tui/src/app/` (`/agent`, `/skill`, `parse_mentions`, `apply_mentions`), `meerai-agents/src/multi_turn_agent/mod.rs` (`apply_instructions`) |
 | How do subagent child sessions and built-in agent subsets work? | `meerai-agents/src/subagent.rs`, `meerai-agents/src/multi_turn_agent/tools.rs`, `meerai-session/src/session.rs` (`create_child`) |
 | How are `#[tool]` and `#[derive(Toolset)]` expanded? | `meerai-macros/src/tool/` |
 | Where is runtime YAML config loaded, how is the project root found, and how is project config merged? | `meerai-common/src/settings.rs` (`load_settings_from`, `find_project_root`, `load_project_settings`, `merge_project_settings`) |

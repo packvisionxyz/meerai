@@ -125,7 +125,7 @@ result also lands in the transcript when it finishes; `q` closes the dialog.
 Long commands use the shell timeout (120 s).
 
 In the TUI: `/sessions`, `/new`, `/close`, `/connect`, `/models`, `/mode`,
-`/agent`, `/skill`, `/goal`, `/compact`, `/context`, `/diagnose`, `/memory`,
+`/agent`, `/skill`, `/loop`, `/goal`, `/compact`, `/context`, `/diagnose`, `/memory`,
 `/remember`, `/routing`, `/subagent`, `/packs`, `/definitions`, `/effort`,
 `/sampling`, `/temperature`, `/vault-reset`, `/open`, `/diff`, `/rewind`, `/fork`,
 `/help`.
@@ -150,15 +150,17 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   search. Shell and script children run in the OS sandbox when one is
   available, with provider secrets removed from the environment.
 - **Agents, skills, and packs:** read-only markdown definitions from user
-  config, trusted packs, `.meerai`, `.agents`, then `.claude`, plus one built-in
-  `goal` skill that runs a bounded act/observe/adjust loop. The model sees a
+  config, trusted packs, `.meerai`, `.agents`, then `.claude`, plus the built-in
+  `goal` and `orchestrate` skills, which run a bounded plan/act/observe/adjust
+  loop. The model sees a
   skill list
   with one line per described skill and loads a skill on demand. An applied
   definition adds prompt text; agent `permissions` can tighten a subagent's
   policy but never grant. See
   [Agents and skills](#agents-and-skills).
 - **Subagents and routing:** isolated child sessions with `explore`, `plan`,
-  `build`, and `general` profiles, plus custom `mode: subagent` definitions,
+  `build`, `general`, `research`, and `review` profiles, plus custom
+  `mode: subagent` definitions,
   an optional run `name` shown in the transcript, runs list, and browser
   agent card, forwarded approvals, and usage rollup; a child `max_tokens` cap
   floors at 50,000 and clamps to the parent budget; task
@@ -208,6 +210,7 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 | `meerai-policy` | Permission rules and approval modes |
 | `meerai-tools` | Coding, repository map, LSP, and script tools |
 | `meerai-agents` | Turn loop, prompt, subagents, and redaction |
+| `meerai-skills` | Built-in skills, the loop engine, and skill tools |
 | `meerai-syntax` | Tree-sitter highlighting |
 | `meerai-tui` | Terminal UI |
 | `meerai-host` | UI-neutral host seams |
@@ -500,12 +503,13 @@ to the `subagent-run` tool.
 - Definitions are repository-controlled prompt text. They cannot run tools,
   grant permissions, or imply a sandbox; agent `permissions` can only tighten a
   subagent. Treat them as untrusted content.
-- One skill is built in: `goal`. It runs a bounded goal loop with the
-  `goal-set`, `goal-check`, and `goal-status` tools. `@goal <instruction>` (or
-  `@skill/goal`, `/skill goal`, `--skill goal`) starts it. While an item is
-  open, the harness continues the turn with the open checklist, up to 24
+- Two skills are built in: `goal` and `orchestrate`. They run the same loop with
+  the `loop-plan`, `loop-act`, `loop-observe`, `loop-adjust`, and `loop-status`
+  tools. `@goal <instruction>` (or `@skill/goal`, `/skill goal`, `--skill goal`)
+  starts the goal preset; `orchestrate` is the multi-area preset. While an item
+  is open, the harness continues the turn with the current phase, up to 24
   rounds and the normal step, time, and token budgets. A user, pack, or project
-  skill with the id `goal` shadows the built-in. In headless mode, use
+  skill with either id shadows the built-in. In headless mode, use
   `--mode auto`: the first write asks for approval in `ask` mode and exits `2`.
 
 Startup flags apply definitions to the system prompt:
@@ -537,6 +541,7 @@ TUI commands and mentions:
 | `@agent/<id>` | Apply an agent, then send the rest of the prompt |
 | `@skill/<id>` | Apply a skill, then send the rest of the prompt |
 | `@goal` | Apply the built-in goal skill, then send the rest of the prompt |
+| `@skill/orchestrate` | Apply the built-in orchestrate skill |
 
 Typing `@` opens one **Mentions** popup: agent and skill rows interleaved, then
 files, so a skill stays visible when the project has many agents. A typed
@@ -555,32 +560,36 @@ turn.
 prints an error and sends nothing. `/agents` opens the Mentions popup filtered to
 agents; `/skills` shows the discovered skills.
 
-#### Goal loop
+#### Loop
 
-`@goal <instruction>` applies the built-in `goal` skill and sends the rest of
-the prompt. The model frames the goal and done condition, plans 3-8 verifiable
-items, and repeats one item at a time:
+Two skills are built in: `goal` and `orchestrate`. Both drive one loop with four
+explicit phases:
 
-1. **Act** on the first open item.
-2. **Observe** with that item's verification command.
-3. **Adjust** with `goal-check`: `done` needs evidence, `failed` stays open, and
-   new work is added to the same checklist.
-4. Continue until every item is done, or a budget, a repeated failure, or a
-   user decision stops it.
+1. **Plan** — `loop-plan` stores the objective, done condition, constraints, and
+   items.
+2. **Act** — `loop-act` records one action and its expected observation.
+3. **Observe** — `loop-observe` records the raw evidence.
+4. **Adjust** — `loop-adjust` marks the item done, open, or failed, and may add
+   items.
+
+`@goal <instruction>` applies `goal` and sends the rest of the prompt.
+`@skill/orchestrate` applies the multi-area preset, which delegates research and
+review to the `research` and `review` subagents. The loop is not code-specific:
+an item can be a document, a data set, a launch, or a repository change.
 
 The harness enforces the loop. When the model stops with an open item,
-`GoalInterceptor` re-enters the turn with the open checklist, up to 24 rounds.
-If the turn still ends with open items (the round cap, the step budget, or the
-30-minute clock), the worker starts a follow-up turn with the same checklist,
-up to 4 turns; each turn resets the round count. The normal step budget (96
-steps per turn), token cap, approvals, cancellation, and `quit` still apply.
+`LoopInterceptor` re-enters the turn with the current phase, up to 24 rounds. If
+the turn still ends with open items, the worker starts a follow-up turn, up to 4
+turns; each turn resets the round count. The normal step budget, token cap,
+approvals, cancellation, and `quit` still apply.
 
-`/goal` opens a read-only Goal panel in the TUI and the browser. It shows the
-goal, the done condition, constraints, each item with its evidence, and the
-round and turn counts. The last checklist is saved as a `GoalUpdated` session
-event, so the panel and the model state come back after `--resume`.
+`/loop` (or `/goal`) opens a read-only Loop panel in the TUI and the browser. It
+shows the objective, done condition, constraints, phase, each item with its
+action and observation, and the round and turn counts. The last state is saved
+as a `LoopUpdated` session event, so the panel and the model state come back
+after `--resume`.
 
-`goal-status` re-reads the in-process checklist after compaction. A headless
+`loop-status` re-reads the in-process state after compaction. A headless
 one-shot runs one turn only: use `--mode auto` and raise
 `context.max_steps_per_turn` for a longer run. In `ask` mode the first write
 stops the run with exit `2`.

@@ -352,6 +352,9 @@ pub enum SessionEvent {
     GoalUpdated {
         state: crate::goal::GoalState,
     },
+    LoopUpdated {
+        state: crate::loop_state::LoopState,
+    },
     CheckpointCreated {
         checkpoint_id: CheckpointId,
         turn_id: TurnId,

@@ -1,11 +1,11 @@
 use meerai_agents::AgentCommand;
-use meerai_common::definitions::{load_definitions_for, load_definitions_with_builtins};
 use meerai_common::hooks::load_hooks_for_run;
 use meerai_common::settings::{
     Temperature, find_project_root, load_project_settings, load_settings_from,
     merge_project_settings, open_store_for_config_dir,
 };
 use meerai_policy::rules_from_yaml;
+use meerai_skills::{load_definitions_for, load_definitions_with_builtins};
 
 use super::*;
 

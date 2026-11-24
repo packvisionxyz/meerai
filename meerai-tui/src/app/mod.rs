@@ -212,8 +212,8 @@ pub enum ActiveModal {
         error: Option<String>,
     },
     Context(ContextPanel),
-    Goal {
-        state: Option<meerai_session::GoalState>,
+    Loop {
+        state: Option<meerai_session::LoopState>,
         scroll: usize,
     },
     Memory {
@@ -769,7 +769,7 @@ pub struct SessionTab {
     pub usage: UsageStats,
     pub metrics: TurnMetrics,
     pub context: Option<meerai_session::ContextBreakdown>,
-    pub goal: Option<meerai_session::GoalState>,
+    pub loop_state: Option<meerai_session::LoopState>,
     pub is_running: bool,
     pub queued: Vec<String>,
     pub shell_runs: Vec<ShellRun>,
@@ -818,7 +818,7 @@ impl SessionTab {
             usage: UsageStats::default(),
             metrics: TurnMetrics::default(),
             context: None,
-            goal: None,
+            loop_state: None,
             is_running: false,
             queued: Vec::new(),
             shell_runs: Vec::new(),
@@ -1938,7 +1938,7 @@ impl AppState {
         tab.transcript = transcript_from_events(&opened.events);
         tab.user_turns = user_turn_map(&tab.transcript, &opened.events);
         tab.seed_usage_from_events(&opened.events);
-        tab.goal = meerai_session::goal::last_goal(&opened.events);
+        tab.loop_state = meerai_session::last_loop(&opened.events);
 
         if mode == SessionOpenMode::ReplaceEmpty && self.should_replace_active_tab() {
             if matches!(self.modal, Some(ActiveModal::Approval { .. })) {

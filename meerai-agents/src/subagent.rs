@@ -51,7 +51,7 @@ pub struct BuiltinAgent {
     pub system_prompt: &'static str,
 }
 
-const BUILTIN_AGENTS: [BuiltinAgent; 4] = [
+const BUILTIN_AGENTS: [BuiltinAgent; 6] = [
     BuiltinAgent {
         id: "explore",
         description: "Fast read-only codebase search returning file:start-end spans and synthesis",
@@ -87,6 +87,24 @@ const BUILTIN_AGENTS: [BuiltinAgent; 4] = [
         max_steps: 16,
         allowed_tools: None,
         system_prompt: "You are a general-purpose subagent. Complete the assigned task accurately using the available tools and return a concise summary of what you did and observed.",
+    },
+    BuiltinAgent {
+        id: "research",
+        description: "Read-only research subagent that gathers evidence from the workspace and its documents and returns cited findings",
+        effect: EffectClass::Read,
+        read_only: true,
+        max_steps: 12,
+        allowed_tools: Some(READ_ONLY_SUBAGENT_TOOLS),
+        system_prompt: "You are a read-only research subagent. Answer one narrow question from the workspace and its documents. Use parallel read-only tool calls, cite exact file:start-end spans, separate evidence from inference, and state what you could not determine. Never edit files or run shell commands.",
+    },
+    BuiltinAgent {
+        id: "review",
+        description: "Read-only review of an artifact against stated criteria, with findings by severity and path:line evidence",
+        effect: EffectClass::Read,
+        read_only: true,
+        max_steps: 12,
+        allowed_tools: Some(READ_ONLY_SUBAGENT_TOOLS),
+        system_prompt: "You are a read-only review subagent. Evaluate the named artifact against the stated criteria. Report findings by severity with path:line evidence and why each finding matters. Do not edit, fix, or run shell commands. If the criteria are missing, state the criteria you applied.",
     },
 ];
 

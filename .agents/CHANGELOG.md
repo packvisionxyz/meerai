@@ -2,8 +2,18 @@
 
 All notable changes to the skill bundle. Versions follow the `metadata.version` in each `SKILL.md`.
 
+## 1.5.0
+
+- Removed `orchestrate` from the portable bundle. meerai now ships it as a built-in skill with a
+  plan, act, observe, adjust loop, so the project copy shadowed the built-in and hid drift. The
+  portable body lives at `meerai-skills/skills/orchestrate/SKILL.md`.
+
 ## 1.4.0
 
+- `orchestrate` is now domain-agnostic. It drives a plan, act, observe, adjust loop for any
+  objective (report, launch, data set, migration, or code), uses `loop-*` tools when the harness
+  provides them, and falls back to a written plan. The delegation contract and planning template
+  now speak of artifacts and observations instead of files and tests.
 - Added the `review` skill: review a pull request, a local change, or a document against the codebase
   and its rules, with severity-ranked findings and `path:line` evidence. Read-only by design.
 - `review` ships two references: `references/review-playbook.md` for diff acquisition and category

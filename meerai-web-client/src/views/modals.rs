@@ -2927,7 +2927,7 @@ fn line_no(value: Option<usize>) -> String {
 struct PanelSnapshot {
     tab: crate::state::WorkspacePanelTab,
     context: Option<meerai_web_protocol::ContextBreakdownDto>,
-    goal: Option<meerai_web_protocol::GoalDto>,
+    loop_state: Option<meerai_web_protocol::LoopDto>,
     memories: Vec<meerai_web_protocol::MemoryDto>,
     routes: Vec<meerai_web_protocol::RouteDto>,
     packs: Vec<meerai_web_protocol::PackDto>,
@@ -2959,7 +2959,7 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
             Some(ActiveModal::WorkspacePanel {
                 tab,
                 context,
-                goal,
+                loop_state,
                 memories,
                 routes,
                 packs,
@@ -2986,7 +2986,7 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
             }) => Some(PanelSnapshot {
                 tab: *tab,
                 context: context.as_deref().cloned(),
-                goal: goal.as_deref().cloned(),
+                loop_state: loop_state.as_deref().cloned(),
                 memories: memories.clone(),
                 routes: routes.clone(),
                 packs: packs.clone(),
@@ -3017,7 +3017,7 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
     let reload = {
         let store = store;
         move |tab: crate::state::WorkspacePanelTab| {
-            if tab == crate::state::WorkspacePanelTab::Goal {
+            if tab == crate::state::WorkspacePanelTab::Loop {
                 return;
             }
             if let Some(transport) = crate::transport::current() {
@@ -3058,7 +3058,7 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                     let Some(PanelSnapshot {
                         tab,
                         context,
-                        goal,
+                        loop_state,
                         memories,
                         routes,
                         packs,
@@ -3095,13 +3095,13 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                     };
                     let reload = reload.clone();
                     let body = match tab {
-                        crate::state::WorkspacePanelTab::Goal => {
-                            let Some(g) = goal.as_ref() else {
-                                return view! { <pre class="panel-text">"No active goal. Type @goal <instruction> in the composer to start one."</pre> }.into_any();
+                        crate::state::WorkspacePanelTab::Loop => {
+                            let Some(g) = loop_state.as_ref() else {
+                                return view! { <pre class="panel-text">"No active loop. Type @goal <instruction> in the composer to start one."</pre> }.into_any();
                             };
                             let mut text = String::new();
-                            if let Some(goal) = g.goal.as_deref() {
-                                text.push_str(&format!("Goal: {goal}\n"));
+                            if let Some(objective) = g.objective.as_deref() {
+                                text.push_str(&format!("Objective: {objective}\n"));
                             }
                             if !g.done_when.is_empty() {
                                 text.push_str("Done when:\n");
@@ -3121,16 +3121,19 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                                 text.push_str("\nItems:\n");
                                 for item in &g.items {
                                     let mark = match item.status {
-                                        meerai_web_protocol::GoalItemStatusDto::Done => "x",
-                                        meerai_web_protocol::GoalItemStatusDto::Failed => "!",
-                                        meerai_web_protocol::GoalItemStatusDto::Open => " ",
+                                        meerai_web_protocol::LoopItemStatusDto::Done => "x",
+                                        meerai_web_protocol::LoopItemStatusDto::Failed => "!",
+                                        meerai_web_protocol::LoopItemStatusDto::Open => " ",
                                     };
                                     text.push_str(&format!("- [{mark}] {}. {}", item.id, item.text));
-                                    if let Some(verify) = item.verify.as_deref() {
-                                        text.push_str(&format!(" (verify: {verify})"));
+                                    if let Some(expect) = item.expect.as_deref() {
+                                        text.push_str(&format!(" (observe: {expect})"));
                                     }
-                                    if let Some(evidence) = item.evidence.as_deref() {
-                                        text.push_str(&format!("\n  evidence: {evidence}"));
+                                    if let Some(action) = item.action.as_deref() {
+                                        text.push_str(&format!("\n  action: {action}"));
+                                    }
+                                    if let Some(observation) = item.observation.as_deref() {
+                                        text.push_str(&format!("\n  observation: {observation}"));
                                     }
                                     text.push('\n');
                                 }
@@ -3141,7 +3144,7 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                                 .filter(|item| {
                                     matches!(
                                         item.status,
-                                        meerai_web_protocol::GoalItemStatusDto::Done
+                                        meerai_web_protocol::LoopItemStatusDto::Done
                                     )
                                 })
                                 .count();
@@ -3149,6 +3152,12 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                                 "\nProgress: {done}/{} done",
                                 g.items.len()
                             ));
+                            text.push_str(&format!("\nPhase: {}", match g.phase {
+                                meerai_web_protocol::LoopPhaseDto::Plan => "plan",
+                                meerai_web_protocol::LoopPhaseDto::Act => "act",
+                                meerai_web_protocol::LoopPhaseDto::Observe => "observe",
+                                meerai_web_protocol::LoopPhaseDto::Adjust => "adjust",
+                            }));
                             if g.rounds > 0 {
                                 text.push_str(&format!(" · round {}", g.rounds));
                             }
@@ -3520,7 +3529,7 @@ fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                     };
                     let tabs = [
                         (crate::state::WorkspacePanelTab::Context, "Context"),
-                        (crate::state::WorkspacePanelTab::Goal, "Goal"),
+                        (crate::state::WorkspacePanelTab::Loop, "Goal"),
                         (crate::state::WorkspacePanelTab::Memory, "Memory"),
                         (crate::state::WorkspacePanelTab::Subagent, "Subagent"),
                         (crate::state::WorkspacePanelTab::Routing, "Routing"),

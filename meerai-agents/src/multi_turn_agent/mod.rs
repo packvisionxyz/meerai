@@ -469,8 +469,8 @@ pub struct MultiTurnAgent {
     pub(super) subagent_agents: Vec<meerai_common::definitions::AgentDefinition>,
     pub(super) active_subagents: HashMap<ItemId, CancellationToken>,
     pub(super) memory_capture: Option<crate::memory::MemoryCapture>,
-    pub(super) goal: Option<crate::goal::GoalHandle>,
-    pub(super) goal_auto_continue: bool,
+    pub(super) loop_state: Option<meerai_skills::LoopHandle>,
+    pub(super) loop_auto_continue: bool,
 }
 
 impl std::fmt::Debug for MultiTurnAgent {
@@ -563,8 +563,8 @@ impl MultiTurnAgent {
             subagent_agents: Vec::new(),
             active_subagents: HashMap::new(),
             memory_capture: None,
-            goal: None,
-            goal_auto_continue: true,
+            loop_state: None,
+            loop_auto_continue: true,
         }
     }
 
@@ -596,27 +596,27 @@ impl MultiTurnAgent {
         self.hooks = hooks;
     }
 
-    pub fn set_goal_handle(&mut self, goal: crate::goal::GoalHandle) {
-        self.goal = Some(goal);
+    pub fn set_loop_handle(&mut self, state: meerai_skills::LoopHandle) {
+        self.loop_state = Some(state);
     }
 
-    pub fn goal_handle(&self) -> Option<&crate::goal::GoalHandle> {
-        self.goal.as_ref()
+    pub fn loop_handle(&self) -> Option<&meerai_skills::LoopHandle> {
+        self.loop_state.as_ref()
     }
 
-    pub fn set_goal_auto_continue(&mut self, auto: bool) {
-        self.goal_auto_continue = auto;
+    pub fn set_loop_auto_continue(&mut self, auto: bool) {
+        self.loop_auto_continue = auto;
     }
 
-    pub fn goal_auto_continue(&self) -> bool {
-        self.goal_auto_continue
+    pub fn loop_auto_continue(&self) -> bool {
+        self.loop_auto_continue
     }
 
-    pub fn emit_goal_updated(&self, event_tx: &mpsc::UnboundedSender<AgentEvent>) {
-        if let Some(goal) = &self.goal {
-            let state = goal.snapshot();
+    pub fn emit_loop_updated(&self, event_tx: &mpsc::UnboundedSender<AgentEvent>) {
+        if let Some(state) = &self.loop_state {
+            let state = state.snapshot();
             if state.active() {
-                let _ = event_tx.send(AgentEvent::GoalUpdated { state });
+                let _ = event_tx.send(AgentEvent::LoopUpdated { state });
             }
         }
     }
@@ -929,7 +929,7 @@ impl MultiTurnAgent {
             event_tx,
         )
         .await;
-        self.emit_goal_updated(event_tx);
+        self.emit_loop_updated(event_tx);
     }
 
     pub async fn end_session(&mut self, event_tx: &mpsc::UnboundedSender<AgentEvent>) {

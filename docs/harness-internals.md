@@ -15,7 +15,7 @@ This file is not injected into the model prompt.
 
 ## 1. Overview
 
-Rust workspace for Pack Vision's terminal agent harness: twelve library
+Rust workspace for Pack Vision's terminal agent harness: seventeen library
 crates plus the `meerai` binary (built by `meerai-cli`). Milestones M1–M13
 are implemented: session log, item protocol, coding and retrieval tools,
 policy engine, context engine, prompt composition, subagent runtime, CLI
@@ -32,7 +32,7 @@ remaining backlog are tracked in [harness-spec.md](harness-spec.md) §4.1.
 Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
 `core -> policy -> agents/common/tui`, `core -> tools -> cli`,
 `common -> client -> tui/cli`, `client -> providers -> cli`,
-`agents -> acp -> cli`. The diagram and build surfaces are in
+`common -> skills -> agents/cli`, `agents -> acp -> cli`. The diagram and build surfaces are in
 [architecture.md](architecture.md).
 
 - `meerai-core` — `Toolset` trait (`effect_of`, `effect_of_call`,
@@ -65,8 +65,8 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   `UsageRepo`), and private-file permissions.
 - `meerai-common` — SQLite-backed `AppSettings`, `find_project_root`,
   `load_project_settings`/`merge_project_settings`, `definitions`
-  (`load_definitions`, `load_definitions_for`, `AgentDefinition`,
-  `SkillDefinition`, `DefinitionSource`, shadow diagnostics), `packs`
+  (`load_definitions`, `AgentDefinition`, `SkillDefinition`,
+  `DefinitionSource`, shadow diagnostics), `packs`
   (`meerai-pack.yml`, install/pin/trust state), `hooks` (`HookEvent`,
   `HookEntry`, `load_hooks`).
 - `meerai-client` — `ProviderCatalog` + bundled `providers.yml` and the
@@ -82,10 +82,15 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   (including `TokenPricing`), `AgentEvent`/`AgentCommand`, `intercept`
   (`Interceptor`, `StepPlan`, `ToolPlan`, `ToolContext`, `ToolOutcome`,
   `StepAction`, `TurnStopAction`, async `before_tool`), hook engine
-  (`HookEngine`, `HookContext`, `HookReport`), `question-ask`, `skill-load`,
+  (`HookEngine`, `HookContext`, `HookReport`), `question-ask`,
   `prompt::{BASE_SYSTEM_PROMPT, compose_system_prompt}`, `spawn_worker`,
   `subagent` runtime, delegated `acp-run` (`acp_subagent`), `redact`,
   `screen`, `shell_safety`.
+- `meerai-skills` — built-in `goal` and `orchestrate` skill bodies
+  (`skills/`), `builtin` catalog merge, `skill-load` (`SkillToolset`), the
+  shared four-phase loop engine (`LoopHandle`, `LoopInterceptor` policy,
+  `LoopState`, render and continuation prompts), and `loop-*`
+  (`loop-plan`/`loop-act`/`loop-observe`/`loop-adjust`/`loop-status`).
 - `meerai-syntax` — tree-sitter highlighting for twenty languages plus
   a lexical fallback; `highlight_block` returns per-line `Token`s; no UI
   dependency.
@@ -171,9 +176,11 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   warns and skips; missing frontmatter uses the file/directory name. Skills
   advertise one prompt line each (`id: description`, 8 KiB cap,
   screened); `skill-load` reads `SKILL.md` or one supporting file inside the
-  skill directory, 16 KiB cap. One skill is built in (`Builtin` source): `goal`.
-  It is appended after user, pack, and project skills, so a `goal` skill in any
-  of those sources shadows it. Explicit `--skill` bodies keep the 16 KiB /
+  skill directory, 16 KiB cap. Two skills are built in (`Builtin` source):
+  `goal` and `orchestrate`, merged by `meerai-skills::builtin` after user, pack,
+  and project skills. A user, pack, or project skill with either id shadows the
+  built-in. Both presets use the `loop-plan`/`loop-act`/`loop-observe`/
+  `loop-adjust`/`loop-status` tools. Explicit `--skill` bodies keep the 16 KiB /
   32 KiB caps. `--agent` takes one id (repeat is a parse error); `--skill` is
   repeatable; unknown ids fail with the available list. Model precedence:
   `--model` → `MEERAI_MODEL` → agent `model` → settings/provider default;
@@ -443,13 +450,14 @@ implementation invariants.
   pinned turns, verbatim turns, and cached prompt tokens. The TUI stores
   the latest breakdown per tab; the host registry stores it per live
   session and rebroadcasts `RegistryEventKind::ContextUpdated`.
-- Goal telemetry: `AgentEvent::GoalUpdated` carries the full `GoalState`
-  after each step with an active goal. The TUI stores it per tab; the host
+- Loop telemetry: `AgentEvent::LoopUpdated` carries the full `LoopState`
+  after each step with an active loop. The TUI stores it per tab; the host
   stores it per record, adds it to the session detail, and rebroadcasts
-  `RegistryEventKind::GoalUpdated`. The worker logs
-  `SessionEvent::GoalUpdated` at turn end; `meerai_session::goal::last_goal`
-  restores it in `build_agent` and host `register_opened`.
-  `AgentEvent::GoalContinued` announces an automatic follow-up turn and
+  `RegistryEventKind::LoopUpdated`. The worker logs
+  `SessionEvent::LoopUpdated` at turn end; `meerai_session::last_loop`
+  restores it in `build_agent` and host `register_opened`. Legacy
+  `GoalUpdated` events still deserialize and map to `LoopState`.
+  `AgentEvent::LoopContinued` announces an automatic follow-up turn and
   renders as a system row.
 - Routing and spend: `HarnessConfig::routing` holds `ModelRoute` entries.
   `RoutingCoordinator` owns a global and per-provider semaphore from
@@ -486,14 +494,15 @@ implementation invariants.
   more than once, bounded by the remaining step budget; the `Stop` hook
   keeps running at each stop until it blocks once. Checkpoint
   capture is the built-in `CheckpointInterceptor` on `before_tool`
-  (Write-effect tools only). The built-in `GoalInterceptor` continues
-  the turn while the `goal` tool holds an open checklist item, up to
-  `MAX_GOAL_ROUNDS` (24). When the turn still ends with an open goal
-  (`Ok` or `Budget`), the worker logs `SessionEvent::GoalUpdated`, emits
-  `AgentEvent::GoalUpdated` and `GoalContinued`, and pushes one
-  continuation turn (max 4). The `goal-set`, `goal-check`, and
-  `goal-status` tools are Read-classified: they change session state only,
-  never a workspace file. Hooks do **not** use the interceptor chain:
+  (Write-effect tools only). The built-in `LoopInterceptor` continues
+  the turn while the loop has an open item, up to `MAX_LOOP_ROUNDS` (24)
+  and at the phase the tool state names. When the turn still ends with an
+  open item (`Ok` or `Budget`), the worker logs
+  `SessionEvent::LoopUpdated`, emits `AgentEvent::LoopUpdated` and
+  `LoopContinued`, and pushes one continuation turn (max 4). The
+  `loop-plan`, `loop-act`, `loop-observe`, `loop-adjust`, and `loop-status`
+  tools are Read-classified: they change session state only, never a
+  workspace file. Hooks do **not** use the interceptor chain:
   they use `HookEngine`, because they await host processes at lifecycle
   points outside the loop.
 

@@ -1,6 +1,6 @@
 # Agent Skills
 
-A portable bundle of six role skills for coding agents. The skills are repository-agnostic: each one
+A portable bundle of five role skills for coding agents. The skills are repository-agnostic: each one
 reads a per-repository profile instead of hardcoding paths, commands, or rules.
 
 ```
@@ -12,8 +12,7 @@ reads a per-repository profile instead of hardcoding paths, commands, or rules.
 │   ├── implement/    implement in any layer
 │   ├── deliver/      CI/CD and infrastructure-as-code
 │   ├── specify/      brainstorm and write requirements
-│   ├── review/       review a PR, a change, or a document
-│   └── orchestrate/  orchestrate a multi-area change with subagents
+│   └── review/       review a PR, a change, or a document
 ├── templates/
 │   └── repo-profile.md
 └── repo/
@@ -23,6 +22,12 @@ reads a per-repository profile instead of hardcoding paths, commands, or rules.
 ```
 
 `repo/` is repository knowledge, not part of the published skill bundle.
+
+`orchestrate` is no longer in this bundle. meerai ships it as a built-in skill
+with a plan, act, observe, adjust loop. The portable body lives at
+`meerai-skills/skills/orchestrate/SKILL.md` in the meerai workspace; copy it into
+any Agent Skills directory if you want it outside meerai. Keeping a project copy
+here would shadow the built-in in this repository and hide drift.
 
 ## How it works
 
@@ -95,7 +100,6 @@ rest `Unknown` rather than guessing.
 | `deliver` | Changing pipelines, reusable workflow components, IaC, environments, secrets, domains, releases |
 | `specify` | Brainstorming an idea or writing a requirement/initiative document |
 | `review` | Reviewing a pull request, a local change, or a document against the code and rules |
-| `orchestrate` | A change spans several surfaces and needs a plan, delegation, and integration |
 
 ## Subagents
 

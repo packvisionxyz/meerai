@@ -396,20 +396,24 @@ pub struct SessionDetailDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<ContextBreakdownDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub goal: Option<GoalDto>,
+    pub loop_state: Option<LoopDto>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GoalDto {
+pub struct LoopDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub goal: Option<String>,
+    pub objective: Option<String>,
     #[serde(default)]
     pub done_when: Vec<String>,
     #[serde(default)]
     pub constraints: Vec<String>,
     #[serde(default)]
-    pub items: Vec<GoalItemDto>,
+    pub items: Vec<LoopItemDto>,
+    #[serde(default)]
+    pub phase: LoopPhaseDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<u32>,
     #[serde(default)]
     pub rounds: usize,
     #[serde(default)]
@@ -418,19 +422,31 @@ pub struct GoalDto {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GoalItemDto {
+pub struct LoopItemDto {
     pub id: u32,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verify: Option<String>,
-    pub status: GoalItemStatusDto,
+    pub expect: Option<String>,
+    pub status: LoopItemStatusDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evidence: Option<String>,
+    pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum GoalItemStatusDto {
+pub enum LoopPhaseDto {
+    #[default]
+    Plan,
+    Act,
+    Observe,
+    Adjust,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopItemStatusDto {
     #[default]
     Open,
     Done,
@@ -838,9 +854,9 @@ pub enum ViewEvent {
         session_id: String,
         breakdown: ContextBreakdownDto,
     },
-    GoalUpdated {
+    LoopUpdated {
         session_id: String,
-        goal: GoalDto,
+        state: LoopDto,
     },
     SessionActivated {
         session_id: String,
@@ -1399,7 +1415,7 @@ mod tests {
                 usage: UsageDto::default(),
                 metrics: TurnMetricsDto::default(),
                 context: None,
-                goal: None,
+                loop_state: None,
             }),
             file_changes: vec![FileChangeDto {
                 status: "M".to_owned(),

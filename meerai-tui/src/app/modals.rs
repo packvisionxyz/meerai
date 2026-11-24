@@ -1912,7 +1912,7 @@ impl AppState {
                 }
                 self.modal = Some(ActiveModal::Context(panel));
             }
-            ActiveModal::Goal { state, mut scroll } => {
+            ActiveModal::Loop { state, mut scroll } => {
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => self.modal = None,
                     KeyCode::Down | KeyCode::Char('j') => {
@@ -1931,7 +1931,7 @@ impl AppState {
                     _ => {}
                 }
                 if self.modal.is_some() {
-                    self.modal = Some(ActiveModal::Goal { state, scroll });
+                    self.modal = Some(ActiveModal::Loop { state, scroll });
                 }
             }
             ActiveModal::Memory {

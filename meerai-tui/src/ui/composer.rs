@@ -941,7 +941,7 @@ mod cursor_tests {
 
     #[test]
     fn goal_arguments_keep_the_cursor_at_the_end() {
-        let skills = meerai_common::definitions::builtin_skills();
+        let skills = meerai_skills::builtin_skills();
         let input = "/goal 1234";
         assert_eq!(
             display_pos_for_byte(input, input.len(), &[], &skills),

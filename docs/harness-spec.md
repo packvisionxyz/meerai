@@ -127,7 +127,8 @@ QuestionAsked     { request_id, questions }
 QuestionAnswered  { request_id, answers }
 RewindApplied     { turn_id, scope, restored, replaced }
 HookFired         { event, decision, detail }
-GoalUpdated       { state }
+GoalUpdated       { state }   # legacy
+LoopUpdated       { state }
 CheckpointCreated { checkpoint_id, turn_id, paths }
 CircuitBreaker    { kind, action }
 Error             { code, message, retryable }
@@ -244,8 +245,8 @@ pub enum AgentEvent {
     Error         { code, message },
     HookCompleted { event, decision, reason },
     ContextUpdated { breakdown },
-    GoalUpdated   { state },
-    GoalContinued { turn, max_turns },
+    LoopUpdated   { state },
+    LoopContinued { turn, max_turns },
 }
 
 pub enum SessionItem {
@@ -390,8 +391,9 @@ The extension seam is `meerai_agents::intercept`: an ordered
 note), and `turn_stopping` (may continue the turn, consulted only when no
 tool calls were made; a later stop can continue again, bounded by the
 remaining step budget). Checkpoint capture is the built-in
-`CheckpointInterceptor`. The built-in `GoalInterceptor` keeps a goal turn
-alive while the `goal` tool has an open checklist item, up to 24 rounds.
+`CheckpointInterceptor`. The built-in `LoopInterceptor` keeps a loop turn
+alive while an item is open, at the phase the `loop-*` tools name, up to 24
+rounds.
 Hooks use the separate `HookEngine` because they
 await host processes outside the loop. Hot-swappable plugins are out of
 scope (§3, non-goals).
@@ -773,29 +775,32 @@ Review the current changes. List findings by severity with file:line references.
   They grant no tools, scripts, MCP, or sandbox. An agent `permissions` block
   tightens a subagent's policy; `allow` entries are dropped. Full tool and
   permission mapping from definitions is planned (§3).
-- One skill is built in (`DefinitionSource::Builtin`): `goal`. It is inserted
-  last, so a user, pack, or project skill with the id `goal` shadows it. Its
-  body drives a loop with three Read-classified tools: `goal-set` stores the
-  goal, done condition, constraints, and checklist; `goal-check` records one
-  item result with evidence and may add items; `goal-status` re-reads the
-  state after compaction or resume. `GoalInterceptor::turn_stopping` continues
+- Two skills are built in (`DefinitionSource::Builtin`): `goal` and
+  `orchestrate`, merged by `meerai-skills::builtin`. A user, pack, or project
+  skill with either id shadows the built-in. Both drive one four-phase loop
+  with five Read-classified tools: `loop-plan` stores the objective, done
+  condition, constraints, and items; `loop-act` records one action and its
+  expected observation; `loop-observe` records the raw evidence; `loop-adjust`
+  records done, open, or failed and may add items; `loop-status` re-reads the
+  state after compaction or resume. `LoopInterceptor::turn_stopping` continues
   the turn while an item is open, up to 24 rounds. The TUI and browser accept
   `@goal` as an alias for `@skill/goal`.
-- The goal loop spans turns. After a turn ends with an open goal (`Ok` or
-  `ErrorCode::Budget`), the worker logs `SessionEvent::GoalUpdated`, emits
-  `AgentEvent::GoalUpdated` and `AgentEvent::GoalContinued`, resets the round
+- The loop spans turns. After a turn ends with an open item (`Ok` or
+  `ErrorCode::Budget`), the worker logs `SessionEvent::LoopUpdated`, emits
+  `AgentEvent::LoopUpdated` and `AgentEvent::LoopContinued`, resets the round
   count, and pushes one continuation prompt at the front of the queue. It caps
   the automatic turns at 4. `Cancel`, `Quit`, `Reset`, a queued recovery turn,
   and headless one-shots opt out.
-- `SessionEvent::GoalUpdated` is durable but not model-visible.
-  `meerai_session::goal::last_goal` restores it in `build_agent` and in host
+- `SessionEvent::LoopUpdated` is durable but not model-visible.
+  `meerai_session::last_loop` restores it in `build_agent` and in host
   `register_opened`, so the model state and the panel survive `--resume`.
-- `AgentEvent::GoalUpdated` is the live signal. The TUI stores it on the tab;
+  Legacy `SessionEvent::GoalUpdated` is still read and mapped to `LoopState`.
+- `AgentEvent::LoopUpdated` is the live signal. The TUI stores it on the tab;
   the host stores it on the session record, exposes it in the session detail,
-  and rebroadcasts it as `RegistryEventKind::GoalUpdated` /
-  `ViewEvent::GoalUpdated`. `/goal` opens a read-only panel in both clients.
-  The live goal state lives with the agent; the durable event is the only
-  copy outside a running process.
+  and rebroadcasts it as `RegistryEventKind::LoopUpdated` /
+  `ViewEvent::LoopUpdated`. `/loop` (or `/goal`) opens a read-only panel in
+  both clients. The live loop state lives with the agent; the durable event is
+  the only copy outside a running process.
 
 #### Subagent execution
 

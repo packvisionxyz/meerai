@@ -26,15 +26,15 @@ use meerai_web_protocol::{
     ApprovalModeDto, ApprovalRequestDto, AuthKindDto, BackendKind, ChatGptLoginStateDto,
     ContextBreakdownDto, ContextSettingsDto, DefinitionInfoDto, DefinitionsDiagnosticsDto,
     DiffCellDto, DiffRowDto, DiffRowKindDto, EffectClassDto, EffortDto, FileChangeDto,
-    FileDiffResponse, GoalDto, GoalItemDto, GoalItemStatusDto, GrantScopeDto, HostInfoDto,
-    McpServerInfoDto, MemoryDto, ModelItemDto, PackDto, ProviderItemDto, ProvidersResponse,
-    QuestionAnswerDto, QuestionOptionDto, QuestionPromptDto, QuestionRequestDto, RewindScopeDto,
-    RouteDto, SandboxSettingsDto, SearchModeDto, SessionDetailDto, SessionSettingsDto,
-    SessionStatus, SessionSummaryDto, SettingsSnapshotDto, ShadowedDefinitionDto, ShellRunDto,
-    SkillInfoDto, SnapshotResponse, ThemeOverrideDto, ThemeTokensDto, TranscriptEntryDto,
-    TurnMetricsDto, UnifiedLineDto, UnifiedLineKindDto, UpdateSettingsRequest, UsageDto, ViewEvent,
-    WorkspacePreviewLineDto, WorkspacePreviewResponse, WorkspaceSearchMatchDto,
-    WorkspaceSearchResponse,
+    FileDiffResponse, GrantScopeDto, HostInfoDto, LoopDto, LoopItemDto, LoopItemStatusDto,
+    LoopPhaseDto, McpServerInfoDto, MemoryDto, ModelItemDto, PackDto, ProviderItemDto,
+    ProvidersResponse, QuestionAnswerDto, QuestionOptionDto, QuestionPromptDto, QuestionRequestDto,
+    RewindScopeDto, RouteDto, SandboxSettingsDto, SearchModeDto, SessionDetailDto,
+    SessionSettingsDto, SessionStatus, SessionSummaryDto, SettingsSnapshotDto,
+    ShadowedDefinitionDto, ShellRunDto, SkillInfoDto, SnapshotResponse, ThemeOverrideDto,
+    ThemeTokensDto, TranscriptEntryDto, TurnMetricsDto, UnifiedLineDto, UnifiedLineKindDto,
+    UpdateSettingsRequest, UsageDto, ViewEvent, WorkspacePreviewLineDto, WorkspacePreviewResponse,
+    WorkspaceSearchMatchDto, WorkspaceSearchResponse,
 };
 use serde::Serialize;
 
@@ -101,32 +101,40 @@ pub fn map_detail(detail: LiveSessionDetail) -> SessionDetailDto {
         usage: map_usage(detail.usage),
         metrics: map_metrics(detail.metrics),
         context: detail.context.map(map_context_breakdown),
-        goal: detail.goal.map(map_goal),
+        loop_state: detail.loop_state.map(map_loop),
     }
 }
 
-fn map_goal(goal: meerai_session::GoalState) -> GoalDto {
-    GoalDto {
-        goal: goal.goal,
-        done_when: goal.done_when,
-        constraints: goal.constraints,
-        items: goal
+fn map_loop(state: meerai_session::LoopState) -> LoopDto {
+    LoopDto {
+        objective: state.objective,
+        done_when: state.done_when,
+        constraints: state.constraints,
+        items: state
             .items
             .into_iter()
-            .map(|item| GoalItemDto {
+            .map(|item| LoopItemDto {
                 id: item.id,
                 text: item.text,
-                verify: item.verify,
+                expect: item.expect,
                 status: match item.status {
-                    meerai_session::GoalItemStatus::Open => GoalItemStatusDto::Open,
-                    meerai_session::GoalItemStatus::Done => GoalItemStatusDto::Done,
-                    meerai_session::GoalItemStatus::Failed => GoalItemStatusDto::Failed,
+                    meerai_session::LoopItemStatus::Open => LoopItemStatusDto::Open,
+                    meerai_session::LoopItemStatus::Done => LoopItemStatusDto::Done,
+                    meerai_session::LoopItemStatus::Failed => LoopItemStatusDto::Failed,
                 },
-                evidence: item.evidence,
+                action: item.action,
+                observation: item.observation,
             })
             .collect(),
-        rounds: goal.rounds,
-        turns: goal.turns,
+        phase: match state.phase {
+            meerai_session::LoopPhase::Plan => LoopPhaseDto::Plan,
+            meerai_session::LoopPhase::Act => LoopPhaseDto::Act,
+            meerai_session::LoopPhase::Observe => LoopPhaseDto::Observe,
+            meerai_session::LoopPhase::Adjust => LoopPhaseDto::Adjust,
+        },
+        current: state.current,
+        rounds: state.rounds,
+        turns: state.turns,
     }
 }
 
@@ -418,9 +426,9 @@ pub fn map_view_event(kind: RegistryEventKind) -> ViewEvent {
             session_id: session_id.to_string(),
             breakdown: map_context_breakdown(breakdown),
         },
-        RegistryEventKind::GoalUpdated { session_id, state } => ViewEvent::GoalUpdated {
+        RegistryEventKind::LoopUpdated { session_id, state } => ViewEvent::LoopUpdated {
             session_id: session_id.to_string(),
-            goal: map_goal(state),
+            state: map_loop(state),
         },
         RegistryEventKind::SessionActivated { session_id } => ViewEvent::SessionActivated {
             session_id: session_id.to_string(),

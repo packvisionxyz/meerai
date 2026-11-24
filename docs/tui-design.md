@@ -232,7 +232,7 @@ Typing `/` opens completion. The implemented handler set
 | `/mode [plan\|ask\|auto]` | Show or set the approval mode |
 | `/compact` | Request context compaction |
 | `/context` | Context panel: token buckets, watermark, projection toggles, turn pin/unpin, summarize-from-here, blob viewer, scroll, refresh |
-| `/goal` | Goal panel: goal, done condition, constraints, items with evidence, round and turn counts. Read-only; `j`/`k`/PageUp/PageDown scroll, `Esc` closes. Use `@goal <instruction>` to start one |
+| `/loop` | Loop panel: objective, done condition, constraints, phase, items with action and observation, round and turn counts. Read-only; `j`/`k`/PageUp/PageDown scroll, `Esc` closes. `/goal` is an alias. Use `@goal <instruction>` to start the goal preset, or `@skill/orchestrate` for the multi-area preset |
 | `/memory [query]` | Memory panel: list, search, pin, delete |
 | `/remember <note>` | Save a project memory |
 | `/forget <id>`, `/pin <id> [off]` | Delete or pin a project memory |
@@ -285,7 +285,8 @@ description. Rows show the bare id, not the `@agent/` or
 - Accepting inserts `@agent/<id> `, `@skill/<id> `, or `@path ` with one
   trailing space and stays in Insert. An exact agent/skill id keeps the
   popup open; an exact file path dismisses it. The built-in `goal` skill
-  accepts the shorter `@goal ` alias; `@skill/goal` still works.
+  accepts the shorter `@goal ` alias; `@skill/goal` still works. The built-in
+  `orchestrate` skill has no bare alias; use `@skill/orchestrate`.
 - A known accepted mention renders as an `<id>` chip (bold teal agent, bold
   blue skill) while the raw token stays in the input buffer and submit
   detection. Unknown ids and partial tokens render as typed. Cursor columns

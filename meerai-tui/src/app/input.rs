@@ -56,7 +56,7 @@ impl AppState {
                         | ActiveModal::ProviderConnection { .. }
                         | ActiveModal::Question { .. }
                         | ActiveModal::Context(_)
-                        | ActiveModal::Goal { .. }
+                        | ActiveModal::Loop { .. }
                         | ActiveModal::Memory { .. }
                         | ActiveModal::Routing { .. }
                         | ActiveModal::Packs { .. }

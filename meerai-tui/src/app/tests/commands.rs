@@ -642,20 +642,20 @@ fn effort_command_updates_state_queues_sync_and_appears_in_help() {
 #[test]
 fn goal_command_opens_the_read_only_panel() {
     let (mut app, _rx, _secrets) = test_app();
-    app.tab_mut().goal = Some(meerai_session::GoalState {
-        goal: Some("Ship the change".to_string()),
-        items: vec![meerai_session::GoalItem {
+    app.tab_mut().loop_state = Some(meerai_session::LoopState {
+        objective: Some("Ship the change".to_string()),
+        items: vec![meerai_session::LoopItem {
             id: 1,
             text: "Fix it".to_string(),
-            status: meerai_session::GoalItemStatus::Open,
-            ..meerai_session::GoalItem::default()
+            status: meerai_session::LoopItemStatus::Open,
+            ..meerai_session::LoopItem::default()
         }],
-        ..meerai_session::GoalState::default()
+        ..meerai_session::LoopState::default()
     });
 
     type_text(&mut app, "/goal");
     app.handle_key_event(key(KeyCode::Enter));
-    assert!(matches!(app.modal, Some(ActiveModal::Goal { .. })));
+    assert!(matches!(app.modal, Some(ActiveModal::Loop { .. })));
 
     app.handle_key_event(key(KeyCode::Esc));
     assert!(app.modal.is_none());

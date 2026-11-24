@@ -1513,14 +1513,14 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 rows[2],
             );
         }
-        ActiveModal::Goal { state, scroll } => {
+        ActiveModal::Loop { state, scroll } => {
             let popup = cap_width(centered_rect(area, 78, 58, 50, 14), 78);
             dim_backdrop(frame, area, popup);
-            let inner = dialog_frame(frame, app, popup, "Goal (/goal)", true);
+            let inner = dialog_frame(frame, app, popup, "Loop (/loop)", true);
             let rows = Layout::vertical([Constraint::Min(6), Constraint::Length(1)]).split(inner);
             let text = match state {
-                Some(state) => state.render(),
-                None => "No active goal.\n\nType @goal <instruction> in the composer to start one."
+                Some(state) => meerai_skills::loop_engine::render(&state),
+                None => "No active loop.\n\nType @goal <instruction> in the composer to start one."
                     .to_string(),
             };
             frame.render_widget(

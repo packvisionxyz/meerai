@@ -880,7 +880,7 @@ impl MultiTurnAgent {
             };
             self.log_step_ended(event_tx, &step_id, finish).await;
             self.emit_context_updated(event_tx);
-            self.emit_goal_updated(event_tx);
+            self.emit_loop_updated(event_tx);
 
             if cancel.is_cancelled() {
                 return Ok(aborted(event_tx, turn_id));

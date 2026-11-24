@@ -1,11 +1,10 @@
 mod acp_subagent;
 mod checkpoint;
 pub mod events;
-mod goal;
-mod goal_tool;
 mod harness;
 pub mod hooks;
 pub mod intercept;
+mod loop_interceptor;
 pub mod memory;
 mod multi_turn_agent;
 pub mod prompt;
@@ -14,7 +13,6 @@ mod redact;
 pub mod routing;
 pub mod screen;
 pub mod shell_safety;
-pub mod skill_tool;
 pub mod subagent;
 mod tool_args;
 
@@ -24,17 +22,13 @@ pub use events::{
     ItemStatus, PlanStep, PlanStepStatus, QuestionAnswer, QuestionOption, QuestionPrompt,
     QuestionRequest, RewindScope, SessionItem, SubagentSpec, TurnEndReason, TurnId, Usage,
 };
-pub use goal::{
-    GoalHandle, GoalInterceptor, GoalItem, GoalItemStatus, GoalState, MAX_GOAL_ROUNDS,
-    new_goal_handle,
-};
-pub use goal_tool::{GOAL_CHECK, GOAL_SET, GOAL_STATUS, GoalToolset};
 pub use harness::{AgentHarness, HarnessConfig, TokenPricing};
 pub use hooks::{HookContext, HookDecision, HookEngine, HookFiring, HookReport};
 pub use intercept::{
     Interceptor, SharedInterceptor, StepAction, StepPlan, ToolContext, ToolOutcome, ToolPlan,
     TurnStopAction,
 };
+pub use loop_interceptor::LoopInterceptor;
 pub use memory::{
     DEFAULT_MEMORY_PROMPT_BYTES, MEMORY_DELETE, MEMORY_SAVE, MEMORY_SEARCH, MemoryCapture,
     MemoryToolset, load_memory_prompt,
@@ -45,7 +39,6 @@ pub use question::{QUESTION_TOOL, QuestionToolset, format_answers, parse_questio
 pub use routing::{
     DEFAULT_GLOBAL_CONCURRENCY, RoutingCoordinator, RoutingPermit, resolve_route, route_model,
 };
-pub use skill_tool::{SKILL_TOOL, SkillToolset};
 pub use subagent::{
     BuiltinAgent, READ_ONLY_SUBAGENT_TOOLS, SubagentToolFactory, SubagentToolset, builtin_agents,
     find_builtin_agent,

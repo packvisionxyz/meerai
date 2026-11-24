@@ -1554,11 +1554,11 @@ fn handle_registry_event(app: &mut AppState, ev: RegistryEvent) -> bool {
             }
             true
         }
-        RegistryEventKind::GoalUpdated { session_id, state } => {
+        RegistryEventKind::LoopUpdated { session_id, state } => {
             if let Some(idx) = app.tab_index_for_session(&session_id) {
-                app.tabs[idx].goal = Some(state.clone());
+                app.tabs[idx].loop_state = Some(state.clone());
                 if app.active_tab == idx
-                    && let Some(ActiveModal::Goal {
+                    && let Some(ActiveModal::Loop {
                         state: modal_state, ..
                     }) = &mut app.modal
                 {

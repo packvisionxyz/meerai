@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rust workspace for Pack Vision's terminal agent harness: sixteen library crates plus the `meerai`
+Rust workspace for Pack Vision's terminal agent harness: seventeen library crates plus the `meerai`
 binary (built by `meerai-cli`). This file holds working rules only.
 
 It is injected into the system prompt with a 32 KiB cap. Keep it rules-only and short. Put

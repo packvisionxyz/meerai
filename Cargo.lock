@@ -2577,6 +2577,7 @@ dependencies = [
  "meerai-core",
  "meerai-policy",
  "meerai-session",
+ "meerai-skills",
  "meerai-store",
  "regex",
  "serde",
@@ -2603,6 +2604,7 @@ dependencies = [
  "meerai-policy",
  "meerai-providers",
  "meerai-session",
+ "meerai-skills",
  "meerai-store",
  "meerai-tools",
  "meerai-tui",
@@ -2754,6 +2756,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerai-skills"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "meerai-common",
+ "meerai-core",
+ "meerai-session",
+ "meerai-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "meerai-store"
 version = "0.2.0"
 dependencies = [
@@ -2848,6 +2865,7 @@ dependencies = [
  "meerai-host",
  "meerai-policy",
  "meerai-session",
+ "meerai-skills",
  "meerai-store",
  "meerai-syntax",
  "ratatui",

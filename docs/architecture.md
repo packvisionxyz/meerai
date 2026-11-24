@@ -8,13 +8,13 @@ planned.
 | --- | --- |
 | **Status** | Verified against the tree on 2026-11-18 |
 | **Audience** | Contributors navigating the workspace; embedders choosing a build surface |
-| **Scope** | All seventeen workspace crates, dependency direction, build surfaces, protocol and configuration summary |
+| **Scope** | All eighteen workspace crates, dependency direction, build surfaces, protocol and configuration summary |
 | **Related** | [harness-spec.md](harness-spec.md) (behavior and milestones) · [harness-internals.md](harness-internals.md) (implementation invariants) · [tui-design.md](tui-design.md) · [browser-ui.md](browser-ui.md) · [acp.md](acp.md) |
 
 ## 1. Overview
 
 meerai is a pure, provider-agnostic terminal agent harness: a Rust
-workspace with sixteen library crates plus the `meerai` binary (built by
+workspace with seventeen library crates plus the `meerai` binary (built by
 `meerai-cli`). It offers a selection-first modal TUI, a scriptable
 headless CLI, and an opt-in local browser baseline (`meerai serve`) over one agent loop. The loop is driven by an append-only
 session log and a typed item protocol; every client consumes the same
@@ -37,7 +37,8 @@ events. Depth lives in the owning documents: product behavior in
 | `meerai-session` | Append-only `SessionEvent` log in SQLite, crash recovery and idempotent healing, `derive_messages` projection, replay, fork/rewind, SQLite blob and snapshot stores, spill and compaction primitives, listing/deletion/pruning |
 | `meerai-policy` | `PolicyEngine`: ordered rules (default sensitive → user → agent, last match wins), `ApprovalMode` presets, literal turn/session grants, YAML parsing |
 | `meerai-tools` | `code` (`CodeTools`, seven `code-*` tools, path guards, unified diffs, observations, shell safety inputs, env scrub), `repo_map` (`retrieval-repo_map`, tree-sitter + PageRank), `lsp` (`lsp-*` over stdio JSON-RPC), `search_as_code` (`sac-run_script`), `web` (`web-fetch`, `web-search`), `ExecutionWorld` sandbox seam |
-| `meerai-agents` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig`, `AgentEvent`/`AgentCommand`, interceptor seam, hook engine, `question-ask`, `skill-load`, prompt composition, `spawn_worker`, subagent runtime, delegated `acp-run`, redaction and injection screening, shell-safety allowlist |
+| `meerai-agents` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig`, `AgentEvent`/`AgentCommand`, interceptor seam, hook engine, `question-ask`, the `LoopInterceptor` adapter, prompt composition, `spawn_worker`, subagent runtime, delegated `acp-run`, redaction and injection screening, shell-safety allowlist |
+| `meerai-skills` | Built-in `goal` and `orchestrate` skill bodies, built-in catalog merge, the `skill-load` tool, and the shared four-phase loop engine with `loop-plan`/`loop-act`/`loop-observe`/`loop-adjust`/`loop-status` |
 | `meerai-syntax` | Tree-sitter highlighting (Rust, C, C++, C#, Java, Kotlin, Scala, Swift, PHP, Haskell, Ruby, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML, CSS, JSON) plus a lexical fallback; per-line tokens, no UI dependency |
 | `meerai-host` | UI-neutral host seams (`SessionOpener`, `OpenedSession`, `WorkspaceQuery`/`LocalWorkspace`) and `SessionRegistry` live event pump/ring |
 | `meerai-web-protocol` | Serde-only Wasm-safe wire DTOs (`SnapshotResponse`, `ViewEvent`, `SubmitPromptRequest`, `ApiError`) with adjacent serde tagging |

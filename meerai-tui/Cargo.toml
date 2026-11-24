@@ -22,6 +22,7 @@ meerai-host = { path = "../meerai-host/", default-features = false }
 meerai-policy = { path = "../meerai-policy/" }
 meerai-client = { path = "../meerai-client/" }
 meerai-session = { path = "../meerai-session/" }
+meerai-skills = { path = "../meerai-skills/" }
 meerai-store = { path = "../meerai-store/" }
 meerai-syntax = { path = "../meerai-syntax/" }
 

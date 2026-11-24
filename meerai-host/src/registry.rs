@@ -196,7 +196,7 @@ pub struct LiveSessionDetail {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<meerai_session::ContextBreakdown>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub goal: Option<meerai_session::GoalState>,
+    pub loop_state: Option<meerai_session::LoopState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -245,9 +245,9 @@ pub enum RegistryEventKind {
         session_id: SessionId,
         breakdown: meerai_session::ContextBreakdown,
     },
-    GoalUpdated {
+    LoopUpdated {
         session_id: SessionId,
-        state: meerai_session::GoalState,
+        state: meerai_session::LoopState,
     },
     SessionActivated {
         session_id: SessionId,
@@ -372,7 +372,7 @@ struct SessionRecord {
     usage: UsageStatsSnapshot,
     metrics: TurnMetricsSnapshot,
     context: Option<meerai_session::ContextBreakdown>,
-    goal: Option<meerai_session::GoalState>,
+    loop_state: Option<meerai_session::LoopState>,
     turn_started_instant: Option<Instant>,
     tool_items: HashMap<ItemId, String>,
     recovery_pending: bool,
@@ -391,7 +391,7 @@ impl SessionRecord {
             usage: self.usage.clone(),
             metrics: self.metrics.clone(),
             context: self.context.clone(),
-            goal: self.goal.clone(),
+            loop_state: self.loop_state.clone(),
         }
     }
 
@@ -574,7 +574,7 @@ impl SessionRegistry {
             usage: UsageStatsSnapshot::default(),
             metrics,
             context: None,
-            goal: last_goal_from_events(&opened.events),
+            loop_state: last_loop_from_events(&opened.events),
             turn_started_instant: None,
             tool_items: HashMap::new(),
             recovery_pending: false,
@@ -2185,20 +2185,20 @@ fn apply_agent_event(
                 },
             );
         }
-        AgentEvent::GoalUpdated { state: goal } => {
-            state.sessions.get_mut(session_id).unwrap().goal = Some(goal.clone());
+        AgentEvent::LoopUpdated { state: loop_state } => {
+            state.sessions.get_mut(session_id).unwrap().loop_state = Some(loop_state.clone());
             state.push_event(
                 broadcast_tx,
-                RegistryEventKind::GoalUpdated {
+                RegistryEventKind::LoopUpdated {
                     session_id: session_id.clone(),
-                    state: goal,
+                    state: loop_state,
                 },
             );
         }
-        AgentEvent::GoalContinued { turn, max_turns } => {
+        AgentEvent::LoopContinued { turn, max_turns } => {
             let entry = LiveEntry::System {
                 id: state.next_entry_id(),
-                text: format!("Goal continues (turn {turn}/{max_turns})"),
+                text: format!("Loop continues (turn {turn}/{max_turns})"),
             };
             state
                 .sessions
@@ -2631,8 +2631,8 @@ fn update_or_push_subagent_entry(
     entry
 }
 
-fn last_goal_from_events(events: &[LoggedEvent]) -> Option<meerai_session::GoalState> {
-    meerai_session::goal::last_goal(events)
+fn last_loop_from_events(events: &[LoggedEvent]) -> Option<meerai_session::LoopState> {
+    meerai_session::last_loop(events)
 }
 
 fn collect_user_turn_ids(events: &[LoggedEvent]) -> Vec<Option<TurnId>> {

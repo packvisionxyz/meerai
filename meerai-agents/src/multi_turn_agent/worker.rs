@@ -266,51 +266,45 @@ pub fn spawn_worker(
                         {
                             queued.push_front(recovery);
                         }
-                        if let Some(goal) = agent.goal_handle() {
-                            let state = goal.snapshot();
+                        if let Some(state) = agent.loop_handle() {
+                            let state = state.snapshot();
                             if state.active() {
                                 agent
                                     .log_event(
                                         &event_tx,
-                                        SessionEvent::GoalUpdated {
+                                        SessionEvent::LoopUpdated {
                                             state: state.clone(),
                                         },
                                     )
                                     .await;
-                                let _ = event_tx.send(AgentEvent::GoalUpdated { state });
+                                let _ = event_tx.send(AgentEvent::LoopUpdated { state });
                             }
                         }
                         if !pending_quit
                             && !pending_reset
                             && !cancel.is_cancelled()
                             && !had_recovery
-                            && agent.goal_auto_continue()
-                            && let Some(goal) = agent.goal_handle()
+                            && agent.loop_auto_continue()
+                            && let Some(state) = agent.loop_handle()
                         {
-                            let max_turns = crate::goal::MAX_GOAL_TURNS;
                             let planned = {
-                                let mut state = goal.lock();
-                                if state.active()
-                                    && !state.all_done()
-                                    && state.turns < max_turns
-                                    && (budget_ended || (turn_ok && state.pending_turn))
-                                {
-                                    state.turns += 1;
-                                    let turn = state.turns;
-                                    state.reset_rounds();
-                                    let prompt = state.turn_prompt(turn, max_turns);
-                                    Some((turn, prompt, state.clone()))
-                                } else {
-                                    None
-                                }
+                                let mut state = state.lock();
+                                let next = meerai_skills::follow_up_turn(
+                                    &mut state,
+                                    budget_ended,
+                                    turn_ok,
+                                );
+                                next.map(|(turn, prompt)| (turn, prompt, state.clone()))
                             };
                             if let Some((turn, prompt, snapshot)) = planned {
-                                let _ =
-                                    event_tx.send(AgentEvent::GoalContinued { turn, max_turns });
+                                let _ = event_tx.send(AgentEvent::LoopContinued {
+                                    turn,
+                                    max_turns: meerai_skills::MAX_LOOP_TURNS,
+                                });
                                 agent
                                     .log_event(
                                         &event_tx,
-                                        SessionEvent::GoalUpdated { state: snapshot },
+                                        SessionEvent::LoopUpdated { state: snapshot },
                                     )
                                     .await;
                                 queued.push_front(QueuedPrompt {

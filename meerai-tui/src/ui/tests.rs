@@ -3573,7 +3573,7 @@ fn typing_goal_arguments_places_the_cursor_after_the_last_digit() {
     use ratatui::layout::Position;
 
     let mut app = test_app();
-    app.skills = meerai_common::definitions::builtin_skills();
+    app.skills = meerai_skills::builtin_skills();
     for ch in "/goal 1234".chars() {
         app.handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
     }
