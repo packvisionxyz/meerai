@@ -1041,10 +1041,15 @@ impl AppState {
                 let max = self.run_detail_max_scroll;
                 match key.code {
                     KeyCode::Esc => {
-                        self.modal = Some(ActiveModal::Runs {
-                            kind: run.kind(),
-                            selected,
-                        });
+                        match &run {
+                            RunTarget::Subagent(_) => self.modal = None,
+                            RunTarget::Shell(_) => {
+                                self.modal = Some(ActiveModal::Runs {
+                                    kind: run.kind(),
+                                    selected,
+                                });
+                            }
+                        }
                         return true;
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
@@ -2207,14 +2212,25 @@ impl AppState {
                         error: None,
                     });
                 }
-                KeyCode::Left | KeyCode::Right | KeyCode::Char('l' | 'm' | 'h')
+                KeyCode::Left | KeyCode::Right => {
+                    let current = effort.unwrap_or_default();
+                    effort = Some(match key.code {
+                        KeyCode::Left => current.cycle_back(),
+                        _ => current.cycle(),
+                    });
+                    self.modal = Some(ActiveModal::Sampling {
+                        effort,
+                        temperature,
+                        field,
+                        error: None,
+                    });
+                }
+                KeyCode::Char('l' | 'm' | 'h')
                     if field == 0 || !typing_effort_keyword(&temperature) =>
                 {
                     effort = Some(match key.code {
                         KeyCode::Char('l') => EffortLevel::Low,
                         KeyCode::Char('h') => EffortLevel::High,
-                        KeyCode::Left => EffortLevel::Low,
-                        KeyCode::Right => EffortLevel::High,
                         _ => EffortLevel::Medium,
                     });
                     self.modal = Some(ActiveModal::Sampling {

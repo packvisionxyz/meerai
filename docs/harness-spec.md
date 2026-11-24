@@ -787,9 +787,9 @@ permission set, and tool subset, exposed as one `subagent-run` tool.
 - The child runs in background; the parent receives
   `ItemStarted { SubagentRun }` → report on idle → `ItemCompleted`. Only
   the final report enters the parent's context — the isolation that makes
-  search subagents token-efficient. The TUI expands the child's own
-  conversation from its log without affecting the row state when the runs
-  dialog reads the same log.
+  search subagents token-efficient. The TUI opens the child's own full
+  conversation in the agent overlay from its log without affecting the row
+  state; the runs dialog reads the same log.
 - The tool accepts an optional `name` for the run. It is carried on
   `SubagentSpec` and `SessionItem::SubagentRun`, shown in the transcript
   header, runs list, detail title, and browser card, and recovered from the

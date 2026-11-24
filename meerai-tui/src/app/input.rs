@@ -186,6 +186,14 @@ impl AppState {
 
         if self.modal.is_some() {
             self.tab_drag = None;
+            if self.handle_subagent_selection_mouse(
+                mouse.kind,
+                mouse.column,
+                mouse.row,
+                mouse.modifiers,
+            ) {
+                return true;
+            }
             return match mouse.kind {
                 MouseEventKind::Moved => self.handle_modal_mouse_move(mouse.column, mouse.row),
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -697,68 +705,143 @@ impl AppState {
     }
 
     pub fn extract_doc_selected_text(&self, sel: DocSelection) -> String {
-        if self.transcript_wrapped_lines.is_empty() {
-            return String::new();
+        selected_text_from_lines(
+            &self.transcript_wrapped_lines,
+            self.transcript_inner_area.width,
+            sel,
+        )
+    }
+
+    fn extract_subagent_selected_text(&self, sel: DocSelection) -> String {
+        selected_text_from_lines(
+            &self.subagent_view_cache.doc_lines,
+            self.subagent_view_cache.body.width,
+            sel,
+        )
+    }
+
+    fn handle_subagent_selection_mouse(
+        &mut self,
+        kind: MouseEventKind,
+        column: u16,
+        row: u16,
+        modifiers: KeyModifiers,
+    ) -> bool {
+        let subagent = matches!(
+            self.modal,
+            Some(ActiveModal::RunDetail {
+                run: RunTarget::Subagent(_),
+                ..
+            })
+        );
+        if !subagent {
+            return false;
         }
-        let max_line = self.transcript_wrapped_lines.len() - 1;
-        let a = DocPos {
-            line: sel.anchor.line.min(max_line),
-            col: sel.anchor.col,
-        };
-        let b = DocPos {
-            line: sel.head.line.min(max_line),
-            col: sel.head.col,
-        };
-        let (start, end) = if (a.line, a.col) <= (b.line, b.col) {
-            (a, b)
-        } else {
-            (b, a)
-        };
-
-        let mut out = String::new();
-        let max_width_col = self.transcript_inner_area.width.saturating_sub(1) as usize;
-        let mut prev_joined_soft = false;
-
-        for (line_idx, row) in self
-            .transcript_wrapped_lines
-            .iter()
-            .enumerate()
-            .take(end.line + 1)
-            .skip(start.line)
-        {
-            let chars: Vec<char> = row.text.chars().collect();
-            let start_display = if line_idx == start.line { start.col } else { 0 };
-            let end_display = if line_idx == end.line {
-                end.col
-            } else {
-                max_width_col
-            };
-            let c_start = display_to_char(&row.text, start_display);
-            let c_end = display_to_char(&row.text, end_display);
-            let skip = row.gutter_len.max(row.hang_len);
-            let effective_start = c_start.max(skip);
-            let slice_str = if effective_start < chars.len() && effective_start <= c_end {
-                let clamped_end = c_end.min(chars.len() - 1);
-                let raw: String = chars[effective_start..=clamped_end].iter().collect();
-                if row.soft_wrapped_next && line_idx < end.line && clamped_end == chars.len() - 1 {
-                    raw
-                } else {
-                    raw.trim_end().to_string()
+        let body = self.subagent_view_cache.body;
+        let inside = rect_contains(body, column, row);
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) if inside => {
+                let Some(pos) = self.subagent_doc_pos(column, row) else {
+                    return false;
+                };
+                if modifiers.contains(KeyModifiers::SHIFT)
+                    && let Some(anchor) = self.subagent_view_cache.anchor
+                {
+                    let sel = DocSelection {
+                        anchor,
+                        head: pos,
+                        active: false,
+                    };
+                    let text = self.extract_subagent_selected_text(sel);
+                    if !text.is_empty() {
+                        self.copy_text_to_clipboard(&text);
+                    }
+                    self.subagent_view_cache.selection = Some(sel);
+                    return true;
                 }
-            } else {
-                String::new()
-            };
-
-            if line_idx > start.line && !prev_joined_soft {
-                out.push('\n');
+                self.subagent_view_cache.anchor = Some(pos);
+                self.subagent_view_cache.selection = Some(DocSelection {
+                    anchor: pos,
+                    head: pos,
+                    active: true,
+                });
+                true
             }
-            out.push_str(&slice_str);
-            prev_joined_soft = row.soft_wrapped_next
-                && line_idx < end.line
-                && (chars.is_empty() || c_end >= chars.len().saturating_sub(1));
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(mut sel) = self.subagent_view_cache.selection else {
+                    return false;
+                };
+                if !sel.active {
+                    return false;
+                }
+                if row < body.y {
+                    self.scroll_subagent_view(-1);
+                } else if row >= body.y.saturating_add(body.height) {
+                    self.scroll_subagent_view(1);
+                }
+                if let Some(pos) = self.subagent_doc_pos(column, row) {
+                    sel.head = pos;
+                }
+                self.subagent_view_cache.selection = Some(sel);
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some(mut sel) = self.subagent_view_cache.selection.take() else {
+                    return false;
+                };
+                if !sel.active {
+                    return false;
+                }
+                sel.active = false;
+                if sel.anchor != sel.head {
+                    let text = self.extract_subagent_selected_text(sel);
+                    if !text.is_empty() {
+                        self.copy_text_to_clipboard(&text);
+                    }
+                }
+                self.subagent_view_cache.selection = Some(sel);
+                true
+            }
+            _ => false,
         }
+    }
 
-        out.trim_matches('\n').to_string()
+    fn subagent_doc_pos(&self, column: u16, row: u16) -> Option<DocPos> {
+        let body = self.subagent_view_cache.body;
+        let lines = &self.subagent_view_cache.doc_lines;
+        if lines.is_empty() || body.width == 0 || body.height == 0 {
+            return None;
+        }
+        let max_line = lines.len() - 1;
+        let scroll = self.subagent_view_cache.scroll;
+        let line = if row < body.y {
+            scroll.min(max_line)
+        } else if row >= body.y.saturating_add(body.height) {
+            (scroll + body.height as usize - 1).min(max_line)
+        } else {
+            (scroll + (row - body.y) as usize).min(max_line)
+        };
+        let col = if row < body.y || column < body.x {
+            0
+        } else if column >= body.x.saturating_add(body.width) {
+            body.width as usize - 1
+        } else {
+            (column - body.x) as usize
+        };
+        Some(DocPos { line, col })
+    }
+
+    fn scroll_subagent_view(&mut self, delta: isize) {
+        if let Some(ActiveModal::RunDetail { scroll, .. }) = &mut self.modal {
+            let max = self.run_detail_max_scroll;
+            let next = if delta < 0 {
+                scroll.saturating_sub(1)
+            } else {
+                scroll.saturating_add(1).min(max)
+            };
+            *scroll = next;
+            self.subagent_view_cache.scroll = next;
+        }
     }
 
     pub fn selection_bounds(&self, anchor: ScreenPos) -> Rect {
@@ -1259,10 +1342,15 @@ impl AppState {
                 true
             }
             Some(TranscriptEntry::Subagent(entry)) if entry.child_session_id.is_some() => {
-                entry.expanded = !entry.expanded;
-                if entry.expanded {
-                    load_child = Some(entry.id.clone());
-                }
+                let item_id = entry.id.clone();
+                self.subagent_view_cache.selection = None;
+                self.subagent_view_cache.anchor = None;
+                self.modal = Some(ActiveModal::RunDetail {
+                    run: RunTarget::Subagent(entry_idx),
+                    selected: 0,
+                    scroll: 0,
+                });
+                load_child = Some(item_id);
                 true
             }
             Some(TranscriptEntry::User { .. }) => {
@@ -1275,7 +1363,7 @@ impl AppState {
             _ => false,
         };
         if let Some(item_id) = load_child {
-            self.request_child_session_load(&item_id, false);
+            self.request_child_session_load(&item_id, true);
         }
         toggled
     }
@@ -2414,4 +2502,67 @@ fn char_to_byte(text: &str, char_index: usize) -> usize {
     text.char_indices()
         .nth(char_index)
         .map_or(text.len(), |(index, _)| index)
+}
+
+fn selected_text_from_lines(
+    lines: &[TranscriptWrappedLine],
+    width: u16,
+    sel: DocSelection,
+) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    let max_line = lines.len() - 1;
+    let a = DocPos {
+        line: sel.anchor.line.min(max_line),
+        col: sel.anchor.col,
+    };
+    let b = DocPos {
+        line: sel.head.line.min(max_line),
+        col: sel.head.col,
+    };
+    let (start, end) = if (a.line, a.col) <= (b.line, b.col) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+
+    let mut out = String::new();
+    let max_width_col = width.saturating_sub(1) as usize;
+    let mut prev_joined_soft = false;
+
+    for (line_idx, row) in lines.iter().enumerate().take(end.line + 1).skip(start.line) {
+        let chars: Vec<char> = row.text.chars().collect();
+        let start_display = if line_idx == start.line { start.col } else { 0 };
+        let end_display = if line_idx == end.line {
+            end.col
+        } else {
+            max_width_col
+        };
+        let c_start = display_to_char(&row.text, start_display);
+        let c_end = display_to_char(&row.text, end_display);
+        let skip = row.gutter_len.max(row.hang_len);
+        let effective_start = c_start.max(skip);
+        let slice_str = if effective_start < chars.len() && effective_start <= c_end {
+            let clamped_end = c_end.min(chars.len() - 1);
+            let raw: String = chars[effective_start..=clamped_end].iter().collect();
+            if row.soft_wrapped_next && line_idx < end.line && clamped_end == chars.len() - 1 {
+                raw
+            } else {
+                raw.trim_end().to_string()
+            }
+        } else {
+            String::new()
+        };
+
+        if line_idx > start.line && !prev_joined_soft {
+            out.push('\n');
+        }
+        out.push_str(&slice_str);
+        prev_joined_soft = row.soft_wrapped_next
+            && line_idx < end.line
+            && (chars.is_empty() || c_end >= chars.len().saturating_sub(1));
+    }
+
+    out.trim_matches('\n').to_string()
 }

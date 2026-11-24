@@ -35,6 +35,7 @@ use meerai_policy::ApprovalMode;
 pub use meerai_policy::{approval_mode_badge, approval_mode_label, parse_approval_mode};
 use meerai_session::{LoggedEvent, SessionId, SessionSummary};
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use tokio::sync::mpsc;
 
@@ -1297,6 +1298,19 @@ impl TranscriptRenderCache {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct SubagentViewCache {
+    pub(crate) key: Option<(u64, usize, u64, u16)>,
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) doc_lines: Vec<TranscriptWrappedLine>,
+    pub(crate) bands: Vec<(usize, usize)>,
+    pub(crate) code_bands: Vec<(usize, usize)>,
+    pub(crate) body: Rect,
+    pub(crate) scroll: usize,
+    pub(crate) selection: Option<DocSelection>,
+    pub(crate) anchor: Option<DocPos>,
+}
+
 pub struct AppState {
     pub mode: InputMode,
     pub workspace_root: PathBuf,
@@ -1392,6 +1406,7 @@ pub struct AppState {
     pub last_mouse_pos: Option<ScreenPos>,
     pub transcript_wrapped_lines: Vec<TranscriptWrappedLine>,
     pub(crate) transcript_cache: TranscriptRenderCache,
+    pub(crate) subagent_view_cache: SubagentViewCache,
     pub screen_lines: Vec<Vec<String>>,
     pub last_copied_text: Option<String>,
     key_status_cache: RefCell<HashMap<String, KeyStatus>>,
@@ -1572,6 +1587,7 @@ impl AppState {
             last_mouse_pos: None,
             transcript_wrapped_lines: Vec::new(),
             transcript_cache: TranscriptRenderCache::default(),
+            subagent_view_cache: SubagentViewCache::default(),
             screen_lines: Vec::new(),
             last_copied_text: None,
             key_status_cache: RefCell::new(HashMap::new()),
@@ -1704,6 +1720,7 @@ impl AppState {
         self.last_transcript_anchor = None;
         self.transcript_wrapped_lines.clear();
         self.transcript_cache.clear();
+        self.subagent_view_cache = SubagentViewCache::default();
         self.queued_hit_zones.clear();
         self.hovered_queued = None;
         self.hovered_status = None;

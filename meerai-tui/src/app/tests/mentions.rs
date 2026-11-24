@@ -130,6 +130,26 @@ fn submitting_bare_goal_applies_the_builtin_skill() {
 }
 
 #[test]
+fn submitting_bare_goal_uses_the_builtin_goal_skill() {
+    let (mut app, mut rx, _secrets) = test_app();
+    app.skills = meerai_common::definitions::builtin_skills();
+
+    submit(&mut app, "@goal ship the fix");
+
+    match rx.try_recv().unwrap() {
+        AgentCommand::ApplySkill { name, instructions } => {
+            assert_eq!(name, "goal");
+            assert!(instructions.contains("Goal loop"));
+        }
+        other => panic!("expected ApplySkill for the builtin goal, got {other:?}"),
+    }
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::SubmitPrompt("ship the fix".to_string())
+    );
+}
+
+#[test]
 fn mention_popup_arrows_and_tab_insert_without_submitting() {
     let (mut app, mut rx, _secrets) = test_app();
     app.agents = vec![sample_agent(

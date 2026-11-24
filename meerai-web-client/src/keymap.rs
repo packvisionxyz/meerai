@@ -46,10 +46,6 @@ pub fn handle_global_key(store: StoreHandle, ev: &web_sys::KeyboardEvent) {
             Some(ActiveModal::ShellRun {
                 from_runs: Some(kind),
                 ..
-            })
-            | Some(ActiveModal::SubagentOverlay {
-                from_runs: Some(kind),
-                ..
             }) => EscapeAction::BackToRuns(*kind),
             Some(_) => EscapeAction::Close,
         });

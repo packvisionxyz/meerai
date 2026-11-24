@@ -150,6 +150,14 @@ impl EffortLevel {
             Self::High => Self::Low,
         }
     }
+
+    pub fn cycle_back(self) -> Self {
+        match self {
+            Self::Low => Self::High,
+            Self::Medium => Self::Low,
+            Self::High => Self::Medium,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -1309,28 +1309,6 @@ kbd {
   border-left: 1px solid var(--line);
 }
 
-.child-line {
-  min-width: 0;
-  max-width: 100%;
-  margin: 3px 0;
-  font-size: 11.5px;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
-
-.child-line.tool {
-  color: var(--m-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
-
-.child-line.system {
-  color: var(--m-faint);
-}
-
-.child-line.error {
-  color: var(--m-error);
-}
-
 .question-card {
   min-width: 0;
   max-width: 100%;
@@ -1777,6 +1755,55 @@ kbd {
 
 .modal-wide {
   width: min(980px, 100%);
+}
+
+.modal-full {
+  width: min(1200px, 100%);
+  height: min(92vh, 100%);
+  max-height: none;
+}
+
+.modal-full .modal-body {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+
+.subagent-view {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  padding: var(--dialog-padding);
+}
+
+.subagent-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 20px;
+  align-items: center;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.subagent-meta .kv {
+  padding: 0;
+  border: 0;
+}
+
+.subagent-conversation {
+  min-width: 0;
+  min-height: 0;
+  padding: 12px 0;
+  background: var(--bg);
+}
+
+.subagent-conversation .child-entry {
+  margin: 10px 0;
+}
+
+.subagent-conversation .child-turn {
+  margin-top: 14px;
 }
 
 .modal-head {

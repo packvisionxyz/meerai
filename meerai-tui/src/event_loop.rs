@@ -136,6 +136,9 @@ pub async fn run_event_loop(
             maybe_term = term_events.next() => {
                 match maybe_term {
                     Some(Ok(ev)) => {
+                        if matches!(ev, crossterm::event::Event::Resize(..)) {
+                            crate::terminal::reassert_keyboard_enhancement();
+                        }
                         if app.handle_terminal_event(ev) {
                             needs_redraw = true;
                         }

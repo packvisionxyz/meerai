@@ -11,7 +11,6 @@ use crossterm::event::{
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-    supports_keyboard_enhancement,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Frame, Terminal};
@@ -67,16 +66,35 @@ fn setup_screen() -> Result<()> {
         EnableBracketedPaste,
         EnableMouseCapture
     )?;
-    if matches!(supports_keyboard_enhancement(), Ok(true))
-        && execute!(
-            io::stdout(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        )
-        .is_ok()
+    push_keyboard_enhancement();
+    Ok(())
+}
+
+fn keyboard_enhancement() -> KeyboardEnhancementFlags {
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+}
+
+fn push_keyboard_enhancement() {
+    if execute!(
+        io::stdout(),
+        PushKeyboardEnhancementFlags(keyboard_enhancement())
+    )
+    .is_ok()
     {
         KEYBOARD_ENHANCED.store(true, Ordering::Relaxed);
     }
-    Ok(())
+}
+
+pub fn reassert_keyboard_enhancement() {
+    if !KEYBOARD_ENHANCED.load(Ordering::Relaxed) {
+        return;
+    }
+    let _ = execute!(
+        io::stdout(),
+        PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags(keyboard_enhancement())
+    );
 }
 
 pub fn restore_terminal() {
@@ -165,4 +183,16 @@ fn install_panic_hook() {
             previous(info);
         }));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyboard_enhancement_reports_alternate_keys_for_shifted_text() {
+        let flags = keyboard_enhancement();
+        assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
+    }
 }

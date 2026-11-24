@@ -63,6 +63,8 @@ impl AppState {
                 Some(TranscriptEntry::Subagent(subagent)) => subagent.id.clone(),
                 _ => return,
             };
+            self.subagent_view_cache.selection = None;
+            self.subagent_view_cache.anchor = None;
             self.request_child_session_load(&item_id, true);
         }
         self.modal = Some(ActiveModal::RunDetail {

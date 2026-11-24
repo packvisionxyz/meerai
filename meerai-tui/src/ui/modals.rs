@@ -1867,7 +1867,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                     )),
                     Line::from(tier_spans),
                     Line::from(Span::styled(
-                        "Left/Right or l/m/h",
+                        "Left/Right cycles · l/m/h picks",
                         Style::default().fg(theme::p().faint),
                     )),
                 ]),
@@ -1925,7 +1925,8 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             frame.render_widget(
                 key_hints_line(&[
                     ("Tab", "field"),
-                    ("l/m/h", "effort"),
+                    ("←/→", "effort"),
+                    ("l/m/h", "pick"),
                     ("Enter", "save"),
                     ("Esc", "cancel"),
                 ]),
@@ -2231,10 +2232,9 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 rows[1],
             );
         }
-        ActiveModal::RunDetail { run, scroll, .. } => {
-            let mut report_markdown: Option<String> = None;
-            let (title, lines) = match run {
-                RunTarget::Subagent(index) => {
+        ActiveModal::RunDetail { run, scroll, .. } => match run {
+            RunTarget::Subagent(index) => {
+                let (title, nested_loaded, loading, report) = {
                     let Some(TranscriptEntry::Subagent(subagent)) = app.tab().transcript.get(index)
                     else {
                         return;
@@ -2244,105 +2244,174 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                     } else {
                         format!("Agent — {}", subagent.agent)
                     };
-                    let lines = match &subagent.nested {
-                        Some(nested) if !nested.is_empty() => {
-                            crate::ui::transcript::nested_conversation_lines(nested, index)
-                        }
-                        _ if subagent.nested_loading => vec![Line::from(Span::styled(
-                            "loading conversation…",
-                            Style::default().fg(theme::p().faint),
-                        ))],
-                        _ => match &subagent.report {
-                            Some(report) if !report.trim().is_empty() => {
-                                report_markdown = Some(report.clone());
-                                Vec::new()
+                    (
+                        title,
+                        subagent.nested.is_some(),
+                        subagent.nested_loading,
+                        subagent.report.clone(),
+                    )
+                };
+                let popup = if app.transcript_area.width > 0 && app.transcript_area.height > 0 {
+                    app.transcript_area
+                } else {
+                    cap_width(centered_rect(area, 92, 88, 56, 14), 140)
+                };
+                dim_backdrop(frame, area, popup);
+                let inner = dialog_frame(frame, app, popup, &title, true);
+                let rows =
+                    Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+                let body = rows[0];
+                let width = (body.width as usize).max(1);
+                let lines = if nested_loaded {
+                    super::transcript::subagent_view_lines(app, index, body.width)
+                } else if loading {
+                    vec![Line::from(Span::styled(
+                        "loading conversation…",
+                        Style::default().fg(theme::p().faint),
+                    ))]
+                } else if let Some(report) = report.filter(|report| !report.trim().is_empty()) {
+                    super::transcript::markdown_lines(&report, width)
+                } else {
+                    vec![Line::from(Span::styled(
+                        "conversation unavailable",
+                        Style::default().fg(theme::p().faint),
+                    ))]
+                };
+                let max_scroll = lines.len().saturating_sub(body.height as usize);
+                app.run_detail_max_scroll = max_scroll;
+                let scroll = scroll.min(max_scroll).min(u16::MAX as usize) as u16;
+                app.subagent_view_cache.body = body;
+                app.subagent_view_cache.scroll = scroll as usize;
+                frame.render_widget(
+                    Block::default().style(Style::default().bg(theme::p().background)),
+                    body,
+                );
+                frame.render_widget(
+                    Paragraph::new(lines)
+                        .scroll((scroll, 0))
+                        .style(Style::default().fg(theme::p().text)),
+                    body,
+                );
+                if nested_loaded {
+                    let first = scroll as usize;
+                    let last =
+                        (first + body.height as usize).min(app.subagent_view_cache.lines.len());
+                    for &(start, end) in &app.subagent_view_cache.bands {
+                        let from = start.max(first);
+                        let to = end.min(last);
+                        for row in from..to {
+                            let y = body.y + (row - first) as u16;
+                            let buf = frame.buffer_mut();
+                            for col in body.x..body.x.saturating_add(body.width) {
+                                if let Some(cell) = buf.cell_mut((col, y)) {
+                                    cell.set_bg(theme::p().surface);
+                                }
                             }
-                            _ => vec![Line::from(Span::styled(
-                                "conversation unavailable",
-                                Style::default().fg(theme::p().faint),
-                            ))],
-                        },
-                    };
-                    (title, lines)
+                        }
+                    }
+                    for &(start, end) in &app.subagent_view_cache.code_bands {
+                        let from = start.max(first);
+                        let to = end.min(last);
+                        let start_x = body.x.saturating_add(2).min(body.x + body.width);
+                        for row in from..to {
+                            let y = body.y + (row - first) as u16;
+                            let buf = frame.buffer_mut();
+                            for col in start_x..body.x.saturating_add(body.width) {
+                                if let Some(cell) = buf.cell_mut((col, y)) {
+                                    cell.set_bg(theme::p().surface_high);
+                                }
+                            }
+                        }
+                    }
                 }
-                RunTarget::Shell(id) => {
-                    let Some(run) = app.shell_run(id) else {
-                        return;
-                    };
-                    let elapsed = crate::ui::statusline::format_compact_ms(
-                        meerai_core::env::now_millis().saturating_sub(run.started_ms),
+                if let Some(selection) = app.subagent_view_cache.selection {
+                    super::selection::render_doc_selection(
+                        frame,
+                        body,
+                        scroll as usize,
+                        &app.subagent_view_cache.doc_lines,
+                        selection,
                     );
-                    let title = format!("Shell — !{}", truncate_single_line(&run.command, 40));
-                    let (status, color) = match run.status {
-                        ShellRunStatus::Running => {
-                            (format!("running · {elapsed}"), theme::p().warning)
-                        }
-                        ShellRunStatus::Succeeded => ("finished".to_string(), theme::p().success),
-                        ShellRunStatus::Failed => ("failed".to_string(), theme::p().error),
-                    };
-                    let mut lines = vec![
-                        Line::from(vec![
-                            Span::styled("$ ", Style::default().fg(theme::p().accent)),
-                            Span::styled(
-                                run.command.clone(),
-                                Style::default()
-                                    .fg(theme::p().text)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                        ]),
-                        Line::from(Span::styled(status, Style::default().fg(color))),
-                        Line::from(""),
-                    ];
-                    match &run.output {
-                        Some(output) => {
-                            lines.extend(output.lines().map(|line| Line::from(line.to_string())))
-                        }
-                        None => lines.push(Line::from(Span::styled(
-                            "waiting for output…",
-                            Style::default().fg(theme::p().faint),
-                        ))),
-                    }
-                    (title, lines)
                 }
-            };
-            let popup = centered_rect(area, 84, 76, 56, 14);
-            dim_backdrop(frame, area, popup);
-            let inner = dialog_frame(frame, app, popup, &title, true);
-            let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
-            let body = rows[0];
-            let width = (body.width as usize).max(1);
-            let wrapped_lines: Vec<Line<'static>> = match report_markdown {
-                Some(report) => super::transcript::markdown_lines(&report, width),
-                None => {
-                    let mut wrapped_lines: Vec<Line<'static>> = Vec::new();
-                    for line in lines {
-                        let text: String = line
-                            .spans
-                            .iter()
-                            .map(|span| span.content.as_ref())
-                            .collect();
-                        for (start, end) in wrap_queued_editor(&text, width) {
-                            wrapped_lines.push(Line::from(Span::styled(
-                                text[start..end].to_string(),
-                                Style::default().fg(theme::p().text),
-                            )));
-                        }
+                frame.render_widget(
+                    Paragraph::new(key_hints_line(&[
+                        ("drag", "copy"),
+                        ("j/k", "scroll"),
+                        ("G", "end"),
+                        ("Esc", "back"),
+                    ])),
+                    rows[1],
+                );
+            }
+            RunTarget::Shell(id) => {
+                let Some(run) = app.shell_run(id) else {
+                    return;
+                };
+                let elapsed = crate::ui::statusline::format_compact_ms(
+                    meerai_core::env::now_millis().saturating_sub(run.started_ms),
+                );
+                let title = format!("Shell — !{}", truncate_single_line(&run.command, 40));
+                let (status, color) = match run.status {
+                    ShellRunStatus::Running => (format!("running · {elapsed}"), theme::p().warning),
+                    ShellRunStatus::Succeeded => ("finished".to_string(), theme::p().success),
+                    ShellRunStatus::Failed => ("failed".to_string(), theme::p().error),
+                };
+                let mut lines = vec![
+                    Line::from(vec![
+                        Span::styled("$ ", Style::default().fg(theme::p().accent)),
+                        Span::styled(
+                            run.command.clone(),
+                            Style::default()
+                                .fg(theme::p().text)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(Span::styled(status, Style::default().fg(color))),
+                    Line::from(""),
+                ];
+                match &run.output {
+                    Some(output) => {
+                        lines.extend(output.lines().map(|line| Line::from(line.to_string())))
                     }
-                    wrapped_lines
+                    None => lines.push(Line::from(Span::styled(
+                        "waiting for output…",
+                        Style::default().fg(theme::p().faint),
+                    ))),
                 }
-            };
-            let max_scroll = wrapped_lines.len().saturating_sub(body.height as usize);
-            app.run_detail_max_scroll = max_scroll;
-            frame.render_widget(
-                Paragraph::new(wrapped_lines)
-                    .scroll((scroll.min(max_scroll).min(u16::MAX as usize) as u16, 0)),
-                body,
-            );
-            frame.render_widget(
-                Paragraph::new(key_hints_line(&[("j/k", "scroll"), ("Esc", "back")])),
-                rows[1],
-            );
-        }
+                let popup = centered_rect(area, 84, 76, 56, 14);
+                dim_backdrop(frame, area, popup);
+                let inner = dialog_frame(frame, app, popup, &title, true);
+                let rows =
+                    Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+                let body = rows[0];
+                let width = (body.width as usize).max(1);
+                let mut wrapped_lines: Vec<Line<'static>> = Vec::new();
+                for line in lines {
+                    let text: String = line
+                        .spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect();
+                    for (start, end) in wrap_queued_editor(&text, width) {
+                        wrapped_lines.push(Line::from(Span::styled(
+                            text[start..end].to_string(),
+                            Style::default().fg(theme::p().text),
+                        )));
+                    }
+                }
+                let max_scroll = wrapped_lines.len().saturating_sub(body.height as usize);
+                app.run_detail_max_scroll = max_scroll;
+                frame.render_widget(
+                    Paragraph::new(wrapped_lines)
+                        .scroll((scroll.min(max_scroll).min(u16::MAX as usize) as u16, 0)),
+                    body,
+                );
+                frame.render_widget(
+                    Paragraph::new(key_hints_line(&[("j/k", "scroll"), ("Esc", "back")])),
+                    rows[1],
+                );
+            }
+        },
         ActiveModal::Question {
             request,
             answers,

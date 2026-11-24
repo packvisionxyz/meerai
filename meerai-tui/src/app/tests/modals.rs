@@ -1571,6 +1571,76 @@ fn sampling_effort_keys_work_from_the_temperature_field() {
 }
 
 #[test]
+fn sampling_arrows_cycle_every_effort_tier() {
+    let (mut app, _rx, _secrets) = test_app();
+    submit(&mut app, "/effort");
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::Sampling {
+            effort: None,
+            field: 0,
+            ..
+        })
+    ));
+
+    let tier = |app: &AppState| match &app.modal {
+        Some(ActiveModal::Sampling { effort, .. }) => *effort,
+        _ => panic!("sampling modal closed"),
+    };
+
+    app.handle_key_event(key(KeyCode::Right));
+    assert_eq!(tier(&app), Some(EffortLevel::High));
+    app.handle_key_event(key(KeyCode::Right));
+    assert_eq!(tier(&app), Some(EffortLevel::Low));
+    app.handle_key_event(key(KeyCode::Right));
+    assert_eq!(tier(&app), Some(EffortLevel::Medium));
+    app.handle_key_event(key(KeyCode::Left));
+    assert_eq!(tier(&app), Some(EffortLevel::Low));
+    app.handle_key_event(key(KeyCode::Left));
+    assert_eq!(tier(&app), Some(EffortLevel::High));
+    app.handle_key_event(key(KeyCode::Left));
+    assert_eq!(tier(&app), Some(EffortLevel::Medium));
+}
+
+#[test]
+fn sampling_arrows_cycle_effort_from_the_temperature_field() {
+    let (mut app, _rx, _secrets) = test_app();
+    submit(&mut app, "/temperature");
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::Sampling { field: 1, .. })
+    ));
+
+    app.handle_key_event(key(KeyCode::Right));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::Sampling {
+            effort: Some(EffortLevel::High),
+            field: 1,
+            ..
+        })
+    ));
+    app.handle_key_event(key(KeyCode::Right));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::Sampling {
+            effort: Some(EffortLevel::Low),
+            field: 1,
+            ..
+        })
+    ));
+    app.handle_key_event(key(KeyCode::Left));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::Sampling {
+            effort: Some(EffortLevel::High),
+            field: 1,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn sampling_temperature_field_accepts_the_default_keyword() {
     let (mut app, _rx, _secrets) = test_app();
     submit(&mut app, "/temperature");

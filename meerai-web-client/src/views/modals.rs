@@ -2057,61 +2057,60 @@ fn SubagentModal(store: StoreHandle) -> impl IntoView {
         });
     }
 
+    let render_epoch = Memo::new(move |_| {
+        store.with(|s| {
+            s.active_tab()
+                .map(|tab| {
+                    (
+                        tab.entries_version,
+                        tab.expanded_tools.len(),
+                        tab.expanded_reasoning.len(),
+                        tab.expanded_subagents.len(),
+                    )
+                })
+                .unwrap_or((0, 0, 0, 0))
+        })
+    });
+
     let body = view! {
         {move || {
+            let _ = render_epoch.get();
             let Some((name, agent, status, child_session_id, entries, usage, loading, error)) = sub_state.get() else {
                 return view! { <span></span> }.into_any();
             };
-            let lines = entries
-                .iter()
-                .filter_map(|entry| match entry {
-                    meerai_web_protocol::TranscriptEntryDto::Assistant { text, .. }
-                        if !text.trim().is_empty() =>
-                    {
-                        Some(view! { <div class="child-line">{text.clone()}</div> }.into_any())
-                    }
-                    meerai_web_protocol::TranscriptEntryDto::ToolCall { name, status, .. } => Some(
-                        view! { <div class="child-line tool">{format!("{name} · {status}")}</div> }
-                            .into_any(),
-                    ),
-                    meerai_web_protocol::TranscriptEntryDto::System { text, .. } => {
-                        Some(view! { <div class="child-line system">{text.clone()}</div> }.into_any())
-                    }
-                    meerai_web_protocol::TranscriptEntryDto::Error { message, .. } => {
-                        Some(view! { <div class="child-line error">{message.clone()}</div> }.into_any())
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
             let refresh_id = child_session_id.clone();
             view! {
-                <div class="modal-form">
-                    <div class="kv"><span>"Agent"</span><strong>{name.clone().unwrap_or_else(|| agent.clone())}</strong></div>
-                    {name.map(|_| view! { <div class="kv"><span>"Preset"</span><strong>{agent.clone()}</strong></div> })}
-                    <div class="kv"><span>"Status"</span><strong>{status}</strong></div>
-                    <div class="kv"><span>"Child session"</span><code>{child_session_id.unwrap_or_else(|| "none".to_owned())}</code></div>
-                    {usage.map(|usage| view! {
-                        <div class="kv"><span>"Usage"</span><strong>{format!(
-                            "↑{} ↓{} · Σ{}",
-                            format_tokens(usage.prompt_tokens.unwrap_or(0).max(0) as u64),
-                            format_tokens(usage.completion_tokens.unwrap_or(0).max(0) as u64),
-                            format_tokens(usage.total_tokens.unwrap_or(0).max(0) as u64),
-                        )}</strong></div>
-                    }.into_any())}
-                    {error.map(|error| view! { <div class="banner error">{error}</div> }.into_any())}
-                    <Show when=move || loading>
-                        <div class="hint">"Loading child transcript…"</div>
-                    </Show>
-                    {refresh_id.map(|cid| view! {
-                        <div>
+                <div class="subagent-view">
+                    <div class="subagent-meta">
+                        <div class="kv"><span>"Agent"</span><strong>{name.clone().unwrap_or_else(|| agent.clone())}</strong></div>
+                        {name.map(|_| view! { <div class="kv"><span>"Preset"</span><strong>{agent.clone()}</strong></div> })}
+                        <div class="kv"><span>"Status"</span><strong>{status}</strong></div>
+                        {child_session_id.clone().map(|child| view! { <div class="kv"><span>"Child session"</span><code>{child}</code></div> }).into_any()}
+                        {usage.map(|usage| view! {
+                            <div class="kv"><span>"Usage"</span><strong>{format!(
+                                "↑{} ↓{} · Σ{}",
+                                format_tokens(usage.prompt_tokens.unwrap_or(0).max(0) as u64),
+                                format_tokens(usage.completion_tokens.unwrap_or(0).max(0) as u64),
+                                format_tokens(usage.total_tokens.unwrap_or(0).max(0) as u64),
+                            )}</strong></div>
+                        }.into_any())}
+                        {refresh_id.map(|cid| view! {
                             <button class="btn tiny" on:click=move |_| {
                                 if let Some(t) = crate::transport::current() {
                                     t.fetch_session_events(cid.clone(), true);
                                 }
                             }>"Refresh"</button>
-                        </div>
-                    }.into_any())}
-                    <div class="child-transcript">{AnyView::from(Fragment::new(lines))}</div>
+                        }.into_any())}
+                    </div>
+                    {error.map(|error| view! { <div class="banner error">{error}</div> }.into_any())}
+                    <Show when=move || loading>
+                        <div class="hint">"Loading child transcript…"</div>
+                    </Show>
+                    {if entries.is_empty() && !loading {
+                        view! { <div class="hint">"This agent has no conversation yet."</div> }.into_any()
+                    } else {
+                        crate::views::transcript::render_child_transcript(store, &entries)
+                    }}
                 </div>
             }
             .into_any()
@@ -2127,7 +2126,7 @@ fn SubagentModal(store: StoreHandle) -> impl IntoView {
             _ => "Subagent".to_owned(),
         })
     };
-    shell_reactive(
+    shell_reactive_full(
         title,
         store,
         body,
@@ -2404,6 +2403,25 @@ fn shell_reactive(
     body: AnyView,
     actions: AnyView,
 ) -> AnyView {
+    shell_reactive_class(title, store, body, actions, "modal")
+}
+
+fn shell_reactive_full(
+    title: impl Fn() -> String + Send + 'static,
+    store: StoreHandle,
+    body: AnyView,
+    actions: AnyView,
+) -> AnyView {
+    shell_reactive_class(title, store, body, actions, "modal modal-full")
+}
+
+fn shell_reactive_class(
+    title: impl Fn() -> String + Send + 'static,
+    store: StoreHandle,
+    body: AnyView,
+    actions: AnyView,
+    class: &'static str,
+) -> AnyView {
     view! {
         <div
             class="modal-backdrop"
@@ -2413,7 +2431,7 @@ fn shell_reactive(
                 }
             }
         >
-            <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabindex="-1">
+            <div class=class role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabindex="-1">
                 <div class="modal-head">
                     <h2 id="dialog-title">{move || title()}</h2>
                     <button class="modal-close" aria-label="Close dialog" title="Close (Esc)" on:click=move |_| store.update(|s| s.modal = None)>"×"</button>

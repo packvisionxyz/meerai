@@ -899,6 +899,9 @@ pub(super) fn parse_mentions(
 }
 
 pub(crate) fn parse_mention_token(text: &str, start: usize) -> Option<(MentionKind, &str, usize)> {
+    if !text.get(start..).is_some_and(|rest| rest.starts_with('@')) {
+        return None;
+    }
     let rest = text.get(start + 1..)?;
     let (kind, rest) = if let Some(rest) = rest.strip_prefix("agent/") {
         (MentionKind::Agent, rest)

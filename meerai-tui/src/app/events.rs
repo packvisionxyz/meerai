@@ -984,19 +984,10 @@ impl AppState {
         entry.nested_loading = false;
         entry.nested_refreshed_at = Some(Instant::now());
         if let Ok(events) = result {
-            entry.nested = Some(newest_nested(transcript_from_events(&events)));
+            entry.nested = Some(transcript_from_events(&events));
         }
         tab.transcript_version = tab.transcript_version.wrapping_add(1);
     }
-}
-
-const MAX_NESTED_ENTRIES: usize = 60;
-
-fn newest_nested(mut entries: Vec<TranscriptEntry>) -> Vec<TranscriptEntry> {
-    if entries.len() > MAX_NESTED_ENTRIES {
-        entries.drain(..entries.len() - MAX_NESTED_ENTRIES);
-    }
-    entries
 }
 
 fn error_code_label(code: ErrorCode) -> &'static str {

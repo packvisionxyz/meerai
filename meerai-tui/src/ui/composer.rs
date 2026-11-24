@@ -934,3 +934,21 @@ fn wrap_queued_preview(text: &str, first_w: usize, next_w: usize, max_lines: usi
     }
     lines
 }
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    #[test]
+    fn goal_arguments_keep_the_cursor_at_the_end() {
+        let skills = meerai_common::definitions::builtin_skills();
+        let input = "/goal 1234";
+        assert_eq!(
+            display_pos_for_byte(input, input.len(), &[], &skills),
+            (0, 10)
+        );
+        let wrapped = wrap_composer(input, input.len(), 40, &[], &skills);
+        assert_eq!(wrapped.cursor_row, 0);
+        assert_eq!(wrapped.cursor_col, 10);
+    }
+}

@@ -170,7 +170,12 @@ and click-to-open do not conflict.
   newlines, and keep the goal column when a shorter row clamps the cursor
   (`composer_vertical_move`).
 - `Enter` submits. `shift+enter`, `alt+enter`, `ctrl+enter`, and `ctrl+j`
-  insert a newline; a trailing `\` continues a line.
+  insert a newline; a trailing `\` continues a line. The TUI requests the kitty
+  keyboard protocol with alternate-key reporting on startup and re-asserts it
+  after a resize, because iTerm2 can drop the mode on a tab switch. Alternate
+  keys make shifted symbols such as `@` arrive as text. A terminal without the
+  protocol sends plain `Enter` for `shift+enter` and `ctrl+enter`; use `ctrl+j`
+  there.
 - While a turn runs, `Enter` queues the message (`Queued N message(s) ·
   ctrl+g sends now`); queued messages send in order when the turn ends.
   `ctrl+g` steers the oldest queued message (or the current draft) at the
@@ -219,8 +224,8 @@ Typing `/` opens completion. The implemented handler set
 | `/connect`, `/provider` | Configure or switch provider |
 | `/models`, `/model [name]` | Pick or set the model |
 | `/effort [low\|medium\|high]` | Set the reasoning tier, or open the sampling panel with no argument |
-| `/sampling` | Sampling panel: reasoning effort and temperature override together |
-| `/temperature` | Sampling panel focused on the temperature override. `l`/`m`/`h` and Left/Right set the tier from either field; the tier row is clickable. Type `default` to clear the override. |
+| `/sampling` | Sampling panel: reasoning effort and temperature override together. Left/Right cycle the effort tier; Tab moves between the two fields. |
+| `/temperature` | Sampling panel focused on the temperature override. Left/Right cycle the tier (`low` -> `medium` -> `high` -> `low`) and `l`/`m`/`h` pick it directly from either field; the tier row is clickable. Type `default` to clear the override. |
 | `/agent <id>`, `/skill <id>` | Apply a markdown definition |
 | `/agents` | Mentions popup filtered to agents |
 | `/skills` | Definitions panel filtered to skills |
@@ -445,11 +450,15 @@ the update hint) gets a `surface_high` background and `text` foreground while
 the pointer is over it. Clicking `N agents` or `N shells` opens the `Runs` modal
 for that kind. A row lists one running agent (name, preset, status, steps) or one
 running shell (`!command`, elapsed). `Enter` or a row click opens the detail view.
-`Esc` in the detail returns to the list; a second `Esc` closes it. The agent
-detail shows the child conversation and refreshes while the agent runs, without
-expanding the same subagent row in the transcript. The shell detail shows the
-command, status, elapsed time, and output. The list uses the normal modal frame,
-so it blocks composer input and mouse actions behind it.
+The agent detail is a full-pane overlay over the chat transcript area. `Esc`
+closes it back to the chat. It renders the child conversation with the normal
+transcript styles: Markdown, code highlighting, reasoning, tool rows and
+diffs, questions, errors, and the user band. It refreshes while the agent runs
+and does not expand the same subagent row in the transcript. A click on a
+subagent row in the transcript opens the same overlay. The shell detail keeps
+the `Esc` detail → list → closed path and shows the command, status, elapsed
+time, and output. The list uses the normal modal frame, so it blocks composer
+input and mouse actions behind it.
 
 A subagent run can carry an optional `name` (`subagent-run` or `acp-run`
 argument, `/subagent --name`, or the spawn panel `Name` field). The transcript
@@ -613,7 +622,8 @@ New dialogs stay narrow. Current caps (`meerai-tui/src/ui/modals.rs`):
 | Vault reset | ≤ 72 |
 | Subagent spawn | ≤ 70 |
 | Runs | ≤ 68 |
-| Run detail | 84% of the terminal |
+| Run detail (shell) | 84% of the terminal |
+| Agent conversation | the chat transcript area |
 | Diff | 92% of the terminal |
 | Search | 90% of the terminal |
 | Terminal (`!`) | 80% of the terminal |
@@ -662,14 +672,15 @@ opens the dialog.
   expanded caps at 200. Finished rows fade to `faint`/`muted`; a failed row
   keeps `error` in the badge. Thought blocks are click-only (`Thinking`
   while streaming, `Thought` after).
-- **Subagent folds.** Rows carrying a `child_session_id` expand to the
-  child's own conversation, loaded through
-  `SessionOpener::read_session_events` and refreshed about once per second
-  while the child runs. Nested folds cap at the newest 60 entries. The
-  nested view is display-only: its lines share the parent hit zone, so any
-  click collapses the group. The `N agents` statusline counter opens the
-  same conversation in the `Runs` detail modal instead, and that modal
-  never expands the transcript row.
+- **Subagent view.** A row carrying a `child_session_id` opens the agent
+  conversation overlay instead of expanding inline. The overlay loads the full
+  child history through `SessionOpener::read_session_events` and refreshes
+  about once per second while the child runs. It renders with the normal
+  transcript entry renderer (Markdown, code highlighting, tool rows,
+  reasoning, diffs, questions, errors, and the user band) and never expands the
+  transcript row. Drag to select and release to copy; a click then `shift+click`
+  copies to the clicked point. `Esc` closes it back to the chat. The `N agents`
+  statusline counter opens the same overlay from the `Runs` list.
 - **Markdown spacing and coverage.** Both clients parse the same `comrak`
   extension set: tables with alignment, task lists, footnotes, description
   lists, GitHub alerts, math, front matter, multiline block quotes,

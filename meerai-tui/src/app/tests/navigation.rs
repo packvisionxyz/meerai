@@ -250,7 +250,7 @@ fn drag_selection_auto_copies_within_pane_and_normal_yank_works() {
 }
 
 #[test]
-fn multiline_input_supports_ctrl_j_ctrl_enter_and_backslash_continuation() {
+fn multiline_input_supports_ctrl_j_ctrl_enter_shift_enter_alt_enter_and_backslash() {
     let (mut app, mut rx, _secrets) = test_app();
 
     type_text(&mut app, "line1");
@@ -260,12 +260,16 @@ fn multiline_input_supports_ctrl_j_ctrl_enter_and_backslash_continuation() {
     type_text(&mut app, "line3\\");
     app.handle_key_event(key(KeyCode::Enter));
     type_text(&mut app, "line4");
-    assert_eq!(app.tab().input, "line1\nline2\nline3\nline4");
+    app.handle_key_event(key_mod(KeyCode::Enter, KeyModifiers::SHIFT));
+    type_text(&mut app, "line5");
+    app.handle_key_event(key_mod(KeyCode::Enter, KeyModifiers::ALT));
+    type_text(&mut app, "line6");
+    assert_eq!(app.tab().input, "line1\nline2\nline3\nline4\nline5\nline6");
 
     app.handle_key_event(key(KeyCode::Enter));
     assert_eq!(
         rx.try_recv().unwrap(),
-        AgentCommand::SubmitPrompt("line1\nline2\nline3\nline4".to_string())
+        AgentCommand::SubmitPrompt("line1\nline2\nline3\nline4\nline5\nline6".to_string())
     );
 }
 

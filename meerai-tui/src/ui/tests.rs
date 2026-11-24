@@ -764,7 +764,7 @@ fn clicking_the_digest_expands_and_collapses_turn_activity() {
 }
 
 #[test]
-fn subagent_expands_to_show_child_conversation() {
+fn subagent_opens_a_full_child_conversation_view() {
     let mut app = test_app();
     app.tab_mut().transcript.push(TranscriptEntry::User {
         text: "go".to_string(),
@@ -805,12 +805,26 @@ fn subagent_expands_to_show_child_conversation() {
     let col = app.transcript_inner_area.x + 2;
     let row = app.transcript_inner_area.y + zone.start_line as u16;
     assert!(app.toggle_entry_at(col, row));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::RunDetail {
+            run: RunTarget::Subagent(1),
+            ..
+        })
+    ));
+    let Some(TranscriptEntry::Subagent(entry)) = app.tab().transcript.get(1) else {
+        panic!("subagent entry");
+    };
+    assert!(
+        !entry.expanded,
+        "the child view must not expand the transcript row"
+    );
 
     let loading = render_to_string(&mut app);
-    assert!(loading.contains("- [subagent] explore [ok]"));
     assert!(loading.contains("loading conversation…"));
 
     if let Some(TranscriptEntry::Subagent(entry)) = app.tab_mut().transcript.get_mut(1) {
+        entry.nested_loading = false;
         entry.nested = Some(vec![
             TranscriptEntry::User {
                 text: "find the bug".to_string(),
@@ -831,24 +845,104 @@ fn subagent_expands_to_show_child_conversation() {
             }),
         ]);
     }
+    app.tab_mut().transcript_version = app.tab().transcript_version.wrapping_add(1);
     let expanded = render_to_string(&mut app);
-    assert!(expanded.contains("you: find the bug"));
-    assert!(expanded.contains("thought (1 line)"));
+    assert!(expanded.contains("find the bug"));
+    assert!(expanded.contains("Thought (1 line)"));
+    assert!(expanded.contains("checking"));
     assert!(expanded.contains("Found it."));
-    assert!(expanded.contains("[tool] code-grep [ok]"));
+    assert!(expanded.contains("Searched"));
     assert!(!expanded.contains("final report"));
 
-    let zone = app
-        .thinking_hit_zones
-        .iter()
-        .find(|zone| zone.entry_idx == 1)
-        .copied()
-        .expect("subagent hit zone");
-    let row = app.transcript_inner_area.y + zone.start_line as u16;
-    assert!(app.toggle_entry_at(col, row));
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.modal.is_none());
     let recollapsed = render_to_string(&mut app);
     assert!(recollapsed.contains("final report"));
-    assert!(!recollapsed.contains("you: find the bug"));
+    assert!(!recollapsed.contains("find the bug"));
+}
+
+#[test]
+fn subagent_overlay_drag_copies_selected_text() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    let mut app = test_app();
+    app.tab_mut()
+        .transcript
+        .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
+            id: "sub-copy".to_string(),
+            name: None,
+            agent: "explore".to_string(),
+            status: ToolCallStatus::Succeeded,
+            report: None,
+            child_session_id: Some("ses-child".to_string()),
+            model: None,
+            approval_mode: "ask".to_string(),
+            steps_used: 1,
+            max_steps: 4,
+            usage: Default::default(),
+            est_cost_usd: None,
+            active_tool: None,
+            expanded: false,
+            nested: Some(vec![
+                TranscriptEntry::User {
+                    text: "find the bug".to_string(),
+                },
+                TranscriptEntry::Assistant {
+                    text: "Found it.".to_string(),
+                    reasoning: "checking".to_string(),
+                    streaming: false,
+                    reasoning_expanded: false,
+                },
+            ]),
+            nested_refreshed_at: None,
+            nested_loading: false,
+        }));
+    app.modal = Some(ActiveModal::RunDetail {
+        run: RunTarget::Subagent(0),
+        selected: 0,
+        scroll: 0,
+    });
+
+    let _ = render_to_string(&mut app);
+    let (body, scroll, start_line, end_line) = {
+        let cache = &app.subagent_view_cache;
+        let start = cache
+            .doc_lines
+            .iter()
+            .position(|line| line.text.contains("find the bug"))
+            .expect("user line");
+        let end = cache
+            .doc_lines
+            .iter()
+            .position(|line| line.text.contains("Found it."))
+            .expect("assistant line");
+        (cache.body, cache.scroll, start, end)
+    };
+    assert!(start_line >= scroll && end_line >= scroll);
+    let start_row = body.y + (start_line - scroll) as u16;
+    let end_row = body.y + (end_line - scroll) as u16;
+    assert!(start_row < body.y + body.height);
+    assert!(end_row < body.y + body.height);
+
+    app.handle_mouse_event(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        body.x + 2,
+        start_row,
+    ));
+    app.handle_mouse_event(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        body.x + body.width - 2,
+        end_row,
+    ));
+    app.handle_mouse_event(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        body.x + body.width - 2,
+        end_row,
+    ));
+
+    let copied = app.last_copied_text.clone().unwrap_or_default();
+    assert!(copied.contains("find the bug"), "{copied:?}");
+    assert!(copied.contains("Found it."), "{copied:?}");
 }
 
 #[test]
@@ -2702,8 +2796,6 @@ fn statusline_agents_counter_opens_runs_and_detail() {
     ));
 
     app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(matches!(app.modal, Some(ActiveModal::Runs { .. })));
-    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(app.modal.is_none());
 }
 
@@ -3474,4 +3566,32 @@ fn word_bounds_map_wide_characters_to_display_columns() {
         .position(|line| line.text.contains("test"))
         .expect("row");
     assert_eq!(app.word_bounds_at(row, 7), Some((5, 8)));
+}
+
+#[test]
+fn typing_goal_arguments_places_the_cursor_after_the_last_digit() {
+    use ratatui::layout::Position;
+
+    let mut app = test_app();
+    app.skills = meerai_common::definitions::builtin_skills();
+    for ch in "/goal 1234".chars() {
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    assert_eq!(app.tab().input, "/goal 1234");
+    assert_eq!(app.tab().cursor, 10);
+
+    let backend = TestBackend::new(120, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    let position = terminal.backend().cursor_position();
+    assert!(terminal.backend().cursor_visible());
+
+    let content = app.composer_input_area;
+    assert_eq!(
+        position,
+        Position {
+            x: content.x + 10,
+            y: content.y
+        }
+    );
 }

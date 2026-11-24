@@ -565,10 +565,13 @@ Detail in [`infra.md`](infra.md). Summary:
   (`composer_rows`) so word-wrapped rows are never clipped. All other modal fields are
   single-line append/backspace inputs without a movable cursor.
 - Running work: the statusline shows clickable `N agents` and `N shells` counters for running
-  work only. They open `ActiveModal::Runs`; a row opens `RunDetail` (the child conversation or the
-  shell command, status, and output) without expanding the transcript row. `Esc` steps detail →
-  list → closed. Clickable statusline items and sidebar panel headers get a `surface_high` hover
-  highlight. Shells are concurrent:
+  work only. They open `ActiveModal::Runs`; a row opens the agent conversation as a full
+  transcript-area overlay or the shell command, status, and output, without expanding the
+  transcript row. The agent overlay uses the normal transcript renderer (Markdown, code, tool
+  rows, reasoning, diffs, questions) and loads the full child history. A subagent row in the
+  transcript opens the same overlay. `Esc` closes the agent overlay to the chat; the shell detail
+  keeps the detail → list → closed path. Clickable statusline items and sidebar panel headers get
+  a `surface_high` hover highlight. Shells are concurrent:
   `SessionTab.shell_runs` carries a per-run id, and the host registry exposes `LiveShellRun` /
   `ShellRunDto` with `user_shell_running` derived from the list. The sidebar `AGENTS` block is
   display-only; the statusline counter is the interactive path.

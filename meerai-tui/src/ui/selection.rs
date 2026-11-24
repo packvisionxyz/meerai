@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::DocSelection;
 
 pub(super) fn render_tab_bar(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     let drag = app.tab_drag.filter(|drag| drag.moved);
@@ -195,59 +196,76 @@ pub(super) fn capture_screen_lines(frame: &mut Frame<'_>, app: &mut AppState) {
     app.screen_lines = rows;
 }
 
+pub(super) fn render_doc_selection(
+    frame: &mut Frame<'_>,
+    inner: Rect,
+    scroll: usize,
+    lines: &[TranscriptWrappedLine],
+    sel: DocSelection,
+) {
+    if sel.anchor == sel.head || lines.is_empty() || inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let max_line = lines.len() - 1;
+    let a = DocPos {
+        line: sel.anchor.line.min(max_line),
+        col: sel.anchor.col,
+    };
+    let b = DocPos {
+        line: sel.head.line.min(max_line),
+        col: sel.head.col,
+    };
+    let (start, end) = if (a.line, a.col) <= (b.line, b.col) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let vis_start = scroll;
+    let vis_end = vis_start + inner.height as usize;
+    let draw_start = start.line.max(vis_start);
+    let draw_end = end.line.min(vis_end.saturating_sub(1));
+    if draw_start > draw_end {
+        return;
+    }
+    let min_col = inner.x;
+    let max_col = inner.x + inner.width - 1;
+    let buf = frame.buffer_mut();
+    for doc_line in draw_start..=draw_end {
+        let row = inner.y + (doc_line - vis_start) as u16;
+        let c_start = if doc_line == start.line {
+            inner.x.saturating_add(start.col as u16)
+        } else {
+            min_col
+        }
+        .clamp(min_col, max_col);
+        let c_end = if doc_line == end.line {
+            inner.x.saturating_add(end.col as u16)
+        } else {
+            max_col
+        }
+        .clamp(min_col, max_col);
+        for col in c_start..=c_end {
+            if let Some(cell) = buf.cell_mut((col, row)) {
+                cell.set_bg(TEXT_SELECTION_BG);
+                cell.set_fg(TEXT_SELECTION_FG);
+            }
+        }
+    }
+}
+
 pub(super) fn render_selection_highlight(frame: &mut Frame<'_>, app: &AppState) {
     if let Some(sel) = app.doc_selection
         && sel.anchor != sel.head
         && app.modal.is_none()
     {
-        let inner = app.transcript_inner_area;
-        if inner.width > 0 && inner.height > 0 && !app.transcript_wrapped_lines.is_empty() {
-            let max_line = app.transcript_wrapped_lines.len() - 1;
-            let a = DocPos {
-                line: sel.anchor.line.min(max_line),
-                col: sel.anchor.col,
-            };
-            let b = DocPos {
-                line: sel.head.line.min(max_line),
-                col: sel.head.col,
-            };
-            let (start, end) = if (a.line, a.col) <= (b.line, b.col) {
-                (a, b)
-            } else {
-                (b, a)
-            };
-            let vis_start = app.tab().scroll_offset;
-            let vis_end = vis_start + inner.height as usize;
-            let draw_start = start.line.max(vis_start);
-            let draw_end = end.line.min(vis_end.saturating_sub(1));
-            if draw_start <= draw_end {
-                let min_col = inner.x;
-                let max_col = inner.x + inner.width - 1;
-                let buf = frame.buffer_mut();
-                for doc_line in draw_start..=draw_end {
-                    let row = inner.y + (doc_line - vis_start) as u16;
-                    let c_start = if doc_line == start.line {
-                        inner.x.saturating_add(start.col as u16)
-                    } else {
-                        min_col
-                    }
-                    .clamp(min_col, max_col);
-                    let c_end = if doc_line == end.line {
-                        inner.x.saturating_add(end.col as u16)
-                    } else {
-                        max_col
-                    }
-                    .clamp(min_col, max_col);
-                    for col in c_start..=c_end {
-                        if let Some(cell) = buf.cell_mut((col, row)) {
-                            cell.set_bg(TEXT_SELECTION_BG);
-                            cell.set_fg(TEXT_SELECTION_FG);
-                        }
-                    }
-                }
-            }
-            return;
-        }
+        render_doc_selection(
+            frame,
+            app.transcript_inner_area,
+            app.tab().scroll_offset,
+            &app.transcript_wrapped_lines,
+            sel,
+        );
+        return;
     }
 
     let Some(sel) = app.selection else {

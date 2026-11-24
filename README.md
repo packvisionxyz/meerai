@@ -119,7 +119,8 @@ In the TUI, type `!` before a command to run it in the workspace, for example
 a scrollable Terminal dialog (`j`/`k`). `Esc` backgrounds it: the dialog closes and
 the run stays listed. Several shells can run at once. The statusline shows
 clickable `N agents` and `N shells` counters for running work; a counter opens a
-list of runs, and a row opens the agent conversation or the shell output. The
+list of runs, and a row opens the agent conversation in a full chat overlay or
+the shell output. `Esc` closes the overlay. The
 result also lands in the transcript when it finishes; `q` closes the dialog.
 Long commands use the shell timeout (120 s).
 
@@ -390,8 +391,9 @@ Parity highlights:
 Set `context.temperature` in the user settings, or in the project
 `.meerai/settings.yml` (which overrides it field by field). In the TUI, use
 `/sampling` or `/temperature`; the browser uses Settings → Context. In the
-sampling panel, `l`/`m`/`h` and Left/Right set the effort tier from either
-field, the tier row is clickable, and typing `default` clears the override.
+sampling panel, Left/Right cycle the effort tier from either field, `l`/`m`/`h`
+pick it directly, the tier row is clickable, and typing `default` clears the
+override.
 Edit user settings with `meerai config export`, an edit, then
 `meerai config import <PATH>`:
 

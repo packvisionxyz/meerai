@@ -676,29 +676,11 @@ fn render_subagent(
     let child_toggle_id = child_key.clone();
     let child_view = child
         .map(|entries| {
-            let lines = entries
-                .iter()
-                .filter_map(|entry| match entry {
-                    TranscriptEntryDto::Assistant { text, .. } if !text.trim().is_empty() => {
-                        Some(view! { <div class="child-line">{text.clone()}</div> }.into_any())
-                    }
-                    TranscriptEntryDto::ToolCall { name, status, .. } => Some(
-                        view! { <div class="child-line tool">{format!("{name} · {status}")}</div> }
-                            .into_any(),
-                    ),
-                    TranscriptEntryDto::System { text, .. } => Some(
-                        view! { <div class="child-line system">{text.clone()}</div> }.into_any(),
-                    ),
-                    TranscriptEntryDto::Error { message, .. } => Some(
-                        view! { <div class="child-line error">{message.clone()}</div> }.into_any(),
-                    ),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            let count = lines.len();
+            let count = entries.len();
             if count == 0 {
                 return view! { <span></span> }.into_any();
             }
+            let transcript = render_child_transcript(store, entries);
             view! {
                 <details
                     class="subagent-messages"
@@ -723,7 +705,7 @@ fn render_subagent(
                     }
                 >
                     <summary>{format!("Messages ({count})")}</summary>
-                    <div class="child-transcript">{AnyView::from(Fragment::new(lines))}</div>
+                    <div class="child-transcript">{transcript}</div>
                 </details>
             }
             .into_any()
@@ -801,6 +783,53 @@ fn render_subagent(
             </div>
             {report}
             {child_view}
+        </div>
+    }
+    .into_any()
+}
+
+pub(crate) fn render_child_transcript(
+    store: StoreHandle,
+    entries: &[TranscriptEntryDto],
+) -> AnyView {
+    let Some(tab) = store.with(|s| s.active_tab().cloned()) else {
+        return view! { <div class="subagent-conversation"></div> }.into_any();
+    };
+    let views = entries
+        .iter()
+        .map(|entry| match entry {
+            TranscriptEntryDto::User { text, .. } => view! {
+                <article class="turn child-turn">
+                    <div class="msg-label">"You"</div>
+                    <div class="user-msg">{text.clone()}</div>
+                </article>
+            }
+            .into_any(),
+            TranscriptEntryDto::Assistant { .. } => view! {
+                <div class="child-entry">
+                    {render_reasoning(store, &tab, entry, "Thought")}
+                    {render_assistant(store, entry)}
+                </div>
+            }
+            .into_any(),
+            TranscriptEntryDto::ToolCall { .. } => render_tool_row(store, &tab, entry),
+            TranscriptEntryDto::Subagent { .. } => render_subagent(store, &tab, entry),
+            TranscriptEntryDto::System { text, .. } => {
+                view! { <div class="system-line">{text.clone()}</div> }.into_any()
+            }
+            TranscriptEntryDto::Error { message, .. } => view! {
+                <div class="error-block" role="alert">
+                    <span class="error-label">"Error"</span>
+                    <span>{message.clone()}</span>
+                </div>
+            }
+            .into_any(),
+            TranscriptEntryDto::Question { .. } => render_question(entry),
+        })
+        .collect::<Vec<_>>();
+    view! {
+        <div class="subagent-conversation conversation-column">
+            {AnyView::from(Fragment::new(views))}
         </div>
     }
     .into_any()
