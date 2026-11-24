@@ -614,6 +614,8 @@ pub struct ContextSettingsDto {
     pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<EffortDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effort_levels: Vec<EffortDto>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -622,6 +624,74 @@ pub enum EffortDto {
     Low,
     Medium,
     High,
+    ExtraHigh,
+    Max,
+}
+
+impl EffortDto {
+    pub const ALL: [Self; 5] = [
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::ExtraHigh,
+        Self::Max,
+    ];
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "low" | "minimal" => Some(Self::Low),
+            "medium" | "mid" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "extrahigh" | "extra-high" | "xhigh" => Some(Self::ExtraHigh),
+            "max" | "maximum" => Some(Self::Max),
+            _ => None,
+        }
+    }
+
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::ExtraHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Low => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+            Self::ExtraHigh => 3,
+            Self::Max => 4,
+        }
+    }
+
+    pub fn clamp_to(self, allowed: &[Self]) -> Self {
+        if allowed.is_empty() || allowed.contains(&self) {
+            return self;
+        }
+        allowed
+            .iter()
+            .copied()
+            .filter(|level| level.rank() <= self.rank())
+            .max_by_key(|level| level.rank())
+            .unwrap_or(allowed[0])
+    }
+
+    pub fn next_in(self, allowed: &[Self]) -> Self {
+        let allowed = if allowed.is_empty() {
+            &Self::ALL[..]
+        } else {
+            allowed
+        };
+        let current = self.clamp_to(allowed);
+        match allowed.iter().position(|level| *level == current) {
+            Some(index) => allowed[(index + 1) % allowed.len()],
+            None => current,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

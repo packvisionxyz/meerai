@@ -133,7 +133,7 @@ pub enum ActiveModal {
     },
     ModelInput {
         input: String,
-        selected_recent: Option<usize>,
+        selected: Option<usize>,
         error: Option<String>,
     },
     DiffView {
@@ -637,6 +637,32 @@ pub(crate) fn display_to_char(text: &str, display: usize) -> usize {
 
 pub(crate) fn char_to_display(text: &str, char_index: usize) -> usize {
     text.chars().take(char_index).map(char_width).sum()
+}
+
+pub(crate) fn rank_model_matches(models: &[String], provider: &str, query: &str) -> Vec<String> {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return models.to_vec();
+    }
+    let provider_prefix = format!("{}/", provider.to_ascii_lowercase());
+    let mut ranked: Vec<(u8, usize, usize, String)> = models
+        .iter()
+        .enumerate()
+        .filter_map(|(index, model)| {
+            let id = model.to_ascii_lowercase();
+            let hit = id
+                .find(&query)
+                .map(|position| (position != 0, position))
+                .or_else(|| {
+                    format!("{provider_prefix}{id}")
+                        .find(&query)
+                        .map(|position| (true, position))
+                });
+            hit.map(|(is_infix, position)| (u8::from(is_infix), position, index, model.clone()))
+        })
+        .collect();
+    ranked.sort();
+    ranked.into_iter().map(|(_, _, _, model)| model).collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1475,7 +1501,7 @@ impl AppState {
         } else if model.trim().is_empty() {
             Some(ActiveModal::ModelInput {
                 input: String::new(),
-                selected_recent: None,
+                selected: None,
                 error: None,
             })
         } else {
@@ -2044,16 +2070,34 @@ impl AppState {
     pub fn recent_models_for_active_provider(&self) -> Vec<String> {
         let provider = &self.tab().active_provider;
         let mut models = self.settings.recent_models_for(provider).to_vec();
-        let default_model = {
+        let (default_model, catalog_models) = {
             let rt = self.runtime.read().unwrap();
-            rt.catalog.default_model_for_provider(provider)
+            (
+                rt.catalog.default_model_for_provider(provider),
+                rt.catalog
+                    .models_for_provider(provider)
+                    .into_iter()
+                    .map(|model| model.id.clone())
+                    .collect::<Vec<_>>(),
+            )
         };
+        for model in catalog_models {
+            if !models.contains(&model) {
+                models.push(model);
+            }
+        }
         if let Some(default_model) = default_model
             && !models.contains(&default_model)
         {
             models.push(default_model);
         }
         models
+    }
+
+    pub(crate) fn model_candidates(&self, query: &str) -> Vec<String> {
+        let models = self.recent_models_for_active_provider();
+        let provider = self.tab().active_provider.clone();
+        rank_model_matches(&models, &provider, query)
     }
 
     pub fn current_or_default_model(&self, provider_id: &str) -> Option<String> {
@@ -2086,6 +2130,23 @@ impl AppState {
             .and_then(|info| info.context_window)
     }
 
+    pub(super) fn active_model_effort_levels(&self) -> Vec<EffortLevel> {
+        let tab = self.tab();
+        let provider = tab.active_provider.clone();
+        let model = tab.model.clone();
+        if model.trim().is_empty() {
+            return EffortLevel::ALL.to_vec();
+        }
+        let allowed = {
+            let rt = self.runtime.read().unwrap();
+            rt.catalog.effort_levels_for(&provider, &model)
+        };
+        match allowed {
+            Some(levels) if levels.is_empty() => EffortLevel::ALL.to_vec(),
+            Some(levels) => levels,
+            None => EffortLevel::ALL.to_vec(),
+        }
+    }
     pub(super) fn resolve_model_target(&self, raw: &str) -> (String, String) {
         let trimmed = raw.trim();
         let active_provider = &self.tab().active_provider;

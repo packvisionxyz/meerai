@@ -805,6 +805,55 @@ mod tests {
     }
 
     #[test]
+    fn model_picker_filters_ranks_and_completes() {
+        use crate::state::{
+            ActiveModal, ProviderModalReturn, complete_model_filter, filtered_models_sorted,
+            open_model_input_for,
+        };
+        use meerai_web_protocol::ModelItemDto;
+
+        let mut state = AppState {
+            connection: ConnectionState::Connected,
+            ..AppState::default()
+        };
+        apply_opened_session(&mut state, summary("s-1", SessionStatus::Idle));
+        state.providers = Some(sample_providers());
+        state.providers.as_mut().unwrap().models.push(ModelItemDto {
+            id: "opus-mini".to_owned(),
+            provider: "ollama".to_owned(),
+            display_name: "opus-mini".to_owned(),
+            context_window_tokens: None,
+            max_output_tokens: None,
+            supports_reasoning: false,
+            supports_vision: false,
+            supports_tools: true,
+            is_custom: false,
+        });
+
+        let filtered = filtered_models_sorted(state.providers.as_ref(), None, None, "opus");
+        let ids: Vec<&str> = filtered.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["opus-mini", "claude-opus-4-6"]);
+
+        assert!(filtered_models_sorted(state.providers.as_ref(), None, None, "zzz").is_empty());
+
+        open_model_input_for(
+            &mut state,
+            Some("anthropic".to_owned()),
+            ProviderModalReturn::Close,
+        );
+        complete_model_filter(&mut state, "claude-opus-4-6");
+        match &state.modal {
+            Some(ActiveModal::ModelInput {
+                filter, selected, ..
+            }) => {
+                assert_eq!(filter.text, "claude-opus-4-6");
+                assert_eq!(*selected, 0);
+            }
+            _ => panic!("model dialog closed"),
+        }
+    }
+
+    #[test]
     fn provider_and_model_pickers_sort_include_recent_and_avoid_connection_loop() {
         use crate::state::{
             ProviderModalReturn, activate_provider_from_modal, custom_model_candidate,
@@ -992,6 +1041,54 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn effort_command_follows_the_model_effort_levels() {
+        use meerai_web_protocol::EffortDto;
+
+        let mut state = AppState {
+            connection: ConnectionState::Connected,
+            ..AppState::default()
+        };
+        state.host_info.settings.config_writable = true;
+
+        state.host_info.settings.context.effort_levels =
+            vec![EffortDto::Low, EffortDto::Medium, EffortDto::High];
+        crate::state::set_effort_from_arg(&mut state, "xhigh");
+        assert_eq!(
+            state.host_info.settings.context.effort,
+            Some(EffortDto::High),
+            "a three-tier model clamps extra high down to high"
+        );
+
+        state.host_info.settings.context.effort_levels = EffortDto::ALL.to_vec();
+        crate::state::set_effort_from_arg(&mut state, "xhigh");
+        assert_eq!(
+            state.host_info.settings.context.effort,
+            Some(EffortDto::ExtraHigh)
+        );
+        assert_eq!(
+            crate::state::effort_default_temperature(EffortDto::ExtraHigh),
+            0.7
+        );
+        crate::state::set_effort_from_arg(&mut state, "max");
+        assert_eq!(
+            state.host_info.settings.context.effort,
+            Some(EffortDto::Max)
+        );
+        assert_eq!(
+            crate::state::effort_default_temperature(EffortDto::Max),
+            0.9
+        );
+
+        state.host_info.settings.context.effort_levels = vec![EffortDto::Low, EffortDto::ExtraHigh];
+        crate::state::set_effort_from_arg(&mut state, "medium");
+        assert_eq!(
+            state.host_info.settings.context.effort,
+            Some(EffortDto::Low),
+            "an unsupported tier clamps down inside the set"
+        );
     }
 
     #[test]

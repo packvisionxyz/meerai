@@ -7,6 +7,8 @@ fn effort_level(effort: EffortLevel) -> genai::chat::ReasoningEffort {
         EffortLevel::Low => genai::chat::ReasoningEffort::Low,
         EffortLevel::Medium => genai::chat::ReasoningEffort::Medium,
         EffortLevel::High => genai::chat::ReasoningEffort::High,
+        EffortLevel::ExtraHigh => genai::chat::ReasoningEffort::XHigh,
+        EffortLevel::Max => genai::chat::ReasoningEffort::Max,
     }
 }
 
@@ -401,7 +403,20 @@ impl MultiTurnAgent {
             .as_ref()
             .and_then(|route| route.effort.as_deref())
             .and_then(crate::routing::parse_effort);
-        let effort = route_effort.or_else(|| self.harness.as_ref().and_then(|h| h.config.effort));
+        let session_effort = self
+            .harness
+            .as_ref()
+            .and_then(|harness| harness.config.effort);
+        let effort_levels = self
+            .harness
+            .as_ref()
+            .and_then(|harness| harness.config.effort_levels.clone());
+        let effort = match (route_effort, effort_levels.as_deref()) {
+            (Some(route_effort), _) => Some(route_effort),
+            (None, Some([])) => None,
+            (None, Some(levels)) => session_effort.map(|effort| effort.clamp_to(levels)),
+            (None, None) => session_effort,
+        };
         if !plan_usage && let Some(effort) = effort {
             options = options.with_reasoning_effort(effort_level(effort));
         }

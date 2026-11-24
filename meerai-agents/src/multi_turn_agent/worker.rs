@@ -91,6 +91,7 @@ pub fn spawn_worker(
                         let mut pending_reset = false;
                         let mut pending_model: Option<String> = None;
                         let mut pending_model_window: Option<u64> = None;
+                        let mut pending_effort_levels: Option<Vec<EffortLevel>> = None;
                         let mut pending_plan_usage: Option<bool> = None;
                         let mut recovery: Option<QueuedPrompt> = None;
                         let mut turn_ok = false;
@@ -174,9 +175,11 @@ pub fn spawn_worker(
                                                             Some(AgentCommand::SetModel {
                                                                 model,
                                                                 context_window_tokens,
+                                                                effort_levels,
                                                             }) => {
                                                                 pending_model = Some(model);
                                                                 pending_model_window = context_window_tokens;
+                                                                pending_effort_levels = effort_levels;
                                                             }
                                                             Some(AgentCommand::SetPlanUsage { plan_usage }) => {
                                                                 pending_plan_usage = Some(plan_usage);
@@ -227,9 +230,11 @@ pub fn spawn_worker(
                                 AgentCommand::SetModel {
                                     model,
                                     context_window_tokens,
+                                    effort_levels,
                                 } => {
                                     pending_model = Some(model);
                                     pending_model_window = context_window_tokens;
+                                    pending_effort_levels = effort_levels;
                                 }
                                 other => deferred.push_back(other),
                             }
@@ -243,6 +248,7 @@ pub fn spawn_worker(
                             if let Some(tokens) = pending_model_window {
                                 agent.set_context_window_tokens(tokens);
                             }
+                            agent.set_effort_levels(pending_effort_levels.take());
                             agent.persist_model().await;
                         }
                         if let Some(plan_usage) = pending_plan_usage.take() {
@@ -340,11 +346,13 @@ pub fn spawn_worker(
                 AgentCommand::SetModel {
                     model,
                     context_window_tokens,
+                    effort_levels,
                 } => {
                     agent.set_model(model);
                     if let Some(tokens) = context_window_tokens {
                         agent.set_context_window_tokens(tokens);
                     }
+                    agent.set_effort_levels(effort_levels);
                     agent.persist_model().await;
                 }
                 AgentCommand::SetPlanUsage { plan_usage } => {
@@ -377,6 +385,7 @@ pub fn spawn_worker(
                     instructions,
                     model,
                     context_window_tokens,
+                    effort_levels,
                 } => {
                     agent
                         .apply_agent_instructions(
@@ -384,6 +393,7 @@ pub fn spawn_worker(
                             &instructions,
                             model,
                             context_window_tokens,
+                            effort_levels,
                             &event_tx,
                         )
                         .await;
@@ -396,8 +406,9 @@ pub fn spawn_worker(
                 AgentCommand::Reload {
                     rules,
                     context,
+                    effort_levels,
                     system_prompt,
-                } => agent.reload_config(rules, context, system_prompt),
+                } => agent.reload_config(rules, context, effort_levels, system_prompt),
                 AgentCommand::SetHooks(entries) => {
                     agent.set_hooks(Arc::new(HookEngine::new(entries)));
                 }

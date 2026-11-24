@@ -80,12 +80,14 @@ impl MultiTurnAgent {
         instructions: &str,
         model: Option<String>,
         context_window_tokens: Option<u64>,
+        effort_levels: Option<Vec<EffortLevel>>,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) {
         self.apply_instructions(
             format!("Agent instructions ({name}):\n\n{instructions}"),
             model,
             context_window_tokens,
+            effort_levels,
             event_tx,
         )
         .await;
@@ -101,6 +103,7 @@ impl MultiTurnAgent {
             format!("Skill instructions ({name}):\n\n{instructions}"),
             None,
             None,
+            None,
             event_tx,
         )
         .await;
@@ -111,6 +114,7 @@ impl MultiTurnAgent {
         text: String,
         model: Option<String>,
         context_window_tokens: Option<u64>,
+        effort_levels: Option<Vec<EffortLevel>>,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) {
         let text = crate::screen::screen_untrusted_text("definition_instructions", &text);
@@ -128,6 +132,7 @@ impl MultiTurnAgent {
             if let Some(tokens) = context_window_tokens {
                 self.set_context_window_tokens(tokens);
             }
+            self.set_effort_levels(effort_levels);
             self.persist_model().await;
         }
     }

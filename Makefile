@@ -49,7 +49,7 @@ BUILD_TARGET := $(if $(target),$(target),$(HOST_TARGET))
 .SILENT:
 
 .PHONY: build build-debug build-web check ci clean clean-dist fmt fmt-check format help \
-	install lint package run run-web serve test verify watch
+	install lint package run run-web serve test verify watch sync-models models-check
 
 # =============================================================================
 # Help & Information
@@ -121,6 +121,20 @@ build-debug: ## Build debug binary
 
 build-web: ## Build the browser UI Wasm bundle into target/web (pass flags via WEB_ARGS="...")
 	python3 scripts/build-web.py $(WEB_ARGS)
+
+sync-models: ## Regenerate meerai-client/models.yml from models.dev (pass flags via MODELS_ARGS="...")
+	python3 scripts/sync-models.py $(MODELS_ARGS)
+
+models-check: ## Fail when meerai-client/models.yml is stale (needs network; pass MODELS_ARGS="--source PATH")
+	@tmp="$$(mktemp)"; \
+	trap 'rm -f "$$tmp"' EXIT; \
+	python3 scripts/sync-models.py $(MODELS_ARGS) --output "$$tmp" >/dev/null; \
+	if ! diff -u meerai-client/models.yml "$$tmp" >/dev/null; then \
+		diff -u meerai-client/models.yml "$$tmp" | head -60; \
+		echo "models.yml is stale: run make sync-models and commit the result"; \
+		exit 1; \
+	fi; \
+	echo "models.yml is up to date"
 
 install: build-web ## Build the web-enabled release binary and install it locally, replacing the installed version
 	cargo install --path $(BIN_PKG) --locked --force --features web --target-dir target $(if $(target),--target $(target),) $(ARGS)

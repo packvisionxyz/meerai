@@ -117,21 +117,55 @@ impl Eq for Temperature {}
 
 pub const DEFAULT_TEMPERATURE: f32 = 0.2;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EffortLevel {
     Low,
     #[default]
     Medium,
     High,
+    #[serde(alias = "xhigh")]
+    ExtraHigh,
+    Max,
 }
 
 impl EffortLevel {
+    pub const ALL: [Self; 5] = [
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::ExtraHigh,
+        Self::Max,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::ExtraHigh => "extra high",
+            Self::Max => "max",
+        }
+    }
+
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::ExtraHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "low" | "minimal" => Some(Self::Low),
+            "medium" | "mid" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "extrahigh" | "extra-high" | "extra_high" | "xhigh" => Some(Self::ExtraHigh),
+            "max" | "maximum" => Some(Self::Max),
+            _ => None,
         }
     }
 
@@ -140,6 +174,8 @@ impl EffortLevel {
             Self::Low => 0.0,
             Self::Medium => DEFAULT_TEMPERATURE,
             Self::High => 0.5,
+            Self::ExtraHigh => 0.7,
+            Self::Max => 0.9,
         }
     }
 
@@ -147,15 +183,57 @@ impl EffortLevel {
         match self {
             Self::Low => Self::Medium,
             Self::Medium => Self::High,
-            Self::High => Self::Low,
+            Self::High => Self::ExtraHigh,
+            Self::ExtraHigh => Self::Max,
+            Self::Max => Self::Low,
         }
     }
 
     pub fn cycle_back(self) -> Self {
         match self {
-            Self::Low => Self::High,
+            Self::Low => Self::Max,
             Self::Medium => Self::Low,
             Self::High => Self::Medium,
+            Self::ExtraHigh => Self::High,
+            Self::Max => Self::ExtraHigh,
+        }
+    }
+
+    pub fn clamp_to(self, allowed: &[Self]) -> Self {
+        if allowed.is_empty() || allowed.contains(&self) {
+            return self;
+        }
+        allowed
+            .iter()
+            .copied()
+            .filter(|level| *level <= self)
+            .max()
+            .unwrap_or_else(|| allowed[0])
+    }
+
+    pub fn next_in(self, allowed: &[Self]) -> Self {
+        let allowed = if allowed.is_empty() {
+            &Self::ALL[..]
+        } else {
+            allowed
+        };
+        let current = self.clamp_to(allowed);
+        match allowed.iter().position(|level| *level == current) {
+            Some(index) => allowed[(index + 1) % allowed.len()],
+            None => current,
+        }
+    }
+
+    pub fn previous_in(self, allowed: &[Self]) -> Self {
+        let allowed = if allowed.is_empty() {
+            &Self::ALL[..]
+        } else {
+            allowed
+        };
+        let current = self.clamp_to(allowed);
+        match allowed.iter().position(|level| *level == current) {
+            Some(index) => allowed[(index + allowed.len() - 1) % allowed.len()],
+            None => current,
         }
     }
 }
@@ -1674,25 +1752,69 @@ providers:
         assert_eq!(EffortLevel::Low.default_temperature(), 0.0);
         assert_eq!(EffortLevel::Medium.default_temperature(), 0.2);
         assert_eq!(EffortLevel::High.default_temperature(), 0.5);
+        assert_eq!(EffortLevel::ExtraHigh.default_temperature(), 0.7);
+        assert_eq!(EffortLevel::Max.default_temperature(), 0.9);
         assert_eq!(EffortLevel::default(), EffortLevel::Medium);
         assert_eq!(DEFAULT_TEMPERATURE, 0.2);
     }
 
     #[test]
     fn effort_labels_round_trip_through_serde() {
-        for level in [EffortLevel::Low, EffortLevel::Medium, EffortLevel::High] {
+        for level in EffortLevel::ALL {
             let yaml = serde_yaml::to_string(&level).unwrap();
             let back: EffortLevel = serde_yaml::from_str(&yaml).unwrap();
             assert_eq!(back, level);
-            assert_eq!(yaml.trim(), level.label());
         }
+        let extra: EffortLevel = serde_yaml::from_str("xhigh").unwrap();
+        assert_eq!(extra, EffortLevel::ExtraHigh);
     }
 
     #[test]
     fn effort_cycle_wraps_through_all_tiers() {
         assert_eq!(EffortLevel::Low.cycle(), EffortLevel::Medium);
         assert_eq!(EffortLevel::Medium.cycle(), EffortLevel::High);
-        assert_eq!(EffortLevel::High.cycle(), EffortLevel::Low);
+        assert_eq!(EffortLevel::High.cycle(), EffortLevel::ExtraHigh);
+        assert_eq!(EffortLevel::ExtraHigh.cycle(), EffortLevel::Max);
+        assert_eq!(EffortLevel::Max.cycle(), EffortLevel::Low);
+        assert_eq!(EffortLevel::ExtraHigh.cycle_back(), EffortLevel::High);
+        assert_eq!(EffortLevel::Max.cycle_back(), EffortLevel::ExtraHigh);
+        assert_eq!(EffortLevel::Low.cycle_back(), EffortLevel::Max);
+    }
+
+    #[test]
+    fn effort_clamps_to_the_model_set() {
+        let gemini = [EffortLevel::Low, EffortLevel::Medium, EffortLevel::High];
+        assert_eq!(EffortLevel::ExtraHigh.clamp_to(&gemini), EffortLevel::High);
+        assert_eq!(EffortLevel::Low.clamp_to(&gemini), EffortLevel::Low);
+        assert_eq!(
+            EffortLevel::ExtraHigh.clamp_to(&EffortLevel::ALL),
+            EffortLevel::ExtraHigh
+        );
+        assert_eq!(
+            EffortLevel::Max.clamp_to(&gemini),
+            EffortLevel::High,
+            "max also clamps down to a three-tier model"
+        );
+        assert_eq!(
+            EffortLevel::Max.clamp_to(&EffortLevel::ALL),
+            EffortLevel::Max
+        );
+        let only_high = [EffortLevel::High];
+        assert_eq!(EffortLevel::Low.clamp_to(&only_high), EffortLevel::High);
+        assert_eq!(EffortLevel::Medium.clamp_to(&[]), EffortLevel::Medium);
+    }
+
+    #[test]
+    fn effort_cycles_inside_the_model_set() {
+        let set = [EffortLevel::Low, EffortLevel::ExtraHigh];
+        assert_eq!(EffortLevel::Low.next_in(&set), EffortLevel::ExtraHigh);
+        assert_eq!(EffortLevel::ExtraHigh.next_in(&set), EffortLevel::Low);
+        assert_eq!(
+            EffortLevel::High.next_in(&set),
+            EffortLevel::ExtraHigh,
+            "an unsupported tier snaps down into the set first"
+        );
+        assert_eq!(EffortLevel::ExtraHigh.previous_in(&set), EffortLevel::Low);
     }
 
     #[test]

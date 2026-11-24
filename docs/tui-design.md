@@ -224,8 +224,8 @@ Typing `/` opens completion. The implemented handler set
 | `/connect`, `/provider` | Configure or switch provider |
 | `/models`, `/model [name]` | Pick or set the model |
 | `/effort [low\|medium\|high]` | Set the reasoning tier, or open the sampling panel with no argument |
-| `/sampling` | Sampling panel: reasoning effort and temperature override together. Left/Right cycle the effort tier; Tab moves between the two fields. |
-| `/temperature` | Sampling panel focused on the temperature override. Left/Right cycle the tier (`low` -> `medium` -> `high` -> `low`) and `l`/`m`/`h` pick it directly from either field; the tier row is clickable. Type `default` to clear the override. |
+| `/sampling` | Sampling panel: reasoning effort and temperature override together. Left/Right cycle the effort tier; Tab moves between the two fields. The tier row lists only the levels the active model accepts (`low`/`medium`/`high`/`extra high`/`max`). |
+| `/temperature` | Sampling panel focused on the temperature override. Left/Right cycle the tier and `l`/`m`/`h`/`x` pick it directly from either field; the tier row is clickable. The cycle stays inside the model's accepted levels. Type `default` to clear the override. |
 | `/agent <id>`, `/skill <id>` | Apply a markdown definition |
 | `/agents` | Mentions popup filtered to agents |
 | `/skills` | Definitions panel filtered to skills |
@@ -469,11 +469,16 @@ The sidebar `AGENTS` block stays display-only: it lists the main agent and the
 subagents with their status, but a row is not clickable.
 
 The model picker (`/model`, `ctrl+o`) lists catalog, saved, and recent
-models. `ctrl+d` removes the highlighted model, or the typed model id when
-nothing is highlighted: it drops the id from `recent_models`, clears the
-saved `provider.model`, and clears the active model when it matches
-(`forget_provider_model`, `meerai-common/src/settings.rs`). The change is
-persisted immediately.
+models. Typing filters the list as a case-insensitive substring match on the
+model id or `provider/id`; prefix matches sort first. `↑`/`↓` moves the
+highlight without changing the typed filter, `Tab` completes the highlighted
+model (or the first match), and `Enter` applies the highlighted model, else the
+typed id, else the current or default model. A query with no catalog match
+still applies the typed id. `ctrl+d` removes the highlighted model, or the
+typed model id when nothing is highlighted: it drops the id from
+`recent_models`, clears the saved `provider.model`, and clears the active model
+when it matches (`forget_provider_model`, `meerai-common/src/settings.rs`). The
+change is persisted immediately.
 
 ### 2.16 Notifications and exit summary
 
@@ -563,8 +568,9 @@ Dependencies: `ratatui` + `crossterm`, `tokio`,
 markdown, `similar`, `anyhow`, `serde_json`, `futures`, `regex`. `reqwest`
 is behind the default `update` feature. The crate does not depend on
 `meerai-tools` or `meerai-providers`; highlighting goes through
-`meerai-syntax` (Rust, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML,
-CSS, JSON, plus a lexical fallback).
+`meerai-syntax` (Rust, C, C++, C#, Java, Kotlin, Scala, Swift, PHP,
+Haskell, Ruby, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML, CSS,
+JSON, plus a lexical fallback).
 
 - Rendering is split by panel under `src/ui/` (`transcript`, `sidebar`,
   `composer`, `modals`, `statusline`, `selection`); `AppState` lives under

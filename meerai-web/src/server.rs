@@ -1107,6 +1107,7 @@ async fn handle_set_model(
         resolved.display_model,
         resolved.command_model,
         resolved.context_window_tokens,
+        resolved.effort_levels,
     ) {
         Ok(()) => {
             state.registry.emit_providers_updated();

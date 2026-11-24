@@ -48,9 +48,9 @@
 | `meerai-store/` | Embedded SQLite store (`meerai.db`): WAL, FTS5, schema v1, private-file permissions, typed repositories (`config`, `memory`, `packs`, `routes`, `usage`) |
 | `meerai-session/` | `Session` append-only `SessionEvent` log in SQLite, recovery, `derive_messages`, replay projection (`replay`), fork/rewind (`latest_closed_turn`, `fork_latest`, `create_child`), SQLite snapshot store (`session_snapshots`), SQLite blob store (`session_blobs`), spill, compaction primitives, the serde `GoalState` DTO and `last_goal`, session list/delete/prune support |
 | `meerai-policy/` | `PolicyEngine`: ordered permission rules, `ApprovalMode`, turn/session grants, YAML parsing |
-| `meerai-tools/` | `code` (`CodeTools`, seven `code-*` tools, path guards, unified diffs, `ToolRun` observations, secret env scrub), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`; opt-in post-edit diagnostics via `context.post_edit_diagnostics`), `search_as_code` (`SearchAsCodeToolset`) |
+| `meerai-tools/` | `code` (`CodeTools`, seven `code-*` tools, path guards, unified diffs, `ToolRun` observations, secret env scrub), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`; opt-in post-edit diagnostics via `context.post_edit_diagnostics`), `search_as_code` (`SearchAsCodeToolset`), `web` (`WebTools`; `web-fetch`, `web-search`, private-address guard) |
 | `meerai-common/` | SQLite-backed `AppSettings`, project-root discovery (`find_project_root`) plus project settings load/merge (`load_project_settings`, `merge_project_settings`), markdown agent/skill discovery (`definitions`: `load_definitions`, `load_definitions_for`, user/pack/project sources, diagnostics), hook configuration (`hooks`: `HookEvent`, `HookEntry`, `load_hooks`), declarative packs (`packs`) |
-| `meerai-client/` | Client-facing provider surface: `ProviderCatalog` + `providers.yml`, `ModelInfo`, `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract, `MemorySecretStore`, auth listing |
+| `meerai-client/` | Client-facing provider surface: `ProviderCatalog` + `providers.yml` plus the generated `models.yml` model table (context windows, prices, per-model `effort_levels`), `ModelInfo`, `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract, `MemorySecretStore`, auth listing |
 | `meerai-providers/` | `genai` client factory + AEAD `VaultSecretStore` (ChaCha20-Poly1305, OS keychain DEK or Argon2id passphrase); re-exports the client surface |
 | `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig` (+ `TokenPricing`), `AgentEvent`, `intercept` (`Interceptor`/`StepPlan`/`ToolPlan`/`ToolContext`/`ToolOutcome`, async `before_tool`), hook engine (`hooks`: `HookEngine`/`HookContext`/`HookReport`, `HookFired` logging), `question-ask` (`QuestionAsked`/`AnswerQuestion`, not an approval), `skill-load` (`skill_tool`), the built-in goal loop (`goal`, `goal_tool`: `goal-set`/`goal-check`/`goal-status` + `GoalInterceptor`), `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins + custom child runs filtered by `mode` and tightened by definition `permissions`, `child_session_id` on `SubagentRun`), delegated `acp-run` (`acp_subagent`: `AcpRunToolset`/`AcpSpawner`), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
 | `meerai-host/` | UI-neutral host seams (`SessionOpener`, `OpenedSession`, `WorkspaceQuery`/`LocalWorkspace`, `WebServerLauncher`), shared `diff`/`search`/`syntax`/`theme`/`update`, and live `SessionRegistry` event pump/ring |
@@ -58,7 +58,7 @@
 | `meerai-web/` | Loopback HTTP/SSE server (`hyper` + `subtle` Basic auth, `Host`/`Origin`/JSON checks, parity REST/SSE routes, embedded Wasm bundle serving) |
 | `meerai-web-client/` | Leptos 0.8 CSR Wasm browser client ([browser-ui.md](../../docs/browser-ui.md)): DOM transcript, Markdown + code highlighting, left Sessions sidebar plus TUI modal surfaces, approval scopes, Settings, palette actions, `@` mentions, completions, a sidebar Diagnose block shown by default (cache hit/write, context, memory) and a collapsible changed-files block, built via `scripts/build-web.py` |
 | `meerai-tui/` | Modal TUI library (`ratatui` + `crossterm`) split into `ui/` panels and `app/` modules, transcript replay, `/serve`, tabs, collapsible digests, a sidebar `AGENTS` list (main + subagents, display-only), a sidebar Diagnose block shown by default, and a collapsible File Changes block, turn-anchor rail, diff/search, re-exporting `meerai-host` seams (no `meerai-tools`, `meerai-providers`, or `meerai-web` dependency) |
-| `meerai-syntax/` | Tree-sitter highlighting for Rust, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML, CSS, and JSON plus a lexical fallback; `highlight_block` returns per-line `Token`s; depends only on grammar crates |
+| `meerai-syntax/` | Tree-sitter highlighting for Rust, C, C++, C#, Java, Kotlin, Scala, Swift, PHP, Haskell, Ruby, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML, CSS, and JSON plus a lexical fallback; `highlight_block` returns per-line `Token`s; depends only on grammar crates |
 | `meerai-cli/` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions` (`list`, `rm`, `prune`, `fork`) / `serve` (feature `web`) subcommands, and TUI launcher |
 | `.agents/agents/`, `.agents/skills/` | Default agent (`*.md`) and skill (`*/SKILL.md`) definitions, read at runtime |
 | `.claude/agents/`, `.claude/skills/` | Lower-priority agent and skill definitions, same format |
@@ -90,6 +90,8 @@
 | Test (single file) | `cargo test -p meerai-macros --test derive_toolset_pass` |
 | Test (single test) | `cargo test -p meerai-macros test_snapshot` |
 | Update macro snapshots | `cargo insta test --review` or `INSTA_UPDATE=always cargo test -p meerai-macros` |
+| Update model catalog | `make sync-models` (`python3 scripts/sync-models.py`; regenerates `meerai-client/models.yml` from models.dev, needs network, commit the result) |
+| Check model catalog | `make models-check` (fails when `meerai-client/models.yml` is stale) |
 | Headless surface | `cargo check -p meerai-cli --no-default-features` |
 | TUI without update | `cargo check -p meerai-tui --no-default-features` |
 | Local gate | `make verify` (alias of `make ci`) |
@@ -337,6 +339,27 @@ Notes:
     and repeats the list or quote prefix on continuation rows; the browser
     aligns cells and scrolls wide tables. Change both renderers in the same
     change.
+39. **Model catalog and effort tiers:** `ProviderCatalog::new()` loads
+    `providers.yml` then the generated `models.yml`. `ModelInfo.effort_levels`
+    is `Option<Vec<EffortLevel>>`: absent means unknown (all five tiers),
+    `Some([])` means the model has no reasoning effort (tier temperature only,
+    no reasoning hint), and a non-empty set gates the tier. `EffortLevel::ExtraHigh`
+    maps to `genai` `XHigh` and `EffortLevel::Max` maps to `Max`; a selected tier
+    clamps down to the nearest accepted tier before the request. The TUI
+    sampling panel and the browser Settings → Context list only the active
+    model's levels. An explicit route `effort` bypasses the session model's set.
+    A model change carries the new levels through `AgentCommand::SetModel`,
+    `ApplyAgent`, and `Reload`; keep those fields in sync when adding a
+    model-switch path. Do not hand-edit `models.yml`; regenerate it with
+    `scripts/sync-models.py`.
+40. **Web tools:** `WebTools` registers `web-fetch` and `web-search` as
+    `EffectClass::External` under the `webfetch` action. `web-fetch` allows only
+    http and https, rejects URL userinfo, re-checks the address guard on every
+    redirect hop, and refuses loopback, private, link-local, CGNAT, and
+    IPv4-mapped addresses after DNS resolution. Do not weaken the guard for
+    convenience; `with_allow_private_networks` is for tests only. Search is
+    keyless DuckDuckGo and best-effort, so a provider block is reported, not
+    retried.
 
 ## 5. Patterns
 
@@ -373,6 +396,9 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 - `meerai-macros/src/tool/snapshots/` — `insta` macro-expansion snapshots (pretty-printed with
   `prettyplease`). Regenerate via `cargo insta test --review` or `INSTA_UPDATE=always`; do not
   hand-edit snapshot expectations without verifying macro output.
+- `meerai-client/models.yml` — generated by `scripts/sync-models.py` from
+  `https://models.dev/api.json`. Do not hand-edit; run the script and commit the diff. Providers
+  with more than 50 text models keep the 50 newest plus one flagship per major family.
 - `target/` — Cargo build artifacts (gitignored).
 
 ## 7. Verification matrix
@@ -517,8 +543,9 @@ Detail in [`infra.md`](infra.md). Summary:
 - Redaction: best-effort regex redaction of known secret shapes before spill/log/UI/model; the
   original secret is discarded, diffs are redacted, paths are not. No entropy screen and no
   guarantee. Cost tracking is token-only by default: `est_cost_usd` is computed from
-  `ProviderCatalog` model pricing when both per-million prices exist; the bundled catalog ships
-  context windows only.
+  `ProviderCatalog` model pricing when both per-million prices exist; the bundled `models.yml`
+  ships context windows, output caps, prices, and per-model `effort_levels` for the 12 bundled
+  providers, capped at 50 models per provider.
 - Rewind only: the TUI sends `RewindScope::Both` (message menu and `/rewind` default);
   `Conversation` is an internal scope; `Code` restores snapshot blobs; `Both` runs code then
   conversation. `Session::rewind` appends one `RewindApplied` event and never a `RevertApplied`
@@ -621,11 +648,14 @@ Detail in [`infra.md`](infra.md). Summary:
   provider opens the TUI connection screen (next/update/remove) instead of the auth method screen.
 - Windows is a supported target: `cmd /C` for shell, x64 build only, no file-mode enforcement.
 - Sampling tiers are a user setting: `context.effort` is `low` (0.00), `medium` (0.20, the
-  default), or `high` (0.50). The tier sets the temperature when `temperature` is unset, and is
-  sent as the provider reasoning-effort hint. That hint is honored by only some adapters; DeepSeek,
-  Groq, xAI, and `open_router` receive the tier temperature and ignore the hint. Both clients show
-  the real value (`temp 0.20 · medium`), never `temp default`. `/effort` cycles or sets the tier in
-  both clients; the browser also provides a Settings selector.
+  default), `high` (0.50), `extrahigh` (0.70), or `max` (0.90). The tier sets the temperature when `temperature`
+  is unset, and is sent as the provider reasoning-effort hint (`extrahigh` -> `xhigh`, `max` ->
+  `max`). The active model's `effort_levels` gates the tier; a tier outside the set clamps down. An
+  empty set sends no reasoning hint and keeps the tier temperature. An unknown model keeps all five
+  tiers. Both
+  clients show the real value (`temp 0.20 · medium`), never `temp default`. `/effort` cycles or
+  sets the tier in both clients; the browser also provides a Settings selector that follows the
+  model's levels.
 - Activity digests group each contiguous run of thoughts, tool calls, and subagents immediately
   before the visible message that follows it (or at the end when work trails), folding an
   `Assistant` entry's reasoning right above its visible text in both live and replay views.

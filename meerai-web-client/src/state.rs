@@ -107,7 +107,7 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         cmd: "/effort",
-        args: "[low|medium|high]",
+        args: "[low|medium|high|xhigh|max]",
         desc: "Set reasoning effort, or open Context settings with no argument",
         takes_arg: true,
     },
@@ -534,6 +534,7 @@ pub struct SettingsFormState {
     pub rollback_on_verify_failure: bool,
     pub post_edit_diagnostics: bool,
     pub effort: Option<EffortDto>,
+    pub effort_levels: Vec<EffortDto>,
     pub require_for_scripts: bool,
     pub require_for_shell: bool,
     pub strict_env: bool,
@@ -619,6 +620,7 @@ impl SettingsFormState {
             rollback_on_verify_failure: c.rollback_on_verify_failure.unwrap_or(false),
             post_edit_diagnostics: c.post_edit_diagnostics.unwrap_or(false),
             effort: c.effort,
+            effort_levels: c.effort_levels.clone(),
             require_for_scripts: s.sandbox.require_for_scripts.unwrap_or(false),
             require_for_shell: s.sandbox.require_for_shell.unwrap_or(false),
             strict_env: s.sandbox.strict_env.unwrap_or(false),
@@ -752,6 +754,7 @@ impl SettingsFormState {
                 memory_prompt_bytes: None,
                 temperature: parse_temp("temperature")?,
                 effort: self.effort,
+                effort_levels: Vec::new(),
             }),
             forget_model: None,
             session: Some(SessionSettingsDto {
@@ -2903,6 +2906,8 @@ pub fn effort_label(effort: EffortDto) -> &'static str {
         EffortDto::Low => "low",
         EffortDto::Medium => "medium",
         EffortDto::High => "high",
+        EffortDto::ExtraHigh => "extra high",
+        EffortDto::Max => "max",
     }
 }
 
@@ -2911,34 +2916,45 @@ pub fn effort_default_temperature(effort: EffortDto) -> f32 {
         EffortDto::Low => 0.0,
         EffortDto::Medium => 0.2,
         EffortDto::High => 0.5,
+        EffortDto::ExtraHigh => 0.7,
+        EffortDto::Max => 0.9,
     }
 }
 
 pub fn set_effort_from_arg(state: &mut AppState, arg: &str) {
     let value = arg.trim().to_ascii_lowercase();
+    let allowed = state.host_info.settings.context.effort_levels.clone();
+    let allowed = if allowed.is_empty() {
+        EffortDto::ALL.to_vec()
+    } else {
+        allowed
+    };
     let current = state
         .host_info
         .settings
         .context
         .effort
-        .unwrap_or(EffortDto::Medium);
-    let next = match value.as_str() {
-        "" => match current {
-            EffortDto::Low => EffortDto::Medium,
-            EffortDto::Medium => EffortDto::High,
-            EffortDto::High => EffortDto::Low,
-        },
-        "low" => EffortDto::Low,
-        "medium" | "mid" => EffortDto::Medium,
-        "high" => EffortDto::High,
-        other => {
-            set_status_notice(
-                state,
-                format!("Unknown effort '{other}' · use low, medium, or high"),
-            );
-            return;
-        }
+        .unwrap_or(EffortDto::Medium)
+        .clamp_to(&allowed);
+    let next = if value.is_empty() {
+        current.next_in(&allowed)
+    } else if let Some(next) = EffortDto::parse(&value) {
+        next
+    } else {
+        set_status_notice(
+            state,
+            format!(
+                "Unknown effort '{value}' · use {}",
+                allowed
+                    .iter()
+                    .map(|level| level.keyword())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+        return;
     };
+    let next = next.clamp_to(&allowed);
     if !state.host_info.settings.config_writable {
         set_status_notice(state, "User settings file is read-only on this host.");
         return;
@@ -3991,6 +4007,16 @@ pub fn filtered_models(
     filtered_models_sorted(providers, provider_filter, None, filter)
 }
 
+pub fn complete_model_filter(state: &mut AppState, model_id: &str) {
+    if let Some(ActiveModal::ModelInput {
+        filter, selected, ..
+    }) = &mut state.modal
+    {
+        filter.replace_text(model_id.to_string());
+        *selected = 0;
+    }
+}
+
 pub fn filtered_models_sorted(
     providers: Option<&ProvidersResponse>,
     provider_filter: Option<&str>,
@@ -4101,7 +4127,12 @@ pub fn filtered_models_sorted(
         let is_default = default_map
             .get(m.provider.as_str())
             .is_some_and(|d| *d == m.id);
-        (scope_tier, recent_rank, !is_default)
+        let query_rank = if q.is_empty() || m.id.to_ascii_lowercase().starts_with(&q) {
+            0u8
+        } else {
+            1
+        };
+        (query_rank, scope_tier, recent_rank, !is_default)
     });
     items
 }

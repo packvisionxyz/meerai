@@ -7,6 +7,7 @@ providers:
       - OPENCODE_GO_API_KEY
       - OPENCODE_API_KEY
     requires_api_key: true
+    default_model: qwen4-max
   - id: opencode
     display_name: "OpenCode Zen"
     adapter: openai
@@ -21,20 +22,23 @@ providers:
       - OPEN_ROUTER_API_KEY
       - OPENROUTER_API_KEY
     requires_api_key: true
-  - id: alibaba-token-plan
-    display_name: "Alibaba Token Plan (DashScope)"
-    adapter: openai
-    base_url: "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1/"
+    default_model: openai/gpt-6.2-sol
+  - id: qwen-cloud
+    display_name: "Qwen Cloud (Alibaba Token Plan)"
+    adapter: qwen_cloud
+    base_url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/"
     env_vars:
-      - ALIYUN_API_KEY
-      - DASHSCOPE_API_KEY
+      - ALIBABA_TOKEN_PLAN_API_KEY
+      - QWEN_CLOUD_API_KEY
     requires_api_key: true
+    default_model: qwen3.8-max
   - id: gemini
     display_name: "Google Gemini"
     adapter: gemini
     env_vars:
       - GEMINI_API_KEY
     requires_api_key: true
+    default_model: gemini-4-neon
   - id: openai
     display_name: "OpenAI"
     adapter: openai_resp
@@ -42,51 +46,52 @@ providers:
     env_vars:
       - OPENAI_API_KEY
     requires_api_key: true
+    default_model: gpt-6.2-sol
   - id: anthropic
     display_name: "Anthropic"
     adapter: anthropic
     env_vars:
       - ANTHROPIC_API_KEY
     requires_api_key: true
+    default_model: claude-opus-4-7
   - id: deepseek
     display_name: "DeepSeek"
     adapter: deepseek
     env_vars:
       - DEEPSEEK_API_KEY
     requires_api_key: true
-  - id: groq
-    display_name: "Groq"
-    adapter: groq
-    env_vars:
-      - GROQ_API_KEY
-    requires_api_key: true
+    default_model: deepseek-v4-pro
   - id: xai
     display_name: "xAI"
     adapter: xai
     env_vars:
       - XAI_API_KEY
     requires_api_key: true
+    default_model: grok-4.7
+  - id: zai-coding
+    display_name: "Z.AI Coding Plan"
+    adapter: zai
+    base_url: "https://api.z.ai/api/coding/paas/v4/"
+    env_vars:
+      - ZAI_API_KEY
+    requires_api_key: true
+    default_model: glm-5.3
+  - id: moonshot
+    display_name: "Moonshot AI"
+    adapter: moonshot
+    env_vars:
+      - MOONSHOT_API_KEY
+    requires_api_key: true
+    default_model: kimi-k3.1-pro
+  - id: mistral
+    display_name: "Mistral"
+    adapter: mistral
+    env_vars:
+      - MISTRAL_API_KEY
+    requires_api_key: true
+    default_model: mistral-large-latest
   - id: ollama
     display_name: "Ollama (Local)"
     adapter: ollama
     env_vars: []
     requires_api_key: false
-models:
-  - provider: opencode-go
-    id: deepseek-v4.1-flash
-    context_window: 128000
-  - provider: anthropic
-    id: claude-sonnet-4-5
-    context_window: 200000
-  - provider: openai
-    id: gpt-5
-    context_window: 400000
-  - provider: gemini
-    id: gemini-2.5-pro
-    context_window: 1048576
-  - provider: openrouter
-    id: deepseek/deepseek-chat
-    context_window: 163840
-  - provider: ollama
-    id: llama3.2
-    context_window: 131072

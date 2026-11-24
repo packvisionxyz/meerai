@@ -1934,6 +1934,7 @@ async fn idle_apply_agent_logs_instruction_and_switches_model() {
             instructions: "Review every change.".to_string(),
             model: Some("gpt-5-mini".to_string()),
             context_window_tokens: None,
+            effort_levels: None,
         })
         .unwrap();
     cmd_tx
@@ -1995,6 +1996,7 @@ async fn idle_set_model_persists_session_meta() {
         .send(AgentCommand::SetModel {
             model: "openai::gpt-5-mini".to_string(),
             context_window_tokens: None,
+            effort_levels: None,
         })
         .unwrap();
     cmd_tx
@@ -2047,6 +2049,7 @@ async fn model_set_during_a_turn_persists_session_meta() {
         .send(AgentCommand::SetModel {
             model: "openai::gpt-5-mini".to_string(),
             context_window_tokens: None,
+            effort_levels: None,
         })
         .unwrap();
     release.notify_one();
@@ -2135,6 +2138,7 @@ async fn worker_set_model_applies_the_context_window() {
         .send(AgentCommand::SetModel {
             model: "openai::gpt-5-mini".to_string(),
             context_window_tokens: Some(10),
+            effort_levels: None,
         })
         .unwrap();
     run_two_turns(&cmd_tx, &mut rx).await;
@@ -2165,6 +2169,7 @@ async fn worker_set_model_without_a_window_keeps_the_current_window() {
         .send(AgentCommand::SetModel {
             model: "openai::gpt-5-mini".to_string(),
             context_window_tokens: None,
+            effort_levels: None,
         })
         .unwrap();
     run_two_turns(&cmd_tx, &mut rx).await;
@@ -2255,6 +2260,7 @@ async fn apply_agent_without_harness_updates_history_and_model() {
             instructions: "Review every change.".to_string(),
             model: Some("gpt-5-mini".to_string()),
             context_window_tokens: None,
+            effort_levels: None,
         })
         .unwrap();
     cmd_tx
@@ -9354,7 +9360,7 @@ async fn reload_preserves_token_pricing() {
         max_steps_per_turn: Some(7),
         ..ContextSettings::default()
     };
-    agent.reload_config(None, Some(context), "reloaded system".to_string());
+    agent.reload_config(None, Some(context), None, "reloaded system".to_string());
 
     let harness = agent.harness().expect("harness");
     assert_eq!(harness.config.token_pricing, Some(pricing));
@@ -9381,13 +9387,13 @@ async fn reload_preserves_plan_usage() {
         max_steps_per_turn: Some(7),
         ..ContextSettings::default()
     };
-    agent.reload_config(None, Some(context), "reloaded system".to_string());
+    agent.reload_config(None, Some(context), None, "reloaded system".to_string());
 
     let harness = agent.harness().expect("harness");
     assert!(harness.config.plan_usage);
     assert_eq!(harness.config.max_steps_per_turn, 7);
 
-    agent.reload_config(None, None, "prompt".to_string());
+    agent.reload_config(None, None, None, "prompt".to_string());
     assert!(agent.harness().expect("harness").config.plan_usage);
 }
 
@@ -9407,7 +9413,7 @@ async fn reload_preserves_resolved_context_window_when_unset() {
         },
     );
 
-    agent.reload_config(None, None, "prompt".to_string());
+    agent.reload_config(None, None, None, "prompt".to_string());
     assert_eq!(
         agent
             .harness()
@@ -9417,7 +9423,12 @@ async fn reload_preserves_resolved_context_window_when_unset() {
         200_000
     );
 
-    agent.reload_config(None, Some(ContextSettings::default()), "prompt".to_string());
+    agent.reload_config(
+        None,
+        Some(ContextSettings::default()),
+        None,
+        "prompt".to_string(),
+    );
     assert_eq!(
         agent
             .harness()
@@ -9431,7 +9442,7 @@ async fn reload_preserves_resolved_context_window_when_unset() {
         context_window_tokens: Some(50_000),
         ..ContextSettings::default()
     };
-    agent.reload_config(None, Some(narrow), "prompt".to_string());
+    agent.reload_config(None, Some(narrow), None, "prompt".to_string());
     assert_eq!(
         agent
             .harness()
@@ -9441,7 +9452,7 @@ async fn reload_preserves_resolved_context_window_when_unset() {
         50_000
     );
 
-    agent.reload_config(None, None, "prompt".to_string());
+    agent.reload_config(None, None, None, "prompt".to_string());
     assert_eq!(
         agent
             .harness()
@@ -9502,21 +9513,21 @@ async fn reload_applies_post_edit_diagnostics_reset_to_default() {
     );
     agent.set_post_edit_diagnostics(true);
 
-    agent.reload_config(None, None, "prompt".to_string());
+    agent.reload_config(None, None, None, "prompt".to_string());
     assert!(!agent.post_edit_diagnostics);
 
     let enabled = ContextSettings {
         post_edit_diagnostics: Some(true),
         ..ContextSettings::default()
     };
-    agent.reload_config(None, Some(enabled), "prompt".to_string());
+    agent.reload_config(None, Some(enabled), None, "prompt".to_string());
     assert!(agent.post_edit_diagnostics);
 
     let unset = ContextSettings {
         post_edit_diagnostics: None,
         ..ContextSettings::default()
     };
-    agent.reload_config(None, Some(unset), "prompt".to_string());
+    agent.reload_config(None, Some(unset), None, "prompt".to_string());
     assert!(!agent.post_edit_diagnostics);
 }
 
@@ -9693,6 +9704,102 @@ async fn effort_tier_flows_into_chat_options_and_plan_usage_omits_it() {
 }
 
 #[tokio::test]
+async fn extra_high_effort_maps_to_xhigh_and_clamps_to_the_model_set() {
+    use meerai_common::settings::EffortLevel;
+
+    let wanted = EffortLevel::ExtraHigh;
+    let open_streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("done"),
+    )]]));
+    let session = memory_session();
+    let mut agent = MultiTurnAgent::with_streamer(
+        open_streamer.clone(),
+        "openai_resp::gpt-6.2-sol",
+        Vec::new(),
+        "",
+        MultiTurnAgentConfig::default(),
+    );
+    let config = HarnessConfig {
+        effort: Some(wanted),
+        effort_levels: Some(EffortLevel::ALL.to_vec()),
+        ..HarnessConfig::default()
+    };
+    agent.set_harness(harness(&session, auto_mode(), config));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    {
+        let cached = open_streamer.options.lock().unwrap();
+        assert!(matches!(
+            cached[0].reasoning_effort,
+            Some(genai::chat::ReasoningEffort::XHigh)
+        ));
+    }
+
+    let capped_streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("done"),
+    )]]));
+    let capped_session = memory_session();
+    let mut capped = MultiTurnAgent::with_streamer(
+        capped_streamer.clone(),
+        "gemini::gemini-3.8-flash",
+        Vec::new(),
+        "",
+        MultiTurnAgentConfig::default(),
+    );
+    let capped_config = HarnessConfig {
+        effort: Some(wanted),
+        effort_levels: Some(vec![
+            EffortLevel::Low,
+            EffortLevel::Medium,
+            EffortLevel::High,
+        ]),
+        ..HarnessConfig::default()
+    };
+    capped.set_harness(harness(&capped_session, auto_mode(), capped_config));
+    capped
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    {
+        let cached = capped_streamer.options.lock().unwrap();
+        assert!(matches!(
+            cached[0].reasoning_effort,
+            Some(genai::chat::ReasoningEffort::High)
+        ));
+    }
+
+    let silent_streamer = Arc::new(FakeStreamer::new(vec![vec![ChatStreamEvent::End(
+        text_end("done"),
+    )]]));
+    let silent_session = memory_session();
+    let mut silent = MultiTurnAgent::with_streamer(
+        silent_streamer.clone(),
+        "openai::plain-model",
+        Vec::new(),
+        "",
+        MultiTurnAgentConfig::default(),
+    );
+    let silent_config = HarnessConfig {
+        effort: Some(wanted),
+        effort_levels: Some(Vec::new()),
+        ..HarnessConfig::default()
+    };
+    silent.set_harness(harness(&silent_session, auto_mode(), silent_config));
+    silent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    let cached = silent_streamer.options.lock().unwrap();
+    assert!(
+        cached[0].reasoning_effort.is_none(),
+        "a model without effort support receives no reasoning hint"
+    );
+}
+
+#[tokio::test]
 async fn manual_subagent_spawn_emits_items_and_clamps_plan_mode() {
     use meerai_policy::ApprovalMode;
 
@@ -9845,6 +9952,8 @@ async fn routing_applies_effort_and_output_cap_to_the_request() {
             max_concurrency: None,
         }],
     });
+    let mut config = config;
+    config.effort_levels = Some(vec![EffortLevel::Low]);
     let mut agent = harness_agent(streamer.clone(), vec![], "", &session, auto_mode(), config);
     assert_eq!(
         agent.harness.as_ref().unwrap().config.effort,
@@ -9855,8 +9964,8 @@ async fn routing_applies_effort_and_output_cap_to_the_request() {
 
     let options = streamer.options.lock().unwrap();
     assert_eq!(options[0].max_tokens, Some(1_234));
-    assert!(matches!(
-        options[0].reasoning_effort,
-        Some(ReasoningEffort::High)
-    ));
+    assert!(
+        matches!(options[0].reasoning_effort, Some(ReasoningEffort::High)),
+        "an explicit route effort is sent as-is, not clamped to the session model"
+    );
 }

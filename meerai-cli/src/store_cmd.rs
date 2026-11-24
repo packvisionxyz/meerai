@@ -110,9 +110,9 @@ pub(crate) fn run_routes(command: RoutesCommand) -> Result<()> {
                 .or_else(|| spec.split_once(':'))
                 .with_context(|| format!("route model must be provider::model: {spec}"))?;
             if let Some(level) = effort.as_deref()
-                && !matches!(level, "low" | "medium" | "high")
+                && meerai_common::settings::EffortLevel::parse(level).is_none()
             {
-                bail!("unknown effort level: {level}");
+                bail!("unknown effort level: {level} (use low, medium, high, or xhigh)");
             }
             let route = ModelRoute {
                 task_type: TaskType::parse(&task)?,

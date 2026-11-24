@@ -292,6 +292,7 @@ impl SessionOpener for ParityOpener {
                 theme: HostPalette::default().to_hex_tokens(),
                 raw_theme: ThemeSettings::default(),
                 context: ContextSettings::default(),
+                effort_levels: Vec::new(),
                 session: SessionSettings::default(),
                 sandbox: SandboxSettings::default(),
                 permissions_summary: vec!["allow: code-read_file".to_string()],
@@ -359,6 +360,7 @@ impl SessionOpener for ParityOpener {
             display_model: model_id.to_string(),
             command_model: format!("google::{model_id}"),
             context_window_tokens: Some(1_000_000),
+            effort_levels: None,
         })
     }
 
@@ -375,6 +377,7 @@ impl SessionOpener for ParityOpener {
             instructions: "Review carefully".to_string(),
             model: None,
             context_window_tokens: None,
+            effort_levels: None,
         })
     }
 

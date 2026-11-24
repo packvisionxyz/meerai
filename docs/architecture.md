@@ -32,13 +32,13 @@ events. Depth lives in the owning documents: product behavior in
 | `meerai-macros` | Proc-macros `#[tool]` and `#[derive(Toolset)]`; insta snapshot tests |
 | `meerai-store` | Embedded SQLite store (`meerai.db`): WAL, FTS5, schema v1, private-file permissions, and typed repositories for config, memories, packs, routes, and usage |
 | `meerai-common` | SQLite-backed `AppSettings`, project-root discovery and tighten-only project merge, markdown agent/skill discovery (`definitions`) across user, trusted packs, and project sources, hook configuration (`hooks`) |
-| `meerai-client` | Client-facing provider surface: `ProviderCatalog` + bundled `providers.yml`, per-model metadata (`ModelInfo`), `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract, `MemorySecretStore`, auth listing |
+| `meerai-client` | Client-facing provider surface: `ProviderCatalog` + bundled `providers.yml` and the generated `models.yml` table (context windows, prices, per-model effort levels), `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract, `MemorySecretStore`, auth listing |
 | `meerai-providers` | `genai` client factory plus the AEAD `VaultSecretStore` (ChaCha20-Poly1305, OS keychain DEK, Argon2id passphrase fallback) and ChatGPT plan OAuth |
 | `meerai-session` | Append-only `SessionEvent` log in SQLite, crash recovery and idempotent healing, `derive_messages` projection, replay, fork/rewind, SQLite blob and snapshot stores, spill and compaction primitives, listing/deletion/pruning |
 | `meerai-policy` | `PolicyEngine`: ordered rules (default sensitive → user → agent, last match wins), `ApprovalMode` presets, literal turn/session grants, YAML parsing |
-| `meerai-tools` | `code` (`CodeTools`, seven `code-*` tools, path guards, unified diffs, observations, shell safety inputs, env scrub), `repo_map` (`retrieval-repo_map`, tree-sitter + PageRank), `lsp` (`lsp-*` over stdio JSON-RPC), `search_as_code` (`sac-run_script`), `ExecutionWorld` sandbox seam |
+| `meerai-tools` | `code` (`CodeTools`, seven `code-*` tools, path guards, unified diffs, observations, shell safety inputs, env scrub), `repo_map` (`retrieval-repo_map`, tree-sitter + PageRank), `lsp` (`lsp-*` over stdio JSON-RPC), `search_as_code` (`sac-run_script`), `web` (`web-fetch`, `web-search`), `ExecutionWorld` sandbox seam |
 | `meerai-agents` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig`, `AgentEvent`/`AgentCommand`, interceptor seam, hook engine, `question-ask`, `skill-load`, prompt composition, `spawn_worker`, subagent runtime, delegated `acp-run`, redaction and injection screening, shell-safety allowlist |
-| `meerai-syntax` | Tree-sitter highlighting (Rust, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML, CSS, JSON) plus a lexical fallback; per-line tokens, no UI dependency |
+| `meerai-syntax` | Tree-sitter highlighting (Rust, C, C++, C#, Java, Kotlin, Scala, Swift, PHP, Haskell, Ruby, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML, CSS, JSON) plus a lexical fallback; per-line tokens, no UI dependency |
 | `meerai-host` | UI-neutral host seams (`SessionOpener`, `OpenedSession`, `WorkspaceQuery`/`LocalWorkspace`) and `SessionRegistry` live event pump/ring |
 | `meerai-web-protocol` | Serde-only Wasm-safe wire DTOs (`SnapshotResponse`, `ViewEvent`, `SubmitPromptRequest`, `ApiError`) with adjacent serde tagging |
 | `meerai-web` | Loopback HTTP/SSE server (`hyper` + `subtle` Basic auth, `Host`/`Origin`/JSON checks, embedded Wasm bundle serving) |
@@ -125,8 +125,10 @@ walking up from the CWD to `.git` or `.meerai/settings.yml`. The project
 merge is tighten-only (permissions, budgets, sandbox); provider, model,
 approval mode, sessions, and hooks blocks are ignored with warnings.
 Tools and sessions keep the CWD as the workspace. `providers.yml` holds
-provider overrides and per-model metadata; keys resolve stored secret →
-configured `api_key` → provider env vars; `.env` loads only by opt-in.
+provider overrides and per-model metadata; `models.yml` is the generated
+shipped model table, including each model's reasoning effort levels; keys
+resolve stored secret → configured `api_key` → provider env vars; `.env`
+loads only by opt-in.
 Field-level detail: [harness-internals.md](harness-internals.md).
 
 ### 2.5 Agents, skills, and tools (summary)

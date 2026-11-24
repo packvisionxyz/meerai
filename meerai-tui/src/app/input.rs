@@ -40,11 +40,11 @@ impl AppState {
                         }
                         ActiveModal::ModelInput {
                             input,
-                            selected_recent,
+                            selected,
                             error,
                         } => {
                             input.push_str(&clean);
-                            *selected_recent = None;
+                            *selected = None;
                             *error = None;
                         }
                         ActiveModal::ChatGptLogin { input, error, .. } => {

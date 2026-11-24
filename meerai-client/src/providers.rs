@@ -5,13 +5,14 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use meerai_common::settings::{
-    AppSettings, ProviderOptions, resolve_config_api_key, user_providers_path,
+    AppSettings, EffortLevel, ProviderOptions, resolve_config_api_key, user_providers_path,
 };
 use serde::Deserialize;
 
 use crate::secrets::{Credential, SecretStore};
 
 const BUNDLED_PROVIDERS_YAML: &str = include_str!("../providers.yml");
+const BUNDLED_MODELS_YAML: &str = include_str!("../models.yml");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderAuthKind {
@@ -100,9 +101,19 @@ pub struct ModelInfo {
     #[serde(default)]
     pub context_window: Option<u64>,
     #[serde(default)]
+    pub max_output_tokens: Option<u64>,
+    #[serde(default)]
     pub input_cost_per_mtok: Option<f64>,
     #[serde(default)]
     pub output_cost_per_mtok: Option<f64>,
+    #[serde(default)]
+    pub effort_levels: Option<Vec<EffortLevel>>,
+}
+
+impl ModelInfo {
+    pub fn supports_reasoning(&self) -> bool {
+        !matches!(self.effort_levels.as_deref(), Some([]))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,11 +150,13 @@ pub fn canonical_provider_id(raw: &str) -> String {
         "openai" => "openai".to_string(),
         "anthropic" => "anthropic".to_string(),
         "deepseek" => "deepseek".to_string(),
-        "groq" => "groq".to_string(),
         "xai" => "xai".to_string(),
-        "mistral" => "mistral".to_string(),
+        "mistral" | "mistralai" | "mistral-ai" => "mistral".to_string(),
+        "moonshot" | "moonshotai" | "moonshot-ai" | "kimi" => "moonshot".to_string(),
+        "zai" | "z-ai" | "zai_coding" | "zai-coding" | "glm" => "zai-coding".to_string(),
+        "aliyun" | "alibaba" | "alibaba-token-plan" | "dashscope" | "qwen" | "qwen-cloud"
+        | "qwen_cloud" => "qwen-cloud".to_string(),
         "ollama" => "ollama".to_string(),
-        "aliyun" => "alibaba-token-plan".to_string(),
         other => other.to_string(),
     }
 }
@@ -160,8 +173,10 @@ fn parse_adapter(adapter: Option<&str>) -> String {
         "gemini" | "google" => "gemini",
         "anthropic" => "anthropic",
         "deepseek" => "deepseek",
-        "groq" => "groq",
         "xai" => "xai",
+        "zai" | "z-ai" => "zai",
+        "moonshot" | "kimi" => "moonshot",
+        "qwen_cloud" | "qwen-cloud" | "qwen" => "qwen_cloud",
         "aliyun" => "aliyun",
         "ollama" => "ollama",
         "mistral" => "mistral",
@@ -211,7 +226,12 @@ impl Default for ProviderCatalog {
 
 impl ProviderCatalog {
     pub fn new() -> Self {
-        Self::from_yaml(BUNDLED_PROVIDERS_YAML).expect("bundled providers.yml must parse")
+        let mut catalog =
+            Self::from_yaml(BUNDLED_PROVIDERS_YAML).expect("bundled providers.yml must parse");
+        let models: ProvidersFile =
+            serde_yaml::from_str(BUNDLED_MODELS_YAML).expect("bundled models.yml must parse");
+        catalog.merge_file(models);
+        catalog
     }
 
     pub fn from_yaml(yaml: &str) -> Result<Self> {
@@ -305,15 +325,31 @@ impl ProviderCatalog {
                 provider: provider.clone(),
                 id,
                 context_window: entry.context_window,
+                max_output_tokens: entry.max_output_tokens,
                 input_cost_per_mtok: entry.input_cost_per_mtok,
                 output_cost_per_mtok: entry.output_cost_per_mtok,
+                effort_levels: entry.effort_levels,
             };
             if let Some(existing) = self
                 .models
                 .iter_mut()
                 .find(|model| model.provider == provider && model.id == info.id)
             {
-                *existing = info;
+                if info.context_window.is_some() {
+                    existing.context_window = info.context_window;
+                }
+                if info.max_output_tokens.is_some() {
+                    existing.max_output_tokens = info.max_output_tokens;
+                }
+                if info.input_cost_per_mtok.is_some() {
+                    existing.input_cost_per_mtok = info.input_cost_per_mtok;
+                }
+                if info.output_cost_per_mtok.is_some() {
+                    existing.output_cost_per_mtok = info.output_cost_per_mtok;
+                }
+                if info.effort_levels.is_some() {
+                    existing.effort_levels = info.effort_levels;
+                }
             } else {
                 self.models.push(info);
             }
@@ -346,6 +382,19 @@ impl ProviderCatalog {
         &self.models
     }
 
+    pub fn models_for_provider(&self, provider: &str) -> Vec<&ModelInfo> {
+        let provider = canonical_provider_id(provider);
+        self.models
+            .iter()
+            .filter(|info| info.provider == provider)
+            .collect()
+    }
+
+    pub fn effort_levels_for(&self, provider: &str, model: &str) -> Option<Vec<EffortLevel>> {
+        self.model_info(provider, model)
+            .and_then(|info| info.effort_levels.clone())
+    }
+
     pub fn model_info(&self, provider: &str, model: &str) -> Option<&ModelInfo> {
         let provider = canonical_provider_id(provider);
         let model = model.trim();
@@ -354,9 +403,11 @@ impl ProviderCatalog {
         }
         let prefix = format!("{provider}/");
         let stripped = model.strip_prefix(prefix.as_str()).unwrap_or(model);
-        self.models
-            .iter()
-            .find(|info| info.provider == provider && (info.id == model || info.id == stripped))
+        let bare = stripped.rsplit("::").next().unwrap_or(stripped);
+        self.models.iter().find(|info| {
+            info.provider == provider
+                && (info.id == model || info.id == stripped || info.id == bare)
+        })
     }
 
     pub fn sensitive_env_vars(&self) -> Vec<String> {
@@ -703,21 +754,38 @@ mod tests {
         assert!(ids.contains(&"opencode-go"));
         assert!(ids.contains(&"opencode"));
         assert!(ids.contains(&"openrouter"));
-        assert!(ids.contains(&"alibaba-token-plan"));
+        assert!(ids.contains(&"qwen-cloud"));
         assert!(ids.contains(&"gemini"));
         assert!(ids.contains(&"openai"));
         assert!(ids.contains(&"anthropic"));
         assert!(ids.contains(&"deepseek"));
-        assert!(ids.contains(&"groq"));
         assert!(ids.contains(&"xai"));
+        assert!(ids.contains(&"zai-coding"));
+        assert!(ids.contains(&"moonshot"));
+        assert!(ids.contains(&"mistral"));
         assert!(ids.contains(&"ollama"));
+        assert!(!ids.contains(&"groq"));
+        assert!(!ids.contains(&"alibaba-token-plan"));
 
         let ollama = catalog.provider("ollama").unwrap();
         assert_eq!(ollama.auth, ProviderAuthKind::None);
 
-        let alibaba = catalog.provider("alibaba-token-plan").unwrap();
-        assert_eq!(alibaba.adapter, "openai");
-        assert!(alibaba.default_base_url.is_some());
+        let qwen = catalog.provider("qwen-cloud").unwrap();
+        assert_eq!(qwen.adapter, "qwen_cloud");
+        assert_eq!(
+            qwen.default_base_url.as_deref(),
+            Some("https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/")
+        );
+
+        let zai = catalog.provider("zai-coding").unwrap();
+        assert_eq!(zai.adapter, "zai");
+        assert_eq!(
+            zai.default_base_url.as_deref(),
+            Some("https://api.z.ai/api/coding/paas/v4/")
+        );
+
+        assert_eq!(catalog.provider("moonshot").unwrap().adapter, "moonshot");
+        assert_eq!(catalog.provider("mistral").unwrap().adapter, "mistral");
 
         let openai = catalog.provider("openai").unwrap();
         assert_eq!(openai.adapter, "openai_resp");
@@ -736,9 +804,45 @@ mod tests {
             "open_router::anthropic/claude-sonnet-4.5"
         );
         assert_eq!(
+            catalog.format_genai_spec("zai-coding", "glm-5.3"),
+            "zai::glm-5.3"
+        );
+        assert_eq!(
+            catalog.format_genai_spec("qwen-cloud", "qwen3.8-max"),
+            "qwen_cloud::qwen3.8-max"
+        );
+        assert_eq!(
             catalog.format_genai_spec("custom-proxy", "my-custom-model"),
             "openai::my-custom-model"
         );
+    }
+
+    #[test]
+    fn bundled_default_models_exist_in_the_model_table() {
+        let catalog = ProviderCatalog::new();
+        for provider in catalog.providers() {
+            let Some(default) = provider.default_model.as_deref() else {
+                continue;
+            };
+            assert!(
+                catalog.model_info(&provider.id, default).is_some(),
+                "{} default model {} is not in models.yml",
+                provider.id,
+                default
+            );
+        }
+    }
+
+    #[test]
+    fn provider_ids_canonicalize_aliases() {
+        assert_eq!(canonical_provider_id("zai_coding"), "zai-coding");
+        assert_eq!(canonical_provider_id("z-ai"), "zai-coding");
+        assert_eq!(canonical_provider_id("moonshotai"), "moonshot");
+        assert_eq!(canonical_provider_id("kimi"), "moonshot");
+        assert_eq!(canonical_provider_id("mistralai"), "mistral");
+        assert_eq!(canonical_provider_id("alibaba-token-plan"), "qwen-cloud");
+        assert_eq!(canonical_provider_id("dashscope"), "qwen-cloud");
+        assert_eq!(canonical_provider_id("qwen"), "qwen-cloud");
     }
 
     #[test]
@@ -932,13 +1036,55 @@ mod model_metadata_tests {
     use super::*;
 
     #[test]
-    fn bundled_models_expose_context_windows() {
+    fn bundled_models_expose_context_windows_and_effort_levels() {
         let catalog = ProviderCatalog::new();
         let info = catalog
             .model_info("opencode-go", "deepseek-v4.1-flash")
             .expect("bundled model metadata");
-        assert_eq!(info.context_window, Some(128_000));
-        assert_eq!(info.input_cost_per_mtok, None);
+        assert_eq!(info.context_window, Some(1_000_000));
+        assert_eq!(info.max_output_tokens, Some(384_000));
+        assert_eq!(
+            info.effort_levels.as_deref(),
+            Some([EffortLevel::Low, EffortLevel::High, EffortLevel::Max].as_slice())
+        );
+        assert!(info.supports_reasoning());
+        assert_eq!(
+            catalog.effort_levels_for("opencode_go", "deepseek-v4.1-flash"),
+            Some(vec![EffortLevel::Low, EffortLevel::High, EffortLevel::Max])
+        );
+    }
+
+    #[test]
+    fn bundled_catalog_covers_every_provider_and_caps_gateways() {
+        let catalog = ProviderCatalog::new();
+        assert!(catalog.models().len() >= 300);
+        for provider in catalog.providers() {
+            if provider.id == "ollama" {
+                continue;
+            }
+            assert!(
+                !catalog.models_for_provider(&provider.id).is_empty(),
+                "{} has no models",
+                provider.id
+            );
+            assert!(
+                catalog.models_for_provider(&provider.id).len() <= 50,
+                "{} exceeds the model cap",
+                provider.id
+            );
+        }
+        let openrouter = catalog.models_for_provider("openrouter");
+        assert!(openrouter.len() <= 50);
+        assert!(
+            openrouter
+                .iter()
+                .any(|model| model.id.starts_with("openai/"))
+        );
+        assert!(
+            openrouter
+                .iter()
+                .any(|model| model.id.starts_with("anthropic/"))
+        );
     }
 
     #[test]
@@ -951,19 +1097,26 @@ mod model_metadata_tests {
             .model_info("gemini", "gemini/gemini-2.5-pro")
             .expect("prefixed lookup");
         assert_eq!(info.context_window, Some(1_048_576));
+        let spec = catalog
+            .model_info("gemini", "gemini::gemini-2.5-pro")
+            .expect("genai spec lookup");
+        assert_eq!(spec.context_window, Some(1_048_576));
     }
 
     #[test]
     fn user_models_override_bundled_entries_and_keep_pricing() {
         let mut catalog = ProviderCatalog::new();
+        let bundled = catalog.models().len();
         catalog.merge_file(ProvidersFile {
             providers: Vec::new(),
             models: vec![ModelInfo {
                 provider: "opencode-go".to_string(),
                 id: "deepseek-v4.1-flash".to_string(),
                 context_window: Some(64_000),
+                max_output_tokens: None,
                 input_cost_per_mtok: Some(0.2),
                 output_cost_per_mtok: Some(0.8),
+                effort_levels: None,
             }],
         });
         let info = catalog
@@ -971,6 +1124,11 @@ mod model_metadata_tests {
             .expect("overridden model");
         assert_eq!(info.context_window, Some(64_000));
         assert_eq!(info.input_cost_per_mtok, Some(0.2));
-        assert_eq!(catalog.models().len(), 6);
+        assert_eq!(
+            info.effort_levels.as_deref(),
+            Some([EffortLevel::Low, EffortLevel::High, EffortLevel::Max].as_slice()),
+            "a partial override keeps the bundled effort set"
+        );
+        assert_eq!(catalog.models().len(), bundled);
     }
 }

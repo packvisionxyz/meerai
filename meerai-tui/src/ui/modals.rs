@@ -2,7 +2,6 @@ use super::statusline::key_status_style;
 use super::*;
 use crate::app::{ApprovalClickAction, DiffListState, PackTab, ProviderConnectionAction};
 use crate::diff::DiffRow;
-use meerai_common::settings::EffortLevel;
 
 fn auth_file_display() -> String {
     meerai_common::settings::default_data_dir()
@@ -508,16 +507,16 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
         }
         ActiveModal::ModelInput {
             input,
-            selected_recent,
+            selected,
             error,
         } => {
             let active_provider = app.tab().active_provider.clone();
             let active_model = app.tab().model.clone();
-            let recent = app.recent_models_for_active_provider();
-            let height = if recent.is_empty() {
+            let matches = app.model_candidates(&input);
+            let height = if matches.is_empty() {
                 12
             } else {
-                (12 + recent.len().min(8)) as u16
+                (12 + matches.len().min(8)) as u16
             };
             let popup = centered_rect_fixed(area, 64, height);
             dim_backdrop(frame, area, popup);
@@ -537,8 +536,8 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
 
             let placeholder = app
                 .current_or_default_model(&active_provider)
-                .map(|m| format!("(Enter keeps '{m}', or type model name)"))
-                .unwrap_or_else(|| "(type model name, e.g. gpt-4o)".to_string());
+                .map(|m| format!("(type to filter, or Enter keeps '{m}')"))
+                .unwrap_or_else(|| "(type to filter, e.g. gpt or claude)".to_string());
             let input_display = if input.is_empty() {
                 Span::styled(placeholder, Style::default().fg(theme::p().faint))
             } else {
@@ -559,30 +558,43 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             );
             place_input_cursor(frame, input_area, 7 + input.chars().count());
 
-            if recent.is_empty() {
+            if matches.is_empty() {
+                let text = if input.trim().is_empty() {
+                    "No models are known for this provider.".to_string()
+                } else {
+                    format!(
+                        "No catalog match for '{}' · Enter applies it as typed.",
+                        input.trim()
+                    )
+                };
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
-                        "No recent models saved for this provider.",
+                        text,
                         Style::default().fg(theme::p().faint),
                     ))),
                     rows[3],
                 );
             } else {
+                let heading = if input.trim().is_empty() {
+                    "MODELS".to_string()
+                } else {
+                    format!("MODELS · {} match", matches.len())
+                };
                 frame.render_widget(
                     Paragraph::new(Span::styled(
-                        "RECENT MODELS",
+                        heading,
                         Style::default()
                             .fg(theme::p().faint)
                             .add_modifier(Modifier::BOLD),
                     )),
                     rows[2],
                 );
-                let list_items: Vec<ListItem<'_>> = recent
+                let list_items: Vec<ListItem<'_>> = matches
                     .iter()
                     .enumerate()
                     .map(|(idx, m)| {
                         let is_active = m == &active_model;
-                        let is_selected = selected_recent == Some(idx);
+                        let is_selected = selected == Some(idx);
                         let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(idx));
                         let active_mark = if is_active { "● " } else { "  " };
                         let row = ListItem::new(Line::from(vec![
@@ -610,12 +622,12 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                     })
                     .collect();
                 let mut state = ListState::default();
-                if let Some(idx) = selected_recent {
-                    state.select(Some(idx.min(recent.len() - 1)));
+                if let Some(idx) = selected {
+                    state.select(Some(idx.min(matches.len() - 1)));
                 }
                 let list = List::new(list_items).highlight_style(selection_style());
                 frame.render_stateful_widget(list, rows[3], &mut state);
-                register_list_hit_zones(app, rows[3], state.offset(), recent.len());
+                register_list_hit_zones(app, rows[3], state.offset(), matches.len());
             }
 
             let status_line = if let Some(err) = error {
@@ -633,10 +645,10 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             frame.render_widget(
                 Paragraph::new(key_hints_line(&[
                     ("Enter", "apply"),
-                    ("↑↓", "recent"),
+                    ("Tab", "complete"),
+                    ("↑↓", "browse"),
                     ("ctrl+d", "forget"),
-                    ("ctrl+u", "clear"),
-                    ("Esc", "close"),
+                    ("esc", "close"),
                 ])),
                 rows[6],
             );
@@ -1824,7 +1836,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             ])
             .split(inner);
             let effort = effort.unwrap_or_default();
-            let tiers = [EffortLevel::Low, EffortLevel::Medium, EffortLevel::High];
+            let tiers = app.active_model_effort_levels();
             let focused = field == 0;
             let mut tier_spans: Vec<Span<'static>> = Vec::new();
             let mut tier_x = rows[0].x;

@@ -161,13 +161,7 @@ pub fn route_model(settings: &RoutingSettings, task: &TaskType, fallback: &str) 
 }
 
 pub fn parse_effort(raw: &str) -> Option<meerai_common::settings::EffortLevel> {
-    use meerai_common::settings::EffortLevel;
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "low" => Some(EffortLevel::Low),
-        "medium" => Some(EffortLevel::Medium),
-        "high" => Some(EffortLevel::High),
-        _ => None,
-    }
+    meerai_common::settings::EffortLevel::parse(raw)
 }
 
 pub fn provider_of(model: &str) -> String {

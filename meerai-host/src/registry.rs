@@ -1225,6 +1225,7 @@ impl SessionRegistry {
         display_model: String,
         command_model: String,
         context_window_tokens: Option<u64>,
+        effort_levels: Option<Vec<meerai_common::settings::EffortLevel>>,
     ) -> Result<(), HostError> {
         let cmd_tx = {
             let mut state = self.inner.state.lock().unwrap();
@@ -1253,6 +1254,7 @@ impl SessionRegistry {
             .send(AgentCommand::SetModel {
                 model: command_model,
                 context_window_tokens,
+                effort_levels,
             })
             .map_err(|_| HostError::WorkerClosed)
     }
@@ -1340,6 +1342,7 @@ impl SessionRegistry {
                 instructions: app.instructions,
                 model: app.model,
                 context_window_tokens: app.context_window_tokens,
+                effort_levels: app.effort_levels,
             })
             .map_err(|_| HostError::WorkerClosed)
     }
@@ -1509,6 +1512,7 @@ impl SessionRegistry {
                 let _ = record.cmd_tx.send(AgentCommand::Reload {
                     rules: outcome.payload.rules.clone(),
                     context: outcome.payload.context.clone(),
+                    effort_levels: None,
                     system_prompt: outcome.payload.system_prompt.clone(),
                 });
                 let _ = record

@@ -698,7 +698,7 @@ where
                         match token.as_str() {
                             "--effort" => {
                                 effort = Some(iter.next().ok_or_else(|| {
-                                    anyhow::anyhow!("--effort requires low, medium, or high")
+                                    anyhow::anyhow!("--effort requires low, medium, high, or xhigh")
                                 })?);
                             }
                             other if max_cost_usd.is_none() => {

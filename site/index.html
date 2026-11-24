@@ -100,9 +100,10 @@
 <body>
   <main>
     <h1><span>meerai</span></h1>
-    <p>Pack Vision's terminal agent harness in Rust with API keys stored locally in
-      <code>auth.json</code> (owner-only permissions, <code>0600</code> on Unix), OpenCode-style model
-      selection, and multi-provider streaming.
+    <p>Pack Vision's terminal agent harness in Rust. Credentials are encrypted in an
+      OS-keychain-backed vault (<code>0600</code> on Unix), a bundled model catalog with
+      per-model reasoning-effort tiers drives OpenCode-style model selection, and streaming
+      spans many providers, with URL fetch, web search, and tree-sitter repository maps.
     </p>
 
     <h2>macOS and Linux</h2>

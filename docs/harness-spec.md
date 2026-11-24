@@ -80,7 +80,7 @@ All boxes below exist in the tree; the SDK/server client is planned (§3).
 │   snapshots · blobs · spill · compaction primitives                      │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ meerai-policy — permissions · approval modes · grants                    │
-│ meerai-tools — code/repo_map/lsp/sac toolsets · ExecutionWorld sandbox   │
+│ meerai-tools — code/repo_map/lsp/sac/web toolsets · ExecutionWorld      │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ meerai-core — Toolset · ToolOutput · ToolObservation · FileDiff (genai)  │
 │ meerai-common — settings · definitions · hooks config                    │
@@ -327,6 +327,30 @@ the user to retype context. `question-ask` adds a real choice channel:
   renders the question and its selected answers. Questions never consult
   policy and never record grants.
 
+#### 2.3.2 Web fetch and search
+
+`meerai-tools::web::WebTools` registers `web-fetch` and `web-search` as
+`EffectClass::External` with the `webfetch` permission action
+(`resource_arg` = `url` / `query`). `plan` hides both because it advertises
+only `Read` tools; `ask` requests an approval; `auto` allows them.
+
+- **`web-fetch`.** Accepts `http` and `https` only, rejects URL userinfo,
+  and follows at most five redirects with the address guard applied to
+  every hop. The guard resolves the host and refuses loopback, private,
+  link-local, CGNAT, broadcast, multicast, and IPv4-mapped private
+  addresses, and rejects `localhost` and `.local` names. DNS rebinding is
+  not prevented. Bodies stop at 2 MiB and output at 60,000 characters.
+  HTML becomes plain text with the page title kept; JSON, XML, and other
+  textual content is returned as-is; binary content is refused.
+- **`web-search`.** Sends the query to `html.duckduckgo.com`, then
+  `lite.duckduckgo.com` if the first page yields no parsed result. It needs
+  no account, returns up to ten numbered results with title, URL, and
+  snippet, unwraps `uddg` redirect links, drops duplicate targets, and
+  reports a blocked provider instead of retrying.
+- Both tools are outside effects: they never write the workspace, never
+  spawn a process, and use the shared tool-output spill rule. Fetched text
+  reaches the model as untrusted data.
+
 ### 2.4 Agent loop: turns and steps
 
 A **step** is one model request plus the tool calls it returns; a **turn**
@@ -409,12 +433,16 @@ Per-model context comes from `ProviderCatalog`. Knobs (`context` in
 | `rollback_on_verify_failure` | false | auto-mode snapshot restore on a verify block |
 | `post_edit_diagnostics` | false | LSP diagnostics after successful edits |
 | `temperature` | `0.20` (medium tier) | sampling temperature, 0.0..=2.0 |
-| `effort` | `medium` | reasoning tier: `low` 0.00, `medium` 0.20, `high` 0.50 |
+| `effort` | `medium` | reasoning tier: `low` 0.00, `medium` 0.20, `high` 0.50, `extrahigh` 0.70, `max` 0.90 |
 
 `effort` sets the temperature for its tier when `temperature` is unset, and
-is also sent as the provider reasoning-effort hint. Adapters that ignore
-that hint (DeepSeek, Groq, xAI, `open_router`) still receive the tier
-temperature.
+is also sent as the provider reasoning-effort hint (`extrahigh` maps to
+`xhigh`; `max` maps to `max`). The active model's catalog entry carries
+`effort_levels`; a tier the model does not accept clamps down to the nearest
+accepted tier, and an empty set sends no reasoning hint but keeps the tier
+temperature. An unknown model keeps all five tiers. An adapter that ignores the hint still receives the tier
+temperature. A route's explicit `effort` is sent as-is; the model set gates only
+the session tier.
 
 The CLI asks `ProviderCatalog::model_info(provider, model)` for the active
 model: a catalog `context_window` replaces the configured default only
@@ -521,7 +549,7 @@ Every tool declares `EffectClass`: `Read | Write | Execute | External`.
 | --- | --- | --- |
 | 1 — autonomous read | `read_file`, `grep`, `glob`, `list_dir` | run, concurrent |
 | 2 — sandboxed mutation | `edit_file`, `write_file`, sandboxed `shell` | run inside the workspace-write sandbox |
-| 3 — human gate | destructive shell, secrets/config edits, network mutations, outside writable roots | approval request (TUI overlay; headless fails fast) |
+| 3 — human gate | destructive shell, secrets/config edits, `web-fetch`/`web-search`, outside writable roots | approval request (TUI overlay; headless fails fast) |
 
 #### Rule engine
 
@@ -837,7 +865,7 @@ permission set, and tool subset, exposed as one `subagent-run` tool.
 | v1 | `read_file(offset,limit)`, `grep`, `glob`, `list_dir`; spill stubs keep big hits cheap | Implemented |
 | v1 | Hierarchical `AGENTS.md`: root in the prefix, per-directory files injected as ephemera when touched | Implemented |
 | v2 | `explore` subagent: parallel read-only calls, spans-only report | Implemented |
-| v2 | AST repo map: `retrieval-repo_map`, tree-sitter (Rust/TS/TSX/JS/Python/Go) + personalized PageRank, ~1500-token budget (200..4000) | Implemented |
+| v2 | AST repo map: `retrieval-repo_map`, tree-sitter (Rust, C, C++, C#, Java, Kotlin, Scala, Swift, PHP, Haskell, Ruby, TS/TSX/JS/Python/Go) + personalized PageRank, ~1500-token budget (200..4000) | Implemented |
 | v3 | LSP tools: `lsp-go_to_definition`, `lsp-find_references`, `lsp-get_diagnostics` over stdio JSON-RPC (`rust-analyzer`, `typescript-language-server`, `gopls`, `dart language-server --protocol=lsp`, `pyright-langserver`); opt-in post-edit diagnostics (`context.post_edit_diagnostics`) | Implemented |
 | v3 | Search-as-Code: `sac-run_script` runs `python3 -I -B` / hardened Node for multi-step analysis; output spilled like any tool result | Implemented |
 

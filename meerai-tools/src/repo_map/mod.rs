@@ -356,10 +356,60 @@ mod tests {
             "go/main.go",
             "package main\nconst Limit = 10\ntype Handler interface { Serve() }\ntype Server struct{}\nfunc NewServer() *Server { return nil }\n",
         );
+        write(
+            root,
+            "c/engine.c",
+            "#include <stdio.h>\nstruct Point { int x; };\nint add(int a, int b) { return a + b; }\ntypedef struct Point Point;\n",
+        );
+        write(
+            root,
+            "cpp/engine.cpp",
+            "namespace app {\nclass Engine {\n public:\n  void run();\n};\n}\nvoid app::start() {}\n",
+        );
+        write(
+            root,
+            "java/App.java",
+            "package app;\npublic class App {\n  public void run() {}\n}\ninterface Task {}\n",
+        );
+        write(
+            root,
+            "csharp/App.cs",
+            "namespace App {\npublic class Engine {\n  public void Run() {}\n  public int Count { get; set; }\n}\n}\n",
+        );
+        write(
+            root,
+            "kotlin/App.kt",
+            "package app\ninterface Task\nclass App {\n  fun run() {}\n}\nobject Registry\n",
+        );
+        write(
+            root,
+            "scala/App.scala",
+            "trait Engine\ndef run(): Int = 1\nclass Point(val x: Int)\nobject Main { def go(): Unit = () }\n",
+        );
+        write(
+            root,
+            "swift/App.swift",
+            "protocol Task {}\nclass App: Task {\n  func run() {}\n}\nstruct Point {}\n",
+        );
+        write(
+            root,
+            "php/App.php",
+            "<?php\nnamespace App;\ninterface Task {}\nclass Engine implements Task {\n  public function run() {}\n}\n",
+        );
+        write(
+            root,
+            "haskell/App.hs",
+            "module Main where\ndata Point = Point Int\nclass Runnable a where\nrun :: a -> Int\nmain = putStrLn \"hi\"\n",
+        );
+        write(
+            root,
+            "ruby/app.rb",
+            "module App\n  class Engine\n    def run\n    end\n  end\nend\n",
+        );
 
         let toolset = RepoMapToolset::new(root);
         let run = toolset
-            .invoke_structured(REPO_MAP_TOOL, "{}")
+            .invoke_structured(REPO_MAP_TOOL, "{\"max_tokens\": 4000}")
             .await
             .unwrap();
         let ToolOutput::Text(out) = run.output else {
@@ -398,6 +448,53 @@ mod tests {
             "interface Handler",
             "struct Server",
             "fn NewServer",
+            "c/engine.c:",
+            "struct Point",
+            "fn add",
+            "type Point",
+            "cpp/engine.cpp:",
+            "namespace app",
+            "class Engine",
+            "fn run",
+            "fn app::start",
+            "java/App.java:",
+            "class App",
+            "fn run",
+            "interface Task",
+            "csharp/App.cs:",
+            "class Engine",
+            "fn Run",
+            "property Count",
+            "kotlin/App.kt:",
+            "interface Task",
+            "class App",
+            "fn run",
+            "object Registry",
+            "scala/App.scala:",
+            "trait Engine",
+            "fn run",
+            "class Point",
+            "object Main",
+            "fn go",
+            "swift/App.swift:",
+            "protocol Task",
+            "class App",
+            "fn run",
+            "struct Point",
+            "php/App.php:",
+            "namespace App",
+            "interface Task",
+            "class Engine",
+            "fn run",
+            "haskell/App.hs:",
+            "type Point",
+            "class Runnable",
+            "fn run",
+            "fn main",
+            "ruby/app.rb:",
+            "module App",
+            "class Engine",
+            "fn run",
         ] {
             assert!(out.contains(expected), "missing `{expected}` in:\n{out}");
         }

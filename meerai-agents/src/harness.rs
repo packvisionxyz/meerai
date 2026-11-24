@@ -35,6 +35,7 @@ pub struct HarnessConfig {
     pub summarizer_model: Option<String>,
     pub temperature: Option<f32>,
     pub effort: Option<EffortLevel>,
+    pub effort_levels: Option<Vec<EffortLevel>>,
     pub token_pricing: Option<TokenPricing>,
     pub routing: RoutingSettings,
 }
@@ -61,6 +62,7 @@ impl Default for HarnessConfig {
             summarizer_model: None,
             temperature: Some(DEFAULT_TEMPERATURE),
             effort: Some(EffortLevel::Medium),
+            effort_levels: None,
             token_pricing: None,
             routing: RoutingSettings::default(),
         }

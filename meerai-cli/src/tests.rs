@@ -1440,6 +1440,8 @@ fn build_workspace_toolsets_exposes_all_and_filters_read_only() {
     assert!(full_names.contains(&"lsp-find_references".to_string()));
     assert!(full_names.contains(&"lsp-get_diagnostics".to_string()));
     assert!(full_names.contains(&"sac-run_script".to_string()));
+    assert!(full_names.contains(&"web-fetch".to_string()));
+    assert!(full_names.contains(&"web-search".to_string()));
 
     let ro_names: Vec<String> = build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, true)
         .into_iter()
@@ -1458,6 +1460,7 @@ fn build_workspace_toolsets_exposes_all_and_filters_read_only() {
     assert!(!ro_names.contains(&"code-edit_file".to_string()));
     assert!(!ro_names.contains(&"code-shell".to_string()));
     assert!(!ro_names.contains(&"sac-run_script".to_string()));
+    assert!(!ro_names.contains(&"web-fetch".to_string()));
 
     std::fs::remove_dir_all(&root).ok();
 }

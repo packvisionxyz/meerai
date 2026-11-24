@@ -76,6 +76,16 @@ mod tests {
         assert_eq!(language_for_path("site/index.html"), Some(Language::Html));
         assert_eq!(language_for_path("site/style.css"), Some(Language::Css));
         assert_eq!(language_for_path("data.json"), Some(Language::Json));
+        assert_eq!(language_for_path("src/app.c"), Some(Language::C));
+        assert_eq!(language_for_path("src/app.cpp"), Some(Language::Cpp));
+        assert_eq!(language_for_path("src/App.java"), Some(Language::Java));
+        assert_eq!(language_for_path("src/App.cs"), Some(Language::CSharp));
+        assert_eq!(language_for_path("src/App.kt"), Some(Language::Kotlin));
+        assert_eq!(language_for_path("src/App.scala"), Some(Language::Scala));
+        assert_eq!(language_for_path("src/App.swift"), Some(Language::Swift));
+        assert_eq!(language_for_path("src/App.php"), Some(Language::Php));
+        assert_eq!(language_for_path("src/App.hs"), Some(Language::Haskell));
+        assert_eq!(language_for_path("src/app.rb"), Some(Language::Ruby));
         assert_eq!(language_for_path("Makefile"), None);
     }
 
@@ -87,6 +97,16 @@ mod tests {
         assert_eq!(language_for_fence("html"), Some(Language::Html));
         assert_eq!(language_for_fence("css"), Some(Language::Css));
         assert_eq!(language_for_fence("json"), Some(Language::Json));
+        assert_eq!(language_for_fence("c"), Some(Language::C));
+        assert_eq!(language_for_fence("c++"), Some(Language::Cpp));
+        assert_eq!(language_for_fence("java"), Some(Language::Java));
+        assert_eq!(language_for_fence("csharp"), Some(Language::CSharp));
+        assert_eq!(language_for_fence("kotlin"), Some(Language::Kotlin));
+        assert_eq!(language_for_fence("scala"), Some(Language::Scala));
+        assert_eq!(language_for_fence("swift"), Some(Language::Swift));
+        assert_eq!(language_for_fence("php"), Some(Language::Php));
+        assert_eq!(language_for_fence("haskell"), Some(Language::Haskell));
+        assert_eq!(language_for_fence("ruby"), Some(Language::Ruby));
         assert_eq!(language_for_fence("text"), None);
         assert_eq!(language_for_fence(""), None);
     }
@@ -107,6 +127,15 @@ mod tests {
             (Language::Java, "class A {}"),
             (Language::C, "int main() { return 0; }"),
             (Language::Cpp, "int main() { return 0; }"),
+            (Language::CSharp, "class A {\n  void Run() {}\n}"),
+            (Language::Kotlin, "fun main() {\n  println(\"hi\")\n}"),
+            (Language::Scala, "trait A {\n  def run(): Int = 1\n}"),
+            (Language::Swift, "func run() -> Int {\n  return 1\n}"),
+            (Language::Php, "<?php\nfunction run() {\n  return 1;\n}"),
+            (
+                Language::Haskell,
+                "module Main where\nmain = putStrLn \"hi\"",
+            ),
             (Language::Yaml, "key: value"),
             (Language::Toml, "key = 1"),
             (Language::Sql, "select 1"),

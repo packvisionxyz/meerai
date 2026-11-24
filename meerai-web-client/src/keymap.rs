@@ -2,10 +2,10 @@ use wasm_bindgen::JsCast;
 
 use crate::state::{
     ActiveModal, ProviderModalReturn, RunKindDto, accept_completion, activate_provider_from_modal,
-    copy_last_reply, custom_model_candidate, cycle_approval_mode, cycle_tab, detach_tab_view,
-    execute_palette_action, execute_slash_command, filtered_commands, filtered_models_sorted,
-    filtered_palette_actions, filtered_providers_sorted, open_diff_modal, open_model_input,
-    open_search_modal, reorder_active_tab, select_tab_index, set_status_notice,
+    complete_model_filter, copy_last_reply, custom_model_candidate, cycle_approval_mode, cycle_tab,
+    detach_tab_view, execute_palette_action, execute_slash_command, filtered_commands,
+    filtered_models_sorted, filtered_palette_actions, filtered_providers_sorted, open_diff_modal,
+    open_model_input, open_search_modal, reorder_active_tab, select_tab_index, set_status_notice,
     steer_or_send_queued, submit_or_queue_composer, update_completion,
 };
 use crate::store::StoreHandle;
@@ -451,6 +451,15 @@ fn handle_modal_key(
                         t.set_model(id, provider, model);
                     }
                     store.update(|s| s.modal = None);
+                    ev.prevent_default();
+                    true
+                }
+                "Tab" if total > 0 => {
+                    let idx = selected.min(total - 1);
+                    if let Some(model) = models.get(idx) {
+                        let model_id = model.id.clone();
+                        store.update(|s| complete_model_filter(s, &model_id));
+                    }
                     ev.prevent_default();
                     true
                 }

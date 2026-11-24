@@ -80,7 +80,12 @@ fn submitting_mention_applies_agent_and_keeps_it_in_the_bubble() {
             name: "reviewer".to_string(),
             instructions: "Review the diff.".to_string(),
             model: Some("gemini::gemini-3.1-pro-preview".to_string()),
-            context_window_tokens: None,
+            context_window_tokens: Some(1_048_576),
+            effort_levels: Some(vec![
+                meerai_common::settings::EffortLevel::Low,
+                meerai_common::settings::EffortLevel::Medium,
+                meerai_common::settings::EffortLevel::High,
+            ]),
         }
     );
     assert_eq!(app.tab().model, "gemini-3.1-pro-preview");
@@ -214,6 +219,7 @@ fn enter_accepts_mention_without_submitting() {
             instructions: "Review.".to_string(),
             model: None,
             context_window_tokens: None,
+            effort_levels: None,
         }
     );
     assert!(rx.try_recv().is_err());
@@ -264,6 +270,7 @@ fn only_mentions_apply_without_starting_a_turn() {
             instructions: "Review.".to_string(),
             model: None,
             context_window_tokens: None,
+            effort_levels: None,
         }
     );
     assert!(rx.try_recv().is_err());
@@ -354,6 +361,7 @@ fn mention_agent_model_with_provider_prefix_is_ignored() {
             instructions: "Review.".to_string(),
             model: None,
             context_window_tokens: None,
+            effort_levels: None,
         }
     );
     assert_eq!(

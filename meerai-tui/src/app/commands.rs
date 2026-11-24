@@ -53,12 +53,16 @@ impl AppState {
     }
 
     fn open_sampling(&mut self, field: usize) {
-        let effort = self.context_effort.or_else(|| {
-            self.settings
-                .context
-                .as_ref()
-                .and_then(|context| context.effort)
-        });
+        let allowed = self.active_model_effort_levels();
+        let effort = self
+            .context_effort
+            .or_else(|| {
+                self.settings
+                    .context
+                    .as_ref()
+                    .and_then(|context| context.effort)
+            })
+            .map(|effort| effort.clamp_to(&allowed));
         let temperature = self
             .settings
             .context
@@ -79,6 +83,7 @@ impl AppState {
         effort: Option<EffortLevel>,
         temperature: &str,
     ) -> std::result::Result<(), String> {
+        let allowed = self.active_model_effort_levels();
         let text = temperature.trim();
         let override_temperature = if text.is_empty() || text.eq_ignore_ascii_case("default") {
             None
@@ -92,7 +97,7 @@ impl AppState {
                     .ok_or_else(|| "Temperature must be between 0.0 and 2.0.".to_string())?,
             )
         };
-        let effort = effort.unwrap_or_default();
+        let effort = effort.unwrap_or_default().clamp_to(&allowed);
         let effective = override_temperature.unwrap_or_else(|| effort.default_temperature());
         let context = self.settings.context.get_or_insert_with(Default::default);
         context.effort = Some(effort);
@@ -117,18 +122,26 @@ impl AppState {
 
     pub(super) fn set_effort_from_arg(&mut self, arg: &str) {
         let value = arg.trim().to_lowercase();
-        let next = match value.as_str() {
-            "" => self.context_effort.unwrap_or_default().cycle(),
-            "low" => EffortLevel::Low,
-            "medium" | "mid" => EffortLevel::Medium,
-            "high" => EffortLevel::High,
-            other => {
-                self.status_notice = Some(format!(
-                    "Unknown effort '{other}' · use low, medium, or high"
-                ));
-                return;
-            }
+        let allowed = self.active_model_effort_levels();
+        let next = if value.is_empty() {
+            self.context_effort
+                .unwrap_or_default()
+                .clamp_to(&allowed)
+                .next_in(&allowed)
+        } else if let Some(next) = EffortLevel::parse(&value) {
+            next
+        } else {
+            self.status_notice = Some(format!(
+                "Unknown effort '{value}' · use {}",
+                allowed
+                    .iter()
+                    .map(|level| level.keyword())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            return;
         };
+        let next = next.clamp_to(&allowed);
         self.context_effort = Some(next);
         self.context_temperature = Some(next.default_temperature());
         let context = self.settings.context.get_or_insert_with(Default::default);
@@ -744,11 +757,18 @@ impl AppState {
         let context_window_tokens = model
             .as_ref()
             .and_then(|model| self.model_context_window(&provider, model));
+        let effort_levels = model.as_ref().and_then(|model| {
+            self.runtime
+                .read()
+                .ok()
+                .and_then(|runtime| runtime.catalog.effort_levels_for(&provider, model))
+        });
         let _ = self.tab().cmd_tx.send(AgentCommand::ApplyAgent {
             name: agent.id.clone(),
             instructions: agent.prompt.clone(),
             model,
             context_window_tokens,
+            effort_levels,
         });
     }
 
@@ -789,7 +809,7 @@ fn format_help_text() -> String {
         .map(|(cmd, _, _)| match *cmd {
             "/sessions" => "/sessions [id]".to_string(),
             "/model" => "/model [name]".to_string(),
-            "/effort" => "/effort [low|medium|high] (no arg opens sampling)".to_string(),
+            "/effort" => "/effort [low|medium|high|xhigh|max] (no arg opens sampling)".to_string(),
             "/sampling" => "/sampling [effort and temperature]".to_string(),
             "/temperature" => "/temperature [0.0..2.0|default]".to_string(),
             "/agent" => "/agent <id> (or @agent/<id>)".to_string(),

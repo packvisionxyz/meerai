@@ -73,7 +73,7 @@ use meerai_store::{
 };
 use meerai_tools::search_as_code::ScriptRuntime;
 use meerai_tools::{
-    CodeTools, ExecutionWorld, LspToolset, RepoMapToolset, SearchAsCodeToolset,
+    CodeTools, ExecutionWorld, LspToolset, RepoMapToolset, SearchAsCodeToolset, WebTools,
     detect_execution_world,
 };
 #[cfg(feature = "tui")]
@@ -372,6 +372,9 @@ fn build_workspace_toolsets(
     ];
     if !read_only && script_runtime.is_some() {
         toolsets.push(Box::new(sac.clone()));
+    }
+    if !read_only {
+        toolsets.push(Box::new(WebTools::new()));
     }
     toolsets
 }
@@ -1489,6 +1492,7 @@ impl CliSessionHost {
             {
                 config.context_window_tokens = window;
             }
+            config.effort_levels = info.effort_levels.clone();
             if let (Some(input), Some(output)) =
                 (info.input_cost_per_mtok, info.output_cost_per_mtok)
             {
@@ -1695,6 +1699,24 @@ impl CliSessionHost {
                 theme: palette.to_hex_tokens(),
                 raw_theme,
                 context: merged.context.clone().unwrap_or_default(),
+                effort_levels: {
+                    let provider = self
+                        .runtime
+                        .read()
+                        .map(|runtime| runtime.active_provider.clone())
+                        .unwrap_or_else(|_| self.default_provider.clone());
+                    let model = self
+                        .user_settings
+                        .lock()
+                        .map(|settings| settings.active_model.clone())
+                        .unwrap_or(None)
+                        .unwrap_or_else(|| self.default_model.clone());
+                    self.runtime
+                        .read()
+                        .ok()
+                        .and_then(|runtime| runtime.catalog.effort_levels_for(&provider, &model))
+                        .unwrap_or_else(|| meerai_common::settings::EffortLevel::ALL.to_vec())
+                },
                 session: merged.sessions.clone().unwrap_or_default(),
                 sandbox: merged.sandbox.clone().unwrap_or_default(),
                 permissions_summary,
@@ -1952,8 +1974,8 @@ impl SessionOpener for CliSessionHost {
                 provider: model.provider.clone(),
                 display_name: model.id.clone(),
                 context_window_tokens: model.context_window,
-                max_output_tokens: None,
-                supports_reasoning: true,
+                max_output_tokens: model.max_output_tokens,
+                supports_reasoning: model.supports_reasoning(),
                 supports_vision: false,
                 supports_tools: true,
                 is_custom: bundled.model_info(&model.provider, &model.id).is_none(),
@@ -2040,7 +2062,7 @@ impl SessionOpener for CliSessionHost {
         if clean_model.is_empty() {
             bail!("model id cannot be empty");
         }
-        let (command_model, context_window_tokens) = {
+        let (command_model, context_window_tokens, effort_levels) = {
             let mut rt = self
                 .runtime
                 .write()
@@ -2054,7 +2076,8 @@ impl SessionOpener for CliSessionHost {
                 .catalog
                 .model_info(&canonical, &clean_model)
                 .and_then(|info| info.context_window);
-            (command_model, ctx)
+            let levels = rt.catalog.effort_levels_for(&canonical, &clean_model);
+            (command_model, ctx, levels)
         };
         let updated = {
             let mut user = self.user_settings.lock().unwrap();
@@ -2071,6 +2094,7 @@ impl SessionOpener for CliSessionHost {
             display_model: clean_model,
             command_model,
             context_window_tokens,
+            effort_levels,
         })
     }
 
@@ -2098,7 +2122,7 @@ impl SessionOpener for CliSessionHost {
                 );
             }
         };
-        let (model, context_window_tokens) = if let Some(raw) = model_raw {
+        let (model, context_window_tokens, effort_levels) = if let Some(raw) = model_raw {
             let rt = self
                 .runtime
                 .read()
@@ -2108,15 +2132,17 @@ impl SessionOpener for CliSessionHost {
                 .catalog
                 .model_info(current_provider, &raw)
                 .and_then(|info| info.context_window);
-            (Some(spec), ctx)
+            let levels = rt.catalog.effort_levels_for(current_provider, &raw);
+            (Some(spec), ctx, levels)
         } else {
-            (None, None)
+            (None, None, None)
         };
         Ok(ResolvedAgentApplication {
             name: agent.id,
             instructions: agent.prompt,
             model,
             context_window_tokens,
+            effort_levels,
         })
     }
 

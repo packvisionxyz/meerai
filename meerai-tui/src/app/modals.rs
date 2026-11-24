@@ -437,31 +437,30 @@ impl AppState {
             },
             ActiveModal::ModelInput {
                 mut input,
-                mut selected_recent,
+                mut selected,
                 mut error,
             } => {
-                let recent = self.recent_models_for_active_provider();
+                let matches = self.model_candidates(&input);
+                let highlighted = selected.and_then(|index| matches.get(index)).cloned();
                 match key.code {
                     KeyCode::Esc => {
                         self.modal = None;
                     }
                     KeyCode::Char('u') if has_ctrl => {
                         input.clear();
-                        selected_recent = None;
+                        selected = None;
                         error = None;
                         self.modal = Some(ActiveModal::ModelInput {
                             input,
-                            selected_recent,
+                            selected,
                             error,
                         });
                     }
                     KeyCode::Char('d') if has_ctrl => {
-                        let target = selected_recent
-                            .and_then(|idx| recent.get(idx).cloned())
-                            .or_else(|| {
-                                let typed = input.trim();
-                                (!typed.is_empty()).then(|| typed.to_string())
-                            });
+                        let target = highlighted.or_else(|| {
+                            let typed = input.trim();
+                            (!typed.is_empty()).then(|| typed.to_string())
+                        });
                         if let Some(model) = target {
                             let provider = self.tab().active_provider.clone();
                             let (target_provider, target_model) = self.resolve_model_target(&model);
@@ -474,103 +473,115 @@ impl AppState {
                                 .forget_provider_model(&provider_id, &target_model);
                             self.persist_settings();
                             input.clear();
-                            selected_recent = None;
+                            selected = None;
                             error = None;
                             self.status_notice =
                                 Some(format!("Removed {provider_id}/{target_model}"));
                         }
                         self.modal = Some(ActiveModal::ModelInput {
                             input,
-                            selected_recent,
+                            selected,
                             error,
                         });
                     }
                     KeyCode::Up | KeyCode::Char('p') if key.code == KeyCode::Up || has_ctrl => {
-                        if !recent.is_empty() {
-                            let next = match selected_recent {
-                                None | Some(0) => recent.len() - 1,
-                                Some(idx) => idx.saturating_sub(1),
-                            };
-                            input = recent[next].clone();
-                            selected_recent = Some(next);
+                        if !matches.is_empty() {
+                            selected = Some(match selected {
+                                None | Some(0) => matches.len() - 1,
+                                Some(index) => index.min(matches.len() - 1).saturating_sub(1),
+                            });
                             error = None;
                         }
                         self.modal = Some(ActiveModal::ModelInput {
                             input,
-                            selected_recent,
+                            selected,
                             error,
                         });
                     }
                     KeyCode::Down | KeyCode::Char('n') if key.code == KeyCode::Down || has_ctrl => {
-                        if !recent.is_empty() {
-                            let next = match selected_recent {
+                        if !matches.is_empty() {
+                            selected = Some(match selected {
                                 None => 0,
-                                Some(idx) => (idx + 1) % recent.len(),
-                            };
-                            input = recent[next].clone();
-                            selected_recent = Some(next);
+                                Some(index) => (index + 1) % matches.len(),
+                            });
                             error = None;
                         }
                         self.modal = Some(ActiveModal::ModelInput {
                             input,
-                            selected_recent,
+                            selected,
+                            error,
+                        });
+                    }
+                    KeyCode::Tab => {
+                        if let Some(model) = highlighted.or_else(|| matches.first().cloned()) {
+                            input = model;
+                            selected = Some(0);
+                            error = None;
+                        }
+                        self.modal = Some(ActiveModal::ModelInput {
+                            input,
+                            selected,
                             error,
                         });
                     }
                     KeyCode::Backspace => {
                         input.pop();
-                        selected_recent = None;
+                        selected = None;
                         error = None;
                         self.modal = Some(ActiveModal::ModelInput {
                             input,
-                            selected_recent,
+                            selected,
                             error,
                         });
                     }
                     KeyCode::Enter => {
-                        let candidate = input.trim();
-                        if !candidate.is_empty() {
-                            let (target_provider, target_model) =
-                                self.resolve_model_target(candidate);
-                            if target_model.is_empty() {
-                                self.modal = Some(ActiveModal::ModelInput {
-                                    input,
-                                    selected_recent,
-                                    error: Some("Model name is required".to_string()),
-                                });
-                            } else {
-                                self.select_provider_and_model(&target_provider, &target_model);
-                                self.modal = None;
-                            }
-                        } else if let Some(existing) = {
+                        let typed = input.trim().to_string();
+                        let target = if let Some(model) = highlighted {
+                            Some(model)
+                        } else if !typed.is_empty() {
+                            Some(typed)
+                        } else {
                             let provider = self.tab().active_provider.clone();
                             self.current_or_default_model(&provider)
-                        } {
-                            let provider = self.tab().active_provider.clone();
-                            self.select_provider_and_model(&provider, &existing);
-                            self.modal = None;
-                        } else {
-                            self.modal = Some(ActiveModal::ModelInput {
-                                input,
-                                selected_recent,
-                                error: Some("Model name is required".to_string()),
-                            });
+                        };
+                        match target {
+                            Some(model) => {
+                                let (target_provider, target_model) =
+                                    self.resolve_model_target(&model);
+                                if target_model.is_empty() {
+                                    self.modal = Some(ActiveModal::ModelInput {
+                                        input,
+                                        selected,
+                                        error: Some("Model name is required".to_string()),
+                                    });
+                                } else {
+                                    self.select_provider_and_model(&target_provider, &target_model);
+                                    self.modal = None;
+                                }
+                            }
+                            None => {
+                                self.modal = Some(ActiveModal::ModelInput {
+                                    input,
+                                    selected,
+                                    error: Some("Model name is required".to_string()),
+                                });
+                            }
                         }
                     }
                     KeyCode::Char(c) if !has_ctrl && !has_alt => {
                         input.push(c);
-                        selected_recent = None;
+                        selected = None;
                         error = None;
                         self.modal = Some(ActiveModal::ModelInput {
                             input,
-                            selected_recent,
+                            selected,
                             error,
                         });
                     }
                     _ => {
                         self.modal = Some(ActiveModal::ModelInput {
                             input,
-                            selected_recent,
+                            selected,
                             error,
                         });
                     }
@@ -2213,10 +2224,11 @@ impl AppState {
                     });
                 }
                 KeyCode::Left | KeyCode::Right => {
-                    let current = effort.unwrap_or_default();
+                    let allowed = self.active_model_effort_levels();
+                    let current = effort.unwrap_or_default().clamp_to(&allowed);
                     effort = Some(match key.code {
-                        KeyCode::Left => current.cycle_back(),
-                        _ => current.cycle(),
+                        KeyCode::Left => current.previous_in(&allowed),
+                        _ => current.next_in(&allowed),
                     });
                     self.modal = Some(ActiveModal::Sampling {
                         effort,
@@ -2225,14 +2237,17 @@ impl AppState {
                         error: None,
                     });
                 }
-                KeyCode::Char('l' | 'm' | 'h')
+                KeyCode::Char('l' | 'm' | 'h' | 'x')
                     if field == 0 || !typing_effort_keyword(&temperature) =>
                 {
-                    effort = Some(match key.code {
+                    let allowed = self.active_model_effort_levels();
+                    let picked = match key.code {
                         KeyCode::Char('l') => EffortLevel::Low,
                         KeyCode::Char('h') => EffortLevel::High,
+                        KeyCode::Char('x') => EffortLevel::ExtraHigh,
                         _ => EffortLevel::Medium,
-                    });
+                    };
+                    effort = Some(picked.clamp_to(&allowed));
                     self.modal = Some(ActiveModal::Sampling {
                         effort,
                         temperature,
@@ -2491,21 +2506,19 @@ impl AppState {
             }
             (
                 ActiveModal::ModelInput {
-                    input,
-                    selected_recent,
-                    ..
+                    input, selected, ..
                 },
                 ModalHitKind::ListItem(idx),
             ) => {
-                let recent = self.recent_models_for_active_provider();
-                if let Some(model) = recent.get(idx) {
+                let candidates = self.model_candidates(&input);
+                if let Some(model) = candidates.get(idx) {
                     let (target_provider, target_model) = self.resolve_model_target(model);
                     self.select_provider_and_model(&target_provider, &target_model);
                     self.modal = None;
                 } else {
                     self.modal = Some(ActiveModal::ModelInput {
                         input,
-                        selected_recent,
+                        selected,
                         error: None,
                     });
                 }
@@ -3256,6 +3269,10 @@ impl AppState {
         };
 
         let context_window_tokens = self.model_context_window(&canonical, &next_model);
+        let effort_levels = {
+            let rt = self.runtime.read().unwrap();
+            rt.catalog.effort_levels_for(&canonical, &next_model)
+        };
 
         self.tab_mut().model = next_model.clone();
         self.settings.active_model = (!next_model.is_empty()).then_some(next_model);
@@ -3265,6 +3282,7 @@ impl AppState {
             let _ = self.tab().cmd_tx.send(AgentCommand::SetModel {
                 model: spec,
                 context_window_tokens,
+                effort_levels,
             });
         }
         self.send_plan_usage(&canonical);
@@ -3311,9 +3329,14 @@ impl AppState {
         self.sync_completion_models();
         self.persist_settings();
         let context_window_tokens = self.model_context_window(&canonical, &clean_model);
+        let effort_levels = {
+            let rt = self.runtime.read().unwrap();
+            rt.catalog.effort_levels_for(&canonical, &clean_model)
+        };
         let _ = self.tab().cmd_tx.send(AgentCommand::SetModel {
             model: spec.clone(),
             context_window_tokens,
+            effort_levels,
         });
         self.send_plan_usage(&canonical);
         let session_id = {
@@ -3355,7 +3378,7 @@ impl AppState {
     pub(super) fn open_model_input(&mut self) {
         self.modal = Some(ActiveModal::ModelInput {
             input: String::new(),
-            selected_recent: None,
+            selected: None,
             error: None,
         });
     }

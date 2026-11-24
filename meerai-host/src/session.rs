@@ -132,6 +132,8 @@ pub struct HostSettingsView {
     pub theme: ResolvedThemeHex,
     pub raw_theme: ThemeSettings,
     pub context: ContextSettings,
+    #[serde(default)]
+    pub effort_levels: Vec<meerai_common::settings::EffortLevel>,
     pub session: SessionSettings,
     pub sandbox: SandboxSettings,
     pub permissions_summary: Vec<String>,
@@ -144,6 +146,7 @@ impl Default for HostSettingsView {
             theme: HostPalette::default().to_hex_tokens(),
             raw_theme: ThemeSettings::default(),
             context: ContextSettings::default(),
+            effort_levels: Vec::new(),
             session: SessionSettings::default(),
             sandbox: SandboxSettings::default(),
             permissions_summary: Vec::new(),
@@ -260,6 +263,7 @@ pub struct ResolvedModelSelection {
     pub display_model: String,
     pub command_model: String,
     pub context_window_tokens: Option<u64>,
+    pub effort_levels: Option<Vec<meerai_common::settings::EffortLevel>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -268,6 +272,7 @@ pub struct ResolvedAgentApplication {
     pub instructions: String,
     pub model: Option<String>,
     pub context_window_tokens: Option<u64>,
+    pub effort_levels: Option<Vec<meerai_common::settings::EffortLevel>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

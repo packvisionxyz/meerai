@@ -735,8 +735,13 @@ fn context_body(store: StoreHandle) -> AnyView {
         .into_any()
     };
 
-    let render_effort = |current: Option<EffortDto>| {
-        let selected = current.unwrap_or(EffortDto::Medium);
+    let render_effort = |current: Option<EffortDto>, allowed: Vec<EffortDto>| {
+        let allowed = if allowed.is_empty() {
+            EffortDto::ALL.to_vec()
+        } else {
+            allowed
+        };
+        let selected = current.unwrap_or(EffortDto::Medium).clamp_to(&allowed);
         let option = |value: EffortDto, label: &'static str, temp: &'static str| {
             let is_selected = selected == value;
             view! {
@@ -745,22 +750,28 @@ fn context_body(store: StoreHandle) -> AnyView {
                 </option>
             }
         };
+        let entries: Vec<(EffortDto, &'static str, &'static str)> = allowed
+            .iter()
+            .map(|level| match level {
+                EffortDto::Low => (EffortDto::Low, "low", "0.00"),
+                EffortDto::Medium => (EffortDto::Medium, "medium", "0.20"),
+                EffortDto::High => (EffortDto::High, "high", "0.50"),
+                EffortDto::ExtraHigh => (EffortDto::ExtraHigh, "extrahigh", "0.70"),
+                EffortDto::Max => (EffortDto::Max, "max", "0.90"),
+            })
+            .collect();
         view! {
             <label class="settings-row settings-field">
                 <div class="settings-field-label">
                     <span>"Reasoning effort"</span>
                     <span class="settings-field-help">
-                        "Sets temperature per tier: low 0.00, medium 0.20, high 0.50."
+                        "Sets temperature per tier and the provider reasoning hint. Tiers follow the selected model."
                     </span>
                 </div>
                 <select
                     class="input"
                     on:change=move |ev| {
-                        let next = match event_target_value(&ev).as_str() {
-                            "low" => Some(EffortDto::Low),
-                            "high" => Some(EffortDto::High),
-                            _ => Some(EffortDto::Medium),
-                        };
+                        let next = EffortDto::parse(&event_target_value(&ev));
                         store.update(|s| {
                             if let Some(ActiveModal::Settings(form)) = &mut s.modal {
                                 form.effort = next;
@@ -771,9 +782,7 @@ fn context_body(store: StoreHandle) -> AnyView {
                         });
                     }
                 >
-                    {option(EffortDto::Low, "low", "0.00")}
-                    {option(EffortDto::Medium, "medium", "0.20")}
-                    {option(EffortDto::High, "high", "0.50")}
+                    {entries.into_iter().map(|(value, label, temp)| option(value, label, temp)).collect::<Vec<_>>()}
                 </select>
             </label>
         }
@@ -822,7 +831,11 @@ fn context_body(store: StoreHandle) -> AnyView {
                     Some(ActiveModal::Settings(form)) => form.effort,
                     _ => None,
                 });
-                render_effort(effort)
+                let allowed = store.with(|s| match &s.modal {
+                    Some(ActiveModal::Settings(form)) => form.effort_levels.clone(),
+                    _ => Vec::new(),
+                });
+                render_effort(effort, allowed)
             }
                 {render_input("temperature", None)}
                 {render_input("recovery_model", Some("context-model-specs"))}

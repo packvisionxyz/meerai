@@ -714,7 +714,21 @@ pub fn map_host_info(info: HostInfoSnapshot) -> HostInfoDto {
                     EffortLevel::Low => EffortDto::Low,
                     EffortLevel::Medium => EffortDto::Medium,
                     EffortLevel::High => EffortDto::High,
+                    EffortLevel::ExtraHigh => EffortDto::ExtraHigh,
+                    EffortLevel::Max => EffortDto::Max,
                 }),
+                effort_levels: info
+                    .settings
+                    .effort_levels
+                    .iter()
+                    .map(|level| match level {
+                        EffortLevel::Low => EffortDto::Low,
+                        EffortLevel::Medium => EffortDto::Medium,
+                        EffortLevel::High => EffortDto::High,
+                        EffortLevel::ExtraHigh => EffortDto::ExtraHigh,
+                        EffortLevel::Max => EffortDto::Max,
+                    })
+                    .collect(),
             },
             session: SessionSettingsDto {
                 auto_prune_days: info.settings.session.auto_prune_days,
@@ -908,6 +922,8 @@ pub fn map_settings_update(req: UpdateSettingsRequest) -> HostSettingsUpdate {
                 EffortDto::Low => EffortLevel::Low,
                 EffortDto::Medium => EffortLevel::Medium,
                 EffortDto::High => EffortLevel::High,
+                EffortDto::ExtraHigh => EffortLevel::ExtraHigh,
+                EffortDto::Max => EffortLevel::Max,
             }),
         }),
         session: req.session.map(|s| SessionSettings {

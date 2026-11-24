@@ -90,9 +90,15 @@ impl AppState {
         .await;
         let system_prompt = format!("{base}{}", self.launch_definitions);
         for tab in &mut self.tabs {
+            let effort_levels = self.runtime.read().ok().and_then(|runtime| {
+                runtime
+                    .catalog
+                    .effort_levels_for(&tab.active_provider, &tab.model)
+            });
             let _ = tab.cmd_tx.send(AgentCommand::Reload {
                 rules: rules.clone(),
                 context: merged.context.clone(),
+                effort_levels,
                 system_prompt: system_prompt.clone(),
             });
         }

@@ -883,10 +883,6 @@ fn ModelInputModal(store: StoreHandle) -> impl IntoView {
             ),
         })
     });
-    let initial_filter = store.with(|s| match &s.modal {
-        Some(ActiveModal::ModelInput { filter, .. }) => filter.text.clone(),
-        _ => String::new(),
-    });
     let body = view! {
         <div class="modal-form">
             {move || {
@@ -960,7 +956,10 @@ fn ModelInputModal(store: StoreHandle) -> impl IntoView {
                         <input
                             class="input"
                             placeholder="Filter models or type custom model ID (e.g. anthropic/claude-sonnet-4-5)"
-                            prop:value=initial_filter.clone()
+                            prop:value=move || store.with(|s| match &s.modal {
+                                Some(ActiveModal::ModelInput { filter, .. }) => filter.text.clone(),
+                                _ => String::new(),
+                            })
                             on:input=move |ev| {
                                 let value = event_target_value(&ev);
                                 store.update(|s| {
@@ -971,6 +970,9 @@ fn ModelInputModal(store: StoreHandle) -> impl IntoView {
                                 });
                             }
                         />
+                        <div class="hint">
+                            "Type to filter. ↑↓ select, Tab completes the highlighted model, Enter uses it."
+                        </div>
                         <div class="pick-list" role="listbox">
                             {move || {
                                 let (loading, models, custom, selected, provider_scope, providers, active_pair, _) = list_state.get();

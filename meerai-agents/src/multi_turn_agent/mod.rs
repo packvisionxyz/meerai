@@ -15,7 +15,7 @@ use genai::chat::{
 };
 use genai::{Client, Headers};
 use meerai_common::hooks::HookEvent;
-use meerai_common::settings::ContextSettings;
+use meerai_common::settings::{ContextSettings, EffortLevel};
 use meerai_core::env::{MEERAI_USER_AGENT, generate_opencode_session_id, resolve_lexical_subpath};
 use meerai_core::text::floor_char_boundary;
 use meerai_core::{
@@ -1171,6 +1171,12 @@ impl MultiTurnAgent {
         }
     }
 
+    pub fn set_effort_levels(&mut self, levels: Option<Vec<EffortLevel>>) {
+        if let Some(harness) = &mut self.harness {
+            harness.config.effort_levels = levels;
+        }
+    }
+
     pub fn set_plan_usage(&mut self, plan_usage: bool) {
         if let Some(harness) = &mut self.harness {
             harness.config.plan_usage = plan_usage;
@@ -1260,6 +1266,7 @@ impl MultiTurnAgent {
         &mut self,
         rules: Option<Vec<PermissionRule>>,
         context: Option<ContextSettings>,
+        effort_levels: Option<Vec<EffortLevel>>,
         system_prompt: String,
     ) {
         if let Some(harness) = self.harness.as_mut() {
@@ -1275,6 +1282,9 @@ impl MultiTurnAgent {
             let context_window = harness.config.context_window_tokens;
             let routing = harness.config.routing.clone();
             harness.config = HarnessConfig::from_context_settings(context.as_ref());
+            if effort_levels.is_some() {
+                harness.config.effort_levels = effort_levels;
+            }
             harness.config.token_pricing = token_pricing;
             harness.config.plan_usage = plan_usage;
             harness.config.routing = routing;

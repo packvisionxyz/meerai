@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use meerai_common::hooks::HookEntry;
-use meerai_common::settings::ContextSettings;
+use meerai_common::settings::{ContextSettings, EffortLevel};
 use meerai_core::{EffectClass, FileDiff};
 use meerai_policy::{ApprovalMode, PermissionRule};
 pub use meerai_session::{
@@ -283,6 +283,8 @@ pub enum AgentCommand {
         model: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_window_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort_levels: Option<Vec<EffortLevel>>,
     },
     SetPlanUsage {
         plan_usage: bool,
@@ -322,6 +324,8 @@ pub enum AgentCommand {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_window_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort_levels: Option<Vec<EffortLevel>>,
     },
     ApplySkill {
         name: String,
@@ -330,6 +334,8 @@ pub enum AgentCommand {
     Reload {
         rules: Option<Vec<PermissionRule>>,
         context: Option<ContextSettings>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort_levels: Option<Vec<EffortLevel>>,
         system_prompt: String,
     },
     SetHooks(Vec<HookEntry>),

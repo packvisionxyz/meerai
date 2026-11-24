@@ -325,12 +325,24 @@ fn connect_flow_saves_key_deletes_and_selects_model() {
     assert!(matches!(app.modal, Some(ActiveModal::ModelInput { .. })));
 
     app.handle_key_event(key(KeyCode::Enter));
-    assert!(matches!(
-        app.modal,
-        Some(ActiveModal::ModelInput { error: Some(_), .. })
-    ));
+    assert!(app.modal.is_none());
+    assert_eq!(app.tab().model, "qwen4-max");
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::SetModel {
+            model: "opencode_go::qwen4-max".to_string(),
+            context_window_tokens: Some(1_000_000),
+            effort_levels: Some(vec![
+                meerai_common::settings::EffortLevel::Low,
+                meerai_common::settings::EffortLevel::High,
+                meerai_common::settings::EffortLevel::ExtraHigh,
+            ]),
+        }
+    );
 
     while rx.try_recv().is_ok() {}
+    submit(&mut app, "/model");
+    assert!(matches!(app.modal, Some(ActiveModal::ModelInput { .. })));
     type_text(&mut app, "glm-5.3");
     app.handle_key_event(key(KeyCode::Enter));
     assert!(app.modal.is_none());
@@ -340,7 +352,12 @@ fn connect_flow_saves_key_deletes_and_selects_model() {
         rx.try_recv().unwrap(),
         AgentCommand::SetModel {
             model: "opencode_go::glm-5.3".to_string(),
-            context_window_tokens: None,
+            context_window_tokens: Some(1_000_000),
+            effort_levels: Some(vec![
+                meerai_common::settings::EffortLevel::Low,
+                meerai_common::settings::EffortLevel::High,
+                meerai_common::settings::EffortLevel::Max,
+            ]),
         }
     );
     assert!(matches!(
@@ -379,6 +396,7 @@ fn model_input_accepts_manual_and_recent_models() {
         AgentCommand::SetModel {
             model: "gemini::custom-gemini-model".to_string(),
             context_window_tokens: None,
+            effort_levels: None,
         }
     );
 
@@ -387,8 +405,86 @@ fn model_input_accepts_manual_and_recent_models() {
     app.handle_key_event(key(KeyCode::Down));
     assert!(matches!(
         app.modal,
+        Some(ActiveModal::ModelInput {
+            ref input,
+            selected: Some(0),
+            ..
+        }) if input.is_empty()
+    ));
+    app.handle_key_event(key(KeyCode::Tab));
+    assert!(matches!(
+        app.modal,
         Some(ActiveModal::ModelInput { ref input, .. }) if input == "custom-gemini-model"
     ));
+}
+
+#[test]
+fn model_input_filters_the_catalog_as_you_type() {
+    let (mut app, _rx, _secrets) = test_app();
+
+    submit(&mut app, "/model");
+    assert!(matches!(app.modal, Some(ActiveModal::ModelInput { .. })));
+
+    type_text(&mut app, "gemini-3.8");
+    let matches = app.model_candidates("gemini-3.8");
+    assert!(!matches.is_empty(), "the catalog has gemini-3.8 models");
+    assert!(matches.iter().all(|model| model.contains("gemini-3.8")));
+
+    app.handle_key_event(key(KeyCode::Tab));
+    let completed = match &app.modal {
+        Some(ActiveModal::ModelInput { input, .. }) => input.clone(),
+        _ => panic!("model dialog closed"),
+    };
+    assert!(completed.starts_with("gemini-3.8"), "got {completed}");
+    assert!(
+        app.model_candidates("gemini-3.8").contains(&completed),
+        "Tab completes a catalog model"
+    );
+
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(app.modal.is_none());
+    assert_eq!(app.tab().model, completed);
+}
+
+#[test]
+fn model_input_arrows_pick_a_match_without_losing_the_filter() {
+    let (mut app, _rx, _secrets) = test_app();
+
+    submit(&mut app, "/model");
+    type_text(&mut app, "gemini-3.8");
+
+    app.handle_key_event(key(KeyCode::Down));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::ModelInput {
+            ref input,
+            selected: Some(0),
+            ..
+        }) if input == "gemini-3.8"
+    ));
+
+    let first = app.model_candidates("gemini-3.8")[0].clone();
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(app.modal.is_none());
+    assert_eq!(app.tab().model, first);
+}
+
+#[test]
+fn model_input_reports_when_a_query_matches_nothing() {
+    let (mut app, _rx, _secrets) = test_app();
+
+    submit(&mut app, "/model");
+    type_text(&mut app, "zzz-not-a-model");
+
+    assert!(app.model_candidates("zzz-not-a-model").is_empty());
+    app.handle_key_event(key(KeyCode::Tab));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::ModelInput { ref input, .. }) if input == "zzz-not-a-model"
+    ));
+
+    app.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(app.tab().model, "zzz-not-a-model");
 }
 
 #[test]
@@ -1635,6 +1731,104 @@ fn sampling_arrows_cycle_effort_from_the_temperature_field() {
         Some(ActiveModal::Sampling {
             effort: Some(EffortLevel::High),
             field: 1,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn effort_tiers_follow_the_active_model() {
+    use meerai_common::settings::EffortLevel;
+
+    let (mut app, _rx, _secrets) = test_app();
+    submit(&mut app, "/model gemini-3.8-flash");
+    submit(&mut app, "/effort xhigh");
+    assert_eq!(
+        app.context_effort,
+        Some(EffortLevel::High),
+        "gemini-3.8-flash has no extra-high tier"
+    );
+
+    submit(&mut app, "/model gemini-4-neon");
+    submit(&mut app, "/effort xhigh");
+    assert_eq!(app.context_effort, Some(EffortLevel::ExtraHigh));
+    assert_eq!(app.context_temperature, Some(0.7));
+
+    submit(&mut app, "/model an-unknown-model");
+    submit(&mut app, "/effort xhigh");
+    assert_eq!(
+        app.context_effort,
+        Some(EffortLevel::ExtraHigh),
+        "an unknown model keeps every tier"
+    );
+}
+
+#[test]
+fn effort_supports_max_when_the_model_declares_it() {
+    use meerai_common::settings::EffortLevel;
+
+    let (mut app, _rx, secrets) = test_app();
+    secrets.set_key("opencode-go", "test-key").unwrap();
+    submit(&mut app, "/model opencode-go/glm-5.3");
+    submit(&mut app, "/effort max");
+    assert_eq!(app.context_effort, Some(EffortLevel::Max));
+    assert_eq!(app.context_temperature, Some(0.9));
+
+    submit(&mut app, "/model gemini/gemini-4-neon");
+    submit(&mut app, "/effort max");
+    assert_eq!(
+        app.context_effort,
+        Some(EffortLevel::ExtraHigh),
+        "a model without max clamps down to its top tier"
+    );
+}
+
+#[test]
+fn sampling_arrows_stay_inside_the_model_effort_set() {
+    use meerai_common::settings::EffortLevel;
+
+    let (mut app, _rx, _secrets) = test_app();
+    submit(&mut app, "/model gemini-3.8-flash");
+    submit(&mut app, "/effort low");
+    submit(&mut app, "/effort");
+
+    let tier = |app: &AppState| match &app.modal {
+        Some(ActiveModal::Sampling { effort, .. }) => *effort,
+        _ => panic!("sampling modal closed"),
+    };
+
+    app.handle_key_event(key(KeyCode::Right));
+    assert_eq!(tier(&app), Some(EffortLevel::Medium));
+    app.handle_key_event(key(KeyCode::Right));
+    assert_eq!(tier(&app), Some(EffortLevel::High));
+    app.handle_key_event(key(KeyCode::Right));
+    assert_eq!(
+        tier(&app),
+        Some(EffortLevel::Low),
+        "the set has three tiers"
+    );
+    app.handle_key_event(key(KeyCode::Char('x')));
+    assert_eq!(
+        tier(&app),
+        Some(EffortLevel::High),
+        "x snaps to the top tier"
+    );
+}
+
+#[test]
+fn sampling_arrows_reach_extra_high_when_the_model_supports_it() {
+    use meerai_common::settings::EffortLevel;
+
+    let (mut app, _rx, _secrets) = test_app();
+    submit(&mut app, "/model gemini-4-neon");
+    submit(&mut app, "/effort high");
+    submit(&mut app, "/effort");
+
+    app.handle_key_event(key(KeyCode::Right));
+    assert!(matches!(
+        app.modal,
+        Some(ActiveModal::Sampling {
+            effort: Some(EffortLevel::ExtraHigh),
             ..
         })
     ));

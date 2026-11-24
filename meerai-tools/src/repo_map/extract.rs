@@ -11,6 +11,16 @@ pub(crate) enum SourceLang {
     JavaScript,
     Python,
     Go,
+    C,
+    Cpp,
+    Java,
+    CSharp,
+    Kotlin,
+    Scala,
+    Swift,
+    Php,
+    Haskell,
+    Ruby,
 }
 
 impl SourceLang {
@@ -23,6 +33,16 @@ impl SourceLang {
             "js" | "jsx" | "mjs" | "cjs" => Some(Self::JavaScript),
             "py" | "pyi" => Some(Self::Python),
             "go" => Some(Self::Go),
+            "c" | "h" => Some(Self::C),
+            "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" => Some(Self::Cpp),
+            "java" => Some(Self::Java),
+            "cs" | "csx" => Some(Self::CSharp),
+            "kt" | "kts" => Some(Self::Kotlin),
+            "scala" | "sc" => Some(Self::Scala),
+            "swift" => Some(Self::Swift),
+            "php" | "phtml" => Some(Self::Php),
+            "hs" | "lhs" => Some(Self::Haskell),
+            "rb" | "rake" | "gemspec" => Some(Self::Ruby),
             _ => None,
         }
     }
@@ -35,6 +55,16 @@ impl SourceLang {
             Self::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Self::Python => tree_sitter_python::LANGUAGE.into(),
             Self::Go => tree_sitter_go::LANGUAGE.into(),
+            Self::C => tree_sitter_c::LANGUAGE.into(),
+            Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            Self::Java => tree_sitter_java::LANGUAGE.into(),
+            Self::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            Self::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
+            Self::Scala => tree_sitter_scala::LANGUAGE.into(),
+            Self::Swift => tree_sitter_swift::LANGUAGE.into(),
+            Self::Php => tree_sitter_php::LANGUAGE_PHP.into(),
+            Self::Haskell => tree_sitter_haskell::LANGUAGE.into(),
+            Self::Ruby => tree_sitter_ruby::LANGUAGE.into(),
         }
     }
 
@@ -53,6 +83,24 @@ impl SourceLang {
             Self::Go => matches!(
                 kind,
                 "identifier" | "type_identifier" | "field_identifier" | "package_identifier"
+            ),
+            Self::C | Self::Cpp => matches!(
+                kind,
+                "identifier" | "type_identifier" | "field_identifier" | "namespace_identifier"
+            ),
+            Self::Java => matches!(kind, "identifier" | "type_identifier"),
+            Self::CSharp => kind == "identifier",
+            Self::Kotlin => kind == "identifier",
+            Self::Scala => matches!(
+                kind,
+                "identifier" | "operator_identifier" | "type_identifier"
+            ),
+            Self::Swift => matches!(kind, "simple_identifier" | "type_identifier"),
+            Self::Php => kind == "name",
+            Self::Haskell => matches!(kind, "variable" | "constructor"),
+            Self::Ruby => matches!(
+                kind,
+                "identifier" | "constant" | "instance_variable" | "class_variable"
             ),
         }
     }
@@ -140,6 +188,16 @@ fn collect_defs(
         }
         SourceLang::Python => collect_python(node, bytes, top_level, definitions, def_spans),
         SourceLang::Go => collect_go(node, bytes, top_level, definitions, def_spans),
+        SourceLang::C => collect_c(node, bytes, top_level, definitions, def_spans),
+        SourceLang::Cpp => collect_cpp(node, bytes, top_level, definitions, def_spans),
+        SourceLang::Java => collect_java(node, bytes, definitions, def_spans),
+        SourceLang::CSharp => collect_csharp(node, bytes, definitions, def_spans),
+        SourceLang::Kotlin => collect_kotlin(node, bytes, definitions, def_spans),
+        SourceLang::Scala => collect_scala(node, bytes, definitions, def_spans),
+        SourceLang::Swift => collect_swift(node, bytes, definitions, def_spans),
+        SourceLang::Php => collect_php(node, bytes, definitions, def_spans),
+        SourceLang::Haskell => collect_haskell(node, bytes, definitions, def_spans),
+        SourceLang::Ruby => collect_ruby(node, bytes, definitions, def_spans),
     }
 }
 
@@ -391,6 +449,528 @@ fn collect_go(
         definitions,
         def_spans,
     );
+}
+
+fn declarator_name(node: Node<'_>) -> Option<Node<'_>> {
+    let mut current = node;
+    for _ in 0..32 {
+        if matches!(
+            current.kind(),
+            "identifier"
+                | "field_identifier"
+                | "type_identifier"
+                | "namespace_identifier"
+                | "destructor_name"
+                | "operator_name"
+                | "qualified_identifier"
+        ) {
+            return Some(current);
+        }
+        let next = current.child_by_field_name("declarator")?;
+        if next == current {
+            return None;
+        }
+        current = next;
+    }
+    None
+}
+
+fn declarator_is_function(node: Node<'_>) -> bool {
+    let mut current = node;
+    for _ in 0..16 {
+        if current.kind().contains("function_declarator") {
+            return true;
+        }
+        let Some(next) = current.child_by_field_name("declarator") else {
+            return false;
+        };
+        if next == current {
+            return false;
+        }
+        current = next;
+    }
+    false
+}
+
+fn push_named(
+    kind: &'static str,
+    node: Node<'_>,
+    field: &str,
+    bytes: &[u8],
+    definitions: &mut Vec<SymbolDef>,
+    def_spans: &mut HashSet<(usize, usize)>,
+) {
+    if let Some(name) = node.child_by_field_name(field) {
+        push_def(kind, name, bytes, definitions, def_spans);
+    }
+}
+
+fn push_declarator(
+    kind: &'static str,
+    node: Node<'_>,
+    bytes: &[u8],
+    definitions: &mut Vec<SymbolDef>,
+    def_spans: &mut HashSet<(usize, usize)>,
+) {
+    if let Some(name) = node
+        .child_by_field_name("declarator")
+        .and_then(declarator_name)
+    {
+        push_def(kind, name, bytes, definitions, def_spans);
+    }
+}
+
+fn collect_c(
+    node: Node<'_>,
+    bytes: &[u8],
+    top_level: bool,
+    definitions: &mut Vec<SymbolDef>,
+    def_spans: &mut HashSet<(usize, usize)>,
+) {
+    match node.kind() {
+        "function_definition" => {
+            push_declarator("fn", node, bytes, definitions, def_spans);
+            return;
+        }
+        "struct_specifier" | "union_specifier" | "enum_specifier" if top_level => {
+            let kind = match node.kind() {
+                "union_specifier" => "union",
+                "enum_specifier" => "enum",
+                _ => "struct",
+            };
+            push_named(kind, node, "name", bytes, definitions, def_spans);
+            return;
+        }
+        "type_definition" if top_level => {
+            push_declarator("type", node, bytes, definitions, def_spans);
+            return;
+        }
+        _ => {}
+    }
+    recurse_children(
+        SourceLang::C,
+        node,
+        bytes,
+        top_level,
+        definitions,
+        def_spans,
+    );
+}
+
+fn collect_cpp(
+    node: Node<'_>,
+    bytes: &[u8],
+    top_level: bool,
+    definitions: &mut Vec<SymbolDef>,
+    def_spans: &mut HashSet<(usize, usize)>,
+) {
+    match node.kind() {
+        "function_definition" => {
+            push_declarator("fn", node, bytes, definitions, def_spans);
+            return;
+        }
+        "class_specifier" | "struct_specifier" | "enum_specifier" => {
+            let kind = match node.kind() {
+                "struct_specifier" => "struct",
+                "enum_specifier" => "enum",
+                _ => "class",
+            };
+            push_named(kind, node, "name", bytes, definitions, def_spans);
+            recurse_children(SourceLang::Cpp, node, bytes, false, definitions, def_spans);
+            return;
+        }
+        "namespace_definition" => {
+            push_named("namespace", node, "name", bytes, definitions, def_spans);
+            recurse_children(SourceLang::Cpp, node, bytes, false, definitions, def_spans);
+            return;
+        }
+        "template_declaration" => {
+            recurse_children(
+                SourceLang::Cpp,
+                node,
+                bytes,
+                top_level,
+                definitions,
+                def_spans,
+            );
+            return;
+        }
+        "field_declaration" => {
+            if let Some(declarator) = node.child_by_field_name("declarator")
+                && declarator_is_function(declarator)
+                && let Some(name) = declarator_name(declarator)
+            {
+                push_def("fn", name, bytes, definitions, def_spans);
+            }
+            return;
+        }
+        _ => {}
+    }
+    recurse_children(
+        SourceLang::Cpp,
+        node,
+        bytes,
+        top_level,
+        definitions,
+        def_spans,
+    );
+}
+
+fn collect_java(
+    node: Node<'_>,
+    bytes: &[u8],
+    definitions: &mut Vec<SymbolDef>,
+    def_spans: &mut HashSet<(usize, usize)>,
+) {
+    let kind = match node.kind() {
+        "class_declaration" => Some("class"),
+        "interface_declaration" => Some("interface"),
+        "enum_declaration" => Some("enum"),
+        "record_declaration" => Some("record"),
+        "annotation_type_declaration" => Some("annotation"),
+        _ => None,
+    };
+    if let Some(kind) = kind {
+        push_named(kind, node, "name", bytes, definitions, def_spans);
+        recurse_children(SourceLang::Java, node, bytes, false, definitions, def_spans);
+        return;
+    }
+    if matches!(
+        node.kind(),
+        "method_declaration" | "constructor_declaration"
+    ) {
+        push_named("fn", node, "name", bytes, definitions, def_spans);
+        return;
+    }
+    recurse_children(SourceLang::Java, node, bytes, false, definitions, def_spans);
+}
+
+fn collect_csharp(
+    node: Node<'_>,
+    bytes: &[u8],
+    definitions: &mut Vec<SymbolDef>,
+    def_spans: &mut HashSet<(usize, usize)>,
+) {
+    let kind = match node.kind() {
+        "class_declaration" => Some("class"),
+        "interface_declaration" => Some("interface"),
+        "struct_declaration" => Some("struct"),
+        "enum_declaration" => Some("enum"),
+        "record_declaration" => Some("record"),
+        _ => None,
+    };
+    if let Some(kind) = kind {
+        push_named(kind, node, "name", bytes, definitions, def_spans);
+        recurse_children(
+            SourceLang::CSharp,
+            node,
+            bytes,
+            false,
+            definitions,
+            def_spans,
+        );
+        return;
+    }
+    match node.kind() {
+        "method_declaration" | "constructor_declaration" => {
+            push_named("fn", node, "name", bytes, definitions, def_spans);
+            return;
+        }
+        "property_declaration" => {
+            push_named("property", node, "name", bytes, definitions, def_spans);
+            return;
+        }
+        "namespace_declaration" | "file_scoped_namespace_declaration" => {
+            recurse_children(
+                SourceLang::CSharp,
+                node,
+                bytes,
+                false,
+                definitions,
+                def_spans,
+            );
+            return;
+        }
+        _ => {}
+    }
+    recurse_children(
+        SourceLang::CSharp,
+        node,
+        bytes,
+        false,
+        definitions,
+        def_spans,
+    );
+}
+
+fn kotlin_type_kind(node: Node<'_>, bytes: &[u8]) -> &'static str {
+    let Some(name) = node.child_by_field_name("name") else {
+        return "class";
+    };
+    let head = &bytes[node.start_byte()..name.start_byte()];
+    let head = String::from_utf8_lossy(head).to_ascii_lowercase();
+    if head.contains("interface") {
+        "interface"
+    } else if head.contains("enum class") {
+        "enum"
+    } else if head.contains("annotation class") {
+        "annotation"
+    } else {
+        "class"
+    }
+}
+
+fn collect_kotlin(
+    node: Node<'_>,
+    bytes: &[u8],
+    definitions: &mut Vec<SymbolDef>,
+    def_spans: &mut HashSet<(usize, usize)>,
+) {
+    match node.kind() {
+        "class_declaration" => {
+            let kind = kotlin_type_kind(node, bytes);
+            push_named(kind, node, "name", bytes, definitions, def_spans);
+            recurse_children(
+                SourceLang::Kotlin,
+                node,
+                bytes,
+                false,
+                definitions,
+                def_spans,
+            );
+            return;
+        }
+        "object_declaration" => {
+            push_named("object", node, "name", bytes, definitions, def_spans);
+            recurse_children(
+                SourceLang::Kotlin,
+                node,
+                bytes,
+                false,
+                definitions,
+                def_spans,
+            );
+            return;
+        }
+        "function_declaration" => {
+            push_named("fn", node, "name", bytes, definitions, def_spans);
+            return;
+        }
+        "type_alias" => {
+            push_named("type", node, "type", bytes, definitions, def_spans);
+            return;
+        }
+        _ => {}
+    }
+    recurse_children(
+        SourceLang::Kotlin,
+        node,
+        bytes,
+        false,
+        definitions,
+        def_spans,
+    );
+}
+
+fn collect_scala(
+    node: Node<'_>,
+    bytes: &[u8],
+    definitions: &mut Vec<SymbolDef>,
+    def_spans: &mut HashSet<(usize, usize)>,
+) {
+    let kind = match node.kind() {
+        "class_definition" => Some("class"),
+        "object_definition" => Some("object"),
+        "trait_definition" => Some("trait"),
+        "enum_definition" => Some("enum"),
+        _ => None,
+    };
+    if let Some(kind) = kind {
+        push_named(kind, node, "name", bytes, definitions, def_spans);
+        recurse_children(
+            SourceLang::Scala,
+            node,
+            bytes,
+            false,
+            definitions,
+            def_spans,
+        );
+        return;
+    }
+    match node.kind() {
+        "function_definition" | "function_declaration" => {
+            push_named("fn", node, "name", bytes, definitions, def_spans);
+            return;
+        }
+        "type_definition" => {
+            push_named("type", node, "name", bytes, definitions, def_spans);
+            return;
+        }
+        _ => {}
+    }
+    recurse_children(
+        SourceLang::Scala,
+        node,
+        bytes,
+        false,
+        definitions,
+        def_spans,
+    );
+}
+
+fn collect_swift(
+    node: Node<'_>,
+    bytes: &[u8],
+    definitions: &mut Vec<SymbolDef>,
+    def_spans: &mut HashSet<(usize, usize)>,
+) {
+    match node.kind() {
+        "class_declaration" => {
+            let kind = node
+                .child_by_field_name("declaration_kind")
+                .and_then(|kind| node_text(kind, bytes))
+                .map(|text| match text {
+                    "struct" => "struct",
+                    "enum" => "enum",
+                    "actor" => "actor",
+                    "extension" => "extension",
+                    _ => "class",
+                })
+                .unwrap_or("class");
+            push_named(kind, node, "name", bytes, definitions, def_spans);
+            recurse_children(
+                SourceLang::Swift,
+                node,
+                bytes,
+                false,
+                definitions,
+                def_spans,
+            );
+            return;
+        }
+        "protocol_declaration" => {
+            push_named("protocol", node, "name", bytes, definitions, def_spans);
+            recurse_children(
+                SourceLang::Swift,
+                node,
+                bytes,
+                false,
+                definitions,
+                def_spans,
+            );
+            return;
+        }
+        "function_declaration" => {
+            push_named("fn", node, "name", bytes, definitions, def_spans);
+            return;
+        }
+        "typealias_declaration" => {
+            push_named("type", node, "name", bytes, definitions, def_spans);
+            return;
+        }
+        _ => {}
+    }
+    recurse_children(
+        SourceLang::Swift,
+        node,
+        bytes,
+        false,
+        definitions,
+        def_spans,
+    );
+}
+
+fn collect_php(
+    node: Node<'_>,
+    bytes: &[u8],
+    definitions: &mut Vec<SymbolDef>,
+    def_spans: &mut HashSet<(usize, usize)>,
+) {
+    let kind = match node.kind() {
+        "class_declaration" => Some("class"),
+        "interface_declaration" => Some("interface"),
+        "trait_declaration" => Some("trait"),
+        "enum_declaration" => Some("enum"),
+        _ => None,
+    };
+    if let Some(kind) = kind {
+        push_named(kind, node, "name", bytes, definitions, def_spans);
+        recurse_children(SourceLang::Php, node, bytes, false, definitions, def_spans);
+        return;
+    }
+    match node.kind() {
+        "function_definition" | "method_declaration" => {
+            push_named("fn", node, "name", bytes, definitions, def_spans);
+            return;
+        }
+        "namespace_definition" => {
+            push_named("namespace", node, "name", bytes, definitions, def_spans);
+            recurse_children(SourceLang::Php, node, bytes, false, definitions, def_spans);
+            return;
+        }
+        _ => {}
+    }
+    recurse_children(SourceLang::Php, node, bytes, false, definitions, def_spans);
+}
+
+fn collect_haskell(
+    node: Node<'_>,
+    bytes: &[u8],
+    definitions: &mut Vec<SymbolDef>,
+    def_spans: &mut HashSet<(usize, usize)>,
+) {
+    let kind = match node.kind() {
+        "function" => Some("fn"),
+        "bind"
+            if node
+                .parent()
+                .is_some_and(|parent| matches!(parent.kind(), "declarations" | "local_binds")) =>
+        {
+            Some("fn")
+        }
+        "data_type" | "newtype" | "type_synonym" | "type_family" => Some("type"),
+        "class" => Some("class"),
+        "instance" => Some("impl"),
+        _ => None,
+    };
+    if let Some(kind) = kind {
+        push_named(kind, node, "name", bytes, definitions, def_spans);
+        return;
+    }
+    recurse_children(
+        SourceLang::Haskell,
+        node,
+        bytes,
+        false,
+        definitions,
+        def_spans,
+    );
+}
+
+fn collect_ruby(
+    node: Node<'_>,
+    bytes: &[u8],
+    definitions: &mut Vec<SymbolDef>,
+    def_spans: &mut HashSet<(usize, usize)>,
+) {
+    match node.kind() {
+        "class" => {
+            push_named("class", node, "name", bytes, definitions, def_spans);
+            recurse_children(SourceLang::Ruby, node, bytes, false, definitions, def_spans);
+            return;
+        }
+        "module" => {
+            push_named("module", node, "name", bytes, definitions, def_spans);
+            recurse_children(SourceLang::Ruby, node, bytes, false, definitions, def_spans);
+            return;
+        }
+        "method" | "singleton_method" => {
+            push_named("fn", node, "name", bytes, definitions, def_spans);
+            return;
+        }
+        _ => {}
+    }
+    recurse_children(SourceLang::Ruby, node, bytes, false, definitions, def_spans);
 }
 
 fn recurse_children(

@@ -145,9 +145,10 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
   and usage telemetry.
 - **Tools and sandbox:** read, write, edit, list, grep, glob, and shell tools
   with workspace path guards and unified diffs; a tree-sitter repository map;
-  LSP definition, references, and diagnostics; and script analysis through
-  `python3` or `node`. Shell and script children run in the OS sandbox when one
-  is available, with provider secrets removed from the environment.
+  LSP definition, references, and diagnostics; script analysis through
+  `python3` or `node`; and `web-fetch` / `web-search` for URLs and keyless web
+  search. Shell and script children run in the OS sandbox when one is
+  available, with provider secrets removed from the environment.
 - **Agents, skills, and packs:** read-only markdown definitions from user
   config, trusted packs, `.meerai`, `.agents`, then `.claude`, plus one built-in
   `goal` skill that runs a bounded act/observe/adjust loop. The model sees a
@@ -392,8 +393,22 @@ Set `context.temperature` in the user settings, or in the project
 `.meerai/settings.yml` (which overrides it field by field). In the TUI, use
 `/sampling` or `/temperature`; the browser uses Settings → Context. In the
 sampling panel, Left/Right cycle the effort tier from either field, `l`/`m`/`h`
-pick it directly, the tier row is clickable, and typing `default` clears the
-override.
+pick it directly, `x` picks extra high, the tier row is clickable, and typing
+`default` clears the override.
+
+Effort has five tiers: `low` (temp 0.00), `medium` (0.20), `high` (0.50),
+`extra high` (0.70), and `max` (0.90). The tier list follows the active model:
+the bundled catalog records the reasoning levels each model accepts, so
+`extra high` appears only for models that accept `xhigh`, and `max` only for
+models that accept `max`. A tier the model does not accept clamps down to the
+nearest accepted tier. A model with no recorded reasoning support still
+receives the tier temperature and no reasoning hint. An unknown model keeps all
+five tiers.
+
+In the TUI, `/effort xhigh` sets the extra-high tier; a three-tier model clamps
+it to `high` and the status line reports the tier it applied. `/effort max`
+sets the top tier where the model declares it.
+
 Edit user settings with `meerai config export`, an edit, then
 `meerai config import <PATH>`:
 
@@ -642,7 +657,14 @@ YAML. Do not edit the database by hand.
 ### Configuration (`~/.config/meerai`)
 
 - `providers.yml` — provider overrides and an optional `models:` list with
-  `context_window`, `input_cost_per_mtok`, and `output_cost_per_mtok`.
+  `context_window`, `max_output_tokens`, `input_cost_per_mtok`,
+  `output_cost_per_mtok`, and `effort_levels` (`low`, `medium`, `high`,
+  `extrahigh`, `max`). The bundled `meerai-client/models.yml` carries
+  the shipped model table; `make sync-models` (`scripts/sync-models.py`)
+  regenerates it from [models.dev](https://models.dev/api.json), and
+  `make models-check` fails when the committed table is stale. A provider with
+  more than 50 text models keeps the 50 newest plus one flagship per major
+  model family.
 - The user settings (`active_provider`, `active_model`, `providers`,
   `approval_mode`, `permissions`, `context`, `routing`, `sessions`, and
   `theme`) are stored in the database. Change them with TUI Settings or
@@ -892,7 +914,11 @@ Key resolution order per provider is the stored vault credential → `api_key`
 in `providers.yml` → the provider's environment variables. The
 bundled [providers.yml](meerai-client/providers.yml) declares those variables,
 for example `OPENROUTER_API_KEY` (also `OPEN_ROUTER_API_KEY`) and
-`GEMINI_API_KEY`.
+`GEMINI_API_KEY`. Shipped providers are `opencode-go`, `opencode`,
+`openrouter`, `qwen-cloud` (`ALIBABA_TOKEN_PLAN_API_KEY`, also
+`QWEN_CLOUD_API_KEY`), `gemini`, `openai`, `anthropic`, `deepseek`, `xai`,
+`zai-coding` (`ZAI_API_KEY`), `moonshot` (`MOONSHOT_API_KEY`), `mistral`
+(`MISTRAL_API_KEY`), and `ollama`.
 
 - `MEERAI_PROVIDER`, `MEERAI_MODEL` — default provider and model; CLI flags win.
 - `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` — standard proxy
@@ -935,6 +961,15 @@ for example `OPENROUTER_API_KEY` (also `OPEN_ROUTER_API_KEY`) and
   The original text is discarded; there is no log-only copy. Paths are not
   redacted. Redaction is pattern-based, not a guarantee, and a secret that does
   not match a pattern is not redacted.
+- **Web tools are approval-gated external effects.** `web-fetch` and
+  `web-search` declare `EffectClass::External` under the `webfetch` action, so
+  `plan` mode hides them, `ask` mode requests an approval, and `auto` mode
+  allows them. `web-fetch` accepts http and https only, rejects URL userinfo,
+  follows at most five redirects, caps the body at 2 MiB and the output at
+  60,000 characters, and refuses loopback, private, link-local, CGNAT,
+  broadcast, multicast, and IPv4-mapped private addresses after DNS
+  resolution. DNS rebinding is not prevented. `web-search` uses DuckDuckGo
+  without an account and is best-effort.
 - **Local files are private by default.** `meerai.db` is `0600`; session
   directories are `0700` on Unix. Windows has no equivalent mode enforcement.
 - **Repository input is opt-in.** `.env` is not loaded implicitly. `AGENTS.md`

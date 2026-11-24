@@ -1735,7 +1735,7 @@ fn renders_provider_apikey_masked_and_model_modals() {
 
     app.modal = Some(ActiveModal::ModelInput {
         input: String::new(),
-        selected_recent: None,
+        selected: None,
         error: None,
     });
     let model_screen = render_to_string(&mut app);

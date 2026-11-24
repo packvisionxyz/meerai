@@ -371,6 +371,28 @@ processes cannot write or delete the same live session concurrently;
   when `WINDOWS_CERTIFICATE` is set. Without those secrets, archives
   publish unsigned (§5.6).
 
+### 2.14 Web tools
+
+- **Policy.** `web-fetch` and `web-search` (`meerai-tools/src/web/`) declare
+  `EffectClass::External` with the `webfetch` action. `plan` denies and
+  hides them; `ask` requests an approval; `auto` allows them. A project
+  file cannot grant them.
+- **URL guard.** `web-fetch` accepts `http`/`https` only, rejects URL
+  userinfo, and resolves the host before each request. Loopback, private,
+  link-local, CGNAT, broadcast, multicast, and IPv4-mapped private
+  addresses are refused, as are `localhost` and `.local` names. Redirects
+  are followed manually, at most five, with the guard re-applied to each
+  hop.
+- **Limits.** Bodies stop at 2 MiB and output at 60,000 characters. HTML is
+  reduced to plain text; binary content is refused.
+- **Search.** `web-search` queries DuckDuckGo over HTTPS without an
+  account. It returns titles, URLs, and snippets only; it does not fetch
+  pages and reports a blocked provider without retrying.
+- **Residual risk.** DNS rebinding between the guard and the request is not
+  prevented, and the tools are policy gates, not a kernel boundary. In
+  `auto` mode the model can send arbitrary URLs and queries, so treat this
+  as an egress channel.
+
 ## 3. Planned controls
 
 | Item | Description | Gate |
@@ -391,6 +413,7 @@ processes cannot write or delete the same live session concurrently;
 | --- | --- | --- |
 | Workspace code & files | Workspace root + `writable_roots` | Destructive modification, malicious injection, exfiltration |
 | Host filesystem & network | Paths outside the workspace, local services, external endpoints | Arbitrary read/write via `shell`, exfiltration, SSRF |
+| Web tools | `web-fetch` URLs and `web-search` queries | Data exfiltration through the URL or query; SSRF into local services; hostile page content |
 | Provider API keys | Encrypted `vault_secrets` in `meerai.db`, process env | Leakage via child processes, tool output, logs, model context |
 | ChatGPT plan OAuth tokens | Encrypted `vault_secrets` in `meerai.db`, process memory | Refresh-token theft, token in an error body or log, shared-machine access |
 | Repository & user secrets | `.env*`, SSH keys, `.aws/credentials`, `.kube/config`, `.docker/config.json`, `*.pem`/`*.key` | Disclosure into prompts/transcripts or exfiltration |

@@ -1645,11 +1645,13 @@ impl DecisionCtx<'_> {
                 instructions,
                 model,
                 context_window_tokens,
+                effort_levels,
             } => {
                 self.apply_instructions(
                     format!("Agent instructions ({name}):\n\n{instructions}"),
                     model,
                     context_window_tokens,
+                    effort_levels,
                     event_tx,
                 )
                 .await;
@@ -1657,6 +1659,7 @@ impl DecisionCtx<'_> {
             AgentCommand::ApplySkill { name, instructions } => {
                 self.apply_instructions(
                     format!("Skill instructions ({name}):\n\n{instructions}"),
+                    None,
                     None,
                     None,
                     event_tx,
@@ -1690,6 +1693,7 @@ impl DecisionCtx<'_> {
         text: String,
         model: Option<String>,
         context_window_tokens: Option<u64>,
+        effort_levels: Option<Vec<EffortLevel>>,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) {
         let text = crate::screen::screen_untrusted_text("definition_instructions", &text);
@@ -1713,6 +1717,9 @@ impl DecisionCtx<'_> {
                 && let Some(harness) = self.harness.as_mut()
             {
                 harness.config.context_window_tokens = tokens;
+            }
+            if let Some(harness) = self.harness.as_mut() {
+                harness.config.effort_levels = effort_levels;
             }
         }
     }
