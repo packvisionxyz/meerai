@@ -231,7 +231,7 @@ The backlog orders contract work before structural work. Each item states one ob
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | ~~Remove the two `large_enum_variant` suppressions~~ **Done** — see [§3.4](#34-completed-work) | signature | `meerai-tui` | S | Low | Done: both allows gone, `TranscriptEntry` cut from 312 to 104 bytes, guard test added |
 | 2 | ~~Replace the 73 production unwraps in the registry with typed `HostError` returns~~ **Partly done** — 15 of 34 lock sites converted, see [§3.4](#34-completed-work) | error handling | `meerai-host` | M | Medium | Remaining: 19 lock sites in methods that cannot fail today, plus 33 `get`/`get_mut` unwraps |
-| 3 | Unify `goal.rs` and `loop_engine.rs` into one loop model | duplication | `meerai-session`, `meerai-skills` | M | Medium | `cap_text`, `render`, `continuation`, `turn_prompt`, and `open_summary` each exist once |
+| 3 | ~~Unify `goal.rs` and `loop_engine.rs` into one loop model~~ **Done** — `goal.rs` was dead, so it was deleted, see [§3.4](#34-completed-work) | duplication | `meerai-session`, `meerai-skills` | M | Medium | Done: the four prompt builders exist once; no live behavior changed |
 | 4 | Split `meerai-host/src/registry.rs` into `state`, `events`, and `snapshot` modules | file size | `meerai-host` | M | Medium | No file in `meerai-host/src` exceeds 900 lines and the public re-export list is unchanged |
 | 5 | Split `meerai-agents/src/multi_turn_agent/tests.rs` (10,018 lines) and `tools.rs` (2,134 test lines) into per-concern test modules | test organization | `meerai-agents` | M | Low | No test file in `multi_turn_agent/` exceeds 1,500 lines and each module under test has its own test file |
 | 6 | Introduce parameter structs to remove the five `too_many_arguments` allows in `meerai-agents` | signature | `meerai-agents` | M | Medium | No `#[allow(clippy::too_many_arguments)]` remains in the crate |
@@ -260,6 +260,16 @@ Items 1 through 3 are contract-adjacent and should land first. Items 4 through 1
 | 18 | Removed the three test-only `#[allow(dead_code)]` in `meerai-macros/src/tool/attribute_tool.rs` and `meerai-core/src/tools.rs:302`; one moved to the inner struct that genuinely needs it | 4 test allows | 1 inner allow, with the struct it applies to |
 | 2 | Added `HostError::Poisoned` and a `lock_state()` helper, then converted the 15 registry lock sites whose function already returned `Result` | 15 `lock().unwrap()` in `Result` functions | 15 `lock_state()?` |
 | 2 | `meerai-web/src/mapper.rs:643` maps `Poisoned` to 500 `Internal` | exhaustive match panic | explicit mapping |
+| 3 | Deleted `meerai-session/src/goal.rs` and `SessionEvent::GoalUpdated`, plus `LoopState::from_goal` | 331-line module, a dead wire variant, and a compatibility conversion | 0 references to `GoalState`, `GoalItem`, `GoalItemStatus`, `GoalUpdated`, `last_goal`, or `from_goal` |
+| 3 | `cap_text`, `continuation`, `turn_prompt`, and `open_summary` now exist once each, all in `meerai-skills/src/loop_engine.rs` | 5 functions implemented twice | 4 functions, one implementation each |
+
+Item 3 needed no merge. The audit assumed `goal.rs` and `loop_engine.rs` were two live copies of one protocol. They are not: `goal.rs` was dead. `SessionEvent::GoalUpdated` was never constructed anywhere in the workspace, and `last_goal` had no callers outside its own test. The `goal.rs` copies of `cap_text`, `render`, `continuation`, `turn_prompt`, and `open_summary` were therefore unreachable.
+
+So the fix was a deletion, not a unification. `meerai-session` dropped from 3,851 to 3,564 production lines and `meerai-skills` stayed at 986. Six tests went with the deleted code: five in `goal.rs` and one `from_goal` test in `loop_engine.rs`, which is why the suite count is 1276 rather than 1282. No live behavior changed.
+
+This also cleared the last clippy warning in the workspace. The `needless_update` at `meerai-skills/src/loop_engine.rs:336` was in the deleted `from_goal` test, so `cargo clippy --workspace --all-targets` is now silent.
+
+`GoalUpdated` was removed from the `SessionEvent` enum. That is a wire-contract change as `AGENTS.md` defines it, and it is only safe because no code ever emitted it: a stored log cannot contain an event that was never written.
 
 Total suppressions in the tree went from 20 to 15. What remains: 10 `too_many_arguments`, 3 `result_large_err`, 1 `deprecated`, and 1 justified `dead_code`.
 
