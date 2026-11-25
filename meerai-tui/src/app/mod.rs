@@ -100,7 +100,6 @@ pub struct SubagentSpawnPanel {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[allow(clippy::large_enum_variant)]
 pub enum ActiveModal {
     ProviderSelect {
         filter: TextInput,
@@ -679,7 +678,6 @@ pub struct ThinkingHitZone {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[allow(clippy::large_enum_variant)]
 pub enum TranscriptEntry {
     User {
         text: String,
@@ -691,7 +689,7 @@ pub enum TranscriptEntry {
         reasoning_expanded: bool,
     },
     ToolCall(ToolCallEntry),
-    Subagent(SubagentEntry),
+    Subagent(Box<SubagentEntry>),
     Question {
         request_id: String,
         questions: Vec<QuestionPrompt>,

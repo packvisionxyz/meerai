@@ -775,7 +775,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
     });
     assert_eq!(
         app.tab().transcript.last(),
-        Some(&TranscriptEntry::Subagent(SubagentEntry {
+        Some(&TranscriptEntry::Subagent(Box::new(SubagentEntry {
             id: "item-sub-1".to_string(),
             name: None,
             agent: "reviewer".to_string(),
@@ -793,7 +793,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
             nested: None,
             nested_refreshed_at: None,
             nested_loading: false,
-        }))
+        })))
     );
 
     app.handle_agent_event(AgentEvent::ItemDelta {
@@ -802,7 +802,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
     });
     assert_eq!(
         app.tab().transcript.last(),
-        Some(&TranscriptEntry::Subagent(SubagentEntry {
+        Some(&TranscriptEntry::Subagent(Box::new(SubagentEntry {
             id: "item-sub-1".to_string(),
             name: None,
             agent: "reviewer".to_string(),
@@ -820,7 +820,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
             nested: None,
             nested_refreshed_at: None,
             nested_loading: false,
-        }))
+        })))
     );
 
     app.handle_agent_event(AgentEvent::ItemCompleted {
@@ -842,7 +842,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
     });
     assert_eq!(
         app.tab().transcript.last(),
-        Some(&TranscriptEntry::Subagent(SubagentEntry {
+        Some(&TranscriptEntry::Subagent(Box::new(SubagentEntry {
             id: "item-sub-1".to_string(),
             name: None,
             agent: "reviewer".to_string(),
@@ -860,7 +860,7 @@ fn subagent_run_lifecycle_folds_and_renders() {
             nested: None,
             nested_refreshed_at: None,
             nested_loading: false,
-        }))
+        })))
     );
 
     app.tab_mut().turn_activity.insert(0, true);

@@ -183,3 +183,12 @@ fn bang_command_needs_a_shell_opener() {
             .contains("Shell commands are not available")
     );
 }
+
+#[test]
+fn transcript_entry_stays_small() {
+    assert!(
+        std::mem::size_of::<super::TranscriptEntry>() <= 112,
+        "TranscriptEntry grew to {} bytes; box the large variant instead of raising the limit",
+        std::mem::size_of::<super::TranscriptEntry>()
+    );
+}

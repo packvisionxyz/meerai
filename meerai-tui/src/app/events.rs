@@ -339,7 +339,7 @@ impl SessionTab {
                     active_tool,
                 } => {
                     self.finalize_pending_assistant();
-                    let entry = TranscriptEntry::Subagent(SubagentEntry {
+                    let entry = TranscriptEntry::Subagent(Box::new(SubagentEntry {
                         id: id.to_string(),
                         name,
                         agent,
@@ -357,7 +357,7 @@ impl SessionTab {
                         nested: None,
                         nested_refreshed_at: None,
                         nested_loading: false,
-                    });
+                    }));
                     let idx = match self.transcript.iter().position(|entry| match entry {
                         TranscriptEntry::ToolCall(tc) => {
                             is_delegation_tool(&tc.name)
@@ -572,7 +572,7 @@ impl SessionTab {
                     } else {
                         self.finalize_pending_assistant();
                         self.transcript
-                            .push(TranscriptEntry::Subagent(SubagentEntry {
+                            .push(TranscriptEntry::Subagent(Box::new(SubagentEntry {
                                 id: id_str,
                                 name,
                                 agent,
@@ -590,7 +590,7 @@ impl SessionTab {
                                 nested: None,
                                 nested_refreshed_at: None,
                                 nested_loading: false,
-                            }));
+                            })));
                     }
                 }
                 SessionItem::Compaction { freed_tokens, .. } => {
@@ -882,7 +882,7 @@ impl From<ReplayEntry> for TranscriptEntry {
                 reasoning_expanded: false,
             },
             ReplayEntry::ToolCall(call) => TranscriptEntry::ToolCall(call.into()),
-            ReplayEntry::Subagent(subagent) => TranscriptEntry::Subagent(subagent.into()),
+            ReplayEntry::Subagent(subagent) => TranscriptEntry::Subagent(Box::new(subagent.into())),
             ReplayEntry::Question(question) => TranscriptEntry::Question {
                 request_id: question.request_id,
                 questions: question.questions,

@@ -1463,7 +1463,7 @@ fn live_to_transcript(entry: LiveEntry) -> TranscriptEntry {
             report,
             child_session_id,
             ..
-        } => TranscriptEntry::Subagent(crate::app::SubagentEntry {
+        } => TranscriptEntry::Subagent(Box::new(crate::app::SubagentEntry {
             id,
             name,
             agent,
@@ -1481,7 +1481,7 @@ fn live_to_transcript(entry: LiveEntry) -> TranscriptEntry {
             nested: None,
             nested_refreshed_at: None,
             nested_loading: false,
-        }),
+        })),
         LiveEntry::Question {
             id,
             questions,

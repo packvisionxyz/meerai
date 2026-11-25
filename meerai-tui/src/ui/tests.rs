@@ -776,25 +776,27 @@ fn subagent_opens_a_full_child_conversation_view() {
     });
     app.tab_mut()
         .transcript
-        .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
-            id: "sub-1".to_string(),
-            name: None,
-            agent: "explore".to_string(),
-            status: ToolCallStatus::Succeeded,
-            report: Some("final report".to_string()),
-            child_session_id: Some("ses-child".to_string()),
-            model: None,
-            approval_mode: "ask".to_string(),
-            steps_used: 0,
-            max_steps: 0,
-            usage: Default::default(),
-            est_cost_usd: None,
-            active_tool: None,
-            expanded: false,
-            nested: None,
-            nested_refreshed_at: None,
-            nested_loading: false,
-        }));
+        .push(TranscriptEntry::Subagent(Box::new(
+            crate::app::SubagentEntry {
+                id: "sub-1".to_string(),
+                name: None,
+                agent: "explore".to_string(),
+                status: ToolCallStatus::Succeeded,
+                report: Some("final report".to_string()),
+                child_session_id: Some("ses-child".to_string()),
+                model: None,
+                approval_mode: "ask".to_string(),
+                steps_used: 0,
+                max_steps: 0,
+                usage: Default::default(),
+                est_cost_usd: None,
+                active_tool: None,
+                expanded: false,
+                nested: None,
+                nested_refreshed_at: None,
+                nested_loading: false,
+            },
+        )));
     app.tab_mut().turn_activity.insert(1, true);
 
     let collapsed = render_to_string(&mut app);
@@ -873,35 +875,37 @@ fn subagent_overlay_drag_copies_selected_text() {
     let mut app = test_app();
     app.tab_mut()
         .transcript
-        .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
-            id: "sub-copy".to_string(),
-            name: None,
-            agent: "explore".to_string(),
-            status: ToolCallStatus::Succeeded,
-            report: None,
-            child_session_id: Some("ses-child".to_string()),
-            model: None,
-            approval_mode: "ask".to_string(),
-            steps_used: 1,
-            max_steps: 4,
-            usage: Default::default(),
-            est_cost_usd: None,
-            active_tool: None,
-            expanded: false,
-            nested: Some(vec![
-                TranscriptEntry::User {
-                    text: "find the bug".to_string(),
-                },
-                TranscriptEntry::Assistant {
-                    text: "Found it.".to_string(),
-                    reasoning: "checking".to_string(),
-                    streaming: false,
-                    reasoning_expanded: false,
-                },
-            ]),
-            nested_refreshed_at: None,
-            nested_loading: false,
-        }));
+        .push(TranscriptEntry::Subagent(Box::new(
+            crate::app::SubagentEntry {
+                id: "sub-copy".to_string(),
+                name: None,
+                agent: "explore".to_string(),
+                status: ToolCallStatus::Succeeded,
+                report: None,
+                child_session_id: Some("ses-child".to_string()),
+                model: None,
+                approval_mode: "ask".to_string(),
+                steps_used: 1,
+                max_steps: 4,
+                usage: Default::default(),
+                est_cost_usd: None,
+                active_tool: None,
+                expanded: false,
+                nested: Some(vec![
+                    TranscriptEntry::User {
+                        text: "find the bug".to_string(),
+                    },
+                    TranscriptEntry::Assistant {
+                        text: "Found it.".to_string(),
+                        reasoning: "checking".to_string(),
+                        streaming: false,
+                        reasoning_expanded: false,
+                    },
+                ]),
+                nested_refreshed_at: None,
+                nested_loading: false,
+            },
+        )));
     app.modal = Some(ActiveModal::RunDetail {
         run: RunTarget::Subagent(0),
         selected: 0,
@@ -958,25 +962,27 @@ fn sidebar_lists_subagents_without_click_actions() {
     });
     app.tab_mut()
         .transcript
-        .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
-            id: "sub-sidebar".to_string(),
-            name: None,
-            agent: "explore".to_string(),
-            status: ToolCallStatus::Running,
-            report: None,
-            child_session_id: Some("ses-child".to_string()),
-            model: None,
-            approval_mode: "ask".to_string(),
-            steps_used: 2,
-            max_steps: 16,
-            usage: Default::default(),
-            est_cost_usd: None,
-            active_tool: Some("code-grep".to_string()),
-            expanded: false,
-            nested: None,
-            nested_refreshed_at: None,
-            nested_loading: false,
-        }));
+        .push(TranscriptEntry::Subagent(Box::new(
+            crate::app::SubagentEntry {
+                id: "sub-sidebar".to_string(),
+                name: None,
+                agent: "explore".to_string(),
+                status: ToolCallStatus::Running,
+                report: None,
+                child_session_id: Some("ses-child".to_string()),
+                model: None,
+                approval_mode: "ask".to_string(),
+                steps_used: 2,
+                max_steps: 16,
+                usage: Default::default(),
+                est_cost_usd: None,
+                active_tool: Some("code-grep".to_string()),
+                expanded: false,
+                nested: None,
+                nested_refreshed_at: None,
+                nested_loading: false,
+            },
+        )));
     app.tab_mut().turn_activity.insert(1, true);
 
     let rendered = render_to_string_with_size(&mut app, 120, 40);
@@ -1115,25 +1121,27 @@ fn statusline_shows_the_running_agent_count() {
     for (id, agent) in [("s1", "explore"), ("s2", "build")] {
         app.tab_mut()
             .transcript
-            .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
-                id: id.to_string(),
-                name: None,
-                agent: agent.to_string(),
-                status: ToolCallStatus::Running,
-                report: None,
-                child_session_id: None,
-                model: None,
-                approval_mode: "ask".to_string(),
-                steps_used: 0,
-                max_steps: 0,
-                usage: Default::default(),
-                est_cost_usd: None,
-                active_tool: None,
-                expanded: false,
-                nested: None,
-                nested_refreshed_at: None,
-                nested_loading: false,
-            }));
+            .push(TranscriptEntry::Subagent(Box::new(
+                crate::app::SubagentEntry {
+                    id: id.to_string(),
+                    name: None,
+                    agent: agent.to_string(),
+                    status: ToolCallStatus::Running,
+                    report: None,
+                    child_session_id: None,
+                    model: None,
+                    approval_mode: "ask".to_string(),
+                    steps_used: 0,
+                    max_steps: 0,
+                    usage: Default::default(),
+                    est_cost_usd: None,
+                    active_tool: None,
+                    expanded: false,
+                    nested: None,
+                    nested_refreshed_at: None,
+                    nested_loading: false,
+                },
+            )));
     }
     let rendered = render_to_string(&mut app);
     assert!(rendered.contains("2 agents"));
@@ -2521,25 +2529,27 @@ fn transcript_document_rebuilds_when_nested_subagent_content_arrives() {
     });
     app.tab_mut()
         .transcript
-        .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
-            id: "sub-cache".to_string(),
-            name: None,
-            agent: "explore".to_string(),
-            status: ToolCallStatus::Running,
-            report: None,
-            child_session_id: Some("ses-child-cache".to_string()),
-            model: None,
-            approval_mode: "ask".to_string(),
-            steps_used: 0,
-            max_steps: 0,
-            usage: Default::default(),
-            est_cost_usd: None,
-            active_tool: None,
-            expanded: true,
-            nested: None,
-            nested_refreshed_at: None,
-            nested_loading: true,
-        }));
+        .push(TranscriptEntry::Subagent(Box::new(
+            crate::app::SubagentEntry {
+                id: "sub-cache".to_string(),
+                name: None,
+                agent: "explore".to_string(),
+                status: ToolCallStatus::Running,
+                report: None,
+                child_session_id: Some("ses-child-cache".to_string()),
+                model: None,
+                approval_mode: "ask".to_string(),
+                steps_used: 0,
+                max_steps: 0,
+                usage: Default::default(),
+                est_cost_usd: None,
+                active_tool: None,
+                expanded: true,
+                nested: None,
+                nested_refreshed_at: None,
+                nested_loading: true,
+            },
+        )));
     app.tab_mut().turn_activity.insert(1, true);
 
     let loading = render_to_string(&mut app);
@@ -2742,25 +2752,27 @@ fn statusline_agents_counter_opens_runs_and_detail() {
     let mut app = test_app();
     app.tab_mut()
         .transcript
-        .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
-            id: "sub-1".to_string(),
-            name: None,
-            agent: "explore".to_string(),
-            status: ToolCallStatus::Running,
-            report: None,
-            child_session_id: Some("ses-child".to_string()),
-            model: None,
-            approval_mode: "ask".to_string(),
-            steps_used: 0,
-            max_steps: 0,
-            usage: Default::default(),
-            est_cost_usd: None,
-            active_tool: None,
-            expanded: false,
-            nested: None,
-            nested_refreshed_at: None,
-            nested_loading: false,
-        }));
+        .push(TranscriptEntry::Subagent(Box::new(
+            crate::app::SubagentEntry {
+                id: "sub-1".to_string(),
+                name: None,
+                agent: "explore".to_string(),
+                status: ToolCallStatus::Running,
+                report: None,
+                child_session_id: Some("ses-child".to_string()),
+                model: None,
+                approval_mode: "ask".to_string(),
+                steps_used: 0,
+                max_steps: 0,
+                usage: Default::default(),
+                est_cost_usd: None,
+                active_tool: None,
+                expanded: false,
+                nested: None,
+                nested_refreshed_at: None,
+                nested_loading: false,
+            },
+        )));
     app.tab_mut().is_running = true;
     app.tab_mut().active_tool = Some("subagent-run".to_string());
     let _ = render_to_string(&mut app);
@@ -2824,25 +2836,27 @@ fn named_subagent_shows_its_name_in_transcript_runs_and_detail() {
     let mut app = test_app();
     app.tab_mut()
         .transcript
-        .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
-            id: "sub-1".to_string(),
-            name: Some("parser scan".to_string()),
-            agent: "explore".to_string(),
-            status: ToolCallStatus::Running,
-            report: None,
-            child_session_id: None,
-            model: None,
-            approval_mode: "ask".to_string(),
-            steps_used: 0,
-            max_steps: 4,
-            usage: Default::default(),
-            est_cost_usd: None,
-            active_tool: None,
-            expanded: false,
-            nested: None,
-            nested_refreshed_at: None,
-            nested_loading: false,
-        }));
+        .push(TranscriptEntry::Subagent(Box::new(
+            crate::app::SubagentEntry {
+                id: "sub-1".to_string(),
+                name: Some("parser scan".to_string()),
+                agent: "explore".to_string(),
+                status: ToolCallStatus::Running,
+                report: None,
+                child_session_id: None,
+                model: None,
+                approval_mode: "ask".to_string(),
+                steps_used: 0,
+                max_steps: 4,
+                usage: Default::default(),
+                est_cost_usd: None,
+                active_tool: None,
+                expanded: false,
+                nested: None,
+                nested_refreshed_at: None,
+                nested_loading: false,
+            },
+        )));
     app.tab_mut().turn_activity.insert(0, true);
 
     let rendered = render_to_string(&mut app);
@@ -2865,25 +2879,27 @@ fn statusline_counter_highlights_on_hover() {
     let mut app = test_app();
     app.tab_mut()
         .transcript
-        .push(TranscriptEntry::Subagent(crate::app::SubagentEntry {
-            id: "sub-1".to_string(),
-            name: None,
-            agent: "explore".to_string(),
-            status: ToolCallStatus::Running,
-            report: None,
-            child_session_id: None,
-            model: None,
-            approval_mode: "ask".to_string(),
-            steps_used: 0,
-            max_steps: 0,
-            usage: Default::default(),
-            est_cost_usd: None,
-            active_tool: None,
-            expanded: false,
-            nested: None,
-            nested_refreshed_at: None,
-            nested_loading: false,
-        }));
+        .push(TranscriptEntry::Subagent(Box::new(
+            crate::app::SubagentEntry {
+                id: "sub-1".to_string(),
+                name: None,
+                agent: "explore".to_string(),
+                status: ToolCallStatus::Running,
+                report: None,
+                child_session_id: None,
+                model: None,
+                approval_mode: "ask".to_string(),
+                steps_used: 0,
+                max_steps: 0,
+                usage: Default::default(),
+                est_cost_usd: None,
+                active_tool: None,
+                expanded: false,
+                nested: None,
+                nested_refreshed_at: None,
+                nested_loading: false,
+            },
+        )));
     let _ = render_to_string(&mut app);
     let (hit, kind) = app
         .runs_hits
