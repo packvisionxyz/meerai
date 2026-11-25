@@ -256,7 +256,6 @@ pub fn cap_text(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use meerai_session::goal::{GoalItem, GoalItemStatus, GoalState};
     use meerai_session::loop_state::LoopPhase;
 
     use super::*;
@@ -320,28 +319,5 @@ mod tests {
         assert!(text.contains("Objective: Ship it"));
         assert!(text.contains("Phase: act"));
         assert!(text.contains("Current item: 1. Fix it"));
-    }
-
-    #[test]
-    fn a_legacy_goal_maps_to_a_loop() {
-        let goal = GoalState {
-            goal: Some("Ship it".to_string()),
-            done_when: vec!["tests pass".to_string()],
-            items: vec![GoalItem {
-                id: 1,
-                text: "Fix it".to_string(),
-                verify: Some("cargo test".to_string()),
-                status: GoalItemStatus::Done,
-                evidence: Some("ok".to_string()),
-                ..GoalItem::default()
-            }],
-            ..GoalState::default()
-        };
-        let state = LoopState::from_goal(goal);
-        assert_eq!(state.objective.as_deref(), Some("Ship it"));
-        assert_eq!(state.items[0].expect.as_deref(), Some("cargo test"));
-        assert_eq!(state.items[0].observation.as_deref(), Some("ok"));
-        assert!(state.all_done());
-        assert_eq!(state.phase, LoopPhase::Plan);
     }
 }

@@ -125,51 +125,11 @@ impl LoopState {
         self.rounds = 0;
         self.pending_turn = false;
     }
-
-    pub fn from_goal(goal: crate::goal::GoalState) -> Self {
-        let items: Vec<LoopItem> = goal
-            .items
-            .into_iter()
-            .map(|item| LoopItem {
-                id: item.id,
-                text: item.text,
-                expect: item.verify,
-                status: match item.status {
-                    crate::goal::GoalItemStatus::Open => LoopItemStatus::Open,
-                    crate::goal::GoalItemStatus::Done => LoopItemStatus::Done,
-                    crate::goal::GoalItemStatus::Failed => LoopItemStatus::Failed,
-                },
-                action: None,
-                observation: item.evidence,
-            })
-            .collect();
-        let current = items
-            .iter()
-            .find(|item| item.status != LoopItemStatus::Done)
-            .map(|item| item.id);
-        let phase = if current.is_some() {
-            LoopPhase::Act
-        } else {
-            LoopPhase::Plan
-        };
-        Self {
-            objective: goal.goal,
-            done_when: goal.done_when,
-            constraints: goal.constraints,
-            phase,
-            items,
-            current,
-            rounds: goal.rounds,
-            turns: goal.turns,
-            pending_turn: goal.pending_turn,
-        }
-    }
 }
 
 pub fn last_loop(events: &[crate::LoggedEvent]) -> Option<LoopState> {
     events.iter().rev().find_map(|logged| match &logged.event {
         crate::SessionEvent::LoopUpdated { state } => Some(state.clone()),
-        crate::SessionEvent::GoalUpdated { state } => Some(LoopState::from_goal(state.clone())),
         _ => None,
     })
 }

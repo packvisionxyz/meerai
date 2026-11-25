@@ -520,7 +520,6 @@ fn event_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::RewindApplied { .. } => "rewind_applied",
         SessionEvent::HookFired { .. } => "hook_fired",
         SessionEvent::ContextTurnPinned { .. } => "context_turn_pinned",
-        SessionEvent::GoalUpdated { .. } => "goal_updated",
         SessionEvent::LoopUpdated { .. } => "loop_updated",
         SessionEvent::CheckpointCreated { .. } => "checkpoint_created",
         SessionEvent::CircuitBreaker { .. } => "circuit_breaker",

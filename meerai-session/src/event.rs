@@ -349,9 +349,6 @@ pub enum SessionEvent {
         turn_id: TurnId,
         pinned: bool,
     },
-    GoalUpdated {
-        state: crate::goal::GoalState,
-    },
     LoopUpdated {
         state: crate::loop_state::LoopState,
     },
