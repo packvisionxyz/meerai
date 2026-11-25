@@ -18,9 +18,6 @@ pub struct ToolMeta {
 pub struct ToolsetDerive {
     pub ident: syn::Ident,
 
-    #[allow(dead_code)]
-    pub attrs: Vec<syn::Attribute>,
-
     #[darling(flatten)]
     pub toolset: ToolsetArgs,
 }

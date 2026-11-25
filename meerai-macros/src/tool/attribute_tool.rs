@@ -71,8 +71,8 @@ mod test {
     use super::*;
 
     #[test]
-    #[allow(dead_code)]
     fn test_snapshot_attribute_with_params() {
+        #[allow(dead_code)]
         pub struct HelloAttributeArgs {
             text: String,
         }
@@ -92,7 +92,6 @@ mod test {
     }
 
     #[test]
-    #[allow(dead_code)]
     fn test_snapshot_attribute_without_params() {
         let args = quote! {
             name = "hello",

@@ -299,7 +299,6 @@ impl From<&genai::chat::ToolCall> for ToolCall {
 mod tests {
     use super::*;
 
-    #[allow(dead_code)]
     #[test]
     fn test_tool() {
         struct MyToolset;
