@@ -230,7 +230,7 @@ The backlog orders contract work before structural work. Each item states one ob
 | # | Item | Axis | Crates | Effort | Risk | Done when |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | ~~Remove the two `large_enum_variant` suppressions~~ **Done** — see [§3.4](#34-completed-work) | signature | `meerai-tui` | S | Low | Done: both allows gone, `TranscriptEntry` cut from 312 to 104 bytes, guard test added |
-| 2 | Replace the 73 production unwraps in the registry with typed `HostError` returns | error handling | `meerai-host` | M | Medium | Production region of `registry.rs` has zero `.unwrap()` and `HostError` covers each new case |
+| 2 | ~~Replace the 73 production unwraps in the registry with typed `HostError` returns~~ **Partly done** — 15 of 34 lock sites converted, see [§3.4](#34-completed-work) | error handling | `meerai-host` | M | Medium | Remaining: 19 lock sites in methods that cannot fail today, plus 33 `get`/`get_mut` unwraps |
 | 3 | Unify `goal.rs` and `loop_engine.rs` into one loop model | duplication | `meerai-session`, `meerai-skills` | M | Medium | `cap_text`, `render`, `continuation`, `turn_prompt`, and `open_summary` each exist once |
 | 4 | Split `meerai-host/src/registry.rs` into `state`, `events`, and `snapshot` modules | file size | `meerai-host` | M | Medium | No file in `meerai-host/src` exceeds 900 lines and the public re-export list is unchanged |
 | 5 | Split `meerai-agents/src/multi_turn_agent/tests.rs` (10,018 lines) and `tools.rs` (2,134 test lines) into per-concern test modules | test organization | `meerai-agents` | M | Low | No test file in `multi_turn_agent/` exceeds 1,500 lines and each module under test has its own test file |
@@ -239,7 +239,7 @@ The backlog orders contract work before structural work. Each item states one ob
 | 8 | Split `meerai-web/src/server.rs` below 900 lines and narrow its error type | file size | `meerai-web` | M | Medium | The three `result_large_err` suppressions are gone and no file in the crate exceeds 900 lines |
 | 9 | Split `meerai-session/src/session.rs` into `open`, `fork`, and `query` modules | file size | `meerai-session` | M | Medium | No file in `meerai-session/src` exceeds 900 lines |
 | 10 | Split `meerai-web-protocol/src/lib.rs` into domain modules and move DTOs above the tests | file size | `meerai-web-protocol` | S | Low | No DTO is declared below a test module and no serde tag changed |
-| 11 | Share the Markdown parse options between both clients | duplication | `meerai-input`, `meerai-tui`, `meerai-web-client` | S | Low | One parse-options builder feeds both renderers and a test asserts they match; `python3 scripts/build-web.py --dev` still succeeds |
+| 11 | Share the Markdown parse options between both clients | duplication | `meerai-input`, `meerai-tui`, `meerai-web-client` | S | Low | Downgraded to optional by [§3.5](#35-corrected-finding-the-markdown-option-blocks-do-not-diverge): the blocks already agree in effect |
 | 12 | Split `meerai-tui/src/app/modals.rs`, `app/input.rs`, `app/mod.rs`, and `ui/transcript.rs` | file size | `meerai-tui` | L | Medium | No file in `meerai-tui/src` exceeds 900 lines, including `app/mod.rs` |
 | 13 | Split `meerai-web-client/src/state.rs` and `views/modals.rs` | file size | `meerai-web-client` | L | Medium | No file in `meerai-web-client/src` exceeds 900 lines |
 | 14 | ~~Write the error-handling policy into `AGENTS.md` and apply it per crate~~ **Policy written**; the per-crate conversion below remains | error handling | all | M | Low | Every library crate reaches zero production `unwrap`/`expect`, or records a line-level exception with its reason |
@@ -258,12 +258,27 @@ Items 1 through 3 are contract-adjacent and should land first. Items 4 through 1
 | 1 | Added `app::tests::transcript_entry_stays_small` so the footprint cannot grow back silently | no guard | fails above 112 bytes |
 | 18 | Deleted the dead `attrs` field from `ToolsetDerive` at `meerai-macros/src/tool/common.rs:21` | unused field with an allow | field removed, allow removed |
 | 18 | Removed the three test-only `#[allow(dead_code)]` in `meerai-macros/src/tool/attribute_tool.rs` and `meerai-core/src/tools.rs:302`; one moved to the inner struct that genuinely needs it | 4 test allows | 1 inner allow, with the struct it applies to |
+| 2 | Added `HostError::Poisoned` and a `lock_state()` helper, then converted the 15 registry lock sites whose function already returned `Result` | 15 `lock().unwrap()` in `Result` functions | 15 `lock_state()?` |
+| 2 | `meerai-web/src/mapper.rs:643` maps `Poisoned` to 500 `Internal` | exhaustive match panic | explicit mapping |
 
 Total suppressions in the tree went from 20 to 15. What remains: 10 `too_many_arguments`, 3 `result_large_err`, 1 `deprecated`, and 1 justified `dead_code`.
 
 `TranscriptEntry` did not reach 64 bytes because `ToolCallEntry` is the next-largest variant and boxing it touches 44 call sites across the crate. That is item 7 territory, not a same-pass change.
 
+Item 2 is partly done: 15 of 34 lock sites are converted. The other 19 sit in methods that cannot fail today (`snapshot`, `has_session`, `context_for`, `session_detail`, `session_summary`, `cmd_tx`, `subscribe`, the five `note_tui_*` writers, the three `emit_*` writers, `register_opened_with_activation`, `finish_user_shell`, `append_system_entry`, `shutdown_all`). Converting them means changing their signatures, which cascades into both clients. One of them, `snapshot()`, runs on every render, so deciding what a poisoned registry renders is a product decision rather than a mechanical one.
+
 Verification for this batch: `cargo fmt --all --check` exit 0; `cargo clippy --workspace --all-targets` reports one pre-existing warning (`meerai-skills`); `cargo test --workspace` 1282 passed, 0 failed.
+
+### 3.5 Corrected finding: the Markdown option blocks do not diverge
+
+[§2.5](#25-axis-four-tui-and-browser-duplication) claimed the two clients "have drifted" because the browser sets `options.parse.smart = false` and the terminal does not. Measured, that is wrong twice over:
+
+- `comrak::Options::default()` already has `parse.smart == false`; verified by running a probe against the same `comrak = "1"` the workspace pins. The browser line restates the default.
+- Comparing all 15 option keys, the two blocks are identical in effective value. The browser has one redundant assignment; the terminal relies on the default.
+
+So there is no rendering divergence and item 11 loses most of its value. The only real difference between the clients is that the terminal sets 14 extension flags and the browser sets the same 14 plus one no-op. A shared builder would be tidier, not a correctness fix, which moves item 11 from S/Low to optional.
+
+The finding that does survive from §2.5 is the modal/logic duplication, which is untouched.
 
 ### 3.1 Items considered and rejected
 
