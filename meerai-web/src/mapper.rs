@@ -640,6 +640,7 @@ pub fn map_host_error(err: HostError) -> (StatusCode, ApiError) {
         HostError::UnsupportedBackend(_) => {
             (StatusCode::BAD_REQUEST, ApiErrorCode::UnsupportedBackend)
         }
+        HostError::Poisoned => (StatusCode::INTERNAL_SERVER_ERROR, ApiErrorCode::Internal),
     };
     (
         status,

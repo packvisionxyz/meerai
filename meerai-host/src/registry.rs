@@ -40,6 +40,7 @@ pub enum HostError {
     StaleRequest(RequestId),
     InvalidInput(String),
     WorkerClosed,
+    Poisoned,
 }
 
 impl fmt::Display for HostError {
@@ -53,6 +54,7 @@ impl fmt::Display for HostError {
             Self::StaleRequest(id) => write!(f, "stale or unknown request: {id}"),
             Self::InvalidInput(msg) => write!(f, "{msg}"),
             Self::WorkerClosed => write!(f, "session worker is closed"),
+            Self::Poisoned => write!(f, "session registry lock was poisoned"),
         }
     }
 }
@@ -507,6 +509,10 @@ pub struct SessionRegistry {
 }
 
 impl SessionRegistry {
+    fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, RegistryState>, HostError> {
+        self.inner.state.lock().map_err(|_| HostError::Poisoned)
+    }
+
     pub fn new() -> Arc<Self> {
         let (broadcast_tx, _) = broadcast::channel(CAPACITY);
         let (agent_broadcast_tx, _) = broadcast::channel(CAPACITY);
@@ -779,7 +785,7 @@ impl SessionRegistry {
     }
 
     pub fn set_active_session(&self, session_id: &SessionId) -> Result<(), HostError> {
-        let mut state = self.inner.state.lock().unwrap();
+        let mut state = self.lock_state()?;
         if !state.sessions.contains_key(session_id) {
             return Err(HostError::SessionNotFound(session_id.clone()));
         }
@@ -797,7 +803,7 @@ impl SessionRegistry {
 
     pub async fn close_and_wait_session(&self, session_id: &SessionId) -> Result<(), HostError> {
         let handle = {
-            let mut state = self.inner.state.lock().unwrap();
+            let mut state = self.lock_state()?;
             let Some(record) = state.sessions.remove(session_id) else {
                 return Err(HostError::SessionNotFound(session_id.clone()));
             };
@@ -874,7 +880,7 @@ impl SessionRegistry {
         let display = display_text(display, &prompt);
 
         let cmd_tx = {
-            let mut state = self.inner.state.lock().unwrap();
+            let mut state = self.lock_state()?;
             let Some(record) = state.sessions.get(session_id) else {
                 return Err(HostError::SessionNotFound(session_id.clone()));
             };
@@ -935,7 +941,7 @@ impl SessionRegistry {
         let display = display_text(display, &prompt);
 
         let cmd_tx = {
-            let mut state = self.inner.state.lock().unwrap();
+            let mut state = self.lock_state()?;
             let Some(record) = state.sessions.get(session_id) else {
                 return Err(HostError::SessionNotFound(session_id.clone()));
             };
@@ -975,7 +981,7 @@ impl SessionRegistry {
     }
 
     pub fn cancel_turn(&self, session_id: &SessionId) -> Result<(), HostError> {
-        let state = self.inner.state.lock().unwrap();
+        let state = self.lock_state()?;
         let Some(record) = state.sessions.get(session_id) else {
             return Err(HostError::SessionNotFound(session_id.clone()));
         };
@@ -990,7 +996,7 @@ impl SessionRegistry {
 
     pub fn compact(&self, session_id: &SessionId) -> Result<(), HostError> {
         let cmd_tx = {
-            let state = self.inner.state.lock().unwrap();
+            let state = self.lock_state()?;
             let Some(record) = state.sessions.get(session_id) else {
                 return Err(HostError::SessionNotFound(session_id.clone()));
             };
@@ -1014,7 +1020,7 @@ impl SessionRegistry {
 
     pub fn reset(&self, session_id: &SessionId) -> Result<(), HostError> {
         let cmd_tx = {
-            let mut state = self.inner.state.lock().unwrap();
+            let mut state = self.lock_state()?;
             let Some(record) = state.sessions.get(session_id) else {
                 return Err(HostError::SessionNotFound(session_id.clone()));
             };
@@ -1062,7 +1068,7 @@ impl SessionRegistry {
         scope: RewindScope,
     ) -> Result<Option<String>, HostError> {
         let (cmd_tx, restored_prompt) = {
-            let state = self.inner.state.lock().unwrap();
+            let state = self.lock_state()?;
             let Some(record) = state.sessions.get(session_id) else {
                 return Err(HostError::SessionNotFound(session_id.clone()));
             };
@@ -1102,7 +1108,7 @@ impl SessionRegistry {
         scope: Option<GrantScope>,
     ) -> Result<(), HostError> {
         let cmd_tx = {
-            let mut state = self.inner.state.lock().unwrap();
+            let mut state = self.lock_state()?;
             let Some(record) = state.sessions.get_mut(session_id) else {
                 return Err(HostError::SessionNotFound(session_id.clone()));
             };
@@ -1153,7 +1159,7 @@ impl SessionRegistry {
     ) -> Result<(), HostError> {
         let cmd_tx =
             {
-                let mut state = self.inner.state.lock().unwrap();
+                let mut state = self.lock_state()?;
                 let Some(record) = state.sessions.get_mut(session_id) else {
                     return Err(HostError::SessionNotFound(session_id.clone()));
                 };
@@ -1231,7 +1237,7 @@ impl SessionRegistry {
         effort_levels: Option<Vec<meerai_common::settings::EffortLevel>>,
     ) -> Result<(), HostError> {
         let cmd_tx = {
-            let mut state = self.inner.state.lock().unwrap();
+            let mut state = self.lock_state()?;
             let Some(record) = state.sessions.get_mut(session_id) else {
                 return Err(HostError::SessionNotFound(session_id.clone()));
             };
@@ -1269,7 +1275,7 @@ impl SessionRegistry {
         mode: ApprovalMode,
     ) -> Result<(), HostError> {
         let cmd_tx = {
-            let mut state = self.inner.state.lock().unwrap();
+            let mut state = self.lock_state()?;
             let Some(record) = state.sessions.get_mut(session_id) else {
                 return Err(HostError::SessionNotFound(session_id.clone()));
             };
@@ -1298,7 +1304,7 @@ impl SessionRegistry {
         app: ResolvedAgentApplication,
     ) -> Result<(), HostError> {
         let (cmd_tx, notice) = {
-            let mut state = self.inner.state.lock().unwrap();
+            let mut state = self.lock_state()?;
             let Some(record) = state.sessions.get(session_id) else {
                 return Err(HostError::SessionNotFound(session_id.clone()));
             };
@@ -1357,7 +1363,7 @@ impl SessionRegistry {
         app: ResolvedSkillApplication,
     ) -> Result<(), HostError> {
         let cmd_tx = {
-            let mut state = self.inner.state.lock().unwrap();
+            let mut state = self.lock_state()?;
             let Some(record) = state.sessions.get(session_id) else {
                 return Err(HostError::SessionNotFound(session_id.clone()));
             };
@@ -1400,7 +1406,7 @@ impl SessionRegistry {
         command: &str,
         run_id: Option<String>,
     ) -> Result<String, HostError> {
-        let mut state = self.inner.state.lock().unwrap();
+        let mut state = self.lock_state()?;
         let Some(record) = state.sessions.get(session_id) else {
             return Err(HostError::SessionNotFound(session_id.clone()));
         };
