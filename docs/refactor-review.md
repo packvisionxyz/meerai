@@ -238,7 +238,7 @@ The backlog orders contract work before structural work. Each item states one ob
 | 7 | Introduce parameter structs to remove the five `too_many_arguments` allows in `meerai-tui` | signature | `meerai-tui` | M | Medium | No `#[allow(clippy::too_many_arguments)]` remains in the crate |
 | 8 | Split `meerai-web/src/server.rs` below 900 lines and narrow its error type | file size | `meerai-web` | M | Medium | The three `result_large_err` suppressions are gone and no file in the crate exceeds 900 lines |
 | 9 | Split `meerai-session/src/session.rs` into `open`, `fork`, and `query` modules | file size | `meerai-session` | M | Medium | No file in `meerai-session/src` exceeds 900 lines |
-| 10 | Split `meerai-web-protocol/src/lib.rs` into domain modules and move DTOs above the tests | file size | `meerai-web-protocol` | S | Low | No DTO is declared below a test module and no serde tag changed |
+| 10 | ~~Split `meerai-web-protocol/src/lib.rs` into domain modules and move DTOs above the tests~~ **Done** — see [§3.4](#34-completed-work) | file size | `meerai-web-protocol` | S | Low | Done: 12 modules, largest 258 lines, wire format unchanged |
 | 11 | Share the Markdown parse options between both clients | duplication | `meerai-input`, `meerai-tui`, `meerai-web-client` | S | Low | Downgraded to optional by [§3.5](#35-corrected-finding-the-markdown-option-blocks-do-not-diverge): the blocks already agree in effect |
 | 12 | Split `meerai-tui/src/app/modals.rs`, `app/input.rs`, `app/mod.rs`, and `ui/transcript.rs` | file size | `meerai-tui` | L | Medium | No file in `meerai-tui/src` exceeds 900 lines, including `app/mod.rs` |
 | 13 | Split `meerai-web-client/src/state.rs` and `views/modals.rs` | file size | `meerai-web-client` | L | Medium | No file in `meerai-web-client/src` exceeds 900 lines |
@@ -262,6 +262,18 @@ Items 1 through 3 are contract-adjacent and should land first. Items 4 through 1
 | 2 | `meerai-web/src/mapper.rs:643` maps `Poisoned` to 500 `Internal` | exhaustive match panic | explicit mapping |
 | 3 | Deleted `meerai-session/src/goal.rs` and `SessionEvent::GoalUpdated`, plus `LoopState::from_goal` | 331-line module, a dead wire variant, and a compatibility conversion | 0 references to `GoalState`, `GoalItem`, `GoalItemStatus`, `GoalUpdated`, `last_goal`, or `from_goal` |
 | 3 | `cap_text`, `continuation`, `turn_prompt`, and `open_summary` now exist once each, all in `meerai-skills/src/loop_engine.rs` | 5 functions implemented twice | 4 functions, one implementation each |
+| 10 | Split `meerai-web-protocol/src/lib.rs` into 12 domain modules plus `tests.rs` | 1 file, 1,734 lines, 97 DTOs | 13 files, largest 258 lines, `lib.rs` 28 lines |
+
+Item 10 verification went beyond "it compiles". The split was mechanical, so the risk was silent wire drift:
+
+- All 97 `pub` items are present, with zero missing and zero extra, compared by name against the original.
+- Both `impl` blocks survived (`Default for ThemeTokensDto`, `EffortDto`).
+- The count of `tag = "type"` adjacent-tagged enums is 5 before and 5 after, so every `SessionEvent`-style payload keeps its shape.
+- All 6 protocol tests pass unchanged, including the round-trip tests that assert `"toolCall"`, `"turnStarted"`, and the `backend`/`data` nesting.
+
+The module split is `approval`, `errors`, `events`, `host`, `loop_` (renamed to avoid the `loop` keyword), `memory`, `providers`, `requests`, `session`, `settings`, `transcript`, `workspace`. Each is `pub mod` plus a glob re-export, so every existing `meerai_web_protocol::Foo` path still resolves and no consumer changed.
+
+Three false starts are worth recording because they are the failure modes of this kind of split. A regex over top-level declarations cut multi-line `#[serde(...)]` attributes in half. A brace-depth scanner that ignored character and raw-string literals miscounted `'` and `r#"`. And a grouping rule that ended a segment at depth zero split attribute blocks from the items they annotate. The working version tracks braces, parentheses, brackets, comments, normal strings, raw strings with hash counts, and character literals, and it only ends a segment after it has seen a real item keyword.
 
 Item 3 needed no merge. The audit assumed `goal.rs` and `loop_engine.rs` were two live copies of one protocol. They are not: `goal.rs` was dead. `SessionEvent::GoalUpdated` was never constructed anywhere in the workspace, and `last_goal` had no callers outside its own test. The `goal.rs` copies of `cap_text`, `render`, `continuation`, `turn_prompt`, and `open_summary` were therefore unreachable.
 
