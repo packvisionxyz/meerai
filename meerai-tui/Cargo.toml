@@ -19,6 +19,7 @@ meerai-agents = { path = "../meerai-agents/" }
 meerai-common = { path = "../meerai-common/" }
 meerai-core = { path = "../meerai-core/" }
 meerai-host = { path = "../meerai-host/", default-features = false }
+meerai-input = { path = "../meerai-input/" }
 meerai-policy = { path = "../meerai-policy/" }
 meerai-client = { path = "../meerai-client/" }
 meerai-session = { path = "../meerai-session/" }
@@ -38,4 +39,5 @@ tokio = { workspace = true }
 unicode-width = { workspace = true }
 
 [dev-dependencies]
+git2 = { workspace = true }
 tempfile = "3"

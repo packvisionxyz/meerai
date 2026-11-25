@@ -53,6 +53,8 @@ pub struct SessionMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_mode: Option<String>,
@@ -81,6 +83,7 @@ impl SessionMeta {
             created_at_ms: now,
             updated_at_ms: now,
             title: None,
+            provider: None,
             model: None,
             approval_mode: None,
             git_branch: None,
@@ -508,6 +511,12 @@ impl Session {
         self.update_meta(|meta| meta.model = Some(model)).await
     }
 
+    pub async fn set_provider(&self, provider: impl Into<String>) -> Result<()> {
+        let provider = provider.into();
+        self.update_meta(|meta| meta.provider = Some(provider))
+            .await
+    }
+
     pub async fn set_approval_mode(&self, approval_mode: impl Into<String>) -> Result<()> {
         let approval_mode = approval_mode.into();
         self.update_meta(|meta| meta.approval_mode = Some(approval_mode))
@@ -633,6 +642,28 @@ impl Session {
         Self::fork_from_parts(config, source_id, &meta, &events, boundary_turn).await
     }
 
+    pub async fn stored_meta(config: &SessionConfig, id: &SessionId) -> Result<SessionMeta> {
+        Ok(read_sqlite_session(config, id).await?.0)
+    }
+
+    pub async fn memory_fork(config: &SessionConfig, source_id: &SessionId) -> Result<Session> {
+        let (source_meta, mut events) = read_sqlite_session(config, source_id).await?;
+        for logged in &mut events {
+            reset_inherited_usage(&mut logged.event);
+        }
+        let session = Self::memory(SessionId::new(), source_meta.cwd.clone());
+        session.append_preserved(&events).await?;
+        session
+            .update_meta(|meta| {
+                meta.provider = source_meta.provider;
+                meta.model = source_meta.model;
+                meta.approval_mode = Some("plan".to_string());
+            })
+            .await?;
+        session.heal_dangling_tool_calls().await?;
+        Ok(session)
+    }
+
     async fn fork_from_parts(
         config: &SessionConfig,
         source_id: &SessionId,
@@ -649,6 +680,8 @@ impl Session {
         let prefix = fork_prefix(events, &resolved_boundary)?;
         let inherited_event_count = prefix.len() as u64;
         let approval_mode = source_meta.approval_mode.clone();
+        let provider = source_meta.provider.clone();
+        let model = source_meta.model.clone();
         let cwd = source_meta.cwd.clone();
 
         let session = Self::open_or_create(config, SessionId::new(), cwd).await?;
@@ -658,6 +691,8 @@ impl Session {
             inherited_event_count,
             &prefix,
             approval_mode,
+            provider,
+            model,
         )
         .await
         {
@@ -674,6 +709,8 @@ impl Session {
         inherited_event_count: u64,
         prefix: &[LoggedEvent],
         approval_mode: Option<String>,
+        provider: Option<String>,
+        model: Option<String>,
     ) -> Result<()> {
         session.append_preserved(prefix).await?;
         session
@@ -681,6 +718,8 @@ impl Session {
                 meta.forked_from = Some(source_id.clone());
                 meta.inherited_event_count = Some(inherited_event_count);
                 meta.approval_mode = approval_mode;
+                meta.provider = provider;
+                meta.model = model;
             })
             .await
     }
@@ -701,12 +740,14 @@ impl Session {
         title: Option<String>,
     ) -> Result<Session> {
         let parent_id = self.id().clone();
-        let cwd = self.meta().cwd;
+        let parent = self.meta();
+        let cwd = parent.cwd;
         let child = match self.config() {
             Some(config) => Self::open_or_create(config, SessionId::new(), cwd).await?,
             None => Self::memory(SessionId::new(), cwd),
         };
-        if let Err(error) = Self::link_child(&child, parent_id, model, title).await {
+        if let Err(error) = Self::link_child(&child, parent_id, parent.provider, model, title).await
+        {
             discard_session(&child).await;
             return Err(error);
         }
@@ -716,12 +757,14 @@ impl Session {
     async fn link_child(
         child: &Session,
         parent_id: SessionId,
+        provider: Option<String>,
         model: Option<String>,
         title: Option<String>,
     ) -> Result<()> {
         child
             .update_meta(|meta| {
                 meta.parent_session_id = Some(parent_id);
+                meta.provider = provider;
                 if model.is_some() {
                     meta.model = model;
                 }
@@ -1602,6 +1645,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_fork_seeds_history_without_storing_a_session() {
+        let root = temp_root("btw");
+        let config = config(&root);
+        let source_id = SessionId::new();
+        let source = Session::open_or_create(&config, source_id.clone(), root.clone())
+            .await
+            .unwrap();
+        let turn = TurnId::new();
+
+        source.append(started(&turn)).await.unwrap();
+        source.append(user("one")).await.unwrap();
+        source.append(assistant_with_call("call-1")).await.unwrap();
+        source.append(ended(&turn)).await.unwrap();
+        source.set_provider("gemini").await.unwrap();
+        source.set_model("gemini-3.8-flash").await.unwrap();
+        source.flush().await.unwrap();
+
+        let btw = Session::memory_fork(&config, &source_id).await.unwrap();
+
+        assert_ne!(btw.id(), &source_id);
+        assert_eq!(btw.meta().approval_mode.as_deref(), Some("plan"));
+        assert_eq!(btw.meta().provider.as_deref(), Some("gemini"));
+        assert_eq!(btw.meta().model.as_deref(), Some("gemini-3.8-flash"));
+        assert!(btw.meta().forked_from.is_none());
+        assert_eq!(btw.events().len(), 5);
+        assert!(matches!(
+            btw.events().last().map(|logged| &logged.event),
+            Some(SessionEvent::ToolResult { call_id, .. }) if call_id.as_str() == "call-1"
+        ));
+        let messages = btw.derive_messages(&ProjectionPolicy::default());
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.content.first_text() == Some("one"))
+        );
+        let stored = list_sessions(&root).unwrap();
+        assert!(
+            stored
+                .iter()
+                .any(|summary| summary.id.as_str() == source_id.as_str())
+        );
+        assert!(
+            stored
+                .iter()
+                .all(|summary| summary.id.as_str() != btw.id().as_str())
+        );
+
+        fs::remove_dir_all(&root).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn fork_resets_inherited_usage_counters() {
         let root = temp_root("fork-usage");
         let config = config(&root);
@@ -1643,9 +1737,13 @@ mod tests {
             .await
             .unwrap();
         source.append(ended(&turn)).await.unwrap();
+        source.set_provider("openrouter").await.unwrap();
+        source.set_model("gpt-5").await.unwrap();
 
         let forked = Session::fork(&config, &source, &turn).await.unwrap();
 
+        assert_eq!(forked.meta().provider.as_deref(), Some("openrouter"));
+        assert_eq!(forked.meta().model.as_deref(), Some("gpt-5"));
         assert_eq!(forked.events().len(), 4);
         assert_eq!(
             session_usage_from_events(&forked.events()),
@@ -2042,13 +2140,20 @@ mod tests {
         assert!(titled.updated_at_ms > created_at);
 
         tokio::time::sleep(Duration::from_millis(2)).await;
+        session.set_provider("openrouter").await.unwrap();
+        let provided = session.meta();
+        assert_eq!(provided.provider.as_deref(), Some("openrouter"));
+        assert!(provided.updated_at_ms > titled.updated_at_ms);
+
+        tokio::time::sleep(Duration::from_millis(2)).await;
         session.set_model("gpt-4o-mini").await.unwrap();
         let modeled = session.meta();
         assert_eq!(modeled.model.as_deref(), Some("gpt-4o-mini"));
-        assert!(modeled.updated_at_ms > titled.updated_at_ms);
+        assert!(modeled.updated_at_ms > provided.updated_at_ms);
 
         let persisted = persisted_meta(&root, session.id());
         assert_eq!(persisted.title.as_deref(), Some("Fix the parser"));
+        assert_eq!(persisted.provider.as_deref(), Some("openrouter"));
         assert_eq!(persisted.model.as_deref(), Some("gpt-4o-mini"));
         assert_eq!(persisted.updated_at_ms, modeled.updated_at_ms);
 

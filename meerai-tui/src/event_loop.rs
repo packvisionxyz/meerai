@@ -6,11 +6,12 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use crossterm::event::EventStream;
 use futures::StreamExt;
-use meerai_agents::{AgentEvent, SessionItem};
+use meerai_agents::{AgentCommand, AgentEvent, SessionItem};
 use meerai_host::{
     HostActionContext, LiveEntry, LiveSessionDetail, RegistryEvent, RegistryEventKind,
     SubscribeResult, execute_host_action,
 };
+use meerai_input::TextInput;
 use meerai_session::{LoggedEvent, SessionId, SessionSummary};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::{self, MissedTickBehavior};
@@ -34,6 +35,10 @@ enum SessionResolveOutcome {
     Opened {
         opened: Box<OpenedSession>,
         draft: Option<String>,
+    },
+    BtwOpened {
+        opened: Box<OpenedSession>,
+        prompt: String,
     },
     FromRegistry(Box<LiveSessionDetail>),
 }
@@ -343,8 +348,8 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
             PendingSessionAction::StartWebServer { port, secret } => {
                 let Some(reg) = app.registry.clone() else {
                     app.modal = Some(ActiveModal::ServeDialog {
-                        port_input: port.map(|p| p.to_string()).unwrap_or_default(),
-                        secret_input: String::new(),
+                        port_input: TextInput::new(port.map(|p| p.to_string()).unwrap_or_default()),
+                        secret_input: TextInput::default(),
                         editing_secret: false,
                         error: Some("Session registry is unavailable".to_string()),
                         busy: false,
@@ -586,6 +591,36 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
                         Ok(SessionResolveOutcome::Opened {
                             opened: Box::new(opened),
                             draft: Some(draft),
+                        })
+                    }
+                    .await;
+                    let _ = tx.send(LoopMsg::SessionResolved {
+                        mode: SessionOpenMode::NewTab,
+                        result,
+                    });
+                });
+            }
+            PendingSessionAction::BtwSession { session_id, text } => {
+                let Some(opener) = opener.clone() else {
+                    continue;
+                };
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let result = async {
+                        let opened = opener.btw_session(&session_id).await?;
+                        if text.trim().is_empty() {
+                            return Ok(SessionResolveOutcome::Opened {
+                                opened: Box::new(opened),
+                                draft: None,
+                            });
+                        }
+                        opened
+                            .cmd_tx
+                            .send(AgentCommand::SubmitPrompt(text.clone()))
+                            .map_err(|_| anyhow::anyhow!("btw worker is closed"))?;
+                        Ok(SessionResolveOutcome::BtwOpened {
+                            opened: Box::new(opened),
+                            prompt: text,
                         })
                     }
                     .await;
@@ -1058,6 +1093,13 @@ fn handle_loop_msg(
                         tab.input = draft;
                     }
                 }
+                Ok(SessionResolveOutcome::BtwOpened { opened, prompt }) => {
+                    if let Some(new_tab_id) = mount_opened_session(app, *opened, mode, loop_tx)
+                        && let Some(idx) = app.tab_index_by_id(new_tab_id)
+                    {
+                        app.tabs[idx].seed_user_prompt(prompt);
+                    }
+                }
                 Ok(SessionResolveOutcome::FromRegistry(detail)) => {
                     mount_registry_detail(app, *detail, mode);
                 }
@@ -1117,7 +1159,7 @@ fn handle_loop_msg(
                     {
                         app.modal = Some(ActiveModal::ServeDialog {
                             port_input,
-                            secret_input: String::new(),
+                            secret_input: TextInput::default(),
                             editing_secret,
                             error: Some(msg),
                             busy: false,
@@ -1319,6 +1361,11 @@ fn mount_opened_session(
     mode: SessionOpenMode,
     loop_tx: &mpsc::UnboundedSender<LoopMsg>,
 ) -> Option<u64> {
+    if opened.transient {
+        let (tab_id, event_rx) = app.apply_opened_session(opened, mode)?;
+        spawn_tab_forwarder(tab_id, event_rx, loop_tx.clone());
+        return Some(tab_id);
+    }
     if let Some(reg) = app.registry.clone() {
         let (_keep_tx, dummy_rx) = mpsc::unbounded_channel();
         let ui_opened = OpenedSession {
@@ -1328,6 +1375,7 @@ fn mount_opened_session(
             provider: opened.provider.clone(),
             model: opened.model.clone(),
             approval_mode: opened.approval_mode,
+            transient: opened.transient,
             events: opened.events.clone(),
             cmd_tx: opened.cmd_tx.clone(),
             event_rx: dummy_rx,
@@ -1358,6 +1406,7 @@ fn mount_registry_detail(app: &mut AppState, detail: LiveSessionDetail, mode: Se
         provider: detail.summary.provider.clone(),
         model: detail.summary.model.clone(),
         approval_mode: detail.summary.approval_mode,
+        transient: detail.summary.transient,
         events: Vec::new(),
         cmd_tx,
         event_rx: dummy_rx,

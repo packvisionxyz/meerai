@@ -125,10 +125,16 @@ result also lands in the transcript when it finishes; `q` closes the dialog.
 Long commands use the shell timeout (120 s).
 
 In the TUI: `/sessions`, `/new`, `/close`, `/connect`, `/models`, `/mode`,
-`/agent`, `/skill`, `/loop`, `/goal`, `/compact`, `/context`, `/diagnose`, `/memory`,
+`/agent`, `/skill`, `/loop`, `/compact`, `/context`, `/diagnose`, `/memory`,
 `/remember`, `/routing`, `/subagent`, `/packs`, `/definitions`, `/effort`,
 `/sampling`, `/temperature`, `/vault-reset`, `/open`, `/diff`, `/rewind`, `/fork`,
-`/help`.
+`/btw`, `/help`.
+
+`/btw [question]` opens a transient, read-only tab seeded from the current
+session. It reads files and answers follow-up prompts in its own history, but it
+cannot write, run shell commands, or fetch the web. Nothing it says enters the
+current session log or the session list, and closing the tab discards it. The
+same command exists in the browser.
 
 Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 `AgentEvent` per line and requires `--prompt`. The default approval mode is
@@ -201,6 +207,7 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 | Crate | Role |
 | --- | --- |
 | `meerai-core` | Tool primitives and shared types |
+| `meerai-input` | Shared multiline text input model for the TUI and browser |
 | `meerai-macros` | `#[tool]` and `#[derive(Toolset)]` macros |
 | `meerai-store` | Embedded SQLite store |
 | `meerai-common` | Settings, project config, definitions, and packs |
@@ -541,7 +548,7 @@ TUI commands and mentions:
 | `@agent/<id>` | Apply an agent, then send the rest of the prompt |
 | `@skill/<id>` | Apply a skill, then send the rest of the prompt |
 | `@goal` | Apply the built-in goal skill, then send the rest of the prompt |
-| `@skill/orchestrate` | Apply the built-in orchestrate skill |
+| `@orchestrate` | Apply the built-in orchestrate skill, then send the rest of the prompt |
 
 Typing `@` opens one **Mentions** popup: agent and skill rows interleaved, then
 files, so a skill stays visible when the project has many agents. A typed
@@ -550,7 +557,7 @@ Tab accepts; Enter accepts the highlighted row without sending; Esc dismisses.
 Accepting inserts the mention and one trailing space, so a second Enter sends
 the prompt.
 
-A known `@agent/<id>`, `@skill/<id>`, or `@goal` shows as a compact chip in the
+A known `@agent/<id>`, `@skill/<id>`, `@goal`, or `@orchestrate` shows as a compact chip in the
 composer. The model and the session log receive the stripped prompt. Unknown
 ids stay as typed. On submit, skills apply before the agent, and repeats apply
 once; a prompt that is only mentions applies the definitions without starting a
@@ -573,9 +580,13 @@ explicit phases:
    items.
 
 `@goal <instruction>` applies `goal` and sends the rest of the prompt.
-`@skill/orchestrate` applies the multi-area preset, which delegates research and
+`@orchestrate` applies the multi-area preset, which delegates research and
 review to the `research` and `review` subagents. The loop is not code-specific:
 an item can be a document, a data set, a launch, or a repository change.
+
+An item can require human sign-off. The model asks with `question-ask`, records
+the exact answer as the observation, and keeps the item open until the answer
+approves it. A `research` or `review` subagent answer is not human approval.
 
 The harness enforces the loop. When the model stops with an open item,
 `LoopInterceptor` re-enters the turn with the current phase, up to 24 rounds. If
@@ -583,7 +594,7 @@ the turn still ends with open items, the worker starts a follow-up turn, up to 4
 turns; each turn resets the round count. The normal step budget, token cap,
 approvals, cancellation, and `quit` still apply.
 
-`/loop` (or `/goal`) opens a read-only Loop panel in the TUI and the browser. It
+`/loop` opens a read-only Loop panel in the TUI and the browser. It
 shows the objective, done condition, constraints, phase, each item with its
 action and observation, and the round and turn counts. The last state is saved
 as a `LoopUpdated` session event, so the panel and the model state come back
@@ -632,8 +643,11 @@ headless; without it the TUI starts and replays the stored transcript. Replay
 covers user and steering messages, assistant text and reasoning, tool calls and
 results, questions and their answers, and compaction markers. An unmatched tool
 call shows as cancelled. Session metadata records the workspace, git branch and
-SHA, title, model, approval mode, lineage, and timestamps. See
-[Data locations](#data-locations).
+SHA, title, provider, model, approval mode, lineage, and timestamps. See
+[Data locations](#data-locations). Provider, model, and approval mode belong to
+the session: changing the model or provider in one tab does not change another
+session, and reopening a session restores its own values. An explicit
+`--provider`, `--model`, or `--mode` overrides the stored value for that run.
 
 A plain TUI start adds one empty session tab and restores the saved tabs in
 the background, so the empty tab stays active. The empty session is reused on

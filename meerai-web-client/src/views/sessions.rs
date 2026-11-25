@@ -81,7 +81,7 @@ pub(super) fn SessionPanel(store: StoreHandle) -> impl IntoView {
     let open = Memo::new(move |_| store.with(|s| s.session_panel.open));
     let narrow = Memo::new(move |_| store.with(|s| s.session_panel.narrow));
     let filter = Memo::new(move |_| store.with(|s| s.session_panel.filter.clone()));
-    let rows = Memo::new(move |_| store.with(|s| s.session_panel.rows(&s.sessions)));
+    let rows = Memo::new(move |_| store.with(|s| s.session_panel.rows(&s.sidebar_sessions())));
     let selected = Memo::new(move |_| {
         let count = rows.with(Vec::len);
         store.with(|s| s.session_panel.selected.min(count.saturating_sub(1)))

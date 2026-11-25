@@ -2,6 +2,7 @@ use super::statusline::{display_model, format_compact_tokens, key_status_style};
 use super::*;
 
 pub(super) fn render_sidebar_overview(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
+    app.update_hit = None;
     frame.render_widget(
         Block::default().style(Style::default().bg(theme::p().surface)),
         area,
@@ -11,7 +12,6 @@ pub(super) fn render_sidebar_overview(frame: &mut Frame<'_>, app: &mut AppState,
         return;
     }
     let width = inner.width as usize;
-    let tab = app.tab();
 
     let key_status = app.active_key_status();
     let (key_badge, key_color) = key_status_style(&key_status);
@@ -22,7 +22,19 @@ pub(super) fn render_sidebar_overview(frame: &mut Frame<'_>, app: &mut AppState,
         .fg(theme::p().text)
         .add_modifier(Modifier::BOLD);
 
-    let mut lines = vec![
+    let mut lines = Vec::new();
+    if let Some(latest) = app.update_available.clone() {
+        lines.push(Line::from(Span::styled(
+            format!("UPDATE  v{latest} · /update"),
+            Style::default()
+                .fg(theme::p().warning)
+                .add_modifier(Modifier::BOLD),
+        )));
+        app.update_hit = Some(Rect::new(inner.x, inner.y, inner.width, 1));
+        lines.push(Line::default());
+    }
+    let tab = app.tab();
+    lines.extend([
         Line::from(Span::styled("SESSION", section_style)),
         Line::from(vec![
             field("session"),
@@ -57,7 +69,7 @@ pub(super) fn render_sidebar_overview(frame: &mut Frame<'_>, app: &mut AppState,
             ),
         ]),
         Line::default(),
-    ];
+    ]);
 
     if app.mcp_servers.is_empty() {
         lines.push(Line::from(vec![

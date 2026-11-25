@@ -113,23 +113,25 @@ fn meta_row(row: &Row<'_>) -> rusqlite::Result<SessionMeta> {
         created_at_ms: row.get(2)?,
         updated_at_ms: row.get(3)?,
         title: row.get(4)?,
-        model: row.get(5)?,
-        approval_mode: row.get(6)?,
-        git_branch: row.get(7)?,
-        git_sha: row.get(8)?,
-        forked_from: row.get::<_, Option<String>>(9)?.map(SessionId::from_raw),
-        inherited_event_count: row.get(10)?,
-        parent_session_id: row.get::<_, Option<String>>(11)?.map(SessionId::from_raw),
-        harness: row.get(12)?,
-        remote_session_id: row.get(13)?,
+        provider: row.get(5)?,
+        model: row.get(6)?,
+        approval_mode: row.get(7)?,
+        git_branch: row.get(8)?,
+        git_sha: row.get(9)?,
+        forked_from: row.get::<_, Option<String>>(10)?.map(SessionId::from_raw),
+        inherited_event_count: row.get(11)?,
+        parent_session_id: row.get::<_, Option<String>>(12)?.map(SessionId::from_raw),
+        harness: row.get(13)?,
+        remote_session_id: row.get(14)?,
     })
 }
 
 pub(crate) fn meta(conn: &Connection, id: &SessionId) -> Result<Option<SessionMeta>> {
     Ok(conn
         .query_row(
-            "SELECT id, cwd, created_at_ms, updated_at_ms, title, model, approval_mode, git_branch,
-         git_sha, forked_from, inherited_event_count, parent_session_id, harness, remote_session_id
+            "SELECT id, cwd, created_at_ms, updated_at_ms, title, provider, model, approval_mode,
+         git_branch, git_sha, forked_from, inherited_event_count, parent_session_id, harness,
+         remote_session_id
          FROM sessions WHERE id = ?1",
             [id.as_str()],
             meta_row,
@@ -155,14 +157,27 @@ pub(crate) fn insert_session(conn: &Connection, project: &Path, meta: &SessionMe
 pub(crate) fn update_meta(conn: &Connection, meta: &SessionMeta) -> Result<()> {
     let count = conn.execute(
         "UPDATE sessions SET cwd = ?2, created_at_ms = ?3, updated_at_ms = ?4, title = ?5,
-         model = ?6, approval_mode = ?7, git_branch = ?8, git_sha = ?9, forked_from = ?10,
-         inherited_event_count = ?11, parent_session_id = ?12, harness = ?13, remote_session_id = ?14
+         provider = ?6, model = ?7, approval_mode = ?8, git_branch = ?9, git_sha = ?10,
+         forked_from = ?11, inherited_event_count = ?12, parent_session_id = ?13, harness = ?14,
+         remote_session_id = ?15
          WHERE id = ?1",
-        params![meta.id.as_str(), meta.cwd.to_str().context("session cwd is not UTF-8")?,
-            meta.created_at_ms, meta.updated_at_ms, meta.title, meta.model, meta.approval_mode,
-            meta.git_branch, meta.git_sha, meta.forked_from.as_ref().map(SessionId::as_str),
-            meta.inherited_event_count, meta.parent_session_id.as_ref().map(SessionId::as_str),
-            meta.harness, meta.remote_session_id],
+        params![
+            meta.id.as_str(),
+            meta.cwd.to_str().context("session cwd is not UTF-8")?,
+            meta.created_at_ms,
+            meta.updated_at_ms,
+            meta.title,
+            meta.provider,
+            meta.model,
+            meta.approval_mode,
+            meta.git_branch,
+            meta.git_sha,
+            meta.forked_from.as_ref().map(SessionId::as_str),
+            meta.inherited_event_count,
+            meta.parent_session_id.as_ref().map(SessionId::as_str),
+            meta.harness,
+            meta.remote_session_id
+        ],
     )?;
     ensure!(count == 1, "session not found: {}", meta.id);
     Ok(())

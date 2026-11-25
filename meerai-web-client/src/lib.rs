@@ -74,6 +74,7 @@ mod tests {
             active_tool: None,
             turn_started_at_ms: None,
             user_shell_running: false,
+            transient: false,
             shell_runs: Vec::new(),
         }
     }
@@ -552,12 +553,17 @@ mod tests {
     }
 
     #[test]
-    fn the_goal_skill_accepts_a_bare_at_alias() {
+    fn builtin_skills_accept_bare_at_aliases() {
         let mut host = HostInfoDto::default();
         host.skills.push(SkillInfoDto {
             id: "goal".to_owned(),
             source: "built-in".to_owned(),
             description: Some("Run a goal loop".to_owned()),
+        });
+        host.skills.push(SkillInfoDto {
+            id: "orchestrate".to_owned(),
+            source: "built-in".to_owned(),
+            description: Some("Run an orchestration loop".to_owned()),
         });
 
         let mentions = extract_mentions("@goal ship the fix", &host);
@@ -584,6 +590,28 @@ mod tests {
 
         let items = crate::state::mention_completion_items("goal", &host, &[]);
         assert!(items.iter().any(|item| item.insert == "@goal"));
+
+        let mentions = extract_mentions("@orchestrate plan the launch", &host);
+        assert_eq!(mentions.skills, vec!["orchestrate".to_owned()]);
+        assert_eq!(mentions.cleaned, "plan the launch");
+        assert_eq!(
+            resolved_mention_chips("@orchestrate plan", &host),
+            vec![(
+                MentionCategory::Skill,
+                "orchestrate".to_owned(),
+                "@orchestrate".to_owned(),
+            )]
+        );
+        let segments = mention_segments("@orchestrate plan", &host);
+        assert_eq!(segments[0].category, Some(MentionCategory::Skill));
+        assert_eq!(segments[0].text, "orchestrate");
+
+        let unknown = extract_mentions("@orchestrated plan", &host);
+        assert!(unknown.skills.is_empty());
+        assert_eq!(unknown.cleaned, "@orchestrated plan");
+
+        let items = crate::state::mention_completion_items("orchestrate", &host, &[]);
+        assert!(items.iter().any(|item| item.insert == "@orchestrate"));
     }
 
     #[test]
@@ -992,10 +1020,14 @@ mod tests {
                     FileChangeDto {
                         status: "M".to_owned(),
                         path: "src/a.rs".to_owned(),
+                        staged: false,
+                        unstaged: true,
                     },
                     FileChangeDto {
                         status: "A".to_owned(),
                         path: "src/b.rs".to_owned(),
+                        staged: true,
+                        unstaged: false,
                     },
                 ],
             },
@@ -1015,6 +1047,8 @@ mod tests {
                 changes: vec![FileChangeDto {
                     status: "A".to_owned(),
                     path: "src/b.rs".to_owned(),
+                    staged: true,
+                    unstaged: false,
                 }],
             },
         );
@@ -1214,7 +1248,7 @@ mod tests {
             })
         ));
         state.modal = None;
-        execute_slash_command(&mut state, "/goal");
+        execute_slash_command(&mut state, "/loop");
         assert!(matches!(
             state.modal,
             Some(ActiveModal::WorkspacePanel {

@@ -14,7 +14,7 @@ planned.
 ## 1. Overview
 
 meerai is a pure, provider-agnostic terminal agent harness: a Rust
-workspace with seventeen library crates plus the `meerai` binary (built by
+workspace with eighteen library crates plus the `meerai` binary (built by
 `meerai-cli`). It offers a selection-first modal TUI, a scriptable
 headless CLI, and an opt-in local browser baseline (`meerai serve`) over one agent loop. The loop is driven by an append-only
 session log and a typed item protocol; every client consumes the same
@@ -28,9 +28,10 @@ events. Depth lives in the owning documents: product behavior in
 
 | Crate | Role |
 | --- | --- |
+| `meerai-input` | Dependency-free multiline text model shared by the TUI and browser client: cursor, selection, word/line motion, insertion, visual wrapping, row/column mapping |
 | `meerai-core` | `Toolset` trait (`effect_of`, `effect_of_call`, `permission_spec`, `should_spill_output`, `grant_path_root`, `invoke_structured`), `ToolCall`, `ToolDefinition`, `ToolOutput::{Text,Fail,Stop}`, `ToolError`, `EffectClass`, `PermissionAction`, `ApprovalPreview`, `GrantScope`, `ToolObservation`, `ToolRun`, `FileDiff`, lenient argument parsing/coercion, shared text/env/fs-perms helpers; re-exports `genai`, `async_trait`, `schemars::JsonSchema` |
 | `meerai-macros` | Proc-macros `#[tool]` and `#[derive(Toolset)]`; insta snapshot tests |
-| `meerai-store` | Embedded SQLite store (`meerai.db`): WAL, FTS5, schema v1, private-file permissions, and typed repositories for config, memories, packs, routes, and usage |
+| `meerai-store` | Embedded SQLite store (`meerai.db`): WAL, FTS5, schema v2, private-file permissions, and typed repositories for config, memories, packs, routes, and usage |
 | `meerai-common` | SQLite-backed `AppSettings`, project-root discovery and tighten-only project merge, markdown agent/skill discovery (`definitions`) across user, trusted packs, and project sources, hook configuration (`hooks`) |
 | `meerai-client` | Client-facing provider surface: `ProviderCatalog` + bundled `providers.yml` and the generated `models.yml` table (context windows, prices, per-model effort levels), `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract, `MemorySecretStore`, auth listing |
 | `meerai-providers` | `genai` client factory plus the AEAD `VaultSecretStore` (ChaCha20-Poly1305, OS keychain DEK, Argon2id passphrase fallback) and ChatGPT plan OAuth |

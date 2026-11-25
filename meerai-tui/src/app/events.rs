@@ -59,7 +59,7 @@ impl AppState {
                         None => {
                             self.modal = Some(ActiveModal::Approval {
                                 queue: vec![request],
-                                reason: String::new(),
+                                reason: TextInput::default(),
                                 editing_reason: false,
                             });
                         }
@@ -201,7 +201,7 @@ impl AppState {
 impl AppState {
     pub(super) fn open_question(&mut self, request: QuestionRequest) {
         let answers = vec![Vec::new(); request.questions.len()];
-        let custom = vec![String::new(); request.questions.len()];
+        let custom = vec![TextInput::default(); request.questions.len()];
         self.modal = Some(ActiveModal::Question {
             request,
             answers,
@@ -246,6 +246,13 @@ impl AppState {
 }
 
 impl SessionTab {
+    pub(crate) fn seed_user_prompt(&mut self, text: String) {
+        self.transcript.push(TranscriptEntry::User { text });
+        self.is_running = true;
+        self.auto_follow = true;
+        self.transcript_version = self.transcript_version.wrapping_add(1);
+    }
+
     pub(super) fn apply_agent_event(&mut self, event: AgentEvent) {
         self.transcript_version = self.transcript_version.wrapping_add(1);
         match event {

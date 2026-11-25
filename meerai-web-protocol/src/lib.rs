@@ -185,6 +185,17 @@ pub struct FileDiffResponse {
 pub struct FileChangeDto {
     pub status: String,
     pub path: String,
+    #[serde(default)]
+    pub staged: bool,
+    #[serde(default)]
+    pub unstaged: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceStageRequest {
+    pub path: String,
+    pub stage: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -372,6 +383,8 @@ pub struct SessionSummaryDto {
     pub turn_started_at_ms: Option<u64>,
     #[serde(default)]
     pub user_shell_running: bool,
+    #[serde(default)]
+    pub transient: bool,
     #[serde(default)]
     pub shell_runs: Vec<ShellRunDto>,
 }
@@ -1001,6 +1014,13 @@ pub struct ForkSessionRequest {
     pub turn_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BtwSessionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredSessionDto {
@@ -1269,6 +1289,7 @@ mod tests {
             active_tool: None,
             turn_started_at_ms: None,
             user_shell_running: false,
+            transient: false,
             shell_runs: Vec::new(),
         }
     }
@@ -1420,6 +1441,8 @@ mod tests {
             file_changes: vec![FileChangeDto {
                 status: "M".to_owned(),
                 path: "src/lib.rs".to_owned(),
+                staged: false,
+                unstaged: true,
             }],
             host_info: Some(HostInfoDto::default()),
         };

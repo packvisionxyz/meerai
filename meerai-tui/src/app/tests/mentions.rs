@@ -62,6 +62,28 @@ fn bare_goal_mention_applies_the_builtin_skill() {
 }
 
 #[test]
+fn bare_orchestrate_mention_applies_the_builtin_skill() {
+    let skills = vec![sample_skill(
+        "orchestrate",
+        DefinitionSource::Builtin,
+        Some("Run an orchestration loop"),
+        "Body.",
+    )];
+
+    let plan = parse_mentions("@orchestrate plan the launch", &[], &skills);
+    assert_eq!(plan.skill_indices, vec![0]);
+    assert_eq!(plan.text.as_deref(), Some("plan the launch"));
+
+    let unknown = parse_mentions("@orchestrated plan", &[], &skills);
+    assert!(unknown.skill_indices.is_empty());
+    assert_eq!(unknown.text, None);
+
+    let without_skill = parse_mentions("@orchestrate plan", &[], &[]);
+    assert!(without_skill.skill_indices.is_empty());
+    assert_eq!(without_skill.text, None);
+}
+
+#[test]
 fn submitting_mention_applies_agent_and_keeps_it_in_the_bubble() {
     let (mut app, mut rx, _secrets) = test_app();
     app.agents = vec![sample_agent(

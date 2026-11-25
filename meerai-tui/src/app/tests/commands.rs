@@ -28,6 +28,8 @@ fn ctrl_shortcuts_open_menus_and_reports_missing_diff() {
     app.file_changes.push(crate::FileChangeEntry {
         status: "M".to_string(),
         path: "src/lib.rs".to_string(),
+        staged: false,
+        unstaged: true,
     });
     app.handle_key_event(key_mod(KeyCode::Char('e'), KeyModifiers::CONTROL));
     assert!(matches!(app.modal, Some(ActiveModal::DiffView { .. })));
@@ -51,6 +53,7 @@ fn slash_command_handling() {
         rx.try_recv().unwrap(),
         AgentCommand::SetModel {
             model: "gemini::gemini-3.1-pro-preview".to_string(),
+            provider: Some("gemini".to_string()),
             context_window_tokens: Some(1_048_576),
             effort_levels: Some(vec![
                 meerai_common::settings::EffortLevel::Low,
@@ -409,6 +412,24 @@ fn fork_command_requests_a_fork_at_the_latest_turn() {
 }
 
 #[test]
+fn btw_command_requests_a_transient_read_only_session() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.session_opener = Some(Arc::new(DummySessionOpener));
+    let session_id = app.tab().session_id.clone();
+
+    submit(&mut app, "/btw what changed?");
+
+    assert_eq!(
+        app.take_pending_session_actions(),
+        vec![PendingSessionAction::BtwSession {
+            session_id,
+            text: "what changed?".to_string(),
+        }]
+    );
+    assert_eq!(app.status_notice.as_deref(), Some("Opening btw..."));
+}
+
+#[test]
 fn ctrl_p_opens_the_command_palette_and_esc_closes_it() {
     let (mut app, _rx, _secrets) = test_app();
     app.handle_key_event(key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL));
@@ -640,7 +661,7 @@ fn effort_command_updates_state_queues_sync_and_appears_in_help() {
 }
 
 #[test]
-fn goal_command_opens_the_read_only_panel() {
+fn loop_command_opens_the_read_only_panel() {
     let (mut app, _rx, _secrets) = test_app();
     app.tab_mut().loop_state = Some(meerai_session::LoopState {
         objective: Some("Ship the change".to_string()),
@@ -653,7 +674,7 @@ fn goal_command_opens_the_read_only_panel() {
         ..meerai_session::LoopState::default()
     });
 
-    type_text(&mut app, "/goal");
+    type_text(&mut app, "/loop");
     app.handle_key_event(key(KeyCode::Enter));
     assert!(matches!(app.modal, Some(ActiveModal::Loop { .. })));
 

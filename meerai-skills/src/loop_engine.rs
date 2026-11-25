@@ -194,7 +194,8 @@ fn phase_instruction(state: &LoopState) -> &'static str {
              result."
         }
         LoopPhase::Adjust => {
-            "Judge the observation, then call loop-adjust with status done, failed, or open."
+            "Judge the observation, then call loop-adjust with status done, failed, or open. \
+             For an item that needs human sign-off, record the human answer before done."
         }
     }
 }

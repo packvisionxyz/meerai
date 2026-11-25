@@ -185,6 +185,11 @@ and click-to-open do not conflict.
   slash-command completion; `/model ` opens model completion. `Tab` accepts
   a completion; `Esc` dismisses completion, then returns to `NOR` without
   discarding the draft.
+- Every modal text field uses the same `meerai_input::TextInput` editing
+  model: multiline insertion, cursor motion, word and line deletion,
+  selection, and paste. The question `Other` field, the approval reason, the
+  queued edit, and the subagent task accept newlines with
+  `shift`/`alt`/`ctrl+enter`; plain `Enter` submits the dialog.
 - Composer clicks move the cursor and start a drag selection. Drag paints
   the selection as white with black text, and
   the release copies it, like the transcript. The drag target is clamped to
@@ -232,7 +237,7 @@ Typing `/` opens completion. The implemented handler set
 | `/mode [plan\|ask\|auto]` | Show or set the approval mode |
 | `/compact` | Request context compaction |
 | `/context` | Context panel: token buckets, watermark, projection toggles, turn pin/unpin, summarize-from-here, blob viewer, scroll, refresh |
-| `/loop` | Loop panel: objective, done condition, constraints, phase, items with action and observation, round and turn counts. Read-only; `j`/`k`/PageUp/PageDown scroll, `Esc` closes. `/goal` is an alias. Use `@goal <instruction>` to start the goal preset, or `@skill/orchestrate` for the multi-area preset |
+| `/loop` | Loop panel: objective, done condition, constraints, phase, items with action and observation, round and turn counts. Read-only; `j`/`k`/PageUp/PageDown scroll, `Esc` closes. Use `@goal <instruction>` to start the goal preset, or `@orchestrate <instruction>` for the multi-area preset |
 | `/memory [query]` | Memory panel: list, search, pin, delete |
 | `/remember <note>` | Save a project memory |
 | `/forget <id>`, `/pin <id> [off]` | Delete or pin a project memory |
@@ -251,6 +256,7 @@ Typing `/` opens completion. The implemented handler set
 | `/new`, `/close` | Open / close a session tab |
 | `/rewind` | Rewind menu for the latest turn (§2.9) |
 | `/fork` | Fork the session at the latest closed turn into a new tab; refuses while a turn runs |
+| `/btw [question]` | Open a transient, read-only tab seeded from this session; it keeps its own history and never writes to the parent session or the session list |
 | `/acp` | Open a new `agy` ACP tab |
 | `/reload` | Re-read settings, theme, definitions, policy, hooks, prompt (§2.18) |
 | `/serve [stop]` | Start or stop the local browser server attached to this TUI's `SessionRegistry` (`web` feature) |
@@ -286,12 +292,13 @@ description. Rows show the bare id, not the `@agent/` or
   trailing space and stays in Insert. An exact agent/skill id keeps the
   popup open; an exact file path dismisses it. The built-in `goal` skill
   accepts the shorter `@goal ` alias; `@skill/goal` still works. The built-in
-  `orchestrate` skill has no bare alias; use `@skill/orchestrate`.
+  `orchestrate` skill accepts the shorter `@orchestrate ` alias; `@skill/orchestrate`
+  still works.
 - A known accepted mention renders as an `<id>` chip (bold teal agent, bold
   blue skill) while the raw token stays in the input buffer and submit
   detection. Unknown ids and partial tokens render as typed. Cursor columns
   map through chip display widths; editing operates on the raw text.
-  `@goal` renders as a `goal` skill chip.
+  `@goal` and `@orchestrate` render as skill chips.
 - On submit, skills apply before the agent, mentions are stripped, repeats
   apply once, and an unknown mention stays as text. A mention-only prompt
   applies definitions without starting a turn. A directly submitted user message keeps a
@@ -327,10 +334,16 @@ The overlay shows the header, the question, and a mode line: `Select one`
 - Up/Down move the focus, including the `Other` row. Space toggles
   (multiple) or selects (single). Typing on `Other` enters free text,
   submitted as an extra selected label; for single-select, a typed answer
-  clears the option selection and vice versa. Backspace edits the text.
+  clears the option selection and vice versa.
+- The `Other` field is a multiline input with the same editing model as the
+  composer: Left/Right, Home/End, Backspace/Delete, word motion, selection,
+  and paste. `shift+enter`, `alt+enter`, `ctrl+enter`, and `ctrl+j` insert a
+  newline; plain Enter submits or advances. Up/Down move inside the text and
+  leave the field at its first or last line.
 - Enter submits on the last question (or advances); on an empty `Other` row
-  it starts typing. Tab/Right and Left move between questions. Esc cancels
-  with a structured refusal.
+  it starts typing. Tab moves to the next question and backtab to the
+  previous one. Esc leaves the text edit, then cancels with a structured
+  refusal.
 - Questions queue per tab like approvals. A question is not a permission:
   no grant, no mode change. Transcript scrolling still works while a
   question is open. Headless runs auto-cancel with a stderr hint.
@@ -401,6 +414,10 @@ being replayed.
   rename uses the new side for the language. `←`/`→` (or `[`/`]`) cycle
   files. `f` toggles a navigable file list (Up/Down/j/k select, Enter opens,
   Esc closes the list before the modal); clicking a row opens that file.
+  `s` stages the current file and `u` unstages it. The header and the file
+  row show the available action (`stage`, `unstage`, or `stage+unstage`) from
+  the index and working-tree flags. Stage and unstage refresh the file list
+  and keep the same path selected when it still has changes.
 - Search (`ctrl+f` files, `ctrl+shift+f` content) uses the `WorkspaceQuery`
   implementation: a gitignore-aware walker and in-process grep, with a
   result list and preview pane. There is no transcript search.
@@ -439,15 +456,17 @@ clipboard programs (§2.3).
 ### 2.15 Statusline
 
 One monochrome row, left to right: workspace path, git branch (when the
-workspace is a git repo), an optional sandbox warning, the `ACP:agy` badge on ACP tabs, clickable `N agents` and `N shells` counters for running work, a clickable `web :<port>` badge while `/serve` is running, a clickable `update vX (/update)` hint,
+workspace is a git repo), an optional sandbox warning, the `ACP:agy` badge on ACP tabs, clickable `N agents` and `N shells` counters for running work, a clickable `web :<port>` badge while `/serve` is running,
 throughput after the first measured stream, and a braille spinner with the
 active tool. Token and cache counters belong to the
 sidebar `DIAGNOSE` panel, so the statusline stays one row of state, not a
-second usage report. Short notices replace the right side temporarily.
+second usage report. Short notices replace the right side temporarily. The
+statusline does not repeat keyboard hints; the composer and the palette carry
+input guidance.
 
 The counters include running work only and appear only when the count is
-non-zero. Each clickable statusline item (both counters, the `web` badge, and
-the update hint) gets a `surface_high` background and `text` foreground while
+non-zero. Each clickable statusline item (both counters and the `web` badge)
+gets a `surface_high` background and `text` foreground while
 the pointer is over it. Clicking `N agents` or `N shells` opens the `Runs` modal
 for that kind. A row lists one running agent (name, preset, status, steps) or one
 running shell (`!command`, elapsed). `Enter` or a row click opens the detail view.
@@ -479,7 +498,10 @@ still applies the typed id. `ctrl+d` removes the highlighted model, or the
 typed model id when nothing is highlighted: it drops the id from
 `recent_models`, clears the saved `provider.model`, and clears the active model
 when it matches (`forget_provider_model`, `meerai-common/src/settings.rs`). The
-change is persisted immediately.
+change is persisted immediately. A model change belongs to the active session:
+the tab sends `SetModel` with the provider, and both are stored in that
+session's row. Another tab keeps its own provider and model, and reopening a
+session restores them.
 
 ### 2.16 Notifications and exit summary
 
@@ -498,9 +520,10 @@ change is persisted immediately.
 
 `meerai-tui/src/update.rs` reads the latest GitHub release tag at TUI
 startup (3 s timeout); `MEERAI_NO_UPDATE_CHECK=1` disables it. A newer
-version shows the clickable statusline hint; `/update` prints the install
-hint; the palette has "Check for updates". meerai never installs an update
-on its own. The check is behind the default `update` feature (reqwest).
+version shows `UPDATE  vX · /update` at the top of the sidebar. The row is
+clickable and runs `/update`, which prints the install hint; the palette has
+"Check for updates". meerai never installs an update on its own. The check is
+behind the default `update` feature (reqwest).
 
 ### 2.18 `/reload`
 

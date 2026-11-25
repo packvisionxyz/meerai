@@ -222,7 +222,8 @@ impl meerai_core::Toolset for LoopToolset {
                 name: LOOP_PLAN.to_string(),
                 description: "Plan phase. Store the objective, the done condition, constraints, \
                               and an ordered list of items. Each item has one action and one \
-                              expected observation. Replaces the previous plan."
+                              expected observation. Add a review item when a human must \
+                              approve the result. Replaces the previous plan."
                     .to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
@@ -319,7 +320,8 @@ impl meerai_core::Toolset for LoopToolset {
                 name: LOOP_ADJUST.to_string(),
                 description: "Adjust phase. Judge the recorded observation and set the item \
                               status. Done completes the item. Open retries it. Failed requires a \
-                              replan. Add newly discovered items in the same call."
+                              replan. A review item needs the human answer before done. Add \
+                              newly discovered items in the same call."
                     .to_string(),
                 parameters: serde_json::json!({
                     "type": "object",

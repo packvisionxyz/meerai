@@ -15,7 +15,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use meerai_agents::{AgentCommand, TurnId};
-use meerai_host::diff::{build_file_diff, list_git_changes};
+use meerai_host::diff::{build_file_diff, list_git_changes, stage_file, unstage_file};
 use meerai_host::search::{
     SearchMatch, SearchMode, build_search_preview, discover_workspace_files, resolve_preview_path,
     search_content, search_files,
@@ -28,13 +28,14 @@ use meerai_host::{
 use meerai_session::{RequestId, SessionEvent, SessionId};
 use meerai_web_protocol::{
     ApiError, ApiErrorCode, ApplyDefinitionRequest, ApprovalDecisionRequest, BackendKind,
-    BlobResponse, ChatGptLoginPasteRequest, ChatGptLoginStartResponse, CreateSessionRequest,
-    CreateSessionResponse, ForkSessionRequest, HostActionRequest, HostActionResponse,
-    MemoriesResponse, PacksResponse, QuestionAnswerRequest, ReloadResponse, RewindRequest,
-    RewindResponse, RoutesResponse, RunShellRequest, RunShellResponse, SessionEventsResponse,
-    SessionHistoryResponse, SetApiKeyRequest, SetModeRequest, SetModelRequest, SetModelResponse,
-    SetProviderBaseUrlRequest, StoredSessionDto, SubmitPromptRequest, SubmitPromptResponse,
-    UpdateSettingsRequest, ViewEvent, WorkspaceFilesResponse,
+    BlobResponse, BtwSessionRequest, ChatGptLoginPasteRequest, ChatGptLoginStartResponse,
+    CreateSessionRequest, CreateSessionResponse, ForkSessionRequest, HostActionRequest,
+    HostActionResponse, MemoriesResponse, PacksResponse, QuestionAnswerRequest, ReloadResponse,
+    RewindRequest, RewindResponse, RoutesResponse, RunShellRequest, RunShellResponse,
+    SessionEventsResponse, SessionHistoryResponse, SetApiKeyRequest, SetModeRequest,
+    SetModelRequest, SetModelResponse, SetProviderBaseUrlRequest, StoredSessionDto,
+    SubmitPromptRequest, SubmitPromptResponse, UpdateSettingsRequest, ViewEvent,
+    WorkspaceFilesResponse,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -321,6 +322,7 @@ async fn dispatch_privileged_route(
         (&Method::GET, "/api/workspace/preview") => handle_workspace_preview(state, &req).await,
         (&Method::GET, "/api/workspace/changes") => handle_workspace_changes(state).await,
         (&Method::GET, "/api/workspace/diff") => handle_workspace_diff(state, &req).await,
+        (&Method::POST, "/api/workspace/stage") => handle_workspace_stage(state, req).await,
         (&Method::GET, "/api/providers") => handle_get_providers(state).await,
         (&Method::POST, "/api/actions") => handle_host_action(state, req).await,
         (&Method::GET, "/api/memories") => handle_memories(state, &req).await,
@@ -364,6 +366,10 @@ async fn dispatch_privileged_route(
         (&Method::POST, p) if extract_session_action(p, "fork").is_some() => {
             let raw_id = extract_session_action(p, "fork").unwrap().to_string();
             handle_fork_session(state, &raw_id, req).await
+        }
+        (&Method::POST, p) if extract_session_action(p, "btw").is_some() => {
+            let raw_id = extract_session_action(p, "btw").unwrap().to_string();
+            handle_btw_session(state, &raw_id, req).await
         }
         (&Method::POST, p) if extract_session_action(p, "steer").is_some() => {
             let raw_id = extract_session_action(p, "steer").unwrap().to_string();
@@ -976,6 +982,44 @@ async fn handle_fork_session(
     }
 }
 
+async fn handle_btw_session(
+    state: &AppState,
+    raw_id: &str,
+    req: Request<Incoming>,
+) -> Response<RespBody> {
+    let session_id = match parse_session_id(raw_id) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let btw_req: BtwSessionRequest = match parse_optional_json(req).await {
+        Ok(parsed) => parsed,
+        Err(resp) => return resp,
+    };
+    let opened = match state.opener.btw_session(&session_id).await {
+        Ok(opened) => opened,
+        Err(err) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                ApiErrorCode::BadRequest,
+                &format!("failed to open btw session: {err}"),
+            );
+        }
+    };
+    let btw_id = opened.session_id.clone();
+    let summary = state.registry.register_opened_active(opened);
+    if let Some(text) = btw_req.text.filter(|text| !text.trim().is_empty())
+        && let Err(err) = state.registry.submit_prompt(&btw_id, text, None)
+    {
+        return host_err_response(err);
+    }
+    json_response(
+        StatusCode::CREATED,
+        &CreateSessionResponse {
+            session: mapper::map_summary(summary),
+        },
+    )
+}
+
 async fn handle_submit_prompt(
     state: &AppState,
     raw_id: &str,
@@ -1229,6 +1273,17 @@ async fn handle_user_shell(
         Ok(id) => id,
         Err(resp) => return resp,
     };
+    if state
+        .registry
+        .session_summary(&session_id)
+        .is_some_and(|summary| summary.transient)
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            ApiErrorCode::Forbidden,
+            "btw is read-only",
+        );
+    }
     let body: RunShellRequest = match parse_json(req).await {
         Ok(req) => req,
         Err(resp) => return resp,
@@ -1415,6 +1470,54 @@ async fn handle_workspace_changes(state: &AppState) -> Response<RespBody> {
     let changes = tokio::task::spawn_blocking(move || list_git_changes(&root))
         .await
         .unwrap_or_default();
+    state.registry.emit_file_changes(changes.clone());
+    let mapped: Vec<_> = changes.into_iter().map(mapper::map_file_change).collect();
+    json_response(StatusCode::OK, &mapped)
+}
+
+async fn handle_workspace_stage(state: &AppState, req: Request<Incoming>) -> Response<RespBody> {
+    let body: meerai_web_protocol::WorkspaceStageRequest = match parse_json(req).await {
+        Ok(body) => body,
+        Err(resp) => return resp,
+    };
+    if !body.path.split(" -> ").all(is_safe_relative_workspace_spec) {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::BadRequest,
+            "invalid stage path",
+        );
+    }
+    let Some(root) = state.opener.workspace_root() else {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::NotFound,
+            "workspace root unavailable",
+        );
+    };
+    let path = body.path;
+    let stage = body.stage;
+    let result = tokio::task::spawn_blocking(move || {
+        if stage {
+            stage_file(&root, &path)?;
+        } else {
+            unstage_file(&root, &path)?;
+        }
+        Ok::<_, String>(list_git_changes(&root))
+    })
+    .await;
+    let changes = match result {
+        Ok(Ok(changes)) => changes,
+        Ok(Err(err)) => {
+            return json_error(StatusCode::BAD_REQUEST, ApiErrorCode::BadRequest, &err);
+        }
+        Err(err) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiErrorCode::Internal,
+                &err.to_string(),
+            );
+        }
+    };
     state.registry.emit_file_changes(changes.clone());
     let mapped: Vec<_> = changes.into_iter().map(mapper::map_file_change).collect();
     json_response(StatusCode::OK, &mapped)

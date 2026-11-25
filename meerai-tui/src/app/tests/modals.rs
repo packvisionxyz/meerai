@@ -239,7 +239,7 @@ fn chatgpt_login_retry_requests_a_fresh_flow() {
         provider_id: "openai".to_string(),
         provider_name: "OpenAI".to_string(),
         url: Some("https://auth.openai.com/example".to_string()),
-        input: String::new(),
+        input: TextInput::default(),
         error: Some("state mismatch".to_string()),
         busy: false,
     });
@@ -331,6 +331,7 @@ fn connect_flow_saves_key_deletes_and_selects_model() {
         rx.try_recv().unwrap(),
         AgentCommand::SetModel {
             model: "opencode_go::qwen4-max".to_string(),
+            provider: Some("opencode-go".to_string()),
             context_window_tokens: Some(1_000_000),
             effort_levels: Some(vec![
                 meerai_common::settings::EffortLevel::Low,
@@ -352,6 +353,7 @@ fn connect_flow_saves_key_deletes_and_selects_model() {
         rx.try_recv().unwrap(),
         AgentCommand::SetModel {
             model: "opencode_go::glm-5.3".to_string(),
+            provider: Some("opencode-go".to_string()),
             context_window_tokens: Some(1_000_000),
             effort_levels: Some(vec![
                 meerai_common::settings::EffortLevel::Low,
@@ -395,6 +397,7 @@ fn model_input_accepts_manual_and_recent_models() {
         rx.try_recv().unwrap(),
         AgentCommand::SetModel {
             model: "gemini::custom-gemini-model".to_string(),
+            provider: Some("gemini".to_string()),
             context_window_tokens: None,
             effort_levels: None,
         }
@@ -432,7 +435,7 @@ fn model_input_filters_the_catalog_as_you_type() {
 
     app.handle_key_event(key(KeyCode::Tab));
     let completed = match &app.modal {
-        Some(ActiveModal::ModelInput { input, .. }) => input.clone(),
+        Some(ActiveModal::ModelInput { input, .. }) => input.text.clone(),
         _ => panic!("model dialog closed"),
     };
     assert!(completed.starts_with("gemini-3.8"), "got {completed}");
@@ -681,6 +684,102 @@ fn approval_decline_with_reason_and_cancel_keys() {
 }
 
 #[test]
+fn approval_reason_accepts_multiline_text_and_cursor_moves() {
+    let (mut app, mut rx, _secrets) = test_app();
+    app.handle_agent_event(AgentEvent::ApprovalRequested {
+        request: approval_request("req-multiline", "src/main.rs"),
+    });
+
+    app.handle_key_event(key(KeyCode::Char('r')));
+    type_text(&mut app, "first");
+    app.handle_key_event(key_mod(KeyCode::Enter, KeyModifiers::SHIFT));
+    type_text(&mut app, "second");
+    app.handle_key_event(key(KeyCode::Up));
+    type_text(&mut app, "!");
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::Approve {
+            request_id: RequestId::from_raw("req-multiline"),
+            decision: ApprovalDecision::DeclineWithReason("first!\nsecond".to_string()),
+            scope: None,
+        }
+    );
+}
+
+#[test]
+fn question_custom_answer_accepts_multiline_text_and_cursor_moves() {
+    let (mut app, mut rx, _secrets) = test_app();
+    app.handle_agent_event(AgentEvent::QuestionAsked {
+        request: question_request("q-multiline", false),
+    });
+    app.handle_key_event(key(KeyCode::Down));
+    app.handle_key_event(key(KeyCode::Down));
+
+    type_text(&mut app, "alpha");
+    app.handle_key_event(key_mod(KeyCode::Enter, KeyModifiers::SHIFT));
+    type_text(&mut app, "beta");
+    app.handle_key_event(key(KeyCode::Up));
+    app.handle_key_event(key(KeyCode::Home));
+    app.handle_key_event(key(KeyCode::End));
+    type_text(&mut app, "!");
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        AgentCommand::AnswerQuestion {
+            request_id: RequestId::from_raw("q-multiline"),
+            answers: Some(vec![QuestionAnswer {
+                header: "DB".to_string(),
+                selected: vec!["alpha!\nbeta".to_string()],
+            }]),
+        }
+    );
+}
+
+#[test]
+fn diff_panel_stages_and_unstages_the_current_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(dir.path()).unwrap();
+    let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+    std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(std::path::Path::new("a.txt")).unwrap();
+    index.write().unwrap();
+    let tree_id = index.write_tree().unwrap();
+    let tree = repo.find_tree(tree_id).unwrap();
+    repo.commit(Some("HEAD"), &signature, &signature, "init", &tree, &[])
+        .unwrap();
+    drop(tree);
+    std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+
+    let (mut app, _rx, _secrets) = test_app();
+    app.workspace_root = dir.path().to_path_buf();
+    app.file_changes = crate::diff::list_git_changes(dir.path());
+    app.open_diff_modal(0);
+    assert!(matches!(app.modal, Some(ActiveModal::DiffView { .. })));
+
+    app.handle_key_event(key(KeyCode::Char('s')));
+    let entry = app
+        .file_changes
+        .iter()
+        .find(|entry| entry.path == "a.txt")
+        .unwrap();
+    assert!(entry.can_unstage());
+    assert!(!entry.can_stage());
+
+    app.handle_key_event(key(KeyCode::Char('u')));
+    let entry = app
+        .file_changes
+        .iter()
+        .find(|entry| entry.path == "a.txt")
+        .unwrap();
+    assert!(entry.can_stage());
+    assert!(!entry.can_unstage());
+}
+
+#[test]
 fn clicking_a_user_message_opens_actions_and_copies_or_forks() {
     let (mut app, _rx, _secrets) = test_app();
     app.tab_mut().transcript.push(TranscriptEntry::User {
@@ -844,6 +943,8 @@ fn clicking_file_change_opens_diff_modal_and_search_attaches_file() {
     app.file_changes.push(FileChangeEntry {
         status: "??".to_string(),
         path: "src/demo.rs".to_string(),
+        staged: false,
+        unstaged: true,
     });
     app.sidebar_changes_inner_area = Rect::new(85, 16, 32, 10);
     app.visible_file_change_rows = 1;
@@ -1171,10 +1272,14 @@ fn diff_list_app(label: &str) -> (AppState, std::path::PathBuf) {
         FileChangeEntry {
             status: "??".to_string(),
             path: "a.rs".to_string(),
+            staged: false,
+            unstaged: true,
         },
         FileChangeEntry {
             status: "??".to_string(),
             path: "b.rs".to_string(),
+            staged: false,
+            unstaged: true,
         },
     ];
     (app, root)
@@ -1549,12 +1654,12 @@ fn packs_modal_toggles_state_and_subagent_form_spawns() {
     ));
     app.modal = None;
 
-    app.modal = Some(ActiveModal::SubagentSpawn(SubagentSpawnPanel {
-        name: "parser scan".to_string(),
-        agent: "explore".to_string(),
+    app.modal = Some(ActiveModal::SubagentSpawn(Box::new(SubagentSpawnPanel {
+        name: TextInput::new("parser scan"),
+        agent: TextInput::new("explore"),
         field: 2,
         ..SubagentSpawnPanel::default()
-    }));
+    })));
     for ch in "find the parser".chars() {
         app.handle_key_event(key(KeyCode::Char(ch)));
     }
@@ -1621,7 +1726,7 @@ fn vault_reset_requires_the_word_reset_and_clears_credentials() {
     assert!(secrets.get_key("openai").unwrap().is_some());
 
     app.modal = Some(ActiveModal::VaultReset {
-        input: "reset".to_string(),
+        input: TextInput::new("reset"),
         error: None,
     });
     app.handle_key_event(key(KeyCode::Enter));
@@ -1881,22 +1986,21 @@ fn queued_edit_arrows_move_across_wrapped_rows() {
     app.tab_mut().queued = vec!["abcdefghijkl".to_string()];
     app.modal = Some(ActiveModal::QueuedEdit {
         index: 0,
-        input: "abcdefghijkl".to_string(),
-        cursor: 7,
+        input: TextInput::with_cursor("abcdefghijkl", 7),
         error: None,
     });
 
     app.handle_key_event(key(KeyCode::Up));
-    let Some(ActiveModal::QueuedEdit { cursor, .. }) = &app.modal else {
+    let Some(ActiveModal::QueuedEdit { input, .. }) = &app.modal else {
         panic!("queued edit modal should stay open");
     };
-    assert_eq!(*cursor, 2);
+    assert_eq!(input.cursor, 2);
 
     app.handle_key_event(key(KeyCode::Down));
-    let Some(ActiveModal::QueuedEdit { cursor, .. }) = &app.modal else {
+    let Some(ActiveModal::QueuedEdit { input, .. }) = &app.modal else {
         panic!("queued edit modal should stay open");
     };
-    assert_eq!(*cursor, 7);
+    assert_eq!(input.cursor, 7);
 }
 
 #[test]
@@ -1906,29 +2010,28 @@ fn queued_edit_arrows_keep_the_goal_column() {
     app.tab_mut().queued = vec!["abcdefghij\nxy\nklmnopqrst".to_string()];
     app.modal = Some(ActiveModal::QueuedEdit {
         index: 0,
-        input: "abcdefghij\nxy\nklmnopqrst".to_string(),
-        cursor: 8,
+        input: TextInput::with_cursor("abcdefghij\nxy\nklmnopqrst", 8),
         error: None,
     });
 
     app.handle_key_event(key(KeyCode::Down));
-    let Some(ActiveModal::QueuedEdit { cursor, .. }) = &app.modal else {
+    let Some(ActiveModal::QueuedEdit { input, .. }) = &app.modal else {
         panic!("queued edit modal should stay open");
     };
-    assert_eq!(*cursor, 13);
+    assert_eq!(input.cursor, 13);
 
     app.handle_key_event(key(KeyCode::Down));
-    let Some(ActiveModal::QueuedEdit { cursor, .. }) = &app.modal else {
+    let Some(ActiveModal::QueuedEdit { input, .. }) = &app.modal else {
         panic!("queued edit modal should stay open");
     };
-    assert_eq!(*cursor, 17);
+    assert_eq!(input.cursor, 17);
 
     app.handle_key_event(key(KeyCode::Up));
     app.handle_key_event(key(KeyCode::Up));
-    let Some(ActiveModal::QueuedEdit { cursor, .. }) = &app.modal else {
+    let Some(ActiveModal::QueuedEdit { input, .. }) = &app.modal else {
         panic!("queued edit modal should stay open");
     };
-    assert_eq!(*cursor, 8);
+    assert_eq!(input.cursor, 8);
 }
 
 #[test]

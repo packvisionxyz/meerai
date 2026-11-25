@@ -9,6 +9,29 @@ use similar::{DiffOp, TextDiff};
 pub struct FileChangeEntry {
     pub status: String,
     pub path: String,
+    #[serde(default)]
+    pub staged: bool,
+    #[serde(default)]
+    pub unstaged: bool,
+}
+
+impl FileChangeEntry {
+    pub fn can_stage(&self) -> bool {
+        self.unstaged
+    }
+
+    pub fn can_unstage(&self) -> bool {
+        self.staged
+    }
+
+    pub fn action_label(&self) -> &'static str {
+        match (self.staged, self.unstaged) {
+            (true, true) => "stage+unstage",
+            (false, true) => "stage",
+            (true, false) => "unstage",
+            (false, false) => "",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +189,8 @@ pub fn list_git_changes(workspace_root: &Path) -> Vec<FileChangeEntry> {
         let Some(code) = status_label(status) else {
             continue;
         };
+        let staged = status.intersects(index_flags());
+        let unstaged = status.intersects(worktree_flags());
         let path = if status.is_index_renamed()
             && let Some(delta) = entry.head_to_index()
             && let (Some(old), Some(new)) = (delta.old_file().path(), delta.new_file().path())
@@ -179,21 +204,34 @@ pub fn list_git_changes(workspace_root: &Path) -> Vec<FileChangeEntry> {
         entries.push(FileChangeEntry {
             status: code.to_string(),
             path,
+            staged,
+            unstaged,
         });
     }
     entries
+}
+
+fn index_flags() -> Status {
+    Status::INDEX_NEW
+        | Status::INDEX_MODIFIED
+        | Status::INDEX_DELETED
+        | Status::INDEX_RENAMED
+        | Status::INDEX_TYPECHANGE
+}
+
+fn worktree_flags() -> Status {
+    Status::WT_NEW
+        | Status::WT_MODIFIED
+        | Status::WT_DELETED
+        | Status::WT_RENAMED
+        | Status::WT_TYPECHANGE
 }
 
 fn status_label(status: Status) -> Option<&'static str> {
     if status.is_conflicted() {
         return Some("U");
     }
-    let index_flags = Status::INDEX_NEW
-        | Status::INDEX_MODIFIED
-        | Status::INDEX_DELETED
-        | Status::INDEX_RENAMED
-        | Status::INDEX_TYPECHANGE;
-    if status.is_wt_new() && !status.intersects(index_flags) {
+    if status.is_wt_new() && !status.intersects(index_flags()) {
         return Some("??");
     }
     if status.is_index_new() {
@@ -214,6 +252,77 @@ fn status_label(status: Status) -> Option<&'static str> {
         return Some("M");
     }
     None
+}
+
+pub fn stage_file(workspace_root: &Path, path: &str) -> Result<(), String> {
+    let repo = Repository::discover(workspace_root).map_err(|err| err.to_string())?;
+    let workdir = repo.workdir().unwrap_or(workspace_root).to_path_buf();
+    let mut index = repo.index().map_err(|err| err.to_string())?;
+    let (old, new) = split_rename(path);
+    if let Some(old) = old {
+        let _ = index.remove_path(Path::new(old));
+    }
+    let full = workdir.join(new);
+    if full.exists() {
+        index
+            .add_path(Path::new(new))
+            .map_err(|err| err.to_string())?;
+    } else {
+        index
+            .remove_path(Path::new(new))
+            .map_err(|err| err.to_string())?;
+    }
+    index.write().map_err(|err| err.to_string())
+}
+
+pub fn unstage_file(workspace_root: &Path, path: &str) -> Result<(), String> {
+    let repo = Repository::discover(workspace_root).map_err(|err| err.to_string())?;
+    let tree = repo.head().ok().and_then(|head| head.peel_to_tree().ok());
+    let (old, new) = split_rename(path);
+    let mut paths = Vec::new();
+    if let Some(old) = old {
+        paths.push(old);
+    }
+    paths.push(new);
+
+    let mut index = repo.index().map_err(|err| err.to_string())?;
+    for path in paths {
+        if let Some(tree) = &tree
+            && let Ok(entry) = tree.get_path(Path::new(path))
+        {
+            let size = entry
+                .to_object(&repo)
+                .ok()
+                .and_then(|object| object.peel_to_blob().ok().map(|blob| blob.size()))
+                .unwrap_or(0);
+            index
+                .add(&git2::IndexEntry {
+                    ctime: git2::IndexTime::new(0, 0),
+                    mtime: git2::IndexTime::new(0, 0),
+                    dev: 0,
+                    ino: 0,
+                    mode: entry.filemode() as u32,
+                    uid: 0,
+                    gid: 0,
+                    file_size: size as u32,
+                    id: entry.id(),
+                    flags: 0,
+                    flags_extended: 0,
+                    path: path.as_bytes().to_vec(),
+                })
+                .map_err(|err| err.to_string())?;
+            continue;
+        }
+        let _ = index.remove_path(Path::new(path));
+    }
+    index.write().map_err(|err| err.to_string())
+}
+
+fn split_rename(path: &str) -> (Option<&str>, &str) {
+    match path.split_once(" -> ") {
+        Some((old, new)) => (Some(old), new),
+        None => (None, path),
+    }
 }
 
 pub fn build_file_diff(workspace_root: &Path, path: &str, status: &str) -> FileDiffView {
@@ -610,6 +719,70 @@ mod tests {
     }
 
     #[test]
+    fn stage_and_unstage_move_a_file_between_worktree_and_index() {
+        let root = temp_dir("stage");
+        init_repo_with_commit(&root, &[("src/lib.rs", "one\n")]);
+
+        fs::write(root.join("src/lib.rs"), "one\ntwo\n").unwrap();
+        let changes = list_git_changes(&root);
+        let entry = changes
+            .iter()
+            .find(|entry| entry.path == "src/lib.rs")
+            .unwrap();
+        assert!(entry.can_stage());
+        assert!(!entry.can_unstage());
+
+        stage_file(&root, "src/lib.rs").unwrap();
+        let changes = list_git_changes(&root);
+        let entry = changes
+            .iter()
+            .find(|entry| entry.path == "src/lib.rs")
+            .unwrap();
+        assert!(!entry.can_stage());
+        assert!(entry.can_unstage());
+
+        unstage_file(&root, "src/lib.rs").unwrap();
+        let changes = list_git_changes(&root);
+        let entry = changes
+            .iter()
+            .find(|entry| entry.path == "src/lib.rs")
+            .unwrap();
+        assert!(entry.can_stage());
+        assert!(!entry.can_unstage());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stage_and_unstage_handle_untracked_files() {
+        let root = temp_dir("stage-untracked");
+        init_repo_with_commit(&root, &[("README.md", "readme\n")]);
+        fs::write(root.join("new.txt"), "new\n").unwrap();
+
+        stage_file(&root, "new.txt").unwrap();
+        let changes = list_git_changes(&root);
+        let entry = changes
+            .iter()
+            .find(|entry| entry.path == "new.txt")
+            .unwrap();
+        assert_eq!(entry.status, "A");
+        assert!(entry.can_unstage());
+        assert!(!entry.can_stage());
+
+        unstage_file(&root, "new.txt").unwrap();
+        let changes = list_git_changes(&root);
+        let entry = changes
+            .iter()
+            .find(|entry| entry.path == "new.txt")
+            .unwrap();
+        assert_eq!(entry.status, "??");
+        assert!(entry.can_stage());
+        assert!(!entry.can_unstage());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn list_changes_and_build_file_diff_use_git2_and_similar() {
         let root = temp_dir("git2");
         let repo = init_repo_with_commit(
@@ -629,18 +802,26 @@ mod tests {
         assert!(changes.contains(&FileChangeEntry {
             status: "M".to_string(),
             path: "src/lib.rs".to_string(),
+            staged: false,
+            unstaged: true,
         }));
         assert!(changes.contains(&FileChangeEntry {
             status: "A".to_string(),
             path: "new.txt".to_string(),
+            staged: true,
+            unstaged: false,
         }));
         assert!(changes.contains(&FileChangeEntry {
             status: "D".to_string(),
             path: "old.txt".to_string(),
+            staged: false,
+            unstaged: true,
         }));
         assert!(changes.contains(&FileChangeEntry {
             status: "??".to_string(),
             path: "notes.md".to_string(),
+            staged: false,
+            unstaged: true,
         }));
 
         let modified = build_file_diff(&root, "src/lib.rs", "M");

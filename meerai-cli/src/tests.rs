@@ -1683,6 +1683,99 @@ async fn cli_session_host_lists_creates_and_opens_sessions() {
 }
 
 #[tokio::test]
+async fn btw_session_seeds_history_in_memory_and_stays_read_only() {
+    use meerai_session::{ContentBlock, InputSource, SessionEvent, TurnEndReason, TurnTrigger};
+
+    let root = std::env::temp_dir().join(format!("meerai-cli-btw-{}", SessionId::new()));
+    let config_root = root.join("config");
+    let sessions_root = root.join("sessions");
+    let workspace_root = root.join("workspace");
+    std::fs::create_dir_all(&config_root).unwrap();
+    std::fs::create_dir_all(&workspace_root).unwrap();
+
+    let settings = AppSettings::default();
+    let runtime = Arc::new(RwLock::new(RuntimeProviderState::from_settings(
+        &settings,
+        ProviderCatalog::new(),
+    )));
+    let expected_provider = runtime.read().unwrap().active_provider.clone();
+    let secrets: Arc<dyn meerai_client::secrets::SecretStore> =
+        Arc::new(meerai_client::secrets::MemorySecretStore::new());
+    let client = build_genai_client(runtime.clone(), secrets.clone()).unwrap();
+
+    let mut session_config = SessionConfig::new(workspace_root.clone());
+    session_config.root = sessions_root.clone();
+
+    let host = CliSessionHost {
+        script_runtime: None,
+        workspace_root: workspace_root.clone(),
+        session_config: session_config.clone(),
+        runtime,
+        secrets,
+        user_settings: std::sync::Mutex::new(settings.clone()),
+        settings,
+        config_dir: Some(config_root.clone()),
+        data_dir: None,
+        client,
+        approval_mode: ApprovalMode::Ask,
+        execution_world: Arc::new(meerai_tools::HostWorld::new()),
+        sensitive_env_vars: Vec::new(),
+        hooks: Arc::new(HookEngine::default()),
+        custom_agents: Vec::new(),
+        skill_catalog: Arc::new(Vec::new()),
+        base_system: "Test system prompt".to_string(),
+        launch_system: String::new(),
+        launch_definitions: String::new(),
+        default_provider: expected_provider,
+        default_model: "test-model".to_string(),
+    };
+
+    let source = Session::open_or_create(&session_config, SessionId::new(), workspace_root)
+        .await
+        .unwrap();
+    let source_id = source.id().clone();
+    let turn = TurnId::new();
+    source
+        .append(SessionEvent::TurnStarted {
+            turn_id: turn.clone(),
+            trigger: TurnTrigger::UserPrompt,
+        })
+        .await
+        .unwrap();
+    source
+        .append(SessionEvent::UserMessage {
+            source: InputSource::User,
+            content: vec![ContentBlock::Text("hello".to_string())],
+        })
+        .await
+        .unwrap();
+    source
+        .append(SessionEvent::TurnEnded {
+            turn_id: turn,
+            reason: TurnEndReason::Completed,
+        })
+        .await
+        .unwrap();
+    source.flush().await.unwrap();
+    drop(source);
+
+    let btw = host.btw_session(&source_id).await.unwrap();
+    assert!(btw.transient);
+    assert_eq!(btw.approval_mode, ApprovalMode::Plan);
+    assert_eq!(btw.title.as_deref(), Some("btw"));
+    assert_eq!(btw.events.len(), 3);
+    assert_ne!(btw.session_id, source_id);
+    let btw_id = btw.session_id.clone();
+    let _ = btw.cmd_tx.send(AgentCommand::Quit);
+
+    let listed = host.list_sessions().await.unwrap();
+    assert!(listed.iter().any(|summary| summary.id == source_id));
+    assert!(listed.iter().all(|summary| summary.id != btw_id));
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test]
 async fn empty_session_cleanup_removes_only_old_unopened_sessions() {
     use meerai_session::{
         ContentBlock, InputSource, SessionConfig, SessionEvent, TurnId, TurnTrigger,
@@ -2156,6 +2249,49 @@ fn session_model_specs_with_an_adapter_prefix_keep_the_current_provider() {
     assert_eq!(
         split_session_model(&catalog, "openai", "gpt-6.1-sol"),
         ("openai".to_string(), "gpt-6.1-sol".to_string())
+    );
+}
+
+#[cfg(any(feature = "tui", feature = "web"))]
+#[test]
+fn session_model_resolution_prefers_the_stored_provider() {
+    let catalog = ProviderCatalog::new();
+    let settings = AppSettings::default();
+    assert_eq!(
+        resolve_session_model(
+            Some(&catalog),
+            "openai",
+            &settings,
+            "openai",
+            "gpt-6.2-sol",
+            Some("openrouter"),
+            Some("openai/gpt-6.2-sol"),
+        ),
+        ("openrouter".to_string(), "openai/gpt-6.2-sol".to_string())
+    );
+    assert_eq!(
+        resolve_session_model(
+            Some(&catalog),
+            "openai",
+            &settings,
+            "openai",
+            "gpt-6.2-sol",
+            Some("gemini"),
+            Some("gemini::gemini-4-neon"),
+        ),
+        ("gemini".to_string(), "gemini-4-neon".to_string())
+    );
+    assert_eq!(
+        resolve_session_model(
+            Some(&catalog),
+            "openai",
+            &settings,
+            "openai",
+            "gpt-6.2-sol",
+            None,
+            Some("gpt-6.2-sol"),
+        ),
+        ("openai".to_string(), "gpt-6.2-sol".to_string())
     );
 }
 

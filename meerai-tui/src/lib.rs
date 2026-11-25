@@ -131,6 +131,7 @@ pub async fn run_tui(
             provider: config.initial_provider,
             model: config.initial_model,
             approval_mode: config.approval_mode,
+            transient: false,
             events: config.initial_events,
             cmd_tx,
             event_rx,

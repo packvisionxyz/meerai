@@ -69,6 +69,7 @@ pub fn map_summary(summary: LiveSessionSummary) -> SessionSummaryDto {
         active_tool: summary.active_tool,
         turn_started_at_ms: summary.turn_started_at_ms,
         user_shell_running: summary.user_shell_running,
+        transient: summary.transient,
         shell_runs: summary
             .shell_runs
             .into_iter()
@@ -803,6 +804,8 @@ pub fn map_file_change(entry: FileChangeEntry) -> FileChangeDto {
     FileChangeDto {
         status: entry.status,
         path: entry.path,
+        staged: entry.staged,
+        unstaged: entry.unstaged,
     }
 }
 

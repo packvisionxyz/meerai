@@ -217,6 +217,11 @@ pub fn derive_messages(events: &[LoggedEvent], policy: &ProjectionPolicy) -> Vec
   is rejected, not silently clipped. Surfaces: `--fork <ID>`,
   `sessions fork <ID> [--turn <ID>]`, TUI `/fork`, and the user-message
   menu's Fork action.
+- `memory_fork(source)` seeds an in-memory session from the stored event
+  prefix for `/btw`. It creates no `sessions` row, forces `plan` mode, and
+  runs read-only tools with no hooks, memory capture, subagents, or goal loop,
+  so the side conversation never enters the parent log, the usage table, or
+  the session list. Surfaces: TUI `/btw` and browser `/btw`.
 - `rewind(turn_id, scope)` closes open turns and appends one
   `RewindApplied { scope, restored, replaced }`; later turns are shadowed
   by a replacement range, never deleted. `RewindScope::{Both, Code,
@@ -453,6 +458,8 @@ project overrides always win. A mid-session model switch (TUI `/model`,
 the provider/model picker, or an applied agent model) re-derives the
 window the same way: the host resolves the catalog window and sends it
 with `SetModel`/`ApplyAgent`, unless an explicit settings window pins it.
+`SetModel` also carries the provider id, and the worker persists both in the
+session row, so reopening the session restores its own provider and model.
 `input_cost_per_mtok`/`output_cost_per_mtok`
 fill `HarnessConfig::token_pricing` and make `UsageUpdated.est_cost_usd`
 non-`None`. The bundled catalog ships context windows only, so no
@@ -782,9 +789,10 @@ Review the current changes. List findings by severity with file:line references.
   condition, constraints, and items; `loop-act` records one action and its
   expected observation; `loop-observe` records the raw evidence; `loop-adjust`
   records done, open, or failed and may add items; `loop-status` re-reads the
-  state after compaction or resume. `LoopInterceptor::turn_stopping` continues
+  state after compaction or resume. A review item records the human answer from
+  `question-ask` as its observation; a subagent review is not human approval. `LoopInterceptor::turn_stopping` continues
   the turn while an item is open, up to 24 rounds. The TUI and browser accept
-  `@goal` as an alias for `@skill/goal`.
+  `@goal` and `@orchestrate` as aliases for `@skill/goal` and `@skill/orchestrate`.
 - The loop spans turns. After a turn ends with an open item (`Ok` or
   `ErrorCode::Budget`), the worker logs `SessionEvent::LoopUpdated`, emits
   `AgentEvent::LoopUpdated` and `AgentEvent::LoopContinued`, resets the round
@@ -798,7 +806,7 @@ Review the current changes. List findings by severity with file:line references.
 - `AgentEvent::LoopUpdated` is the live signal. The TUI stores it on the tab;
   the host stores it on the session record, exposes it in the session detail,
   and rebroadcasts it as `RegistryEventKind::LoopUpdated` /
-  `ViewEvent::LoopUpdated`. `/loop` (or `/goal`) opens a read-only panel in
+  `ViewEvent::LoopUpdated`. `/loop` opens a read-only panel in
   both clients. The live loop state lives with the agent; the durable event is
   the only copy outside a running process.
 

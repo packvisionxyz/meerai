@@ -42,7 +42,7 @@ fn typed_config_persists_and_upserts() -> Result<()> {
 }
 
 #[test]
-fn initializes_v1_and_refuses_unknown_versions() -> Result<()> {
+fn initializes_v2_and_refuses_unknown_versions() -> Result<()> {
     let dir = TempDir::new()?;
     let path = dir.path().join("store.db");
     let store = Store::open(&path)?;
@@ -50,7 +50,7 @@ fn initializes_v1_and_refuses_unknown_versions() -> Result<()> {
         let journal: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
         assert_eq!(journal, "wal");
         for (pragma, expected) in [
-            ("user_version", 1),
+            ("user_version", 2),
             ("synchronous", 1),
             ("foreign_keys", 1),
             ("busy_timeout", 5000),
@@ -64,7 +64,7 @@ fn initializes_v1_and_refuses_unknown_versions() -> Result<()> {
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(version, "1");
+        assert_eq!(version, "2");
         conn.pragma_update(None, "user_version", 42)?;
         Ok(())
     })?;
@@ -73,6 +73,29 @@ fn initializes_v1_and_refuses_unknown_versions() -> Result<()> {
         panic!("unknown schema was accepted");
     };
     assert!(format!("{err:#}").contains("unsupported SQLite store schema version 42"));
+    Ok(())
+}
+
+#[test]
+fn migrates_v1_sessions_to_v2_with_a_provider_column() -> Result<()> {
+    let dir = TempDir::new()?;
+    let path = dir.path().join("store.db");
+    drop(Store::open(&path)?);
+    let conn = Connection::open(&path)?;
+    conn.execute("ALTER TABLE sessions DROP COLUMN provider", [])?;
+    conn.pragma_update(None, "user_version", 1)?;
+    conn.execute(
+        "UPDATE meta SET value = '1' WHERE key = 'schema_version'",
+        [],
+    )?;
+    drop(conn);
+    let store = Store::open(&path)?;
+    store.read(|conn| {
+        let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        assert_eq!(version, 2);
+        conn.execute("SELECT provider FROM sessions LIMIT 0", [])?;
+        Ok(())
+    })?;
     Ok(())
 }
 

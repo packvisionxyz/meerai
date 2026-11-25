@@ -116,6 +116,7 @@ CREATE TABLE sessions (
     project_root TEXT NOT NULL,
     cwd TEXT NOT NULL,
     title TEXT,
+    provider TEXT,
     model TEXT,
     approval_mode TEXT,
     git_branch TEXT,

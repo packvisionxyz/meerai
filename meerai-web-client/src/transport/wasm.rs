@@ -5,15 +5,16 @@ use crate::store::StoreHandle;
 use leptos::prelude::Update;
 use meerai_web_protocol::{
     ApiError, ApplyDefinitionRequest, ApprovalDecisionDto, ApprovalDecisionRequest,
-    ApprovalModeDto, BackendKind, ChatGptLoginPasteRequest, ChatGptLoginStartResponse,
-    CreateSessionRequest, CreateSessionResponse, FileChangeDto, FileDiffResponse,
-    ForkSessionRequest, GrantScopeDto, HostActionRequest, HostActionResponse, MemoriesResponse,
-    PacksResponse, ProvidersResponse, QuestionAnswerDto, QuestionAnswerRequest, ReloadResponse,
-    RewindRequest, RewindResponse, RewindScopeDto, RoutesResponse, RunShellRequest,
+    ApprovalModeDto, BackendKind, BtwSessionRequest, ChatGptLoginPasteRequest,
+    ChatGptLoginStartResponse, CreateSessionRequest, CreateSessionResponse, FileChangeDto,
+    FileDiffResponse, ForkSessionRequest, GrantScopeDto, HostActionRequest, HostActionResponse,
+    MemoriesResponse, PacksResponse, ProvidersResponse, QuestionAnswerDto, QuestionAnswerRequest,
+    ReloadResponse, RewindRequest, RewindResponse, RewindScopeDto, RoutesResponse, RunShellRequest,
     RunShellResponse, SearchModeDto, SessionDetailDto, SessionEventsResponse,
     SessionHistoryResponse, SetApiKeyRequest, SetModeRequest, SetModelRequest,
     SetProviderBaseUrlRequest, SnapshotResponse, SubmitPromptRequest, UpdateSettingsRequest,
     ViewEvent, WorkspaceFilesResponse, WorkspacePreviewResponse, WorkspaceSearchResponse,
+    WorkspaceStageRequest,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -338,6 +339,25 @@ impl WasmTransport {
             let path = format!("/api/sessions/{session_id}/fork");
             let payload = serde_json::to_string(&ForkSessionRequest { turn_id })
                 .unwrap_or_else(|_| "{}".to_owned());
+            match request_opened_session(&path, &payload).await {
+                Ok(session) => handle.update_with_effects(move |state, tx| {
+                    state.modal = None;
+                    apply_opened_session(state, session);
+                    sync_title(state, tx);
+                }),
+                Err(error) => set_error(&handle, error),
+            }
+        });
+    }
+
+    pub fn btw_session(&self, session_id: String, text: String) {
+        let handle = self.handle;
+        spawn_local(async move {
+            let path = format!("/api/sessions/{session_id}/btw");
+            let payload = serde_json::to_string(&BtwSessionRequest {
+                text: (!text.trim().is_empty()).then_some(text),
+            })
+            .unwrap_or_else(|_| "{}".to_owned());
             match request_opened_session(&path, &payload).await {
                 Ok(session) => handle.update_with_effects(move |state, tx| {
                     state.modal = None;
@@ -698,6 +718,31 @@ impl WasmTransport {
                     state.file_changes = changes;
                     sync_diff_modal_on_changes(state);
                 });
+            }
+        });
+    }
+
+    pub fn stage_workspace_file(&self, path: String, stage: bool) {
+        let handle = self.handle;
+        spawn_local(async move {
+            let payload = match serde_json::to_string(&WorkspaceStageRequest { path, stage }) {
+                Ok(payload) => payload,
+                Err(err) => {
+                    set_error(&handle, format!("Failed to encode stage request: {err}"));
+                    return;
+                }
+            };
+            match fetch_text("POST", "/api/workspace/stage", Some(&payload)).await {
+                Ok((200..=299, body)) => {
+                    if let Ok(changes) = serde_json::from_str::<Vec<FileChangeDto>>(&body) {
+                        handle.update(move |state| {
+                            state.file_changes = changes;
+                            sync_diff_modal_on_changes(state);
+                        });
+                    }
+                }
+                Ok((status, body)) => set_error(&handle, format_api_error(status, &body)),
+                Err(err) => set_error(&handle, err),
             }
         });
     }

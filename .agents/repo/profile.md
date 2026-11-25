@@ -45,7 +45,7 @@
 | :--- | :--- |
 | `meerai-core/` | `Toolset` trait (`effect_of`, `effect_of_call`, `invoke_structured`), `ToolOutput`, `ToolError`, `EffectClass`, `ToolObservation`, `ToolRun`, `FileDiff`; re-exports `genai`, `async_trait`, `schemars::JsonSchema` |
 | `meerai-macros/` | Proc-macros `#[tool]` and `#[derive(Toolset)]` (`darling` + `syn` + `quote`), `insta` snapshot tests; test-only dependencies are dev-dependencies |
-| `meerai-store/` | Embedded SQLite store (`meerai.db`): WAL, FTS5, schema v1, private-file permissions, typed repositories (`config`, `memory`, `packs`, `routes`, `usage`) |
+| `meerai-store/` | Embedded SQLite store (`meerai.db`): WAL, FTS5, schema v2, private-file permissions, typed repositories (`config`, `memory`, `packs`, `routes`, `usage`) |
 | `meerai-session/` | `Session` append-only `SessionEvent` log in SQLite, recovery, `derive_messages`, replay projection (`replay`), fork/rewind (`latest_closed_turn`, `fork_latest`, `create_child`), SQLite snapshot store (`session_snapshots`), SQLite blob store (`session_blobs`), spill, compaction primitives, the serde `LoopState` DTO and `last_loop` (legacy `GoalState` still deserializes), session list/delete/prune support |
 | `meerai-policy/` | `PolicyEngine`: ordered permission rules, `ApprovalMode`, turn/session grants, YAML parsing |
 | `meerai-tools/` | `code` (`CodeTools`, seven `code-*` tools, path guards, unified diffs, `ToolRun` observations, secret env scrub), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`; opt-in post-edit diagnostics via `context.post_edit_diagnostics`), `search_as_code` (`SearchAsCodeToolset`), `web` (`WebTools`; `web-fetch`, `web-search`, private-address guard) |
@@ -54,7 +54,7 @@
 | `meerai-providers/` | `genai` client factory + AEAD `VaultSecretStore` (ChaCha20-Poly1305, OS keychain DEK or Argon2id passphrase); re-exports the client surface |
 | `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig` (+ `TokenPricing`), `AgentEvent`, `intercept` (`Interceptor`/`StepPlan`/`ToolPlan`/`ToolContext`/`ToolOutcome`, async `before_tool`), hook engine (`hooks`: `HookEngine`/`HookContext`/`HookReport`, `HookFired` logging), `question-ask` (`QuestionAsked`/`AnswerQuestion`, not an approval), the `LoopInterceptor` adapter over `meerai-skills`, `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins `explore`/`plan`/`build`/`general`/`research`/`review` + custom child runs filtered by `mode` and tightened by definition `permissions`, `child_session_id` on `SubagentRun`), delegated `acp-run` (`acp_subagent`: `AcpRunToolset`/`AcpSpawner`), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
 | `meerai-skills/` | Built-in `goal` and `orchestrate` skill bodies (`skills/`), `builtin` catalog merge, `skill-load` (`SkillToolset`), the shared four-phase loop engine (`LoopHandle`, `LoopState` render/prompts, `turn_stopping`/`follow_up_turn`), and `loop-*` (`loop-plan`/`loop-act`/`loop-observe`/`loop-adjust`/`loop-status`) |
-| `meerai-host/` | UI-neutral host seams (`SessionOpener`, `OpenedSession`, `WorkspaceQuery`/`LocalWorkspace`, `WebServerLauncher`), shared `diff`/`search`/`syntax`/`theme`/`update`, and live `SessionRegistry` event pump/ring |
+| `meerai-host/` | UI-neutral host seams (`SessionOpener`, `OpenedSession`, `WorkspaceQuery`/`LocalWorkspace`, `WebServerLauncher`), shared `diff` (list, build, stage, unstage)/`search`/`syntax`/`theme`/`update`, and live `SessionRegistry` event pump/ring |
 | `meerai-web-protocol/` | Serde-only Wasm-safe wire DTOs (`SnapshotResponse`, `ViewEvent`, `HostInfoDto`, `ProvidersResponse`, `SettingsSnapshotDto`, `ApiError`) |
 | `meerai-web/` | Loopback HTTP/SSE server (`hyper` + `subtle` Basic auth, `Host`/`Origin`/JSON checks, parity REST/SSE routes, embedded Wasm bundle serving) |
 | `meerai-web-client/` | Leptos 0.8 CSR Wasm browser client ([browser-ui.md](../../docs/browser-ui.md)): DOM transcript, Markdown + code highlighting, left Sessions sidebar plus TUI modal surfaces, approval scopes, Settings, palette actions, `@` mentions, completions, a sidebar Diagnose block shown by default (cache hit/write, context, memory) and a collapsible changed-files block, built via `scripts/build-web.py` |
@@ -164,7 +164,11 @@ Notes:
     approvals print the `context.max_session_tokens` remedy, decline, and exit `1`. Completed is
     `0`; other failures are `1`.
 15. **Session privacy:** Session directories are `0700`, session files `0600` on Unix; metadata
-    records cwd, git state, title, model, and timestamps. Windows has no mode enforcement.
+    records cwd, git state, title, provider, model, approval mode, and timestamps. Windows has no
+    mode enforcement. Provider, model, and approval mode are per session
+    (`sessions.provider`/`model`/`approval_mode`): a `/model` or `/mode` change applies to the
+    active tab and persists in its row, opening a session restores those values, and an explicit
+    CLI provider/model/mode wins for that run.
     `sessions prune` is the manual retention surface; `sessions.auto_prune_days` (user config only)
     opts into startup pruning with `sessions.keep` (default 0), always sparing the active session.
     Startup also removes empty sessions (no user message, no title, no parent) older than six hours
@@ -193,8 +197,13 @@ Notes:
     become `Cancelled`. The TUI converts `ReplayEntry` into its `TranscriptEntry` view.
     `set_harness` and `session_usage_from_events` seed token counters from the last logged
     `UsageUpdated`. A fork copies the prefix but zeroes inherited usage fields, so the child
-    starts with empty token and cache counters. `AgentCommand` has `Rewind` and no
-    `Revert`/`Fork` variant; conversation shadowing is internal.
+    starts with empty token and cache counters. `Session::memory_fork` seeds an in-memory session
+    from the stored prefix for `/btw`; it forces `plan` mode, heals dangling calls, creates no
+    session row, and the CLI builds that worker with read-only tools, no hooks, no memory capture,
+    no subagents, and no goal loop, so nothing reaches the parent log, usage table, or
+    session list. `OpenedSession.transient` and `LiveSessionSummary.transient` carry that flag to
+    both clients. `AgentCommand` has `Rewind` and no `Revert`/`Fork` variant; conversation
+    shadowing is internal.
 20. **Security roadmap (M11):** landed — path guards, sensitive-file blocks (`is_sensitive_path` and
     `PolicyEngine::default_sensitive_rules`), `plan` hard read-only, approval gates, headless
     fail-fast, provider-secret env scrub, best-effort output/diff/error redaction, heuristic
@@ -233,10 +242,10 @@ Notes:
     `SessionEvent::LoopUpdated`, emits `AgentEvent::LoopUpdated` and `LoopContinued`, resets the
     round count, and pushes one continuation turn (max 4). `Cancel`, `Quit`, `Reset`, a queued
     recovery turn, and headless one-shots opt out. `meerai_session::last_loop` restores the state in
-    `build_agent` and in host `register_opened`. `/loop` (or `/goal`) opens a read-only Loop panel
+    `build_agent` and in host `register_opened`. `/loop` opens a read-only Loop panel
     in both clients; `LoopUpdated` mirrors the state to the tab, the host record, and the browser.
-    Both clients accept `@goal` as an alias for `@skill/goal`; `orchestrate` uses
-    `@skill/orchestrate`.
+    Both clients accept `@goal` and `@orchestrate` as aliases for `@skill/goal`
+    and `@skill/orchestrate`.
 22. **ACP client (M13, agy):** `--acp` drives `agy acp`; `/acp` opens a new tab; `acp doctor`
     prints the handshake. `AcpWorker` maps `AcpEvent` to `AgentEvent` and `SessionEvent`, sets
     `harness: acp:agy`/`remote_session_id`, and uses `session/load` for resume. Pre-`Connected`
@@ -409,6 +418,7 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 
 | Touched | Required gate |
 | :--- | :--- |
+| `meerai-input` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-input` |
 | `meerai-core` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-core` |
 | `meerai-macros` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-macros` |
 | `meerai-common` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-common` |
@@ -591,12 +601,18 @@ Detail in [`infra.md`](infra.md). Summary:
 - TUI client seam: `WorkspaceQuery` supplies file listing and content search; the local
   implementation lives in `meerai-tui/src/workspace.rs` and is injectable through
   `TuiLaunchConfig::workspace_query`. Do not re-add `meerai-tools` to the TUI.
-- TUI input: the composer and the queued-edit dialog are the only multi-line editors. Both wrap
-  visually; `Up`/`Down` move across wrapped display rows and keep the goal column, and cursor
-  placement must map display columns through mention chips (`composer_row`,
-  `composer_vertical_move`, `queued_editor_vertical`). Composer height uses the same wrap
-  (`composer_rows`) so word-wrapped rows are never clipped. All other modal fields are
-  single-line append/backspace inputs without a movable cursor.
+- TUI and browser input: `meerai-input::TextInput` is the shared multiline model (cursor,
+  selection, word/line motion, paste, visual wrapping, row/column mapping). The composer, question
+  `Other`, approval reason, queued edit, subagent task, and every other modal text field use it
+  through `handle_text_key`; the browser aliases its `TextBuffer` to the same type. The composer
+  still maps display columns through mention chips (`composer_row`, `composer_vertical_move`).
+  Modal fields draw wrapped text with `render_text_block` and show the cursor only when focused.
+  Do not add a new modal with a `String` text field or an append-only editor.
+- Diff review: the diff modal lists changed files and shows each file's available
+  action from the git index and working-tree flags. `s` stages the current file,
+  `u` unstages it, and the browser shows per-file Stage/Unstage buttons through
+  `POST /api/workspace/stage`. Both clients refresh the file list and keep the
+  same path selected when it still has changes.
 - Running work: the statusline shows clickable `N agents` and `N shells` counters for running
   work only. They open `ActiveModal::Runs`; a row opens the agent conversation as a full
   transcript-area overlay or the shell command, status, and output, without expanding the

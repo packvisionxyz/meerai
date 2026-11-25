@@ -21,6 +21,11 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
         "Fork the session at the latest closed turn into a new tab",
         false,
     ),
+    (
+        "/btw",
+        "Open a read-only side session seeded from this history",
+        true,
+    ),
     ("/acp", "Start an ACP session (agy)", false),
     ("/close", "Close the current session tab", false),
     ("/auth", "Show active credential sources", false),
@@ -61,10 +66,9 @@ pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
     ),
     (
         "/loop",
-        "Show the active loop checklist (or use @goal <instruction>)",
+        "Show the active loop checklist (or use @goal / @orchestrate <instruction>)",
         false,
     ),
-    ("/goal", "Alias for /loop", false),
     (
         "/search",
         "Search files by name or content (ripgrep)",
@@ -636,9 +640,13 @@ fn build_definition_candidates(
     let mut scored: Vec<(MatchRank, CompletionItem)> = entries
         .iter()
         .filter_map(|entry| {
-            let alias = kind == CompletionItemKind::Skill && entry.id == "goal";
+            let alias = kind == CompletionItemKind::Skill
+                && matches!(entry.id.as_str(), "goal" | "orchestrate");
             let search = if alias {
-                format!("goal @goal {}", entry.id)
+                format!(
+                    "{} @{} @skill/{} {}",
+                    entry.id, entry.id, entry.id, entry.id
+                )
             } else {
                 format!("{keyword}/{} {} {keyword}", entry.id, entry.id)
             };
@@ -649,7 +657,7 @@ fn build_definition_candidates(
                     label: entry.id.clone(),
                     description: entry.description.clone(),
                     insert_text: if alias {
-                        "@goal ".to_string()
+                        format!("@{} ", entry.id)
                     } else {
                         format!("@{keyword}/{} ", entry.id)
                     },
@@ -874,7 +882,7 @@ mod tests {
         assert_eq!(items[1].item_kind, CompletionItemKind::Skill);
         assert_eq!(items[1].item_kind.badge(), Some("skill"));
         assert!(items[1].description.contains(".claude"));
-        assert_eq!(items[1].insert_text, "@skill/orchestrate ");
+        assert_eq!(items[1].insert_text, "@orchestrate ");
 
         let file = items
             .iter()
@@ -949,16 +957,19 @@ mod tests {
     }
 
     #[test]
-    fn goal_skill_completes_with_the_bare_alias() {
-        let ws = TempWorkspace::new("goal_alias");
+    fn builtin_skills_complete_with_bare_aliases() {
+        let ws = TempWorkspace::new("skill_aliases");
         let mut engine = CompletionEngine::new(ws.root.clone());
         engine.set_definitions(
             &[],
-            &[skill_definition(
-                "goal",
-                DefinitionSource::Builtin,
-                Some("Run a goal loop"),
-            )],
+            &[
+                skill_definition("goal", DefinitionSource::Builtin, Some("Run a goal loop")),
+                skill_definition(
+                    "orchestrate",
+                    DefinitionSource::Builtin,
+                    Some("Run an orchestration loop"),
+                ),
+            ],
         );
 
         engine.update("@goal", 5);
@@ -969,6 +980,15 @@ mod tests {
         let (accepted, cursor) = engine.accept("@goal", 5).unwrap();
         assert_eq!(accepted, "@goal ");
         assert_eq!(cursor, 6);
+
+        engine.update("@orchestrate", 12);
+        assert_eq!(engine.items()[0].label, "orchestrate");
+        assert_eq!(engine.items()[0].item_kind, CompletionItemKind::Skill);
+        assert_eq!(engine.items()[0].insert_text, "@orchestrate ");
+
+        let (accepted, cursor) = engine.accept("@orchestrate", 12).unwrap();
+        assert_eq!(accepted, "@orchestrate ");
+        assert_eq!(cursor, 13);
     }
 
     #[test]

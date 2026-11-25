@@ -1202,28 +1202,27 @@ fn queued_edit_modal_edits_at_the_cursor() {
     app.tab_mut().queued = vec!["first task".to_string()];
     app.modal = Some(ActiveModal::QueuedEdit {
         index: 0,
-        input: "first task".to_string(),
-        cursor: 5,
+        input: TextInput::with_cursor("first task", 5),
         error: None,
     });
 
     type_text(&mut app, "!");
-    let Some(ActiveModal::QueuedEdit { input, cursor, .. }) = &app.modal else {
+    let Some(ActiveModal::QueuedEdit { input, .. }) = &app.modal else {
         panic!("queued edit modal should stay open");
     };
     assert_eq!(input, "first! task");
-    assert_eq!(*cursor, 6);
+    assert_eq!(input.cursor, 6);
 
     app.handle_key_event(key(KeyCode::Backspace));
     app.handle_key_event(key(KeyCode::End));
     type_text(&mut app, " done");
     app.handle_key_event(key(KeyCode::Home));
     app.handle_key_event(key(KeyCode::Delete));
-    let Some(ActiveModal::QueuedEdit { input, cursor, .. }) = &app.modal else {
+    let Some(ActiveModal::QueuedEdit { input, .. }) = &app.modal else {
         panic!("queued edit modal should stay open");
     };
     assert_eq!(input, "irst task done");
-    assert_eq!(*cursor, 0);
+    assert_eq!(input.cursor, 0);
 
     app.handle_key_event(key(KeyCode::Enter));
     assert!(app.modal.is_none());
@@ -1236,8 +1235,7 @@ fn queued_edit_modal_inserts_a_newline_with_alt_enter() {
     app.tab_mut().queued = vec!["first".to_string()];
     app.modal = Some(ActiveModal::QueuedEdit {
         index: 0,
-        input: "first".to_string(),
-        cursor: 5,
+        input: TextInput::with_cursor("first", 5),
         error: None,
     });
 
@@ -1256,8 +1254,7 @@ fn queued_edit_modal_tracks_drained_queue_indices() {
     app.tab_mut().queued = vec!["first".to_string(), "second".to_string()];
     app.modal = Some(ActiveModal::QueuedEdit {
         index: 1,
-        input: "second".to_string(),
-        cursor: 6,
+        input: TextInput::with_cursor("second", 6),
         error: None,
     });
 

@@ -72,7 +72,7 @@ impl AppState {
             .unwrap_or_default();
         self.modal = Some(ActiveModal::Sampling {
             effort,
-            temperature,
+            temperature: temperature.into(),
             field,
             error: None,
         });
@@ -349,6 +349,12 @@ impl AppState {
                 });
             }
             "/mode" => {
+                if self.tab().ephemeral {
+                    self.tab_mut().transcript.push(TranscriptEntry::System {
+                        text: "btw is read-only".to_string(),
+                    });
+                    return;
+                }
                 let tab = self.tab_mut();
                 tab.auto_follow = true;
                 if arg.is_empty() {
@@ -409,6 +415,22 @@ impl AppState {
                     self.status_notice = Some("No closed turn to fork".to_string());
                 }
             }
+            "/btw" => {
+                if self.session_opener.is_none() {
+                    self.status_notice = Some("btw needs an open session".to_string());
+                } else if self.tab().is_acp() {
+                    self.status_notice =
+                        Some("btw needs a native session (ACP keeps its own history)".to_string());
+                } else {
+                    let session_id = self.tab().session_id.clone();
+                    self.pending_session_actions
+                        .push(PendingSessionAction::BtwSession {
+                            session_id,
+                            text: arg.to_string(),
+                        });
+                    self.status_notice = Some("Opening btw...".to_string());
+                }
+            }
             "/reload" => {
                 self.pending_reload = true;
                 self.status_notice = Some("Reloading configuration...".to_string());
@@ -446,8 +468,8 @@ impl AppState {
                     });
                 } else {
                     self.modal = Some(ActiveModal::ServeDialog {
-                        port_input: String::new(),
-                        secret_input: String::new(),
+                        port_input: TextInput::default(),
+                        secret_input: TextInput::default(),
                         editing_secret: false,
                         error: None,
                         busy: false,
@@ -480,7 +502,7 @@ impl AppState {
                 }));
                 let _ = self.tab().cmd_tx.send(AgentCommand::InspectContext);
             }
-            "/goal" | "/loop" => {
+            "/loop" => {
                 let state = self.tab().loop_state.clone();
                 self.modal = Some(ActiveModal::Loop { state, scroll: 0 });
             }
@@ -561,16 +583,16 @@ impl AppState {
             },
             "/vault-reset" | "/vault" => {
                 self.modal = Some(ActiveModal::VaultReset {
-                    input: String::new(),
+                    input: TextInput::default(),
                     error: None,
                 });
             }
             "/subagent" | "/subagents" => {
                 if arg.is_empty() {
-                    self.modal = Some(ActiveModal::SubagentSpawn(SubagentSpawnPanel {
-                        agent: "explore".to_string(),
+                    self.modal = Some(ActiveModal::SubagentSpawn(Box::new(SubagentSpawnPanel {
+                        agent: TextInput::new("explore"),
                         ..SubagentSpawnPanel::default()
-                    }));
+                    })));
                 } else {
                     match parse_host_action(command) {
                         Some(action) => self.queue_host_action(action),
@@ -623,7 +645,7 @@ impl AppState {
             .collect();
         let has_opener = self.session_opener.is_some();
         self.modal = Some(ActiveModal::SessionSelect {
-            filter: String::new(),
+            filter: TextInput::default(),
             selected: 0,
             sessions: open_summaries,
             loading: has_opener,
@@ -814,8 +836,9 @@ fn format_help_text() -> String {
             "/temperature" => "/temperature [0.0..2.0|default]".to_string(),
             "/agent" => "/agent <id> (or @agent/<id>)".to_string(),
             "/skill" => "/skill <id> (or @skill/<id>)".to_string(),
-            "/goal" | "/loop" => "/loop (or /goal, @goal <instruction>)".to_string(),
+            "/loop" => "/loop (or @goal / @orchestrate <instruction>)".to_string(),
             "/mode" => "/mode [plan|ask|auto]".to_string(),
+            "/btw" => "/btw [question] (read-only side session with this history)".to_string(),
             "/search" => "/search [query]".to_string(),
             "/grep" => "/grep [query]".to_string(),
             "/diff" => "/diff [path]".to_string(),
@@ -928,11 +951,13 @@ pub(crate) fn parse_mention_token(text: &str, start: usize) -> Option<(MentionKi
     } else if let Some(rest) = rest.strip_prefix("skill/") {
         (MentionKind::Skill, rest)
     } else {
-        let after = rest.strip_prefix("goal")?;
+        let (id, after) = ["orchestrate", "goal"]
+            .into_iter()
+            .find_map(|id| rest.strip_prefix(id).map(|after| (id, after)))?;
         if after.chars().next().is_some_and(is_mention_id_char) {
             return None;
         }
-        return Some((MentionKind::Skill, "goal", start + 5));
+        return Some((MentionKind::Skill, id, start + 1 + id.len()));
     };
     let id_len = rest
         .char_indices()

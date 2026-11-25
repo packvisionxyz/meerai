@@ -2683,6 +2683,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerai-input"
+version = "0.2.0"
+
+[[package]]
 name = "meerai-macros"
 version = "0.3.0"
 dependencies = [
@@ -2858,11 +2862,13 @@ dependencies = [
  "comrak",
  "crossterm",
  "futures",
+ "git2",
  "meerai-agents",
  "meerai-client",
  "meerai-common",
  "meerai-core",
  "meerai-host",
+ "meerai-input",
  "meerai-policy",
  "meerai-session",
  "meerai-skills",
@@ -2914,6 +2920,7 @@ dependencies = [
  "comrak",
  "js-sys",
  "leptos",
+ "meerai-input",
  "meerai-web-protocol",
  "serde_json",
  "wasm-bindgen",

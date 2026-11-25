@@ -7,6 +7,7 @@ mod reload;
 mod runs;
 #[cfg(test)]
 mod tests;
+mod text_input;
 
 pub(crate) use commands::{MentionKind, mention_is_known, parse_mention_token};
 pub use events::{session_usage_from_events, transcript_from_events, user_turn_map};
@@ -31,6 +32,7 @@ use meerai_common::definitions::{AgentDefinition, SkillDefinition};
 use meerai_common::settings::{AppSettings, EffortLevel};
 use meerai_core::text::truncate_single_line;
 use meerai_host::{SessionRegistry, WebServerHandle, WebServerLauncher};
+use meerai_input::TextInput;
 use meerai_policy::ApprovalMode;
 pub use meerai_policy::{approval_mode_badge, approval_mode_label, parse_approval_mode};
 use meerai_session::{LoggedEvent, SessionId, SessionSummary};
@@ -75,7 +77,7 @@ pub struct ContextPanel {
     pub scroll: usize,
     pub selected_turn: usize,
     pub selected_blob: usize,
-    pub focus_input: Option<String>,
+    pub focus_input: Option<TextInput>,
     pub blob_key: Option<String>,
     pub blob_content: Option<String>,
     pub blob_scroll: usize,
@@ -84,23 +86,24 @@ pub struct ContextPanel {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SubagentSpawnPanel {
-    pub name: String,
-    pub agent: String,
-    pub task: String,
-    pub model: String,
+    pub name: TextInput,
+    pub agent: TextInput,
+    pub task: TextInput,
+    pub model: TextInput,
     pub mode: Option<ApprovalMode>,
-    pub steps: String,
-    pub tokens: String,
-    pub cost: String,
-    pub tools: String,
+    pub steps: TextInput,
+    pub tokens: TextInput,
+    pub cost: TextInput,
+    pub tools: TextInput,
     pub field: usize,
     pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum ActiveModal {
     ProviderSelect {
-        filter: String,
+        filter: TextInput,
         selected: usize,
     },
     AuthMethodSelect {
@@ -118,21 +121,21 @@ pub enum ActiveModal {
         provider_id: String,
         provider_name: String,
         url: Option<String>,
-        input: String,
+        input: TextInput,
         error: Option<String>,
         busy: bool,
     },
     ApiKeyInput {
         provider_id: String,
         provider_name: String,
-        api_key: String,
-        base_url: String,
+        api_key: TextInput,
+        base_url: TextInput,
         editing_base_url: bool,
         existing_key_status: KeyStatus,
         error: Option<String>,
     },
     ModelInput {
-        input: String,
+        input: TextInput,
         selected: Option<usize>,
         error: Option<String>,
     },
@@ -143,7 +146,7 @@ pub enum ActiveModal {
         list: DiffListState,
     },
     Search {
-        query: String,
+        query: TextInput,
         mode: SearchMode,
         workspace_files: Vec<String>,
         results: Vec<SearchMatch>,
@@ -152,13 +155,13 @@ pub enum ActiveModal {
     },
     Approval {
         queue: Vec<ApprovalRequest>,
-        reason: String,
+        reason: TextInput,
         editing_reason: bool,
     },
     Question {
         request: QuestionRequest,
         answers: Vec<Vec<usize>>,
-        custom: Vec<String>,
+        custom: Vec<TextInput>,
         editing_custom: bool,
         current: usize,
         focus: usize,
@@ -184,14 +187,14 @@ pub enum ActiveModal {
         selected: usize,
     },
     SessionSelect {
-        filter: String,
+        filter: TextInput,
         selected: usize,
         sessions: Vec<SessionSummary>,
         loading: bool,
         error: Option<String>,
     },
     CommandPalette {
-        filter: String,
+        filter: TextInput,
         selected: usize,
     },
     UserMessageActions {
@@ -199,16 +202,15 @@ pub enum ActiveModal {
         selected: usize,
     },
     ServeDialog {
-        port_input: String,
-        secret_input: String,
+        port_input: TextInput,
+        secret_input: TextInput,
         editing_secret: bool,
         error: Option<String>,
         busy: bool,
     },
     QueuedEdit {
         index: usize,
-        input: String,
-        cursor: usize,
+        input: TextInput,
         error: Option<String>,
     },
     Context(ContextPanel),
@@ -237,14 +239,14 @@ pub enum ActiveModal {
         loading: bool,
         error: Option<String>,
     },
-    SubagentSpawn(SubagentSpawnPanel),
+    SubagentSpawn(Box<SubagentSpawnPanel>),
     VaultReset {
-        input: String,
+        input: TextInput,
         error: Option<String>,
     },
     Sampling {
         effort: Option<EffortLevel>,
-        temperature: String,
+        temperature: TextInput,
         field: usize,
         error: Option<String>,
     },
@@ -304,6 +306,10 @@ pub enum PendingSessionAction {
         session_id: SessionId,
         turn: Option<TurnId>,
         draft: String,
+    },
+    BtwSession {
+        session_id: SessionId,
+        text: String,
     },
     DeleteSession {
         session_id: SessionId,
@@ -673,6 +679,7 @@ pub struct ThinkingHitZone {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum TranscriptEntry {
     User {
         text: String,
@@ -762,6 +769,7 @@ pub struct SessionTab {
     pub active_provider: String,
     pub model: String,
     pub approval_mode: ApprovalMode,
+    pub ephemeral: bool,
     pub input: String,
     pub cursor: usize,
     pub transcript: Vec<TranscriptEntry>,
@@ -811,6 +819,7 @@ impl SessionTab {
             active_provider: canonical_provider_id(&active_provider.into()),
             model: model.into(),
             approval_mode,
+            ephemeral: false,
             input: String::new(),
             cursor: 0,
             transcript: Vec::new(),
@@ -1416,7 +1425,6 @@ pub struct AppState {
     pub composer_selection: Option<(usize, usize)>,
     pub(super) composer_goal_col: Option<usize>,
     pub queued_editor_width: u16,
-    pub(super) queued_editor_goal_col: Option<usize>,
     pub queued_band_area: Rect,
     pub queued_hit_zones: Vec<QueuedHitZone>,
     pub hovered_queued: Option<QueuedHitKind>,
@@ -1495,12 +1503,12 @@ impl AppState {
 
         let modal = if let Some(selected) = missing_key_idx {
             Some(ActiveModal::ProviderSelect {
-                filter: String::new(),
+                filter: TextInput::default(),
                 selected,
             })
         } else if model.trim().is_empty() {
             Some(ActiveModal::ModelInput {
-                input: String::new(),
+                input: TextInput::default(),
                 selected: None,
                 error: None,
             })
@@ -1597,7 +1605,6 @@ impl AppState {
             composer_selection: None,
             composer_goal_col: None,
             queued_editor_width: 0,
-            queued_editor_goal_col: None,
             queued_band_area: Rect::default(),
             queued_hit_zones: Vec::new(),
             hovered_queued: None,
@@ -1712,14 +1719,21 @@ impl AppState {
         if !self.tab_persistence {
             return;
         }
-        let ids: Vec<SessionId> = self.tabs.iter().map(|tab| tab.session_id.clone()).collect();
+        let ids: Vec<SessionId> = self
+            .tabs
+            .iter()
+            .filter(|tab| !tab.ephemeral)
+            .map(|tab| tab.session_id.clone())
+            .collect();
+        let active_id = self.tab().session_id.clone();
+        let active = ids.iter().position(|id| id == &active_id).unwrap_or(0);
         if let Ok(store) =
             meerai_common::settings::open_store_for_config_dir(self.config_dir.as_deref())
         {
             crate::tabs::save(
                 &store,
                 &ids,
-                self.active_tab,
+                active,
                 &self.workspace_root,
                 self.persistable_empty_session().as_ref(),
             );
@@ -1729,7 +1743,7 @@ impl AppState {
     fn persistable_empty_session(&self) -> Option<SessionId> {
         self.tabs
             .iter()
-            .find(|tab| tab.is_empty_session())
+            .find(|tab| !tab.ephemeral && tab.is_empty_session())
             .map(|tab| tab.session_id.clone())
             .or_else(|| self.closed_empty_session.clone())
     }
@@ -1795,7 +1809,7 @@ impl AppState {
             let queue = std::mem::take(&mut self.tabs[index].pending_approvals);
             self.modal = Some(ActiveModal::Approval {
                 queue,
-                reason: String::new(),
+                reason: TextInput::default(),
                 editing_reason: false,
             });
         }
@@ -1869,10 +1883,10 @@ impl AppState {
         }
 
         let removed = self.tabs.remove(index);
-        if removed.is_empty_session() {
+        if !removed.ephemeral && removed.is_empty_session() {
             self.closed_empty_session = Some(removed.session_id.clone());
         }
-        if self.registry.is_some() {
+        if self.registry.is_some() && !removed.ephemeral {
             self.pending_session_actions
                 .push(PendingSessionAction::CloseSession {
                     session_id: removed.session_id,
@@ -1899,7 +1913,7 @@ impl AppState {
             let queue = std::mem::take(&mut self.tabs[self.active_tab].pending_approvals);
             self.modal = Some(ActiveModal::Approval {
                 queue,
-                reason: String::new(),
+                reason: TextInput::default(),
                 editing_reason: false,
             });
         }
@@ -1935,6 +1949,7 @@ impl AppState {
             opened.cmd_tx,
         );
         tab.backend = opened.backend;
+        tab.ephemeral = opened.transient;
         tab.transcript = transcript_from_events(&opened.events);
         tab.user_turns = user_turn_map(&tab.transcript, &opened.events);
         tab.seed_usage_from_events(&opened.events);

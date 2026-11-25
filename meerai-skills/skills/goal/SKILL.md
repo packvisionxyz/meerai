@@ -12,7 +12,7 @@ Call `loop-plan` with:
 - **Constraints** — frozen decisions, owned resources, budgets, and things you
   must not change.
 - **Items** — 3–8 ordered actions. Each item has one action and one expected
-  observation.
+  observation. Add a review item when a human must approve the result.
 
 If two readings of the request would produce different work, ask one question
 with `question-ask` now. Do not guess.
@@ -42,6 +42,23 @@ Call `loop-adjust` with one status:
 Add newly discovered items in the same `loop-adjust` call. For a wrong plan,
 call `loop-plan` again and pass the `id` of every item that stays; its action,
 observation, and status are preserved.
+
+## 5. Human review
+
+Some items need a human decision, not more work. Add a review item when:
+
+- The item is an irreversible or external action.
+- The item is a customer-facing or published artifact.
+- The item changes a frozen decision or a shared contract.
+- The request names an approver.
+
+The action is to ask the human. Call `question-ask` with a clear approve or
+revise choice. The observation is the exact answer. Record it with
+`loop-observe`. Do not mark the item done until the answer approves it. When the
+answer asks for changes, keep the item open and add the requested work.
+
+A review from a subagent is not a human review. If no human is available, stop
+and report the open review item.
 
 ## Rules
 

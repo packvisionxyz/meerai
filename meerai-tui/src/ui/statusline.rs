@@ -15,10 +15,8 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
         Block::default().style(Style::default().bg(theme::p().surface)),
         area,
     );
-    app.update_hit = None;
     app.runs_hits.clear();
     app.web_server_hit = None;
-    let mut update_hit: Option<Rect> = None;
     let mut runs_hits: Vec<(Rect, RunKind)> = Vec::new();
     let mut web_server_hit: Option<Rect> = None;
     let mut triggers: Vec<(usize, StatusHitKind)> = Vec::new();
@@ -81,18 +79,6 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
         }
     }
 
-    if let Some(latest) = app.update_available.clone() {
-        let label = format!(" · update v{latest} (/update)");
-        let offset: usize = spans.iter().map(|span| span.content.chars().count()).sum();
-        let width = label.chars().count() as u16;
-        let x = area.x.saturating_add(offset as u16);
-        if x.saturating_add(width) <= area.x.saturating_add(area.width) {
-            update_hit = Some(Rect::new(x, area.y, width, 1));
-            triggers.push((spans.len(), StatusHitKind::Update));
-            spans.push(Span::styled(label, Style::default().fg(theme::p().warning)));
-        }
-    }
-
     if let Some(server) = app.web_server.clone() {
         let label = format!(" · web :{}", server.port);
         let offset: usize = spans.iter().map(|span| span.content.chars().count()).sum();
@@ -140,35 +126,8 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
             format!(" · {notice}"),
             Style::default().fg(color),
         ));
-    } else {
-        let hint = if tab.is_running {
-            let cancel = crate::app::ctrl_label('c');
-            let steer = crate::app::ctrl_label('g');
-            let palette = crate::app::ctrl_label('p');
-            if tab.queued.is_empty() {
-                format!(" · {cancel} cancel · {steer} send now · {palette} commands")
-            } else {
-                format!(" · {cancel} cancel · {steer} send queued · {palette} commands")
-            }
-        } else {
-            match app.mode {
-                InputMode::Insert => {
-                    if app.completion.is_active() {
-                        " · Tab/Enter accept · Esc dismiss".to_string()
-                    } else {
-                        format!(" · {} commands · Esc normal", crate::app::ctrl_label('p'))
-                    }
-                }
-                InputMode::Normal => format!(
-                    " · {} commands · i insert · / search · q quit",
-                    crate::app::ctrl_label('p')
-                ),
-            }
-        };
-        spans.push(Span::styled(hint, Style::default().fg(theme::p().faint)));
     }
 
-    app.update_hit = update_hit;
     app.runs_hits = runs_hits;
     app.web_server_hit = web_server_hit;
     let hovered_status = app.hovered_status;

@@ -179,6 +179,8 @@ pub struct LiveSessionSummary {
     pub turn_started_at_ms: Option<u64>,
     pub user_shell_running: bool,
     #[serde(default)]
+    pub transient: bool,
+    #[serde(default)]
     pub shell_runs: Vec<LiveShellRun>,
 }
 
@@ -553,6 +555,7 @@ impl SessionRegistry {
             active_tool: None,
             turn_started_at_ms: None,
             user_shell_running: false,
+            transient: opened.transient,
             shell_runs: Vec::new(),
         };
 
@@ -1240,7 +1243,7 @@ impl SessionRegistry {
             if record.summary.status != SessionStatus::Idle {
                 return Err(HostError::Busy);
             }
-            record.summary.provider = provider;
+            record.summary.provider = provider.clone();
             record.summary.model = display_model.clone();
             let summary = record.summary.clone();
             let cmd_tx = record.cmd_tx.clone();
@@ -1253,6 +1256,7 @@ impl SessionRegistry {
         cmd_tx
             .send(AgentCommand::SetModel {
                 model: command_model,
+                provider: Some(provider),
                 context_window_tokens,
                 effort_levels,
             })
@@ -2833,6 +2837,7 @@ mod tests {
             provider: "gemini".to_string(),
             model: "gemini-3.8-flash".to_string(),
             approval_mode: ApprovalMode::Ask,
+            transient: false,
             events,
             cmd_tx,
             event_rx,

@@ -28,6 +28,7 @@ pub(super) fn make_opened_session(
         provider: "gemini".to_string(),
         model: "gemini-3.8-flash".to_string(),
         approval_mode: ApprovalMode::Ask,
+        transient: false,
         events,
         cmd_tx,
         event_rx,
@@ -402,11 +403,51 @@ fn clicking_the_tab_close_button_closes_without_deleting_the_session() {
 }
 
 #[test]
+fn transient_opened_session_is_marked_read_only_and_does_not_replace_the_empty_tab() {
+    let (mut app, _rx, _secrets) = test_app();
+    let parent = app.tab().session_id.clone();
+    let (mut opened, _event_rx) = make_opened_session("ses-btw", Some("btw"), Vec::new());
+    opened.transient = true;
+
+    app.apply_opened_session(opened, SessionOpenMode::NewTab);
+
+    assert_eq!(app.tabs().len(), 2);
+    assert!(app.tab().ephemeral);
+    assert_eq!(app.tab().display_title(), "btw");
+    assert_eq!(app.tabs[0].session_id, parent);
+
+    app.cycle_approval_mode();
+    assert_eq!(app.tab().approval_mode, ApprovalMode::Ask);
+    assert_eq!(app.status_notice.as_deref(), Some("btw is read-only"));
+}
+
+#[test]
+fn btw_tab_keeps_the_question_it_was_opened_with() {
+    let (mut app, _rx, _secrets) = test_app();
+    let (mut opened, _event_rx) = make_opened_session("ses-btw", Some("btw"), Vec::new());
+    opened.transient = true;
+
+    let (tab_id, _) = app
+        .apply_opened_session(opened, SessionOpenMode::NewTab)
+        .unwrap();
+    let idx = app.tab_index_by_id(tab_id).unwrap();
+    app.tabs[idx].seed_user_prompt("what changed?".to_string());
+
+    assert_eq!(
+        app.tabs[idx].transcript,
+        vec![TranscriptEntry::User {
+            text: "what changed?".to_string(),
+        }]
+    );
+    assert!(app.tabs[idx].is_running);
+}
+
+#[test]
 fn session_picker_deletes_after_a_second_ctrl_d() {
     let (mut app, _rx, _secrets) = test_app();
     let summary = make_session_summary("ses-delete", Some("Old task"), 10, None);
     app.modal = Some(ActiveModal::SessionSelect {
-        filter: String::new(),
+        filter: TextInput::default(),
         selected: 0,
         sessions: vec![summary.clone()],
         loading: false,
@@ -432,7 +473,7 @@ fn session_picker_deletes_an_open_session_without_asking_to_close_the_tab() {
     let _ = app.apply_opened_session(opened, SessionOpenMode::NewTab);
     let summary = make_session_summary("ses-open", Some("Open"), 10, None);
     app.modal = Some(ActiveModal::SessionSelect {
-        filter: String::new(),
+        filter: TextInput::default(),
         selected: 0,
         sessions: vec![summary.clone()],
         loading: false,

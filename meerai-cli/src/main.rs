@@ -522,9 +522,11 @@ async fn main() -> Result<()> {
         bail!("this build has no TUI support; use --prompt \"...\" for headless mode");
     }
 
-    let active_provider = cli
+    let env_provider = non_empty_env("MEERAI_PROVIDER");
+    let explicit_provider = cli.provider.is_some() || env_provider.is_some();
+    let mut active_provider = cli
         .provider
-        .or_else(|| non_empty_env("MEERAI_PROVIDER"))
+        .or(env_provider)
         .or_else(|| settings.active_provider.clone())
         .or_else(|| first_configured_provider(&catalog, secrets.as_ref()))
         .map(|p| canonical_provider_id(&p))
@@ -535,10 +537,13 @@ async fn main() -> Result<()> {
     if let Some(warning) = agent_model_warning {
         eprintln!("Warning: {warning}");
     }
+    let env_model = non_empty_env("MEERAI_MODEL");
+    let explicit_model =
+        cli.model.is_some() || env_model.is_some() || agent_model.as_deref().is_some();
 
-    let active_model = pick_model(
+    let mut active_model = pick_model(
         cli.model.as_deref(),
-        non_empty_env("MEERAI_MODEL").as_deref(),
+        env_model.as_deref(),
         agent_model.as_deref(),
         settings.active_model.as_deref(),
     )
@@ -644,8 +649,46 @@ async fn main() -> Result<()> {
     } else {
         Session::open_or_create(&session_config, SessionId::new(), workspace_root.clone()).await?
     };
-    if !active_model.trim().is_empty() {
-        session.set_model(&active_model).await?;
+    let stored = session.meta();
+    let session_is_acp = stored.harness.as_deref() == Some("acp:agy");
+    if !session_is_acp {
+        if !explicit_provider
+            && let Some(provider) = stored
+                .provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|provider| !provider.is_empty())
+        {
+            active_provider = canonical_provider_id(provider);
+        }
+        if !explicit_model
+            && let Some(model) = stored
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+        {
+            active_model = model.to_string();
+        }
+        if !explicit_model
+            && explicit_provider
+            && let Ok(rt) = runtime.read()
+        {
+            active_model = settings
+                .provider_model(&active_provider)
+                .map(str::to_string)
+                .or_else(|| rt.catalog.default_model_for_provider(&active_provider))
+                .unwrap_or(active_model);
+        }
+        session.set_provider(&active_provider).await?;
+        if !active_model.trim().is_empty() {
+            session.set_model(&active_model).await?;
+        }
+        if let Ok(mut rt) = runtime.write() {
+            rt.active_provider = active_provider.clone();
+        }
+        settings.active_provider = Some(active_provider.clone());
+        settings.active_model = (!active_model.trim().is_empty()).then(|| active_model.clone());
     }
     let approval_mode = if cli.mode.is_some() {
         approval_mode
@@ -661,7 +704,6 @@ async fn main() -> Result<()> {
     prune_empty_sessions(session.id(), &restore_ids).await;
     auto_prune_sessions(&settings, session.id(), &restore_ids).await;
 
-    let session_is_acp = session.meta().harness.as_deref() == Some("acp:agy");
     let use_acp = cli.acp || session_is_acp;
     if use_acp && matches!(approval_mode, ApprovalMode::Plan) {
         bail!("ACP cannot run in plan mode; the external agent cannot be made read-only");
@@ -834,6 +876,7 @@ async fn main() -> Result<()> {
             provider: active_provider.clone(),
             model: active_model.clone(),
             approval_mode,
+            transient: false,
             events,
             cmd_tx,
             event_rx,
@@ -1250,6 +1293,48 @@ fn split_session_model(
     (current_provider.to_string(), raw.to_string())
 }
 
+fn resolve_session_model(
+    catalog: Option<&ProviderCatalog>,
+    runtime_provider: &str,
+    settings: &AppSettings,
+    default_provider: &str,
+    default_model: &str,
+    meta_provider: Option<&str>,
+    meta_model: Option<&str>,
+) -> (String, String) {
+    let pinned = meta_provider
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+        .map(canonical_provider_id)
+        .filter(|provider| catalog.is_none_or(|catalog| catalog.provider(provider).is_some()));
+    let use_pinned = pinned.is_some();
+    let provider = pinned.unwrap_or_else(|| runtime_provider.to_string());
+
+    if let Some(raw) = meta_model.map(str::trim).filter(|model| !model.is_empty()) {
+        if use_pinned {
+            let bare = raw
+                .split_once("::")
+                .map(|(_, model)| model.trim())
+                .unwrap_or(raw);
+            return (provider, bare.to_string());
+        }
+        if let Some(catalog) = catalog {
+            return split_session_model(catalog, &provider, raw);
+        }
+        if let Some((prefix, model)) = raw.split_once("::") {
+            return (canonical_provider_id(prefix), model.trim().to_string());
+        }
+        return (provider, raw.to_string());
+    }
+
+    let fallback = (provider == default_provider && !default_model.trim().is_empty())
+        .then(|| default_model.to_string())
+        .or_else(|| settings.provider_model(&provider).map(str::to_string))
+        .or_else(|| catalog.and_then(|catalog| catalog.default_model_for_provider(&provider)))
+        .unwrap_or_default();
+    (provider, fallback)
+}
+
 #[cfg(any(feature = "tui", feature = "web"))]
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
@@ -1304,38 +1389,31 @@ impl CliSessionHost {
             .and_then(|store| meerai_agents::load_memory_prompt(&store, &project_root, bytes))
     }
 
-    fn resolve_session_provider_model(&self, meta_model: Option<&str>) -> (String, String) {
-        let current_provider = self
-            .runtime
-            .read()
-            .map(|rt| rt.active_provider.clone())
-            .unwrap_or_else(|_| self.default_provider.clone());
-        if let Some(raw) = meta_model.map(str::trim).filter(|m| !m.is_empty()) {
-            let catalog = self.runtime.read().ok().map(|rt| rt.catalog.clone());
-            if let Some(catalog) = catalog {
-                return split_session_model(&catalog, &current_provider, raw);
+    fn resolve_session_provider_model(
+        &self,
+        meta_provider: Option<&str>,
+        meta_model: Option<&str>,
+    ) -> (String, String) {
+        let (catalog, runtime_provider) = {
+            let rt = self
+                .runtime
+                .read()
+                .ok()
+                .map(|rt| (rt.catalog.clone(), rt.active_provider.clone()));
+            match rt {
+                Some((catalog, provider)) => (Some(catalog), provider),
+                None => (None, self.default_provider.clone()),
             }
-            if let Some((prefix, model)) = raw.split_once("::") {
-                let provider = canonical_provider_id(prefix);
-                return (provider, model.trim().to_string());
-            }
-            return (current_provider, raw.to_string());
-        }
-        let fallback_model = if current_provider == self.default_provider {
-            self.default_model.clone()
-        } else {
-            self.settings
-                .provider_model(&current_provider)
-                .map(str::to_string)
-                .or_else(|| {
-                    self.runtime
-                        .read()
-                        .ok()
-                        .and_then(|rt| rt.catalog.default_model_for_provider(&current_provider))
-                })
-                .unwrap_or_else(|| self.default_model.clone())
         };
-        (current_provider, fallback_model)
+        resolve_session_model(
+            catalog.as_ref(),
+            &runtime_provider,
+            &self.settings,
+            &self.default_provider,
+            &self.default_model,
+            meta_provider,
+            meta_model,
+        )
     }
 
     fn build_agent(
@@ -1345,8 +1423,34 @@ impl CliSessionHost {
         model: &str,
         system: String,
     ) -> Result<MultiTurnAgent> {
+        self.build_agent_scoped(session, provider, model, system, false)
+    }
+
+    fn build_btw_agent(
+        &self,
+        session: Session,
+        provider: &str,
+        model: &str,
+        system: String,
+    ) -> Result<MultiTurnAgent> {
+        self.build_agent_scoped(session, provider, model, system, true)
+    }
+
+    fn build_agent_scoped(
+        &self,
+        session: Session,
+        provider: &str,
+        model: &str,
+        system: String,
+        read_only: bool,
+    ) -> Result<MultiTurnAgent> {
+        let mode = if read_only {
+            ApprovalMode::Plan
+        } else {
+            self.approval_mode
+        };
         let policy = build_policy(
-            self.approval_mode,
+            mode,
             self.settings.permissions.as_ref(),
             &self.workspace_root,
         )?;
@@ -1393,20 +1497,25 @@ impl CliSessionHost {
         if let Some(runtime) = self.script_runtime {
             sac = sac.with_runtime(runtime);
         }
-        let mut initial_tools = build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, false);
-        let store = self.store()?;
+        let mut initial_tools =
+            build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, read_only);
         let memory_project_root = find_project_root(&self.workspace_root);
-        initial_tools.push(Box::new(
-            MemoryToolset::new(store.clone(), &memory_project_root)
-                .with_source_session(Some(session.id().clone())),
-        ));
-        initial_tools.push(Box::new(QuestionToolset));
+        let memory_store = if read_only { None } else { Some(self.store()?) };
+        if let Some(store) = &memory_store {
+            initial_tools.push(Box::new(
+                MemoryToolset::new(store.clone(), &memory_project_root)
+                    .with_source_session(Some(session.id().clone())),
+            ));
+            initial_tools.push(Box::new(QuestionToolset));
+        }
         if self.skill_catalog.iter().any(|skill| skill.model_invocable) {
             initial_tools.push(Box::new(SkillToolset::new(self.skill_catalog.clone())));
         }
-        initial_tools.push(Box::new(
-            AcpRunToolset::new(Arc::new(CliAcpSpawner)).with_hooks(self.hooks.clone()),
-        ));
+        if !read_only {
+            initial_tools.push(Box::new(
+                AcpRunToolset::new(Arc::new(CliAcpSpawner)).with_hooks(self.hooks.clone()),
+            ));
+        }
         let subagent_factory: SubagentToolFactory = Arc::new(move |read_only| {
             build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, read_only)
         });
@@ -1422,19 +1531,32 @@ impl CliSessionHost {
         };
 
         let mut agent = MultiTurnAgent::new(self.client.clone(), model_spec, initial_tools, system);
-        let state = new_loop_handle();
-        if let Some(saved) = last_loop_state(&session) {
-            *state.lock() = saved;
+        agent.set_provider(canonical_provider_id(provider));
+        let mut config = self.harness_config(provider, model);
+        if read_only {
+            config.auto_memory = false;
         }
-        agent.set_loop_handle(state.clone());
-        agent.add_tool(LoopToolset::new(state.clone()));
-        agent.add_shared_interceptor(Arc::new(LoopInterceptor::new(state)));
-        agent.set_hooks(self.hooks.clone());
-        agent.set_memory_capture(MemoryCapture::new(
-            store,
-            &memory_project_root,
-            Some(session.id().clone()),
+        let routing = Arc::new(RoutingCoordinator::from_settings(
+            &config.routing,
+            DEFAULT_GLOBAL_CONCURRENCY,
         ));
+        if !read_only {
+            let state = new_loop_handle();
+            if let Some(saved) = last_loop_state(&session) {
+                *state.lock() = saved;
+            }
+            agent.set_loop_handle(state.clone());
+            agent.add_tool(LoopToolset::new(state.clone()));
+            agent.add_shared_interceptor(Arc::new(LoopInterceptor::new(state)));
+            agent.set_hooks(self.hooks.clone());
+            if let Some(store) = memory_store {
+                agent.set_memory_capture(MemoryCapture::new(
+                    store,
+                    &memory_project_root,
+                    Some(session.id().clone()),
+                ));
+            }
+        }
         agent.set_post_edit_diagnostics(
             self.settings
                 .context
@@ -1442,16 +1564,13 @@ impl CliSessionHost {
                 .and_then(|context| context.post_edit_diagnostics)
                 .unwrap_or(false),
         );
-        let subagent_tool = SubagentToolset::from_agent(&agent, subagent_factory.clone())
-            .with_hooks(self.hooks.clone())
-            .with_custom_agents(self.custom_agents.clone());
-        agent.add_tool(subagent_tool);
-        agent.set_subagent_support(subagent_factory, self.custom_agents.clone());
-        let config = self.harness_config(provider, model);
-        let routing = Arc::new(RoutingCoordinator::from_settings(
-            &config.routing,
-            DEFAULT_GLOBAL_CONCURRENCY,
-        ));
+        if !read_only {
+            let subagent_tool = SubagentToolset::from_agent(&agent, subagent_factory.clone())
+                .with_hooks(self.hooks.clone())
+                .with_custom_agents(self.custom_agents.clone());
+            agent.add_tool(subagent_tool);
+            agent.set_subagent_support(subagent_factory, self.custom_agents.clone());
+        }
         let plan_usage = config.plan_usage;
         if let Ok(mut runtime) = self.runtime.write() {
             runtime.active_provider = canonical_provider_id(provider);
@@ -1512,6 +1631,17 @@ impl CliSessionHost {
         provider: String,
         model: String,
     ) -> Result<OpenedSession> {
+        self.build_opened_session_with(session, provider, model, false)
+    }
+
+    #[cfg(any(feature = "tui", feature = "web"))]
+    fn build_opened_session_with(
+        &self,
+        session: Session,
+        provider: String,
+        model: String,
+        transient: bool,
+    ) -> Result<OpenedSession> {
         let meta = session.meta();
         if meta.harness.as_deref() == Some("acp:agy") {
             let start = meta
@@ -1522,13 +1652,21 @@ impl CliSessionHost {
             return self.build_acp_opened_session(session, start);
         }
         let events = session.events();
-        let agent = self.build_agent(session, &provider, &model, self.base_system.clone())?;
+        let approval_mode = if transient {
+            ApprovalMode::Plan
+        } else {
+            meta.approval_mode
+                .as_deref()
+                .and_then(parse_approval_mode)
+                .unwrap_or(self.approval_mode)
+        };
+        let mut agent = if transient {
+            self.build_btw_agent(session, &provider, &model, self.base_system.clone())?
+        } else {
+            self.build_agent(session, &provider, &model, self.base_system.clone())?
+        };
+        agent.set_permission_mode(approval_mode);
         let (cmd_tx, event_rx) = spawn_worker(agent);
-        let approval_mode = meta
-            .approval_mode
-            .as_deref()
-            .and_then(parse_approval_mode)
-            .unwrap_or(self.approval_mode);
         Ok(OpenedSession {
             session_id: meta.id,
             title: meta.title,
@@ -1536,6 +1674,7 @@ impl CliSessionHost {
             provider,
             model,
             approval_mode,
+            transient,
             events,
             cmd_tx,
             event_rx,
@@ -1567,6 +1706,7 @@ impl CliSessionHost {
             provider: "acp:agy".to_string(),
             model: "agy".to_string(),
             approval_mode,
+            transient: false,
             events,
             cmd_tx,
             event_rx,
@@ -1809,7 +1949,8 @@ impl SessionOpener for CliSessionHost {
         )
         .await?;
         let meta = session.meta();
-        let (provider, model) = self.resolve_session_provider_model(meta.model.as_deref());
+        let (provider, model) =
+            self.resolve_session_provider_model(meta.provider.as_deref(), meta.model.as_deref());
         self.build_opened_session(session, provider, model)
     }
 
@@ -1820,7 +1961,8 @@ impl SessionOpener for CliSessionHost {
             self.workspace_root.clone(),
         )
         .await?;
-        let (provider, model) = self.resolve_session_provider_model(None);
+        let (provider, model) = self.resolve_session_provider_model(None, None);
+        session.set_provider(&provider).await?;
         if !model.trim().is_empty() {
             session.set_model(&model).await?;
         }
@@ -1895,8 +2037,22 @@ impl SessionOpener for CliSessionHost {
             return self.build_acp_opened_session(forked, AcpStart::New);
         }
         let meta = forked.meta();
-        let (provider, model) = self.resolve_session_provider_model(meta.model.as_deref());
+        let (provider, model) =
+            self.resolve_session_provider_model(meta.provider.as_deref(), meta.model.as_deref());
         self.build_opened_session(forked, provider, model)
+    }
+
+    async fn btw_session(&self, id: &SessionId) -> Result<OpenedSession> {
+        let source = Session::stored_meta(&self.session_config, id).await?;
+        if source.harness.as_deref() == Some("acp:agy") {
+            bail!("btw needs a native session; ACP sessions keep their own history");
+        }
+        let session = Session::memory_fork(&self.session_config, id).await?;
+        let (provider, model) = self
+            .resolve_session_provider_model(source.provider.as_deref(), source.model.as_deref());
+        let mut opened = self.build_opened_session_with(session, provider, model, true)?;
+        opened.title = Some("btw".to_string());
+        Ok(opened)
     }
 
     async fn create_acp_session(&self, preset: &str) -> Result<OpenedSession> {

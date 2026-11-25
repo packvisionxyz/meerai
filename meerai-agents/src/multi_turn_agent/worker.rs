@@ -90,6 +90,7 @@ pub fn spawn_worker(
                         let mut pending_quit = false;
                         let mut pending_reset = false;
                         let mut pending_model: Option<String> = None;
+                        let mut pending_model_provider: Option<String> = None;
                         let mut pending_model_window: Option<u64> = None;
                         let mut pending_effort_levels: Option<Vec<EffortLevel>> = None;
                         let mut pending_plan_usage: Option<bool> = None;
@@ -174,10 +175,12 @@ pub fn spawn_worker(
                                                             }
                                                             Some(AgentCommand::SetModel {
                                                                 model,
+                                                                provider,
                                                                 context_window_tokens,
                                                                 effort_levels,
                                                             }) => {
                                                                 pending_model = Some(model);
+                                                                pending_model_provider = provider;
                                                                 pending_model_window = context_window_tokens;
                                                                 pending_effort_levels = effort_levels;
                                                             }
@@ -229,10 +232,12 @@ pub fn spawn_worker(
                             match command {
                                 AgentCommand::SetModel {
                                     model,
+                                    provider,
                                     context_window_tokens,
                                     effort_levels,
                                 } => {
                                     pending_model = Some(model);
+                                    pending_model_provider = provider;
                                     pending_model_window = context_window_tokens;
                                     pending_effort_levels = effort_levels;
                                 }
@@ -245,6 +250,9 @@ pub fn spawn_worker(
                         }
                         if let Some(model) = pending_model {
                             agent.set_model(model);
+                            if let Some(provider) = pending_model_provider.take() {
+                                agent.set_provider(provider);
+                            }
                             if let Some(tokens) = pending_model_window {
                                 agent.set_context_window_tokens(tokens);
                             }
@@ -339,10 +347,14 @@ pub fn spawn_worker(
                 }
                 AgentCommand::SetModel {
                     model,
+                    provider,
                     context_window_tokens,
                     effort_levels,
                 } => {
                     agent.set_model(model);
+                    if let Some(provider) = provider {
+                        agent.set_provider(provider);
+                    }
                     if let Some(tokens) = context_window_tokens {
                         agent.set_context_window_tokens(tokens);
                     }

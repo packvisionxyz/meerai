@@ -15,7 +15,7 @@ This file is not injected into the model prompt.
 
 ## 1. Overview
 
-Rust workspace for Pack Vision's terminal agent harness: seventeen library
+Rust workspace for Pack Vision's terminal agent harness: eighteen library
 crates plus the `meerai` binary (built by `meerai-cli`). Milestones M1–M13
 are implemented: session log, item protocol, coding and retrieval tools,
 policy engine, context engine, prompt composition, subagent runtime, CLI
@@ -32,7 +32,8 @@ remaining backlog are tracked in [harness-spec.md](harness-spec.md) §4.1.
 Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
 `core -> policy -> agents/common/tui`, `core -> tools -> cli`,
 `common -> client -> tui/cli`, `client -> providers -> cli`,
-`common -> skills -> agents/cli`, `agents -> acp -> cli`. The diagram and build surfaces are in
+`common -> skills -> agents/cli`, `agents -> acp -> cli`, and
+`input -> tui/web-client`. The diagram and build surfaces are in
 [architecture.md](architecture.md).
 
 - `meerai-core` — `Toolset` trait (`effect_of`, `effect_of_call`,
@@ -42,12 +43,16 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   `ToolObservation`, `ToolRun`, `FileDiff`, lenient argument helpers,
   shared `text`/`env`/`fs_perms` helpers; re-exports `genai`,
   `async_trait`, `schemars::JsonSchema`. `doctest = false`.
+- `meerai-input` — dependency-free `TextInput` model shared by the TUI and
+  the browser client: cursor, selection, word and line motion, multiline
+  insertion, visual wrapping, and row/column mapping.
 - `meerai-macros` — `#[tool]` and `#[derive(Toolset)]` (darling + syn +
   quote; test-only deps are dev-dependencies).
 - `meerai-session` — append-only `SessionEvent` log in SQLite
   (`session_events`, FTS5 `session_events_fts`), crash recovery, idempotent healing,
   `derive_messages`, replay, fork/rewind (`latest_closed_turn`,
-  `fork_latest`, `create_child`), SQLite snapshot store
+  `fork_latest`, `create_child`), a memory-only fork for `/btw`
+  (`memory_fork`), SQLite snapshot store
   (`session_snapshots`), SQLite blob store (`session_blobs`), spill,
   compaction primitives, listing/deletion/pruning.
 - `meerai-policy` — `PolicyEngine`: ordered action/resource/effect rules
@@ -60,7 +65,7 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   `search_as_code` (`sac-run_script`), `web` (`web-fetch`, `web-search`;
   private-address guard, redirect-hop checks, HTML-to-text), `world`
   (`ExecutionWorld`).
-- `meerai-store` — embedded SQLite (`meerai.db`): WAL, FTS5, schema v1,
+- `meerai-store` — embedded SQLite (`meerai.db`): WAL, FTS5, schema v2,
   typed repositories (`ConfigRepo`, `MemoryRepo`, `PackRepo`, `RoutesRepo`,
   `UsageRepo`), and private-file permissions.
 - `meerai-common` — SQLite-backed `AppSettings`, `find_project_root`,
@@ -294,11 +299,16 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   copied from models.dev, never estimated.
 - `-p` is **provider**, not prompt; headless input is `--prompt`/`--print`,
   and `--json` requires it.
-- Approval mode is stored per session in the `sessions` row. Precedence:
-  `--mode` > stored session mode > `settings.approval_mode` > `ask`.
-  `/mode` persists through `SetPermissionMode`; forks inherit the source
-  mode; restored tabs load each session's own mode. A model switch
-  persists through `SetModel`/applied agent model (`persist_model`).
+- Approval mode, provider, and model are stored per session in the `sessions`
+  row. Approval precedence: `--mode` > stored session mode >
+  `settings.approval_mode` > `ask`. Model precedence: explicit
+  `--provider`/`--model` (`MEERAI_PROVIDER`/`MEERAI_MODEL` or an agent model)
+  > the resumed session's stored provider and model > user settings > provider
+  default. A new session pins the resolved provider and model in its row.
+  `/mode` persists through `SetPermissionMode`; a model switch persists the
+  provider and model through `SetModel`/applied agent model (`persist_model`).
+  Forks, `/btw`, and subagent child sessions inherit the source provider and
+  model. Opening a session never applies another session's model.
 - Headless approvals: tool-call approval fails fast with exit `2` and a
   `--mode` hint; a Spend approval prints the preview title with the
   `max_session_tokens` and subagent `max_tokens` remedies, declines, and
@@ -631,6 +641,12 @@ Specified in [acp.md](acp.md). The implementation traps:
 - A fork copies the event prefix but zeroes inherited `Usage` fields in
   `AssistantMessage`, `AssistantAttempt`, and `UsageUpdated` events. The child
   starts with empty token and cache counters while keeping the transcript.
+- `/btw` uses `Session::memory_fork`, not `fork_stored`. It seeds an in-memory
+  session with the stored prefix (including the in-flight turn, healed with an
+  interrupted tool result), forces `plan` mode, and builds the worker with
+  read-only tools, no hooks, no memory capture, no subagents, and no goal loop.
+  It never creates a session row, so nothing reaches the parent log, the usage
+  table, or the session list.
 - The SDK cannot set the child working directory: the adapter runs in the
   process CWD. Do not change the process CWD globally.
 - `plan` refuses `--acp`; other `--mode` values are ignored with a

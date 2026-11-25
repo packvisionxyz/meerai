@@ -26,7 +26,7 @@ the plan in the session and keep it visible:
 - **Constraints** — frozen decisions, owned resources, budgets, and things you
   must not change.
 - **Items** — the workstreams, each with one action and one expected
-  observation.
+  observation. Add a review item when a human must approve the result.
 
 If the request has two plausible readings, ask one question now. A subagent will
 confidently deliver the wrong one.
@@ -111,6 +111,24 @@ Call `loop-adjust`:
 Add newly discovered workstreams in the same call. Resolve conflicting patterns
 by the owning rules, not by majority.
 
+## Human review
+
+Some workstreams need a human decision, not more work. Add a review item when:
+
+- The workstream triggers an irreversible or external action.
+- The deliverable is customer-facing or published.
+- The workstream changes a frozen decision or a shared contract.
+- The objective names an approver.
+
+The action is to ask the human. Use the harness question tool when it provides
+one (`question-ask` in meerai). Ask for an explicit approve or revise answer. The
+observation is the exact answer. Record it with `loop-observe`. Do not mark the
+item done until the answer approves it. When the answer asks for changes, keep
+the item open and add the requested work.
+
+A `research` or `review` subagent is not a human reviewer. If no human is
+available, stop and report the open review item.
+
 ## Integrate
 
 1. Apply shared contract changes first.
@@ -138,6 +156,7 @@ Stop and ask when:
 - A frozen decision would change.
 - An irreversible or external action is required.
 - Secrets or credentials are involved.
+- The deliverable needs human sign-off that is not yet recorded.
 - Two workstreams need the same artifact, or the contract cannot be frozen.
 - A check fails outside the scope of the change. Report it; do not widen the
   change.

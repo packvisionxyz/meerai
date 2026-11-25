@@ -1107,10 +1107,11 @@ fn ApprovalModal(store: StoreHandle) -> impl IntoView {
                     <pre class="approval-detail">{detail}</pre>
                     <div class="kv"><span>"Effect"</span><strong>{effect}</strong></div>
                     <Show when=move || showing_reason>
-                        <input
+                        <textarea
                             id="approval-reason"
-                            class="input"
-                            placeholder="Reason for declining"
+                            class="input multiline"
+                            rows="3"
+                            placeholder="Reason for declining (Enter for a new line)"
                             prop:value=initial_reason.clone()
                             on:input=move |ev| {
                                 let value = event_target_value(&ev);
@@ -1120,7 +1121,7 @@ fn ApprovalModal(store: StoreHandle) -> impl IntoView {
                                     }
                                 });
                             }
-                        />
+                        ></textarea>
                     </Show>
                     <div class="hint">"Shortcuts: y approve once · t allow turn · a allow session · n decline · r reason · c cancel request"</div>
                 </div>
@@ -1296,9 +1297,10 @@ fn QuestionModal(store: StoreHandle) -> impl IntoView {
                     _ => String::new(),
                 });
                 view! {
-                    <input
-                        class="input"
-                        placeholder="Other (type your own)"
+                    <textarea
+                        class="input multiline"
+                        rows="3"
+                        placeholder="Other (type your own; Enter for a new line)"
                         prop:value=custom
                         on:input=move |ev| {
                             let value = event_target_value(&ev);
@@ -1310,7 +1312,7 @@ fn QuestionModal(store: StoreHandle) -> impl IntoView {
                                 }
                             });
                         }
-                    />
+                    ></textarea>
                 }
             }}
         </div>
@@ -2691,6 +2693,18 @@ fn help_modal(store: StoreHandle) -> AnyView {
     )
 }
 
+fn stage_workspace_file(store: StoreHandle, path: String, stage: bool) {
+    if let Some(t) = crate::transport::current() {
+        t.stage_workspace_file(path, stage);
+    }
+    store.update(|s| {
+        if let Some(ActiveModal::DiffView { loading, error, .. }) = &mut s.modal {
+            *loading = true;
+            *error = None;
+        }
+    });
+}
+
 fn diff_body(
     store: StoreHandle,
     files: Vec<meerai_web_protocol::FileChangeDto>,
@@ -2709,22 +2723,50 @@ fn diff_body(
             let badge_class = format!("diff-badge {}", status.to_ascii_lowercase());
             let active = selected_path.as_deref() == Some(change.path.as_str());
             let click_status = status.clone();
+            let click_path = path.clone();
+            let stage_path = path.clone();
+            let unstage_path = path.clone();
+            let can_stage = change.unstaged;
+            let can_unstage = change.staged;
             view! {
-                <button class="diff-file-row" class:active=active on:click=move |_| {
-                    if let Some(t) = crate::transport::current() {
-                        t.fetch_workspace_diff(path.clone(), Some(click_status.clone()));
-                    }
-                    store.update(|s| {
-                        if let Some(ActiveModal::DiffView { selected_path, loading, error, .. }) = &mut s.modal {
-                            *selected_path = Some(path.clone());
-                            *loading = true;
-                            *error = None;
+                <div class="diff-file-row" class:active=active>
+                    <button class="diff-file-select" on:click=move |_| {
+                        if let Some(t) = crate::transport::current() {
+                            t.fetch_workspace_diff(click_path.clone(), Some(click_status.clone()));
                         }
-                    });
-                }>
-                    <span class=badge_class>{status}</span>
-                    <span class="diff-file-name">{change.path}</span>
-                </button>
+                        let path = click_path.clone();
+                        store.update(move |s| {
+                            if let Some(ActiveModal::DiffView { selected_path, loading, error, .. }) = &mut s.modal {
+                                *selected_path = Some(path.clone());
+                                *loading = true;
+                                *error = None;
+                            }
+                        });
+                    }>
+                        <span class=badge_class>{status}</span>
+                        <span class="diff-file-name">{change.path}</span>
+                    </button>
+                    <div class="diff-file-actions">
+                        {can_stage.then(|| view! {
+                            <button
+                                class="btn tiny"
+                                title="Stage file"
+                                on:click=move |_| stage_workspace_file(store, stage_path.clone(), true)
+                            >
+                                "Stage"
+                            </button>
+                        })}
+                        {can_unstage.then(|| view! {
+                            <button
+                                class="btn tiny"
+                                title="Unstage file"
+                                on:click=move |_| stage_workspace_file(store, unstage_path.clone(), false)
+                            >
+                                "Unstage"
+                            </button>
+                        })}
+                    </div>
+                </div>
             }
             .into_any()
         })

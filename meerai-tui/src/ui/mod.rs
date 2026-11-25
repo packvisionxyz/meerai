@@ -118,6 +118,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
         sidebar::render_sidebar_changes(frame, app, changes_area);
         cols[0]
     } else {
+        app.update_hit = None;
         app.sidebar_changes_inner_area = Rect::default();
         app.sidebar_diagnose_head_area = Rect::default();
         app.sidebar_changes_head_area = Rect::default();

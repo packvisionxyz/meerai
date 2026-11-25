@@ -1,41 +1,6 @@
 use leptos::prelude::{RwSignal, Update};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct TextBuffer {
-    pub text: String,
-    pub cursor: usize,
-}
-
-impl TextBuffer {
-    pub fn new(text: impl Into<String>) -> Self {
-        let text = text.into();
-        let cursor = text.len();
-        Self { text, cursor }
-    }
-
-    pub fn replace_text(&mut self, text: impl Into<String>) {
-        self.text = text.into();
-        self.cursor = self.text.len();
-    }
-
-    pub fn insert(&mut self, text: &str) {
-        self.text.push_str(text);
-        self.cursor = self.text.len();
-    }
-
-    pub fn clear(&mut self) {
-        self.text.clear();
-        self.cursor = 0;
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.text.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.text.len()
-    }
-}
+pub use meerai_input::TextInput as TextBuffer;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UiEffect {

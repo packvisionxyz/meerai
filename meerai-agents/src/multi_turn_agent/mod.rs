@@ -438,6 +438,7 @@ struct ProjectionCache {
 pub struct MultiTurnAgent {
     pub(super) streamer: Arc<dyn ChatStreamer>,
     pub(super) model: String,
+    pub(super) provider: Option<String>,
     pub(super) shared_model: Arc<std::sync::RwLock<String>>,
     pub(super) session_id: String,
     pub(super) chat_history: Vec<ChatMessage>,
@@ -532,6 +533,7 @@ impl MultiTurnAgent {
         Self {
             streamer,
             model,
+            provider: None,
             shared_model,
             session_id: generate_opencode_session_id(),
             chat_history: Vec::new(),
@@ -1165,6 +1167,10 @@ impl MultiTurnAgent {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.model.clone();
     }
 
+    pub fn set_provider(&mut self, provider: impl Into<String>) {
+        self.provider = Some(provider.into());
+    }
+
     pub fn set_context_window_tokens(&mut self, tokens: u64) {
         if let Some(harness) = &mut self.harness {
             harness.config.context_window_tokens = tokens;
@@ -1191,6 +1197,9 @@ impl MultiTurnAgent {
                 .map(|(_, bare)| bare)
                 .unwrap_or(self.model.as_str());
             let _ = harness.session.set_model(model.to_string()).await;
+            if let Some(provider) = self.provider.as_deref() {
+                let _ = harness.session.set_provider(provider.to_string()).await;
+            }
         }
     }
 

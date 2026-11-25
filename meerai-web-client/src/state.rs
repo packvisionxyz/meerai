@@ -64,6 +64,12 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         takes_arg: false,
     },
     SlashCommandSpec {
+        cmd: "/btw",
+        args: "[question]",
+        desc: "Open a read-only side session seeded from this history",
+        takes_arg: true,
+    },
+    SlashCommandSpec {
         cmd: "/acp",
         args: "[preset]",
         desc: "Start an ACP session (e.g. agy)",
@@ -1097,6 +1103,14 @@ impl AppState {
     pub fn active_session(&self) -> Option<&SessionSummaryDto> {
         let id = self.active_session_id.as_deref()?;
         self.sessions.iter().find(|s| s.id == id)
+    }
+
+    pub fn sidebar_sessions(&self) -> Vec<SessionSummaryDto> {
+        self.sessions
+            .iter()
+            .filter(|session| !session.transient)
+            .cloned()
+            .collect()
     }
 
     pub fn active_tab(&self) -> Option<&SessionTabState> {
@@ -2629,6 +2643,23 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
                 }
             }
         }
+        "/btw" => {
+            let Some(session) = state.active_session() else {
+                set_status_notice(state, "btw needs an open session.");
+                return;
+            };
+            if matches!(session.backend, BackendKind::Acp { .. }) {
+                set_status_notice(
+                    state,
+                    "btw needs a native session (ACP keeps its own history).",
+                );
+                return;
+            }
+            let session_id = session.id.clone();
+            if let Some(t) = crate::transport::current() {
+                t.btw_session(session_id, arg.to_owned());
+            }
+        }
         "/acp" => {
             if state
                 .active_session()
@@ -2706,7 +2737,7 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
                 transport.run_host_action("/context".to_owned());
             }
         }
-        "/goal" | "/loop" => {
+        "/loop" => {
             open_workspace_panel(state, WorkspacePanelTab::Loop);
         }
         "/memory" => {
@@ -2989,6 +3020,10 @@ pub fn set_approval_mode(state: &mut AppState, mode: ApprovalModeDto) {
     let Some(sid) = state.active_session_id.clone() else {
         return;
     };
+    if state.active_session().is_some_and(|s| s.transient) {
+        set_status_notice(state, "btw is read-only.");
+        return;
+    }
     if mode == ApprovalModeDto::Plan
         && state
             .active_session()
@@ -3478,13 +3513,15 @@ fn scan_mention<'a>(
     } else if let Some(rest) = rest.strip_prefix("skill/") {
         (MentionCategory::Skill, rest)
     } else {
-        let after = rest.strip_prefix("goal")?;
+        let (id, after) = ["orchestrate", "goal"]
+            .into_iter()
+            .find_map(|id| rest.strip_prefix(id).map(|after| (id, after)))?;
         if after.chars().next().is_some_and(is_mention_id_char) {
             return None;
         }
         return skill_ids
-            .contains("goal")
-            .then_some((MentionCategory::Skill, "goal", at + 5));
+            .contains(id)
+            .then_some((MentionCategory::Skill, id, at + 1 + id.len()));
     };
     let id_len = rest
         .char_indices()
@@ -3580,8 +3617,12 @@ pub fn resolved_mention_chips(
             && seen.insert(token.to_owned())
         {
             out.push((MentionCategory::Skill, name.to_owned(), token.to_owned()));
-        } else if token == "@goal" && skill_ids.contains("goal") && seen.insert(token.to_owned()) {
-            out.push((MentionCategory::Skill, "goal".to_owned(), token.to_owned()));
+        } else if let Some(id) = token.strip_prefix('@')
+            && matches!(id, "goal" | "orchestrate")
+            && skill_ids.contains(id)
+            && seen.insert(token.to_owned())
+        {
+            out.push((MentionCategory::Skill, id.to_owned(), token.to_owned()));
         }
     }
     out
@@ -3689,8 +3730,8 @@ pub fn mention_completion_items(
 
     if kind_filter.is_none() || kind_filter == Some(MentionCategory::Skill) {
         for skill in &host.skills {
-            let label = if skill.id == "goal" {
-                "@goal".to_string()
+            let label = if matches!(skill.id.as_str(), "goal" | "orchestrate") {
+                format!("@{}", skill.id)
             } else {
                 format!("@skill/{}", skill.id)
             };
@@ -4509,6 +4550,7 @@ mod tests {
             active_tool: None,
             turn_started_at_ms: None,
             user_shell_running: false,
+            transient: false,
             shell_runs: Vec::new(),
         });
         state
@@ -4518,6 +4560,30 @@ mod tests {
             .entries
             .push(user("u1", Some("t1"), "hello"));
         state
+    }
+
+    #[test]
+    fn sidebar_drops_transient_sessions_but_tabs_keep_them() {
+        let mut state = state_with_tab();
+        let mut btw = state.sessions[0].clone();
+        btw.id = "ses-btw".to_owned();
+        btw.title = Some("btw".to_owned());
+        btw.transient = true;
+        state.sessions.push(btw);
+        state.tab_order.push("ses-btw".to_owned());
+
+        assert_eq!(state.sidebar_sessions().len(), 1);
+        assert_eq!(state.visible_sessions().len(), 2);
+    }
+
+    #[test]
+    fn transient_session_rejects_mode_changes() {
+        let mut state = state_with_tab();
+        state.sessions[0].transient = true;
+
+        set_approval_mode(&mut state, ApprovalModeDto::Auto);
+
+        assert_eq!(state.status_notice.as_deref(), Some("btw is read-only."));
     }
 
     #[test]

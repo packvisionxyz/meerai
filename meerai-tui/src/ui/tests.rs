@@ -1,5 +1,6 @@
 use super::composer::render_composer_line;
 use super::statusline::{format_compact_ms, format_compact_tokens, key_status_style};
+use meerai_input::TextInput;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -116,6 +117,8 @@ fn hides_sidebar_when_terminal_narrow_and_clears_hit_area() {
     app.file_changes.push(crate::app::FileChangeEntry {
         status: "M".to_string(),
         path: "meerai-tui/src/ui.rs".to_string(),
+        staged: false,
+        unstaged: true,
     });
 
     let wide = render_to_string_with_size(&mut app, 120, 28);
@@ -131,11 +134,11 @@ fn hides_sidebar_when_terminal_narrow_and_clears_hit_area() {
 }
 
 #[test]
-fn statusline_shows_update_and_the_hit_zone_runs_it() {
+fn sidebar_shows_update_and_the_hit_zone_runs_it() {
     let mut app = test_app();
     app.update_available = Some("9.9.9".to_string());
     let rendered = render_to_string(&mut app);
-    assert!(rendered.contains("update v9.9.9"));
+    assert!(rendered.contains("UPDATE  v9.9.9"));
     let hit = app.update_hit.expect("update hit zone");
 
     assert!(app.handle_mouse_event(crossterm::event::MouseEvent {
@@ -226,7 +229,7 @@ fn clicking_a_sampling_tier_sets_the_effort() {
     let mut app = test_app();
     app.modal = Some(ActiveModal::Sampling {
         effort: None,
-        temperature: String::new(),
+        temperature: TextInput::default(),
         field: 1,
         error: None,
     });
@@ -351,6 +354,8 @@ fn clicking_the_file_changes_header_toggles_the_block() {
     app.file_changes.push(crate::app::FileChangeEntry {
         status: "M".to_string(),
         path: "src/lib.rs".to_string(),
+        staged: false,
+        unstaged: true,
     });
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
     terminal
@@ -446,7 +451,7 @@ fn running_tools_expand_to_show_full_arguments() {
 fn session_picker_shows_delete_and_confirmation_hints() {
     let mut app = test_app();
     app.modal = Some(ActiveModal::SessionSelect {
-        filter: String::new(),
+        filter: TextInput::default(),
         selected: 0,
         sessions: vec![meerai_session::SessionSummary {
             id: meerai_session::SessionId::from_raw("ses-old"),
@@ -473,7 +478,7 @@ fn session_picker_shows_delete_and_confirmation_hints() {
 fn renders_command_palette_with_shortcuts() {
     let mut app = test_app();
     app.modal = Some(ActiveModal::CommandPalette {
-        filter: String::new(),
+        filter: TextInput::default(),
         selected: 0,
     });
     let rendered = render_to_string(&mut app);
@@ -1144,6 +1149,8 @@ fn paints_sidebar_panel_and_user_band_without_main_borders() {
     app.file_changes.push(crate::app::FileChangeEntry {
         status: "M".to_string(),
         path: "src/main.rs".to_string(),
+        staged: false,
+        unstaged: true,
     });
 
     let backend = TestBackend::new(120, 28);
@@ -1661,6 +1668,8 @@ fn renders_collapsible_thinking_and_records_click_hit_zone() {
     app.file_changes.push(crate::app::FileChangeEntry {
         status: "M".to_string(),
         path: "meerai-tui/src/ui.rs".to_string(),
+        staged: false,
+        unstaged: true,
     });
     app.tab_mut().transcript.push(TranscriptEntry::User {
         text: "hi".to_string(),
@@ -1713,7 +1722,7 @@ fn renders_provider_apikey_masked_and_model_modals() {
     let mut app = test_app();
 
     app.modal = Some(ActiveModal::ProviderSelect {
-        filter: String::new(),
+        filter: TextInput::default(),
         selected: 0,
     });
     let provider_screen = render_to_string(&mut app);
@@ -1722,8 +1731,8 @@ fn renders_provider_apikey_masked_and_model_modals() {
     app.modal = Some(ActiveModal::ApiKeyInput {
         provider_id: "opencode-go".to_string(),
         provider_name: "OpenCode Go".to_string(),
-        api_key: "sk-super-secret".to_string(),
-        base_url: String::new(),
+        api_key: TextInput::new("sk-super-secret"),
+        base_url: TextInput::default(),
         editing_base_url: false,
         existing_key_status: KeyStatus::Missing,
         error: None,
@@ -1734,7 +1743,7 @@ fn renders_provider_apikey_masked_and_model_modals() {
     assert!(!key_screen.contains("sk-super-secret"));
 
     app.modal = Some(ActiveModal::ModelInput {
-        input: String::new(),
+        input: TextInput::default(),
         selected: None,
         error: None,
     });
@@ -1770,7 +1779,7 @@ fn renders_provider_apikey_masked_and_model_modals() {
     assert!(diff_screen.contains("new_val"));
 
     app.modal = Some(ActiveModal::Search {
-        query: "lib".to_string(),
+        query: TextInput::new("lib"),
         mode: SearchMode::Files,
         workspace_files: vec!["src/lib.rs".to_string()],
         results: vec![crate::search::SearchMatch {
@@ -1840,7 +1849,7 @@ fn renders_chatgpt_login_modal_with_url_and_paste_field() {
             "https://auth.openai.com/api/accounts/authorize?client_id=dynamic_agent_client"
                 .to_string(),
         ),
-        input: String::new(),
+        input: TextInput::default(),
         error: None,
         busy: false,
     });
@@ -1889,7 +1898,7 @@ fn plan_badge_and_colors_for_oauth_credentials() {
     assert!(sidebar.contains("[plan]"));
 
     app.modal = Some(ActiveModal::ProviderSelect {
-        filter: String::new(),
+        filter: TextInput::default(),
         selected: 0,
     });
     let providers = render_to_string(&mut app);
@@ -1947,10 +1956,14 @@ fn diff_modal_highlights_syntax_and_lists_files() {
         crate::app::FileChangeEntry {
             status: "M".to_string(),
             path: "src/first.rs".to_string(),
+            staged: false,
+            unstaged: true,
         },
         crate::app::FileChangeEntry {
             status: "A".to_string(),
             path: "src/second.rs".to_string(),
+            staged: true,
+            unstaged: false,
         },
     ];
     app.modal = Some(rust_diff_modal(crate::app::DiffListState::Closed));
@@ -1984,6 +1997,8 @@ fn diff_modal_highlights_syntax_and_lists_files() {
     assert!(list_screen.contains("Files (2)"));
     assert!(list_screen.contains("src/second.rs"));
     assert!(list_screen.contains("Working Tree (b/src/first.rs)"));
+    assert!(list_screen.contains("stage"));
+    assert!(list_screen.contains("unstage"));
 
     terminal
         .draw(|frame| render(frame, &mut app))
@@ -2050,6 +2065,7 @@ fn renders_session_tabs_badges_and_session_select_modal() {
             provider: "gemini".to_string(),
             model: "gemini-3.8-flash".to_string(),
             approval_mode: ApprovalMode::Ask,
+            transient: false,
             events: Vec::new(),
             cmd_tx: tx2,
             event_rx: erx2,
@@ -2066,7 +2082,7 @@ fn renders_session_tabs_badges_and_session_select_modal() {
     assert!(app.tab_hit_zones.len() >= 3);
 
     app.modal = Some(ActiveModal::SessionSelect {
-        filter: String::new(),
+        filter: TextInput::default(),
         selected: 0,
         sessions: vec![
             meerai_session::SessionSummary {
@@ -2157,10 +2173,14 @@ fn sidebar_padding_hover_and_click_alignment() {
         crate::FileChangeEntry {
             status: "M".to_string(),
             path: "src/lib.rs".to_string(),
+            staged: false,
+            unstaged: true,
         },
         crate::FileChangeEntry {
             status: "A".to_string(),
             path: "src/new.rs".to_string(),
+            staged: true,
+            unstaged: false,
         },
     ];
 
@@ -2908,6 +2928,8 @@ fn sidebar_more_row_makes_the_file_list_scrollable() {
         app.file_changes.push(crate::app::FileChangeEntry {
             status: "M".to_string(),
             path: format!("src/file{index}.rs"),
+            staged: false,
+            unstaged: true,
         });
     }
     let _ = render_to_string_with_size(&mut app, 120, 40);
@@ -3383,8 +3405,7 @@ fn queued_edit_dialog_wraps_and_keeps_the_cursor_visible() {
     let long = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega";
     app.modal = Some(crate::app::ActiveModal::QueuedEdit {
         index: 0,
-        input: long.to_string(),
-        cursor: long.len(),
+        input: TextInput::with_cursor(long, long.len()),
         error: None,
     });
 
@@ -3569,15 +3590,15 @@ fn word_bounds_map_wide_characters_to_display_columns() {
 }
 
 #[test]
-fn typing_goal_arguments_places_the_cursor_after_the_last_digit() {
+fn typing_loop_arguments_places_the_cursor_after_the_last_digit() {
     use ratatui::layout::Position;
 
     let mut app = test_app();
     app.skills = meerai_skills::builtin_skills();
-    for ch in "/goal 1234".chars() {
+    for ch in "/loop 1234".chars() {
         app.handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
     }
-    assert_eq!(app.tab().input, "/goal 1234");
+    assert_eq!(app.tab().input, "/loop 1234");
     assert_eq!(app.tab().cursor, 10);
 
     let backend = TestBackend::new(120, 28);

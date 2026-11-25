@@ -282,6 +282,8 @@ pub enum AgentCommand {
     SetModel {
         model: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         context_window_tokens: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort_levels: Option<Vec<EffortLevel>>,

@@ -177,6 +177,13 @@ impl TransportClient {
         let _ = (session_id, turn_id);
     }
 
+    pub fn btw_session(&self, session_id: String, text: String) {
+        #[cfg(target_arch = "wasm32")]
+        self.inner.btw_session(session_id, text);
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = (session_id, text);
+    }
+
     pub fn fetch_history(&self) {
         #[cfg(target_arch = "wasm32")]
         self.inner.fetch_history();
@@ -295,6 +302,13 @@ impl TransportClient {
         self.inner.fetch_workspace_diff(path, status);
         #[cfg(not(target_arch = "wasm32"))]
         let _ = (path, status);
+    }
+
+    pub fn stage_workspace_file(&self, path: String, stage: bool) {
+        #[cfg(target_arch = "wasm32")]
+        self.inner.stage_workspace_file(path, stage);
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = (path, stage);
     }
 
     pub fn fetch_providers(&self) {

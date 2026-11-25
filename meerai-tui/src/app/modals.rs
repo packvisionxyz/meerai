@@ -6,8 +6,9 @@ use meerai_agents::events::{ApprovalDecision, GrantScope, QuestionAnswer, Rewind
 use meerai_client::providers::canonical_provider_id;
 use meerai_common::settings::save_settings_to;
 
+use super::text_input::{TextAction, handle_text_key};
 use super::*;
-use crate::diff::build_file_diff;
+use crate::diff::{build_file_diff, list_git_changes, stage_file, unstage_file};
 use crate::search::{
     SearchMatch, SearchMode, SearchPreview, build_search_preview, search_content, search_files,
 };
@@ -28,7 +29,7 @@ impl AppState {
 
     pub fn open_search_modal(&mut self, mode: SearchMode, initial_query: &str) {
         let workspace_files = self.workspace.list_files();
-        let query = initial_query.trim().to_string();
+        let query = TextInput::new(initial_query.trim());
         let mut results = Vec::new();
         let mut selected = 0;
         let mut preview = None;
@@ -106,26 +107,22 @@ impl AppState {
                         }
                         self.modal = Some(ActiveModal::ProviderSelect { filter, selected });
                     }
-                    KeyCode::Backspace => {
-                        filter.pop();
-                        selected = 0;
-                        self.modal = Some(ActiveModal::ProviderSelect { filter, selected });
-                    }
-                    KeyCode::Enter => {
-                        if let Some((provider, status)) = providers.get(selected) {
-                            self.open_provider_connect(provider, status);
-                        } else {
+                    _ => match handle_text_key(&mut filter, key, 40, false, false) {
+                        TextAction::Submit => {
+                            if let Some((provider, status)) = providers.get(selected) {
+                                self.open_provider_connect(provider, status);
+                            } else {
+                                self.modal = Some(ActiveModal::ProviderSelect { filter, selected });
+                            }
+                        }
+                        TextAction::Edited => {
+                            selected = 0;
                             self.modal = Some(ActiveModal::ProviderSelect { filter, selected });
                         }
-                    }
-                    KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                        filter.push(c);
-                        selected = 0;
-                        self.modal = Some(ActiveModal::ProviderSelect { filter, selected });
-                    }
-                    _ => {
-                        self.modal = Some(ActiveModal::ProviderSelect { filter, selected });
-                    }
+                        TextAction::Ignored => {
+                            self.modal = Some(ActiveModal::ProviderSelect { filter, selected });
+                        }
+                    },
                 }
             }
             ActiveModal::AuthMethodSelect {
@@ -228,31 +225,6 @@ impl AppState {
                         self.cancel_chatgpt_login();
                         return true;
                     }
-                    KeyCode::Enter => {
-                        if error.is_some() {
-                            self.login_input = None;
-                            self.login_cancel = None;
-                            self.pending_login_request = Some(provider_id.clone());
-                            input.clear();
-                            error = None;
-                            busy = true;
-                            url = None;
-                        } else {
-                            let trimmed = input.trim().to_string();
-                            if !trimmed.is_empty()
-                                && let Some(tx) = &self.login_input
-                            {
-                                let _ = tx.send(trimmed);
-                                input.clear();
-                                error = None;
-                                busy = true;
-                            }
-                        }
-                    }
-                    KeyCode::Backspace => {
-                        input.pop();
-                        error = None;
-                    }
                     KeyCode::Char('y') if has_ctrl => {
                         if let Some(link) = url.as_deref() {
                             self.copy_text_to_clipboard(link);
@@ -260,11 +232,33 @@ impl AppState {
                                 Some("Authorize URL copied to clipboard".to_string());
                         }
                     }
-                    KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                        input.push(c);
-                        error = None;
-                    }
-                    _ => {}
+                    _ => match handle_text_key(&mut input, key, 64, false, false) {
+                        TextAction::Submit => {
+                            if error.is_some() {
+                                self.login_input = None;
+                                self.login_cancel = None;
+                                self.pending_login_request = Some(provider_id.clone());
+                                input.clear();
+                                error = None;
+                                busy = true;
+                                url = None;
+                            } else {
+                                let trimmed = input.trim().to_string();
+                                if !trimmed.is_empty()
+                                    && let Some(tx) = &self.login_input
+                                {
+                                    let _ = tx.send(trimmed);
+                                    input.clear();
+                                    error = None;
+                                    busy = true;
+                                }
+                            }
+                        }
+                        TextAction::Edited => {
+                            error = None;
+                        }
+                        TextAction::Ignored => {}
+                    },
                 }
                 self.modal = Some(ActiveModal::ChatGptLogin {
                     provider_id,
@@ -283,83 +277,61 @@ impl AppState {
                 mut editing_base_url,
                 mut existing_key_status,
                 mut error,
-            } => match key.code {
-                KeyCode::Esc => {
-                    let selected = {
-                        let rt = self.runtime.read().unwrap();
-                        rt.catalog
-                            .providers()
-                            .iter()
-                            .position(|p| p.id == provider_id)
-                            .unwrap_or(0)
-                    };
-                    self.modal = Some(ActiveModal::ProviderSelect {
-                        filter: String::new(),
-                        selected,
-                    });
-                }
-                KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
-                    editing_base_url = !editing_base_url;
-                    self.modal = Some(ActiveModal::ApiKeyInput {
-                        provider_id,
-                        provider_name,
-                        api_key,
-                        base_url,
-                        editing_base_url,
-                        existing_key_status,
-                        error,
-                    });
-                }
-                KeyCode::Char('d') if has_ctrl => {
-                    match self.secrets.delete_credential(&provider_id) {
-                        Ok(()) => {
-                            api_key.clear();
-                            self.invalidate_key_status();
-                            let provider_info = {
-                                let rt = self.runtime.read().unwrap();
-                                rt.catalog.provider(&provider_id).cloned()
-                            };
-                            if let Some(info) = provider_info {
-                                existing_key_status = self.cached_key_status(&info);
-                            } else {
-                                existing_key_status = KeyStatus::Missing;
+            } => {
+                let action = match key.code {
+                    KeyCode::Esc => {
+                        let selected = {
+                            let rt = self.runtime.read().unwrap();
+                            rt.catalog
+                                .providers()
+                                .iter()
+                                .position(|p| p.id == provider_id)
+                                .unwrap_or(0)
+                        };
+                        self.modal = Some(ActiveModal::ProviderSelect {
+                            filter: TextInput::default(),
+                            selected,
+                        });
+                        return true;
+                    }
+                    KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
+                        editing_base_url = !editing_base_url;
+                        TextAction::Ignored
+                    }
+                    KeyCode::Char('d') if has_ctrl => {
+                        match self.secrets.delete_credential(&provider_id) {
+                            Ok(()) => {
+                                api_key.clear();
+                                self.invalidate_key_status();
+                                let provider_info = {
+                                    let rt = self.runtime.read().unwrap();
+                                    rt.catalog.provider(&provider_id).cloned()
+                                };
+                                if let Some(info) = provider_info {
+                                    existing_key_status = self.cached_key_status(&info);
+                                } else {
+                                    existing_key_status = KeyStatus::Missing;
+                                }
+                                error = None;
+                                self.status_notice =
+                                    Some(format!("Removed credential for {provider_id}"));
                             }
-                            error = None;
-                            self.status_notice =
-                                Some(format!("Removed credential for {provider_id}"));
+                            Err(err) => {
+                                error = Some(format!("{err:#}"));
+                            }
                         }
-                        Err(err) => {
-                            error = Some(format!("{err:#}"));
-                        }
+                        TextAction::Edited
                     }
-                    self.modal = Some(ActiveModal::ApiKeyInput {
-                        provider_id,
-                        provider_name,
-                        api_key,
-                        base_url,
-                        editing_base_url,
-                        existing_key_status,
-                        error,
-                    });
-                }
-                KeyCode::Backspace => {
-                    if editing_base_url {
-                        base_url.pop();
-                    } else {
-                        api_key.pop();
+                    _ => {
+                        let field = if editing_base_url {
+                            &mut base_url
+                        } else {
+                            &mut api_key
+                        };
+                        handle_text_key(field, key, 64, false, false)
                     }
-                    error = None;
-                    self.modal = Some(ActiveModal::ApiKeyInput {
-                        provider_id,
-                        provider_name,
-                        api_key,
-                        base_url,
-                        editing_base_url,
-                        existing_key_status,
-                        error,
-                    });
-                }
-                KeyCode::Enter => {
+                };
+                if action == TextAction::Submit {
                     let trimmed_key = api_key.trim();
                     if !trimmed_key.is_empty() {
                         if let Err(err) = self.secrets.set_key(&provider_id, trimmed_key) {
@@ -405,36 +377,21 @@ impl AppState {
                     self.activate_provider_only(&provider_id);
                     self.status_notice = Some(format!("Connected {provider_id}"));
                     self.open_model_input();
+                    return true;
                 }
-                KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                    if editing_base_url {
-                        base_url.push(c);
-                    } else {
-                        api_key.push(c);
-                    }
+                if action == TextAction::Edited {
                     error = None;
-                    self.modal = Some(ActiveModal::ApiKeyInput {
-                        provider_id,
-                        provider_name,
-                        api_key,
-                        base_url,
-                        editing_base_url,
-                        existing_key_status,
-                        error,
-                    });
                 }
-                _ => {
-                    self.modal = Some(ActiveModal::ApiKeyInput {
-                        provider_id,
-                        provider_name,
-                        api_key,
-                        base_url,
-                        editing_base_url,
-                        existing_key_status,
-                        error,
-                    });
-                }
-            },
+                self.modal = Some(ActiveModal::ApiKeyInput {
+                    provider_id,
+                    provider_name,
+                    api_key,
+                    base_url,
+                    editing_base_url,
+                    existing_key_status,
+                    error,
+                });
+            }
             ActiveModal::ModelInput {
                 mut input,
                 mut selected,
@@ -514,7 +471,7 @@ impl AppState {
                     }
                     KeyCode::Tab => {
                         if let Some(model) = highlighted.or_else(|| matches.first().cloned()) {
-                            input = model;
+                            input.set_text(model);
                             selected = Some(0);
                             error = None;
                         }
@@ -524,67 +481,61 @@ impl AppState {
                             error,
                         });
                     }
-                    KeyCode::Backspace => {
-                        input.pop();
-                        selected = None;
-                        error = None;
-                        self.modal = Some(ActiveModal::ModelInput {
-                            input,
-                            selected,
-                            error,
-                        });
-                    }
-                    KeyCode::Enter => {
-                        let typed = input.trim().to_string();
-                        let target = if let Some(model) = highlighted {
-                            Some(model)
-                        } else if !typed.is_empty() {
-                            Some(typed)
-                        } else {
-                            let provider = self.tab().active_provider.clone();
-                            self.current_or_default_model(&provider)
-                        };
-                        match target {
-                            Some(model) => {
-                                let (target_provider, target_model) =
-                                    self.resolve_model_target(&model);
-                                if target_model.is_empty() {
+                    _ => match handle_text_key(&mut input, key, 60, false, false) {
+                        TextAction::Submit => {
+                            let typed = input.trim().to_string();
+                            let target = if let Some(model) = highlighted {
+                                Some(model)
+                            } else if !typed.is_empty() {
+                                Some(typed)
+                            } else {
+                                let provider = self.tab().active_provider.clone();
+                                self.current_or_default_model(&provider)
+                            };
+                            match target {
+                                Some(model) => {
+                                    let (target_provider, target_model) =
+                                        self.resolve_model_target(&model);
+                                    if target_model.is_empty() {
+                                        self.modal = Some(ActiveModal::ModelInput {
+                                            input,
+                                            selected,
+                                            error: Some("Model name is required".to_string()),
+                                        });
+                                    } else {
+                                        self.select_provider_and_model(
+                                            &target_provider,
+                                            &target_model,
+                                        );
+                                        self.modal = None;
+                                    }
+                                }
+                                None => {
                                     self.modal = Some(ActiveModal::ModelInput {
                                         input,
                                         selected,
                                         error: Some("Model name is required".to_string()),
                                     });
-                                } else {
-                                    self.select_provider_and_model(&target_provider, &target_model);
-                                    self.modal = None;
                                 }
                             }
-                            None => {
-                                self.modal = Some(ActiveModal::ModelInput {
-                                    input,
-                                    selected,
-                                    error: Some("Model name is required".to_string()),
-                                });
-                            }
                         }
-                    }
-                    KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                        input.push(c);
-                        selected = None;
-                        error = None;
-                        self.modal = Some(ActiveModal::ModelInput {
-                            input,
-                            selected,
-                            error,
-                        });
-                    }
-                    _ => {
-                        self.modal = Some(ActiveModal::ModelInput {
-                            input,
-                            selected,
-                            error,
-                        });
-                    }
+                        TextAction::Edited => {
+                            selected = None;
+                            error = None;
+                            self.modal = Some(ActiveModal::ModelInput {
+                                input,
+                                selected,
+                                error,
+                            });
+                        }
+                        TextAction::Ignored => {
+                            self.modal = Some(ActiveModal::ModelInput {
+                                input,
+                                selected,
+                                error,
+                            });
+                        }
+                    },
                 }
             }
             ActiveModal::DiffView {
@@ -666,6 +617,103 @@ impl AppState {
                     KeyCode::End | KeyCode::Char('G') => {
                         scroll = max_scroll;
                     }
+                    KeyCode::Char('s') if !has_ctrl && !has_alt => {
+                        let target = list_selected
+                            .unwrap_or(file_index)
+                            .min(file_count.saturating_sub(1));
+                        if let Some(entry) = self.file_changes.get(target).cloned() {
+                            match self.stage_diff_path(&entry.path, true) {
+                                Ok(Some(idx)) => {
+                                    file_index = idx;
+                                    let entry = &self.file_changes[idx];
+                                    diff = build_file_diff(
+                                        &self.workspace_root,
+                                        &entry.path,
+                                        &entry.status,
+                                    );
+                                    scroll = 0;
+                                    if list_selected.is_some() {
+                                        list = DiffListState::Open { selected: idx };
+                                    }
+                                    self.status_notice = Some(format!("Staged {}", entry.path));
+                                }
+                                Ok(None) => {
+                                    if self.file_changes.is_empty() {
+                                        self.modal = None;
+                                        self.status_notice = Some(format!("Staged {}", entry.path));
+                                        return true;
+                                    }
+                                    file_index =
+                                        target.min(self.file_changes.len().saturating_sub(1));
+                                    let next = &self.file_changes[file_index];
+                                    diff = build_file_diff(
+                                        &self.workspace_root,
+                                        &next.path,
+                                        &next.status,
+                                    );
+                                    scroll = 0;
+                                    if list_selected.is_some() {
+                                        list = DiffListState::Open {
+                                            selected: file_index,
+                                        };
+                                    }
+                                    self.status_notice = Some(format!("Staged {}", entry.path));
+                                }
+                                Err(err) => {
+                                    self.status_notice = Some(format!("Stage failed: {err}"));
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('u') if !has_ctrl && !has_alt => {
+                        let target = list_selected
+                            .unwrap_or(file_index)
+                            .min(file_count.saturating_sub(1));
+                        if let Some(entry) = self.file_changes.get(target).cloned() {
+                            match self.stage_diff_path(&entry.path, false) {
+                                Ok(Some(idx)) => {
+                                    file_index = idx;
+                                    let entry = &self.file_changes[idx];
+                                    diff = build_file_diff(
+                                        &self.workspace_root,
+                                        &entry.path,
+                                        &entry.status,
+                                    );
+                                    scroll = 0;
+                                    if list_selected.is_some() {
+                                        list = DiffListState::Open { selected: idx };
+                                    }
+                                    self.status_notice = Some(format!("Unstaged {}", entry.path));
+                                }
+                                Ok(None) => {
+                                    if self.file_changes.is_empty() {
+                                        self.modal = None;
+                                        self.status_notice =
+                                            Some(format!("Unstaged {}", entry.path));
+                                        return true;
+                                    }
+                                    file_index =
+                                        target.min(self.file_changes.len().saturating_sub(1));
+                                    let next = &self.file_changes[file_index];
+                                    diff = build_file_diff(
+                                        &self.workspace_root,
+                                        &next.path,
+                                        &next.status,
+                                    );
+                                    scroll = 0;
+                                    if list_selected.is_some() {
+                                        list = DiffListState::Open {
+                                            selected: file_index,
+                                        };
+                                    }
+                                    self.status_notice = Some(format!("Unstaged {}", entry.path));
+                                }
+                                Err(err) => {
+                                    self.status_notice = Some(format!("Unstage failed: {err}"));
+                                }
+                            }
+                        }
+                    }
                     KeyCode::Right | KeyCode::Char(']') if file_count > 0 => {
                         file_index = (file_index + 1) % file_count;
                         let entry = &self.file_changes[file_index];
@@ -708,163 +756,74 @@ impl AppState {
                 mut results,
                 mut selected,
                 mut preview,
-            } => match key.code {
-                KeyCode::Esc => {
-                    self.modal = None;
-                }
-                KeyCode::Tab | KeyCode::BackTab => {
-                    mode = mode.toggle();
-                    Self::refresh_search(
-                        self.workspace.as_ref(),
-                        &self.workspace_root,
-                        mode,
-                        &workspace_files,
-                        &query,
-                        &mut results,
-                        &mut selected,
-                        &mut preview,
-                    );
-                    self.modal = Some(ActiveModal::Search {
-                        query,
-                        mode,
-                        workspace_files,
-                        results,
-                        selected,
-                        preview,
-                    });
-                }
-                KeyCode::Up | KeyCode::Char('p') if key.code == KeyCode::Up || has_ctrl => {
-                    if !results.is_empty() {
-                        selected = if selected == 0 {
-                            results.len() - 1
-                        } else {
-                            selected - 1
-                        };
-                        preview = results
-                            .get(selected)
-                            .map(|item| build_search_preview(&self.workspace_root, item, 20));
-                    }
-                    self.modal = Some(ActiveModal::Search {
-                        query,
-                        mode,
-                        workspace_files,
-                        results,
-                        selected,
-                        preview,
-                    });
-                }
-                KeyCode::Down | KeyCode::Char('n') if key.code == KeyCode::Down || has_ctrl => {
-                    if !results.is_empty() {
-                        selected = (selected + 1) % results.len();
-                        preview = results
-                            .get(selected)
-                            .map(|item| build_search_preview(&self.workspace_root, item, 20));
-                    }
-                    self.modal = Some(ActiveModal::Search {
-                        query,
-                        mode,
-                        workspace_files,
-                        results,
-                        selected,
-                        preview,
-                    });
-                }
-                KeyCode::PageDown | KeyCode::Char('d')
-                    if key.code == KeyCode::PageDown || has_ctrl =>
-                {
-                    if let Some(prev) = preview.as_mut() {
-                        let step = (self.tab().viewport_height / 2).max(5);
-                        let max_scroll = prev.lines.len().saturating_sub(6);
-                        prev.scroll = prev.scroll.saturating_add(step).min(max_scroll);
-                    }
-                    self.modal = Some(ActiveModal::Search {
-                        query,
-                        mode,
-                        workspace_files,
-                        results,
-                        selected,
-                        preview,
-                    });
-                }
-                KeyCode::PageUp => {
-                    if let Some(prev) = preview.as_mut() {
-                        let step = (self.tab().viewport_height / 2).max(5);
-                        prev.scroll = prev.scroll.saturating_sub(step);
-                    }
-                    self.modal = Some(ActiveModal::Search {
-                        query,
-                        mode,
-                        workspace_files,
-                        results,
-                        selected,
-                        preview,
-                    });
-                }
-                KeyCode::Char('u') if has_ctrl => {
-                    query.clear();
-                    Self::refresh_search(
-                        self.workspace.as_ref(),
-                        &self.workspace_root,
-                        mode,
-                        &workspace_files,
-                        &query,
-                        &mut results,
-                        &mut selected,
-                        &mut preview,
-                    );
-                    self.modal = Some(ActiveModal::Search {
-                        query,
-                        mode,
-                        workspace_files,
-                        results,
-                        selected,
-                        preview,
-                    });
-                }
-                KeyCode::Backspace => {
-                    query.pop();
-                    Self::refresh_search(
-                        self.workspace.as_ref(),
-                        &self.workspace_root,
-                        mode,
-                        &workspace_files,
-                        &query,
-                        &mut results,
-                        &mut selected,
-                        &mut preview,
-                    );
-                    self.modal = Some(ActiveModal::Search {
-                        query,
-                        mode,
-                        workspace_files,
-                        results,
-                        selected,
-                        preview,
-                    });
-                }
-                KeyCode::Enter => {
-                    if let Some(item) = results.get(selected) {
-                        let snippet = match item.line {
-                            Some(line) => format!("@{}#L{line} ", item.path),
-                            None => format!("@{} ", item.path),
-                        };
-                        self.insert_str(&snippet);
-                        self.mode = InputMode::Insert;
-                        self.completion.reset();
+            } => {
+                let mut changed = true;
+                match key.code {
+                    KeyCode::Esc => {
                         self.modal = None;
-                    } else {
-                        self.modal = Some(ActiveModal::Search {
-                            query,
-                            mode,
-                            workspace_files,
-                            results,
-                            selected,
-                            preview,
-                        });
+                        return true;
                     }
+                    KeyCode::Tab | KeyCode::BackTab => {
+                        mode = mode.toggle();
+                    }
+                    KeyCode::Up | KeyCode::Char('p') if key.code == KeyCode::Up || has_ctrl => {
+                        if !results.is_empty() {
+                            selected = if selected == 0 {
+                                results.len() - 1
+                            } else {
+                                selected - 1
+                            };
+                            preview = results
+                                .get(selected)
+                                .map(|item| build_search_preview(&self.workspace_root, item, 20));
+                        }
+                        changed = false;
+                    }
+                    KeyCode::Down | KeyCode::Char('n') if key.code == KeyCode::Down || has_ctrl => {
+                        if !results.is_empty() {
+                            selected = (selected + 1) % results.len();
+                            preview = results
+                                .get(selected)
+                                .map(|item| build_search_preview(&self.workspace_root, item, 20));
+                        }
+                        changed = false;
+                    }
+                    KeyCode::PageDown | KeyCode::Char('d')
+                        if key.code == KeyCode::PageDown || has_ctrl =>
+                    {
+                        if let Some(prev) = preview.as_mut() {
+                            let step = (self.tab().viewport_height / 2).max(5);
+                            let max_scroll = prev.lines.len().saturating_sub(6);
+                            prev.scroll = prev.scroll.saturating_add(step).min(max_scroll);
+                        }
+                        changed = false;
+                    }
+                    KeyCode::PageUp => {
+                        if let Some(prev) = preview.as_mut() {
+                            let step = (self.tab().viewport_height / 2).max(5);
+                            prev.scroll = prev.scroll.saturating_sub(step);
+                        }
+                        changed = false;
+                    }
+                    _ => match handle_text_key(&mut query, key, 56, false, false) {
+                        TextAction::Submit => {
+                            if let Some(item) = results.get(selected) {
+                                let snippet = match item.line {
+                                    Some(line) => format!("@{}#L{line} ", item.path),
+                                    None => format!("@{} ", item.path),
+                                };
+                                self.insert_str(&snippet);
+                                self.mode = InputMode::Insert;
+                                self.completion.reset();
+                                self.modal = None;
+                                return true;
+                            }
+                        }
+                        TextAction::Edited => {}
+                        TextAction::Ignored => changed = false,
+                    },
                 }
-                KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                    query.push(c);
+                if key.code == KeyCode::Tab || key.code == KeyCode::BackTab || changed {
                     Self::refresh_search(
                         self.workspace.as_ref(),
                         &self.workspace_root,
@@ -875,26 +834,16 @@ impl AppState {
                         &mut selected,
                         &mut preview,
                     );
-                    self.modal = Some(ActiveModal::Search {
-                        query,
-                        mode,
-                        workspace_files,
-                        results,
-                        selected,
-                        preview,
-                    });
                 }
-                _ => {
-                    self.modal = Some(ActiveModal::Search {
-                        query,
-                        mode,
-                        workspace_files,
-                        results,
-                        selected,
-                        preview,
-                    });
-                }
-            },
+                self.modal = Some(ActiveModal::Search {
+                    query,
+                    mode,
+                    workspace_files,
+                    results,
+                    selected,
+                    preview,
+                });
+            }
             ActiveModal::Approval {
                 queue,
                 mut reason,
@@ -907,30 +856,26 @@ impl AppState {
                             reason.clear();
                             editing_reason = false;
                         }
-                        KeyCode::Enter => {
-                            if let Some(request_id) = request_id {
-                                let text = reason.trim().to_string();
-                                let decision = if text.is_empty() {
-                                    ApprovalDecision::Decline
-                                } else {
-                                    ApprovalDecision::DeclineWithReason(text)
-                                };
-                                let _ = self.tab().cmd_tx.send(AgentCommand::Approve {
-                                    request_id,
-                                    decision,
-                                    scope: None,
-                                });
+                        _ => match handle_text_key(&mut reason, key, 60, true, true) {
+                            TextAction::Submit => {
+                                if let Some(request_id) = request_id {
+                                    let text = reason.trim().to_string();
+                                    let decision = if text.is_empty() {
+                                        ApprovalDecision::Decline
+                                    } else {
+                                        ApprovalDecision::DeclineWithReason(text)
+                                    };
+                                    let _ = self.tab().cmd_tx.send(AgentCommand::Approve {
+                                        request_id,
+                                        decision,
+                                        scope: None,
+                                    });
+                                }
+                                reason.clear();
+                                editing_reason = false;
                             }
-                            reason.clear();
-                            editing_reason = false;
-                        }
-                        KeyCode::Backspace => {
-                            reason.pop();
-                        }
-                        KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                            reason.push(c);
-                        }
-                        _ => {}
+                            TextAction::Edited | TextAction::Ignored => {}
+                        },
                     }
                 } else {
                     let action = match key.code {
@@ -1101,123 +1046,173 @@ impl AppState {
                 let last = current + 1 >= request.questions.len();
                 let other = prompt.options.len();
                 let multiple = prompt.multiple;
-                match key.code {
-                    KeyCode::Esc => {
-                        self.record_question_answer(&request.request_id, None);
-                        let _ = self.tab().cmd_tx.send(AgentCommand::AnswerQuestion {
-                            request_id: request.request_id.clone(),
-                            answers: None,
-                        });
-                        self.modal = None;
-                        self.open_pending_question();
-                        return true;
-                    }
-                    KeyCode::Up => {
-                        editing_custom = false;
-                        focus = focus.saturating_sub(1);
-                    }
-                    KeyCode::Down => {
-                        editing_custom = false;
-                        focus = (focus + 1).min(other);
-                    }
-                    KeyCode::Char('k') if !editing_custom => {
-                        editing_custom = false;
-                        focus = focus.saturating_sub(1);
-                    }
-                    KeyCode::Char('j') if !editing_custom => {
-                        editing_custom = false;
-                        focus = (focus + 1).min(other);
-                    }
-                    KeyCode::Char(' ') if focus < other => {
-                        if multiple {
-                            if let Some(index) = answers[current].iter().position(|i| *i == focus) {
-                                answers[current].remove(index);
+                let width = self.terminal_width.saturating_sub(12).max(20) as usize;
+                let mut submit = false;
+                if editing_custom {
+                    match key.code {
+                        KeyCode::Esc => {
+                            editing_custom = false;
+                        }
+                        KeyCode::Tab => {
+                            if last {
+                                submit = true;
                             } else {
-                                answers[current].push(focus);
-                                answers[current].sort_unstable();
+                                current += 1;
+                                focus = 0;
+                                editing_custom = false;
                             }
-                        } else {
-                            answers[current] = vec![focus];
-                            custom[current].clear();
                         }
-                    }
-                    KeyCode::Char(' ') => {
-                        if editing_custom {
-                            if !multiple {
-                                answers[current].clear();
+                        KeyCode::BackTab => {
+                            if current > 0 {
+                                current -= 1;
+                                focus = 0;
+                                editing_custom = false;
                             }
-                            custom[current].push(' ');
-                        } else {
-                            editing_custom = true;
                         }
-                    }
-                    KeyCode::Char(c) if focus == other => {
-                        editing_custom = true;
-                        if !multiple {
-                            answers[current].clear();
+                        KeyCode::Up
+                            if !key.modifiers.intersects(
+                                KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT,
+                            ) =>
+                        {
+                            if !custom[current].move_up(width) {
+                                editing_custom = false;
+                                focus = focus.saturating_sub(1);
+                            }
                         }
-                        custom[current].push(c);
-                    }
-                    KeyCode::Backspace if focus == other => {
-                        editing_custom = true;
-                        custom[current].pop();
-                    }
-                    KeyCode::Tab | KeyCode::Right => {
-                        if !last {
-                            current += 1;
-                            focus = 0;
-                            editing_custom = false;
+                        KeyCode::Down
+                            if !key.modifiers.intersects(
+                                KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT,
+                            ) =>
+                        {
+                            if !custom[current].move_down(width) {
+                                editing_custom = false;
+                            }
                         }
-                    }
-                    KeyCode::Left => {
-                        if current > 0 {
-                            current -= 1;
-                            focus = 0;
-                            editing_custom = false;
-                        }
-                    }
-                    KeyCode::Char(c @ '1'..='9') if focus < other => {
-                        let index = c.to_digit(10).unwrap_or(1) as usize - 1;
-                        if index < prompt.options.len() {
-                            focus = index;
-                            if multiple {
-                                if !answers[current].contains(&index) {
-                                    answers[current].push(index);
-                                    answers[current].sort_unstable();
+                        _ => match handle_text_key(&mut custom[current], key, width, true, true) {
+                            TextAction::Submit => submit = true,
+                            TextAction::Edited => {
+                                if !multiple {
+                                    answers[current].clear();
                                 }
-                            } else {
-                                answers[current] = vec![index];
-                                custom[current].clear();
                             }
-                        }
+                            TextAction::Ignored => {}
+                        },
                     }
-                    KeyCode::Enter if focus == other && !editing_custom => {
-                        editing_custom = true;
-                    }
-                    KeyCode::Enter if focus == other && custom[current].trim().is_empty() => {}
-                    KeyCode::Enter => {
-                        if focus < other && answers[current].is_empty() {
-                            answers[current] = vec![focus];
-                        }
-                        if last {
-                            let collected = collect_question_answers(&request, &answers, &custom);
-                            self.record_question_answer(
-                                &request.request_id,
-                                Some(collected.clone()),
-                            );
+                } else {
+                    match key.code {
+                        KeyCode::Esc => {
+                            self.record_question_answer(&request.request_id, None);
                             let _ = self.tab().cmd_tx.send(AgentCommand::AnswerQuestion {
                                 request_id: request.request_id.clone(),
-                                answers: Some(collected),
+                                answers: None,
                             });
                             self.modal = None;
                             self.open_pending_question();
                             return true;
                         }
-                        current += 1;
-                        focus = 0;
-                        editing_custom = false;
+                        KeyCode::Up | KeyCode::Char('k')
+                            if key.code == KeyCode::Up || !has_ctrl =>
+                        {
+                            focus = focus.saturating_sub(1);
+                        }
+                        KeyCode::Down | KeyCode::Char('j')
+                            if key.code == KeyCode::Down || !has_ctrl =>
+                        {
+                            focus = (focus + 1).min(other);
+                        }
+                        KeyCode::Char(' ') if focus < other => {
+                            if multiple {
+                                if let Some(index) =
+                                    answers[current].iter().position(|i| *i == focus)
+                                {
+                                    answers[current].remove(index);
+                                } else {
+                                    answers[current].push(focus);
+                                    answers[current].sort_unstable();
+                                }
+                            } else {
+                                answers[current] = vec![focus];
+                                custom[current].clear();
+                            }
+                        }
+                        KeyCode::Char(' ') => {
+                            editing_custom = true;
+                        }
+                        KeyCode::Char(c @ '1'..='9') if focus < other => {
+                            let index = c.to_digit(10).unwrap_or(1) as usize - 1;
+                            if index < prompt.options.len() {
+                                focus = index;
+                                if multiple {
+                                    if !answers[current].contains(&index) {
+                                        answers[current].push(index);
+                                        answers[current].sort_unstable();
+                                    }
+                                } else {
+                                    answers[current] = vec![index];
+                                    custom[current].clear();
+                                }
+                            }
+                        }
+                        KeyCode::Enter if focus == other => {
+                            editing_custom = true;
+                        }
+                        KeyCode::Enter => {
+                            if focus < other && answers[current].is_empty() {
+                                answers[current] = vec![focus];
+                            }
+                            submit = true;
+                        }
+                        KeyCode::Tab | KeyCode::Right => {
+                            if !last {
+                                current += 1;
+                                focus = 0;
+                                editing_custom = false;
+                            } else {
+                                submit = true;
+                            }
+                        }
+                        KeyCode::BackTab | KeyCode::Left => {
+                            if current > 0 {
+                                current -= 1;
+                                focus = 0;
+                                editing_custom = false;
+                            }
+                        }
+                        _ => {
+                            if focus == other {
+                                editing_custom = true;
+                                match handle_text_key(&mut custom[current], key, width, true, true)
+                                {
+                                    TextAction::Submit => submit = true,
+                                    TextAction::Edited => {
+                                        if !multiple {
+                                            answers[current].clear();
+                                        }
+                                    }
+                                    TextAction::Ignored => {}
+                                }
+                            }
+                        }
                     }
-                    _ => {}
+                }
+                if submit {
+                    if focus < other && answers[current].is_empty() && !editing_custom {
+                        answers[current] = vec![focus];
+                    }
+                    if last {
+                        let collected = collect_question_answers(&request, &answers, &custom);
+                        self.record_question_answer(&request.request_id, Some(collected.clone()));
+                        let _ = self.tab().cmd_tx.send(AgentCommand::AnswerQuestion {
+                            request_id: request.request_id.clone(),
+                            answers: Some(collected),
+                        });
+                        self.modal = None;
+                        self.open_pending_question();
+                        return true;
+                    }
+                    current += 1;
+                    focus = 0;
+                    editing_custom = false;
                 }
                 self.modal = Some(ActiveModal::Question {
                     request,
@@ -1300,18 +1295,6 @@ impl AppState {
                             error,
                         });
                     }
-                    KeyCode::Backspace => {
-                        filter.pop();
-                        selected = 0;
-                        self.session_delete_confirm = None;
-                        self.modal = Some(ActiveModal::SessionSelect {
-                            filter,
-                            selected,
-                            sessions,
-                            loading,
-                            error,
-                        });
-                    }
                     KeyCode::Char('d') if has_ctrl => {
                         if let Some((session_id, _)) = filtered_ids.get(selected) {
                             if self.session_delete_confirm.as_ref() == Some(session_id) {
@@ -1336,26 +1319,41 @@ impl AppState {
                             error,
                         });
                     }
-                    KeyCode::Enter => {
-                        if let Some((session_id, open_tab)) = filtered_ids.get(selected).cloned() {
-                            self.modal = None;
-                            if let Some(tab_idx) = open_tab {
-                                self.switch_to_tab(tab_idx);
-                                self.status_notice =
-                                    Some(format!("Switched to tab {}", tab_idx + 1));
-                            } else if self.session_opener.is_some() {
-                                self.status_notice =
-                                    Some(format!("Opening session {session_id}..."));
-                                self.pending_session_actions
-                                    .push(PendingSessionAction::OpenSessionId(session_id));
+                    _ => match handle_text_key(&mut filter, key, 48, false, false) {
+                        TextAction::Submit => {
+                            if let Some((session_id, open_tab)) =
+                                filtered_ids.get(selected).cloned()
+                            {
+                                self.modal = None;
+                                if let Some(tab_idx) = open_tab {
+                                    self.switch_to_tab(tab_idx);
+                                    self.status_notice =
+                                        Some(format!("Switched to tab {}", tab_idx + 1));
+                                } else if self.session_opener.is_some() {
+                                    self.status_notice =
+                                        Some(format!("Opening session {session_id}..."));
+                                    self.pending_session_actions
+                                        .push(PendingSessionAction::OpenSessionId(session_id));
+                                } else {
+                                    self.tab_mut().transcript.push(TranscriptEntry::Error {
+                                        text: "Session switching is not available in this context."
+                                            .to_string(),
+                                        expanded: false,
+                                    });
+                                }
                             } else {
-                                self.tab_mut().transcript.push(TranscriptEntry::Error {
-                                    text: "Session switching is not available in this context."
-                                        .to_string(),
-                                    expanded: false,
+                                self.modal = Some(ActiveModal::SessionSelect {
+                                    filter,
+                                    selected,
+                                    sessions,
+                                    loading,
+                                    error,
                                 });
                             }
-                        } else {
+                        }
+                        TextAction::Edited => {
+                            selected = 0;
+                            self.session_delete_confirm = None;
                             self.modal = Some(ActiveModal::SessionSelect {
                                 filter,
                                 selected,
@@ -1364,27 +1362,16 @@ impl AppState {
                                 error,
                             });
                         }
-                    }
-                    KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                        filter.push(c);
-                        selected = 0;
-                        self.modal = Some(ActiveModal::SessionSelect {
-                            filter,
-                            selected,
-                            sessions,
-                            loading,
-                            error,
-                        });
-                    }
-                    _ => {
-                        self.modal = Some(ActiveModal::SessionSelect {
-                            filter,
-                            selected,
-                            sessions,
-                            loading,
-                            error,
-                        });
-                    }
+                        TextAction::Ignored => {
+                            self.modal = Some(ActiveModal::SessionSelect {
+                                filter,
+                                selected,
+                                sessions,
+                                loading,
+                                error,
+                            });
+                        }
+                    },
                 }
             }
             ActiveModal::UserMessageActions {
@@ -1452,132 +1439,79 @@ impl AppState {
                         self.modal = Some(ActiveModal::CommandPalette { filter, selected });
                     }
                     KeyCode::Backspace => {
-                        filter.pop();
+                        filter.backspace();
                         selected = 0;
                         self.modal = Some(ActiveModal::CommandPalette { filter, selected });
                     }
-                    KeyCode::Enter => {
-                        if let Some(command) = commands.get(selected) {
-                            let action = command.action;
-                            self.modal = None;
-                            self.run_palette_action(action);
-                        } else {
+                    _ => match handle_text_key(&mut filter, key, 48, false, false) {
+                        TextAction::Submit => {
+                            if let Some(command) = commands.get(selected) {
+                                let action = command.action;
+                                self.modal = None;
+                                self.run_palette_action(action);
+                            } else {
+                                self.modal = Some(ActiveModal::CommandPalette { filter, selected });
+                            }
+                        }
+                        TextAction::Edited => {
+                            selected = 0;
                             self.modal = Some(ActiveModal::CommandPalette { filter, selected });
                         }
-                    }
-                    KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                        filter.push(c);
-                        selected = 0;
-                        self.modal = Some(ActiveModal::CommandPalette { filter, selected });
-                    }
-                    _ => {
-                        self.modal = Some(ActiveModal::CommandPalette { filter, selected });
-                    }
+                        TextAction::Ignored => {
+                            self.modal = Some(ActiveModal::CommandPalette { filter, selected });
+                        }
+                    },
                 }
             }
             ActiveModal::QueuedEdit {
                 index,
                 mut input,
-                mut cursor,
                 mut error,
             } => {
+                let width = if self.queued_editor_width == 0 {
+                    56
+                } else {
+                    self.queued_editor_width as usize
+                };
                 let mut keep_open = true;
-                if !matches!(key.code, KeyCode::Up | KeyCode::Down) {
-                    self.queued_editor_goal_col = None;
-                }
                 match key.code {
                     KeyCode::Esc => {
                         self.modal = None;
                         keep_open = false;
                     }
-                    KeyCode::Enter if !has_alt => {
-                        let text = input.trim().to_string();
-                        if text.is_empty() {
-                            error = Some("Message is required".to_string());
-                        } else {
-                            let updated = {
-                                let tab = self.tab_mut();
-                                match tab.queued.get_mut(index) {
-                                    Some(slot) => {
-                                        *slot = text.clone();
-                                        true
+                    _ => match handle_text_key(&mut input, key, width, true, true) {
+                        TextAction::Submit => {
+                            let text = input.trim().to_string();
+                            if text.is_empty() {
+                                error = Some("Message is required".to_string());
+                            } else {
+                                let updated = {
+                                    let tab = self.tab_mut();
+                                    match tab.queued.get_mut(index) {
+                                        Some(slot) => {
+                                            *slot = text.clone();
+                                            true
+                                        }
+                                        None => false,
                                     }
-                                    None => false,
+                                };
+                                if updated {
+                                    self.status_notice = Some("Queued message updated".to_string());
                                 }
-                            };
-                            if updated {
-                                self.status_notice = Some("Queued message updated".to_string());
+                                self.modal = None;
+                                keep_open = false;
                             }
-                            self.modal = None;
-                            keep_open = false;
                         }
-                    }
-                    KeyCode::Enter => {
-                        cursor = cursor.min(input.len());
-                        input.insert(cursor, '\n');
-                        cursor += 1;
-                        error = None;
-                    }
-                    KeyCode::Backspace => {
-                        let start = queued_prev_boundary(&input, cursor);
-                        input.drain(start..cursor.min(input.len()));
-                        cursor = start;
-                        error = None;
-                    }
-                    KeyCode::Delete => {
-                        let end = queued_next_boundary(&input, cursor);
-                        input.drain(cursor.min(input.len())..end);
-                        error = None;
-                    }
-                    KeyCode::Left => {
-                        cursor = queued_prev_boundary(&input, cursor);
-                    }
-                    KeyCode::Right => {
-                        cursor = queued_next_boundary(&input, cursor);
-                    }
-                    KeyCode::Home => {
-                        cursor = input[..cursor.min(input.len())]
-                            .rfind('\n')
-                            .map(|idx| idx + 1)
-                            .unwrap_or(0);
-                    }
-                    KeyCode::End => {
-                        cursor = input[cursor.min(input.len())..]
-                            .find('\n')
-                            .map(|idx| idx + cursor.min(input.len()))
-                            .unwrap_or(input.len());
-                    }
-                    KeyCode::Up | KeyCode::Down => {
-                        let delta = if key.code == KeyCode::Up { -1 } else { 1 };
-                        let width = if self.queued_editor_width == 0 {
-                            56
-                        } else {
-                            self.queued_editor_width as usize
-                        };
-                        if let Some((next, goal)) = crate::ui::modals::queued_editor_vertical(
-                            &input,
-                            cursor,
-                            width,
-                            delta,
-                            self.queued_editor_goal_col,
-                        ) {
-                            cursor = next;
-                            self.queued_editor_goal_col = Some(goal);
+                        TextAction::Edited => {
+                            error = None;
                         }
-                    }
-                    KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                        cursor = cursor.min(input.len());
-                        input.insert(cursor, c);
-                        cursor += c.len_utf8();
-                        error = None;
-                    }
-                    _ => {}
+                        TextAction::Ignored => {}
+                    },
                 }
                 if keep_open {
                     self.modal = Some(ActiveModal::QueuedEdit {
                         index,
                         input,
-                        cursor,
                         error,
                     });
                 }
@@ -1628,95 +1562,92 @@ impl AppState {
                             busy: false,
                         });
                     }
-                    KeyCode::Backspace => {
-                        if editing_secret {
-                            secret_input.pop();
+                    _ => {
+                        let action = if editing_secret {
+                            let action = handle_text_key(&mut secret_input, key, 40, false, false);
+                            secret_input.text.retain(|c| !c.is_control());
+                            secret_input.cursor = secret_input.cursor.min(secret_input.text.len());
+                            action
                         } else {
-                            port_input.pop();
-                        }
-                        error = None;
-                        self.modal = Some(ActiveModal::ServeDialog {
-                            port_input,
-                            secret_input,
-                            editing_secret,
-                            error,
-                            busy: false,
-                        });
-                    }
-                    KeyCode::Enter => {
-                        let port_trimmed = port_input.trim();
-                        let parsed_port = if port_trimmed.is_empty() {
-                            Ok(None)
-                        } else {
-                            match port_trimmed.parse::<u16>() {
-                                Ok(p) if p > 0 => Ok(Some(p)),
-                                _ => Err("Port must be a number between 1 and 65535".to_string()),
-                            }
+                            let action = handle_text_key(&mut port_input, key, 12, false, false);
+                            port_input.text.retain(|c| c.is_ascii_digit());
+                            port_input.cursor = port_input.cursor.min(port_input.text.len());
+                            action
                         };
-                        let secret_opt = if secret_input.is_empty() {
-                            Ok(None)
-                        } else if secret_input.chars().count() < 8 {
-                            Err("Password must be at least 8 characters (or leave blank for default)"
-                                .to_string())
-                        } else if secret_input.chars().any(char::is_control)
-                            || secret_input.trim().is_empty()
-                        {
-                            Err(
-                                "Password cannot be whitespace or contain control characters"
-                                    .to_string(),
-                            )
-                        } else {
-                            Ok(Some(secret_input.clone()))
-                        };
-                        match (parsed_port, secret_opt) {
-                            (Ok(port), Ok(secret)) => {
-                                self.pending_session_actions
-                                    .push(PendingSessionAction::StartWebServer { port, secret });
-                                self.status_notice = Some("Starting web UI server...".to_string());
-                                self.modal = Some(ActiveModal::ServeDialog {
-                                    port_input,
-                                    secret_input: String::new(),
-                                    editing_secret,
-                                    error: None,
-                                    busy: true,
-                                });
+                        match action {
+                            TextAction::Submit => {
+                                let port_trimmed = port_input.trim();
+                                let parsed_port =
+                                    if port_trimmed.is_empty() {
+                                        Ok(None)
+                                    } else {
+                                        match port_trimmed.parse::<u16>() {
+                                            Ok(p) if p > 0 => Ok(Some(p)),
+                                            _ => Err("Port must be a number between 1 and 65535"
+                                                .to_string()),
+                                        }
+                                    };
+                                let secret_opt = if secret_input.is_empty() {
+                                    Ok(None)
+                                } else if secret_input.chars().count() < 8 {
+                                    Err("Password must be at least 8 characters (or leave blank for default)"
+                                        .to_string())
+                                } else if secret_input.chars().any(char::is_control)
+                                    || secret_input.trim().is_empty()
+                                {
+                                    Err(
+                                        "Password cannot be whitespace or contain control characters"
+                                            .to_string(),
+                                    )
+                                } else {
+                                    Ok(Some(secret_input.text.clone()))
+                                };
+                                match (parsed_port, secret_opt) {
+                                    (Ok(port), Ok(secret)) => {
+                                        self.pending_session_actions.push(
+                                            PendingSessionAction::StartWebServer { port, secret },
+                                        );
+                                        self.status_notice =
+                                            Some("Starting web UI server...".to_string());
+                                        self.modal = Some(ActiveModal::ServeDialog {
+                                            port_input,
+                                            secret_input: TextInput::default(),
+                                            editing_secret,
+                                            error: None,
+                                            busy: true,
+                                        });
+                                    }
+                                    (Err(msg), _) | (_, Err(msg)) => {
+                                        self.modal = Some(ActiveModal::ServeDialog {
+                                            port_input,
+                                            secret_input,
+                                            editing_secret,
+                                            error: Some(msg),
+                                            busy: false,
+                                        });
+                                    }
+                                }
                             }
-                            (Err(msg), _) | (_, Err(msg)) => {
+                            TextAction::Edited => {
+                                error = None;
                                 self.modal = Some(ActiveModal::ServeDialog {
                                     port_input,
                                     secret_input,
                                     editing_secret,
-                                    error: Some(msg),
+                                    error,
+                                    busy: false,
+                                });
+                            }
+                            TextAction::Ignored => {
+                                self.modal = Some(ActiveModal::ServeDialog {
+                                    port_input,
+                                    secret_input,
+                                    editing_secret,
+                                    error,
                                     busy: false,
                                 });
                             }
                         }
-                    }
-                    KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                        if editing_secret {
-                            if !c.is_control() {
-                                secret_input.push(c);
-                            }
-                        } else if c.is_ascii_digit() {
-                            port_input.push(c);
-                        }
-                        error = None;
-                        self.modal = Some(ActiveModal::ServeDialog {
-                            port_input,
-                            secret_input,
-                            editing_secret,
-                            error,
-                            busy: false,
-                        });
-                    }
-                    _ => {
-                        self.modal = Some(ActiveModal::ServeDialog {
-                            port_input,
-                            secret_input,
-                            editing_secret,
-                            error,
-                            busy: false,
-                        });
                     }
                 }
             }
@@ -1727,33 +1658,34 @@ impl AppState {
                             panel.focus_input = None;
                             panel.error = None;
                         }
-                        KeyCode::Enter => {
-                            let focus = panel.focus_input.take().unwrap_or_default();
-                            let from_turn_id = panel
-                                .breakdown
-                                .as_ref()
-                                .and_then(|breakdown| breakdown.turn_ids.get(panel.selected_turn))
-                                .map(|turn| turn.to_string());
-                            queue_modal_host_action(
-                                self,
-                                meerai_host::HostAction::Summarize {
-                                    focus: (!focus.trim().is_empty())
-                                        .then(|| focus.trim().to_string()),
-                                    from_turn_id,
-                                },
-                            );
-                        }
-                        KeyCode::Char(c) => {
-                            if let Some(input) = panel.focus_input.as_mut() {
-                                input.push(c);
+                        _ => {
+                            let action = match panel.focus_input.as_mut() {
+                                Some(input) => handle_text_key(input, key, 56, false, false),
+                                None => TextAction::Ignored,
+                            };
+                            if action == TextAction::Submit {
+                                let focus = panel
+                                    .focus_input
+                                    .take()
+                                    .map(|input| input.text)
+                                    .unwrap_or_default();
+                                let from_turn_id = panel
+                                    .breakdown
+                                    .as_ref()
+                                    .and_then(|breakdown| {
+                                        breakdown.turn_ids.get(panel.selected_turn)
+                                    })
+                                    .map(|turn| turn.to_string());
+                                queue_modal_host_action(
+                                    self,
+                                    meerai_host::HostAction::Summarize {
+                                        focus: (!focus.trim().is_empty())
+                                            .then(|| focus.trim().to_string()),
+                                        from_turn_id,
+                                    },
+                                );
                             }
                         }
-                        KeyCode::Backspace => {
-                            if let Some(input) = panel.focus_input.as_mut() {
-                                input.pop();
-                            }
-                        }
-                        _ => {}
                     }
                     self.modal = Some(ActiveModal::Context(panel));
                     return true;
@@ -1845,7 +1777,7 @@ impl AppState {
                             );
                         }
                     }
-                    KeyCode::Char('f') => panel.focus_input = Some(String::new()),
+                    KeyCode::Char('f') => panel.focus_input = Some(TextInput::default()),
                     KeyCode::Char('b') => {
                         if let Some(key) = panel
                             .breakdown
@@ -2203,9 +2135,12 @@ impl AppState {
                 mut temperature,
                 mut field,
                 error,
-            } => match key.code {
-                KeyCode::Esc => self.modal = None,
-                KeyCode::Tab | KeyCode::Down => {
+            } => {
+                if key.code == KeyCode::Esc {
+                    self.modal = None;
+                    return true;
+                }
+                if matches!(key.code, KeyCode::Tab | KeyCode::Down) && field == 0 {
                     field = 1;
                     self.modal = Some(ActiveModal::Sampling {
                         effort,
@@ -2213,8 +2148,9 @@ impl AppState {
                         field,
                         error: None,
                     });
+                    return true;
                 }
-                KeyCode::BackTab | KeyCode::Up => {
+                if matches!(key.code, KeyCode::BackTab | KeyCode::Up) && field == 1 {
                     field = 0;
                     self.modal = Some(ActiveModal::Sampling {
                         effort,
@@ -2222,129 +2158,182 @@ impl AppState {
                         field,
                         error: None,
                     });
+                    return true;
                 }
-                KeyCode::Left | KeyCode::Right => {
-                    let allowed = self.active_model_effort_levels();
-                    let current = effort.unwrap_or_default().clamp_to(&allowed);
-                    effort = Some(match key.code {
-                        KeyCode::Left => current.previous_in(&allowed),
-                        _ => current.next_in(&allowed),
-                    });
-                    self.modal = Some(ActiveModal::Sampling {
-                        effort,
-                        temperature,
-                        field,
-                        error: None,
-                    });
-                }
-                KeyCode::Char('l' | 'm' | 'h' | 'x')
-                    if field == 0 || !typing_effort_keyword(&temperature) =>
-                {
-                    let allowed = self.active_model_effort_levels();
-                    let picked = match key.code {
-                        KeyCode::Char('l') => EffortLevel::Low,
-                        KeyCode::Char('h') => EffortLevel::High,
-                        KeyCode::Char('x') => EffortLevel::ExtraHigh,
-                        _ => EffortLevel::Medium,
-                    };
-                    effort = Some(picked.clamp_to(&allowed));
-                    self.modal = Some(ActiveModal::Sampling {
-                        effort,
-                        temperature,
-                        field,
-                        error: None,
-                    });
-                }
-                KeyCode::Backspace if field == 1 => {
-                    temperature.pop();
-                    self.modal = Some(ActiveModal::Sampling {
-                        effort,
-                        temperature,
-                        field,
-                        error: None,
-                    });
-                }
-                KeyCode::Char(c) if field == 1 && (c.is_ascii_alphanumeric() || c == '.') => {
-                    temperature.push(c);
-                    self.modal = Some(ActiveModal::Sampling {
-                        effort,
-                        temperature,
-                        field,
-                        error: None,
-                    });
-                }
-                KeyCode::Enter => match self.apply_sampling(effort, &temperature) {
-                    Ok(()) => self.modal = None,
-                    Err(message) => {
-                        self.modal = Some(ActiveModal::Sampling {
-                            effort,
-                            temperature,
-                            field,
-                            error: Some(message),
-                        });
+                if field == 0 {
+                    match key.code {
+                        KeyCode::Left | KeyCode::Right => {
+                            let allowed = self.active_model_effort_levels();
+                            let current = effort.unwrap_or_default().clamp_to(&allowed);
+                            effort = Some(match key.code {
+                                KeyCode::Left => current.previous_in(&allowed),
+                                _ => current.next_in(&allowed),
+                            });
+                            self.modal = Some(ActiveModal::Sampling {
+                                effort,
+                                temperature,
+                                field,
+                                error: None,
+                            });
+                        }
+                        KeyCode::Char('l' | 'm' | 'h' | 'x') => {
+                            let allowed = self.active_model_effort_levels();
+                            let picked = match key.code {
+                                KeyCode::Char('l') => EffortLevel::Low,
+                                KeyCode::Char('h') => EffortLevel::High,
+                                KeyCode::Char('x') => EffortLevel::ExtraHigh,
+                                _ => EffortLevel::Medium,
+                            };
+                            effort = Some(picked.clamp_to(&allowed));
+                            self.modal = Some(ActiveModal::Sampling {
+                                effort,
+                                temperature,
+                                field,
+                                error: None,
+                            });
+                        }
+                        KeyCode::Enter => match self.apply_sampling(effort, &temperature) {
+                            Ok(()) => self.modal = None,
+                            Err(message) => {
+                                self.modal = Some(ActiveModal::Sampling {
+                                    effort,
+                                    temperature,
+                                    field,
+                                    error: Some(message),
+                                });
+                            }
+                        },
+                        _ => {
+                            self.modal = Some(ActiveModal::Sampling {
+                                effort,
+                                temperature,
+                                field,
+                                error,
+                            });
+                        }
                     }
-                },
-                _ => {
-                    self.modal = Some(ActiveModal::Sampling {
-                        effort,
-                        temperature,
-                        field,
-                        error,
-                    });
-                }
-            },
-            ActiveModal::VaultReset { mut input, error } => match key.code {
-                KeyCode::Esc => self.modal = None,
-                KeyCode::Backspace => {
-                    input.pop();
-                    self.modal = Some(ActiveModal::VaultReset { input, error: None });
-                }
-                KeyCode::Enter => {
-                    if input.trim() != "reset" {
-                        self.modal = Some(ActiveModal::VaultReset {
-                            input,
-                            error: Some("Type reset exactly to confirm.".to_string()),
-                        });
-                    } else {
-                        match self.secrets.reset_vault() {
-                            Ok(removed) => {
-                                self.modal = None;
-                                self.tab_mut().auto_follow = true;
-                                self.tab_mut().transcript.push(TranscriptEntry::System {
-                                    text: format!(
-                                        "Vault reset: removed {removed} saved credentials. Run /connect to log in again."
-                                    ),
+                } else {
+                    let action = match key.code {
+                        KeyCode::Left | KeyCode::Right
+                            if !key.modifiers.intersects(
+                                KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT,
+                            ) =>
+                        {
+                            let allowed = self.active_model_effort_levels();
+                            let current = effort.unwrap_or_default().clamp_to(&allowed);
+                            effort = Some(match key.code {
+                                KeyCode::Left => current.previous_in(&allowed),
+                                _ => current.next_in(&allowed),
+                            });
+                            TextAction::Edited
+                        }
+                        KeyCode::Char('l' | 'm' | 'h' | 'x')
+                            if !typing_effort_keyword(&temperature) =>
+                        {
+                            let allowed = self.active_model_effort_levels();
+                            let picked = match key.code {
+                                KeyCode::Char('l') => EffortLevel::Low,
+                                KeyCode::Char('h') => EffortLevel::High,
+                                KeyCode::Char('x') => EffortLevel::ExtraHigh,
+                                _ => EffortLevel::Medium,
+                            };
+                            effort = Some(picked.clamp_to(&allowed));
+                            TextAction::Edited
+                        }
+                        _ => handle_text_key(&mut temperature, key, 16, false, false),
+                    };
+                    temperature
+                        .text
+                        .retain(|c| c.is_ascii_alphanumeric() || c == '.');
+                    temperature.cursor = temperature.cursor.min(temperature.text.len());
+                    match action {
+                        TextAction::Submit => match self.apply_sampling(effort, &temperature) {
+                            Ok(()) => self.modal = None,
+                            Err(message) => {
+                                self.modal = Some(ActiveModal::Sampling {
+                                    effort,
+                                    temperature,
+                                    field,
+                                    error: Some(message),
                                 });
                             }
-                            Err(error) => {
-                                self.modal = Some(ActiveModal::VaultReset {
-                                    input,
-                                    error: Some(format!("{error:#}")),
-                                });
-                            }
+                        },
+                        TextAction::Edited | TextAction::Ignored => {
+                            self.modal = Some(ActiveModal::Sampling {
+                                effort,
+                                temperature,
+                                field,
+                                error: None,
+                            });
                         }
                     }
                 }
-                KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                    input.push(c);
-                    self.modal = Some(ActiveModal::VaultReset { input, error: None });
+            }
+            ActiveModal::VaultReset { mut input, error } => {
+                if key.code == KeyCode::Esc {
+                    self.modal = None;
+                    return true;
                 }
-                _ => {
-                    self.modal = Some(ActiveModal::VaultReset { input, error });
+                match handle_text_key(&mut input, key, 24, false, false) {
+                    TextAction::Submit => {
+                        if input.trim() != "reset" {
+                            self.modal = Some(ActiveModal::VaultReset {
+                                input,
+                                error: Some("Type reset exactly to confirm.".to_string()),
+                            });
+                        } else {
+                            match self.secrets.reset_vault() {
+                                Ok(removed) => {
+                                    self.modal = None;
+                                    self.tab_mut().auto_follow = true;
+                                    self.tab_mut().transcript.push(TranscriptEntry::System {
+                                        text: format!(
+                                            "Vault reset: removed {removed} saved credentials. Run /connect to log in again."
+                                        ),
+                                    });
+                                }
+                                Err(error) => {
+                                    self.modal = Some(ActiveModal::VaultReset {
+                                        input,
+                                        error: Some(format!("{error:#}")),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    TextAction::Edited => {
+                        self.modal = Some(ActiveModal::VaultReset { input, error: None });
+                    }
+                    TextAction::Ignored => {
+                        self.modal = Some(ActiveModal::VaultReset { input, error });
+                    }
                 }
-            },
+            }
             ActiveModal::SubagentSpawn(mut panel) => {
                 const FIELDS: usize = 9;
+                let width = self.terminal_width.saturating_sub(16).max(20) as usize;
                 match key.code {
                     KeyCode::Esc => {
                         self.modal = None;
                         return true;
                     }
-                    KeyCode::Tab | KeyCode::Down => {
+                    KeyCode::Tab => {
                         panel.field = (panel.field + 1) % FIELDS;
                         panel.error = None;
                     }
-                    KeyCode::BackTab | KeyCode::Up => {
+                    KeyCode::BackTab => {
+                        panel.field = if panel.field == 0 {
+                            FIELDS - 1
+                        } else {
+                            panel.field - 1
+                        };
+                        panel.error = None;
+                    }
+                    KeyCode::Down if panel.field != 2 => {
+                        panel.field = (panel.field + 1) % FIELDS;
+                        panel.error = None;
+                    }
+                    KeyCode::Up if panel.field != 2 => {
                         panel.field = if panel.field == 0 {
                             FIELDS - 1
                         } else {
@@ -2361,7 +2350,9 @@ impl AppState {
                         };
                         panel.error = None;
                     }
-                    KeyCode::Backspace => {
+                    _ if panel.field == 4 => {}
+                    _ => {
+                        let multiline = panel.field == 2;
                         let field = match panel.field {
                             0 => &mut panel.name,
                             1 => &mut panel.agent,
@@ -2372,39 +2363,31 @@ impl AppState {
                             7 => &mut panel.cost,
                             _ => &mut panel.tools,
                         };
-                        field.pop();
-                        panel.error = None;
-                    }
-                    KeyCode::Enter => {
-                        if panel.task.trim().is_empty() {
-                            panel.error = Some("Task must not be empty.".to_string());
-                        } else if let Some(spec) = subagent_spec_from_panel(&panel) {
-                            let _ = self.tab().cmd_tx.send(AgentCommand::SpawnSubagent { spec });
-                            self.status_notice = Some("Subagent started.".to_string());
-                            self.modal = None;
-                            return true;
-                        } else {
-                            panel.error = Some(
-                                "Steps and tokens must be integers; cost must be a number."
-                                    .to_string(),
-                            );
+                        match handle_text_key(field, key, width, multiline, multiline) {
+                            TextAction::Submit => {
+                                if panel.task.trim().is_empty() {
+                                    panel.error = Some("Task must not be empty.".to_string());
+                                } else if let Some(spec) = subagent_spec_from_panel(&panel) {
+                                    let _ = self
+                                        .tab()
+                                        .cmd_tx
+                                        .send(AgentCommand::SpawnSubagent { spec });
+                                    self.status_notice = Some("Subagent started.".to_string());
+                                    self.modal = None;
+                                    return true;
+                                } else {
+                                    panel.error = Some(
+                                        "Steps and tokens must be integers; cost must be a number."
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                            TextAction::Edited => {
+                                panel.error = None;
+                            }
+                            TextAction::Ignored => {}
                         }
                     }
-                    KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                        let field = match panel.field {
-                            0 => &mut panel.name,
-                            1 => &mut panel.agent,
-                            2 => &mut panel.task,
-                            3 => &mut panel.model,
-                            5 => &mut panel.steps,
-                            6 => &mut panel.tokens,
-                            7 => &mut panel.cost,
-                            _ => &mut panel.tools,
-                        };
-                        field.push(c);
-                        panel.error = None;
-                    }
-                    _ => {}
                 }
                 self.modal = Some(ActiveModal::SubagentSpawn(panel));
             }
@@ -2847,7 +2830,7 @@ impl AppState {
                 .unwrap_or(0)
         };
         self.modal = Some(ActiveModal::ProviderSelect {
-            filter: String::new(),
+            filter: TextInput::default(),
             selected,
         });
     }
@@ -2858,7 +2841,7 @@ impl AppState {
             self.open_provider_connect(provider, status);
         } else {
             self.modal = Some(ActiveModal::ProviderSelect {
-                filter: filter.to_string(),
+                filter: TextInput::new(filter),
                 selected,
             });
         }
@@ -2958,8 +2941,8 @@ impl AppState {
         self.modal = Some(ActiveModal::ApiKeyInput {
             provider_id: provider.id.clone(),
             provider_name: provider.display_name.clone(),
-            api_key: String::new(),
-            base_url: saved_url,
+            api_key: TextInput::default(),
+            base_url: TextInput::new(saved_url),
             editing_base_url: false,
             existing_key_status: status.clone(),
             error: None,
@@ -2997,7 +2980,7 @@ impl AppState {
             provider_id: provider.id.clone(),
             provider_name: provider.display_name.clone(),
             url: None,
-            input: String::new(),
+            input: TextInput::default(),
             error: None,
             busy: true,
         });
@@ -3126,7 +3109,7 @@ impl AppState {
 
     pub(super) fn open_command_palette(&mut self) {
         self.modal = Some(ActiveModal::CommandPalette {
-            filter: String::new(),
+            filter: TextInput::default(),
             selected: 0,
         });
     }
@@ -3281,6 +3264,7 @@ impl AppState {
         if let Some(spec) = spec {
             let _ = self.tab().cmd_tx.send(AgentCommand::SetModel {
                 model: spec,
+                provider: Some(canonical.clone()),
                 context_window_tokens,
                 effort_levels,
             });
@@ -3335,6 +3319,7 @@ impl AppState {
         };
         let _ = self.tab().cmd_tx.send(AgentCommand::SetModel {
             model: spec.clone(),
+            provider: Some(canonical.clone()),
             context_window_tokens,
             effort_levels,
         });
@@ -3370,24 +3355,39 @@ impl AppState {
                 .unwrap_or(0)
         };
         self.modal = Some(ActiveModal::ProviderSelect {
-            filter: String::new(),
+            filter: TextInput::default(),
             selected,
         });
     }
 
     pub(super) fn open_model_input(&mut self) {
         self.modal = Some(ActiveModal::ModelInput {
-            input: String::new(),
+            input: TextInput::default(),
             selected: None,
             error: None,
         });
     }
 }
 
+impl AppState {
+    fn stage_diff_path(&mut self, path: &str, stage: bool) -> Result<Option<usize>, String> {
+        if stage {
+            stage_file(&self.workspace_root, path)?;
+        } else {
+            unstage_file(&self.workspace_root, path)?;
+        }
+        self.file_changes = list_git_changes(&self.workspace_root);
+        Ok(self
+            .file_changes
+            .iter()
+            .position(|entry| entry.path == path))
+    }
+}
+
 fn collect_question_answers(
     request: &QuestionRequest,
     answers: &[Vec<usize>],
-    custom: &[String],
+    custom: &[TextInput],
 ) -> Vec<QuestionAnswer> {
     request
         .questions
@@ -3464,22 +3464,4 @@ fn typing_effort_keyword(temperature: &str) -> bool {
         .chars()
         .next()
         .is_some_and(|c| c.is_ascii_alphabetic())
-}
-
-fn queued_prev_boundary(text: &str, cursor: usize) -> usize {
-    let cursor = cursor.min(text.len());
-    text[..cursor]
-        .chars()
-        .next_back()
-        .map(|c| cursor - c.len_utf8())
-        .unwrap_or(0)
-}
-
-fn queued_next_boundary(text: &str, cursor: usize) -> usize {
-    let cursor = cursor.min(text.len());
-    text[cursor..]
-        .chars()
-        .next()
-        .map(|c| cursor + c.len_utf8())
-        .unwrap_or(cursor)
 }

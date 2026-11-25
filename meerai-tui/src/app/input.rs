@@ -21,7 +21,7 @@ impl AppState {
                     match modal {
                         ActiveModal::Terminal { .. } => {}
                         ActiveModal::ProviderSelect { filter, selected } => {
-                            filter.push_str(&clean);
+                            filter.insert_str(&clean);
                             *selected = 0;
                         }
                         ActiveModal::ApiKeyInput {
@@ -32,9 +32,9 @@ impl AppState {
                             ..
                         } => {
                             if *editing_base_url {
-                                base_url.push_str(&clean);
+                                base_url.insert_str(&clean);
                             } else {
-                                api_key.push_str(&clean);
+                                api_key.insert_str(&clean);
                             }
                             *error = None;
                         }
@@ -43,19 +43,17 @@ impl AppState {
                             selected,
                             error,
                         } => {
-                            input.push_str(&clean);
+                            input.insert_str(&clean);
                             *selected = None;
                             *error = None;
                         }
                         ActiveModal::ChatGptLogin { input, error, .. } => {
-                            input.push_str(&clean);
+                            input.insert_str(&clean);
                             *error = None;
                         }
                         ActiveModal::DiffView { .. }
                         | ActiveModal::AuthMethodSelect { .. }
                         | ActiveModal::ProviderConnection { .. }
-                        | ActiveModal::Question { .. }
-                        | ActiveModal::Context(_)
                         | ActiveModal::Loop { .. }
                         | ActiveModal::Memory { .. }
                         | ActiveModal::Routing { .. }
@@ -63,38 +61,37 @@ impl AppState {
                         | ActiveModal::Runs { .. }
                         | ActiveModal::RunDetail { .. }
                         | ActiveModal::RewindMenu { .. } => {}
+                        ActiveModal::Context(panel) => {
+                            if let Some(input) = panel.focus_input.as_mut() {
+                                input.insert_str(&clean);
+                            }
+                        }
                         ActiveModal::VaultReset { input, error } => {
-                            input.push_str(&clean);
+                            input.insert_str(&clean);
                             *error = None;
                         }
                         ActiveModal::Sampling {
                             temperature, error, ..
                         } => {
-                            temperature.push_str(&clean);
+                            temperature.insert_str(&clean);
                             *error = None;
                         }
                         ActiveModal::SubagentSpawn(panel) => {
                             match panel.field {
-                                0 => panel.agent.push_str(&clean),
-                                1 => panel.task.push_str(&clean),
-                                2 => panel.model.push_str(&clean),
-                                3 => panel.steps.push_str(&clean),
-                                4 => panel.tokens.push_str(&clean),
-                                5 => panel.cost.push_str(&clean),
-                                6 => panel.tools.push_str(&clean),
+                                0 => panel.name.insert_str(&clean),
+                                1 => panel.agent.insert_str(&clean),
+                                2 => panel.task.insert_str(&text),
+                                3 => panel.model.insert_str(&clean),
+                                5 => panel.steps.insert_str(&clean),
+                                6 => panel.tokens.insert_str(&clean),
+                                7 => panel.cost.insert_str(&clean),
+                                8 => panel.tools.insert_str(&clean),
                                 _ => {}
                             }
                             panel.error = None;
                         }
-                        ActiveModal::QueuedEdit {
-                            input,
-                            cursor,
-                            error,
-                            ..
-                        } => {
-                            let at = (*cursor).min(input.len());
-                            input.insert_str(at, &clean);
-                            *cursor = at + clean.len();
+                        ActiveModal::QueuedEdit { input, error, .. } => {
+                            input.insert_str(&text);
                             *error = None;
                         }
                         ActiveModal::Approval {
@@ -103,7 +100,22 @@ impl AppState {
                             ..
                         } => {
                             if *editing_reason {
-                                reason.push_str(&clean);
+                                reason.insert_str(&text);
+                            }
+                        }
+                        ActiveModal::Question {
+                            custom,
+                            editing_custom,
+                            current,
+                            focus,
+                            ..
+                        } => {
+                            let other = custom.len();
+                            if *editing_custom || *focus == other {
+                                if let Some(input) = custom.get_mut(*current) {
+                                    input.insert_str(&text);
+                                }
+                                *editing_custom = true;
                             }
                         }
                         ActiveModal::Search {
@@ -114,7 +126,7 @@ impl AppState {
                             selected,
                             preview,
                         } => {
-                            query.push_str(&clean);
+                            query.insert_str(&clean);
                             Self::refresh_search(
                                 workspace.as_ref(),
                                 &self.workspace_root,
@@ -129,11 +141,11 @@ impl AppState {
                         ActiveModal::SessionSelect {
                             filter, selected, ..
                         } => {
-                            filter.push_str(&clean);
+                            filter.insert_str(&clean);
                             *selected = 0;
                         }
                         ActiveModal::CommandPalette { filter, selected } => {
-                            filter.push_str(&clean);
+                            filter.insert_str(&clean);
                             *selected = 0;
                         }
                         ActiveModal::UserMessageActions { .. } => {}
@@ -146,7 +158,7 @@ impl AppState {
                         } => {
                             if !*busy {
                                 if *editing_secret {
-                                    secret_input.push_str(&clean);
+                                    secret_input.insert_str(&clean);
                                 } else {
                                     port_input.extend(clean.chars().filter(char::is_ascii_digit));
                                 }
@@ -1478,11 +1490,9 @@ impl AppState {
             }
             QueuedHitKind::Edit(idx) => {
                 if let Some(text) = self.tab().queued.get(idx).cloned() {
-                    self.queued_editor_goal_col = None;
                     self.modal = Some(ActiveModal::QueuedEdit {
                         index: idx,
-                        cursor: text.len(),
-                        input: text,
+                        input: TextInput::new(text),
                         error: None,
                     });
                 }
@@ -1755,6 +1765,10 @@ impl AppState {
     }
 
     pub(super) fn cycle_approval_mode(&mut self) {
+        if self.tab().ephemeral {
+            self.status_notice = Some("btw is read-only".to_string());
+            return;
+        }
         let next = match self.tab().approval_mode {
             ApprovalMode::Plan => ApprovalMode::Ask,
             ApprovalMode::Ask => ApprovalMode::Auto,

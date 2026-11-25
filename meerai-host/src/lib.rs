@@ -15,7 +15,7 @@ pub use actions::{
 pub use diff::{
     DiffCell, DiffRow, DiffRowKind, FileChangeEntry, FileDiffView, UnifiedLine, UnifiedLineKind,
     build_edit_diff, build_file_diff, current_branch, diff_counts, diff_texts, list_git_changes,
-    parse_unified_diff, tool_edit_diff,
+    parse_unified_diff, stage_file, tool_edit_diff, unstage_file,
 };
 pub use meerai_store::{
     InstalledPack, ModelRoute, NewProjectMemory, PackSourceKind, ProjectMemory, ProjectMemoryKind,

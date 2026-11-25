@@ -1996,6 +1996,7 @@ async fn idle_set_model_persists_session_meta() {
     cmd_tx
         .send(AgentCommand::SetModel {
             model: "openai::gpt-5-mini".to_string(),
+            provider: Some("openai".to_string()),
             context_window_tokens: None,
             effort_levels: None,
         })
@@ -2013,6 +2014,7 @@ async fn idle_set_model_persists_session_meta() {
     }
 
     assert_eq!(session.meta().model.as_deref(), Some("gpt-5-mini"));
+    assert_eq!(session.meta().provider.as_deref(), Some("openai"));
 
     let _ = cmd_tx.send(AgentCommand::Quit);
 }
@@ -2049,6 +2051,7 @@ async fn model_set_during_a_turn_persists_session_meta() {
     cmd_tx
         .send(AgentCommand::SetModel {
             model: "openai::gpt-5-mini".to_string(),
+            provider: None,
             context_window_tokens: None,
             effort_levels: None,
         })
@@ -2138,6 +2141,7 @@ async fn worker_set_model_applies_the_context_window() {
     cmd_tx
         .send(AgentCommand::SetModel {
             model: "openai::gpt-5-mini".to_string(),
+            provider: None,
             context_window_tokens: Some(10),
             effort_levels: None,
         })
@@ -2169,6 +2173,7 @@ async fn worker_set_model_without_a_window_keeps_the_current_window() {
     cmd_tx
         .send(AgentCommand::SetModel {
             model: "openai::gpt-5-mini".to_string(),
+            provider: None,
             context_window_tokens: None,
             effort_levels: None,
         })

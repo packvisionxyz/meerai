@@ -940,9 +940,9 @@ mod cursor_tests {
     use super::*;
 
     #[test]
-    fn goal_arguments_keep_the_cursor_at_the_end() {
+    fn loop_arguments_keep_the_cursor_at_the_end() {
         let skills = meerai_skills::builtin_skills();
-        let input = "/goal 1234";
+        let input = "/loop 1234";
         assert_eq!(
             display_pos_for_byte(input, input.len(), &[], &skills),
             (0, 10)

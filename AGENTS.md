@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rust workspace for Pack Vision's terminal agent harness: seventeen library crates plus the `meerai`
+Rust workspace for Pack Vision's terminal agent harness: eighteen library crates plus the `meerai`
 binary (built by `meerai-cli`). This file holds working rules only.
 
 It is injected into the system prompt with a 32 KiB cap. Keep it rules-only and short. Put
@@ -106,6 +106,9 @@ make verify                                    # fmt --check + clippy + test (al
 - Both clients render the same Markdown feature set in `markdown.rs`. Change the TUI and
   browser renderers together. Keep the TUI width fitting and the browser table alignment in
   sync.
+- Modal text fields use `meerai_input::TextInput` and the composer editing keys. Do not add a
+  `String`-backed or append-only field. `Enter` submits and `shift`/`alt`/`ctrl+enter` inserts a
+  newline.
 - Every user-facing command and workflow gets a dedicated panel or modal in both
   `meerai-tui` and `meerai-web-client`. Do not ship a transcript-only flow in
   one client, or require a typed confirmation argument in one client and a

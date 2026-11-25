@@ -2,6 +2,7 @@ use super::statusline::key_status_style;
 use super::*;
 use crate::app::{ApprovalClickAction, DiffListState, PackTab, ProviderConnectionAction};
 use crate::diff::DiffRow;
+use meerai_input::TextInput;
 
 fn auth_file_display() -> String {
     meerai_common::settings::default_data_dir()
@@ -48,7 +49,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 },
             ]);
             frame.render_widget(Paragraph::new(filter_line), filter_area);
-            place_input_cursor(frame, filter_area, 8 + filter.chars().count());
+            place_input_cursor(frame, filter_area, 8 + filter.cursor_col());
 
             let providers = app.filtered_providers(&filter);
             let active_provider = app.tab().active_provider.clone();
@@ -352,7 +353,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 Span::styled(input.clone(), Style::default().fg(theme::p().text))
             };
             frame.render_widget(Paragraph::new(value), input_area);
-            place_input_cursor(frame, input_area, input.chars().count());
+            place_input_cursor(frame, input_area, input.cursor_col());
 
             frame.render_widget(
                 Paragraph::new(key_hints_line(&[
@@ -426,7 +427,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                     "(paste or type API key)".to_string()
                 }
             } else {
-                "•".repeat(api_key.chars().count())
+                "•".repeat(api_key.cursor_col())
             };
             let key_val_style = if api_key.is_empty() {
                 Style::default().fg(theme::p().faint)
@@ -461,7 +462,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             let url_display = if base_url.is_empty() {
                 format!("({default_url})")
             } else {
-                base_url.clone()
+                base_url.text.clone()
             };
             let url_val_style = if base_url.is_empty() {
                 Style::default().fg(theme::p().faint)
@@ -478,9 +479,9 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             });
 
             if key_focus {
-                place_input_cursor(frame, key_input_area, api_key.chars().count());
+                place_input_cursor(frame, key_input_area, api_key.cursor_col());
             } else {
-                place_input_cursor(frame, url_input_area, base_url.chars().count());
+                place_input_cursor(frame, url_input_area, base_url.cursor_col());
             }
 
             let info_line = if let Some(err) = error {
@@ -556,7 +557,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 ])),
                 input_area,
             );
-            place_input_cursor(frame, input_area, 7 + input.chars().count());
+            place_input_cursor(frame, input_area, 7 + input.cursor_col());
 
             if matches.is_empty() {
                 let text = if input.trim().is_empty() {
@@ -666,9 +667,22 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             } else {
                 format!(" [{}/{}]", file_index + 1, app.file_changes.len())
             };
+            let action = app
+                .file_changes
+                .get(file_index)
+                .map(|entry| entry.action_label())
+                .unwrap_or("");
             let title = format!(
-                "Diff (/diff): {} ({}) +{} -{}{file_pos}",
-                diff.path, diff.status, diff.additions, diff.deletions
+                "Diff (/diff): {} ({}) +{} -{}{file_pos}{}",
+                diff.path,
+                diff.status,
+                diff.additions,
+                diff.deletions,
+                if action.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {action}")
+                }
             );
             let inner = dialog_frame(frame, app, popup, &title, true);
 
@@ -723,6 +737,8 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 key_hints_line(&[
                     ("↑↓", "select file"),
                     ("Enter", "open"),
+                    ("s", "stage"),
+                    ("u", "unstage"),
                     ("f", "hide list"),
                     ("←→/[/]", "next/prev"),
                     ("Esc", "hide list"),
@@ -734,6 +750,8 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                     ("ctrl+d/u", "page"),
                     ("g/G", "top/bot"),
                     ("f", "files"),
+                    ("s", "stage"),
+                    ("u", "unstage"),
                     ("←→/[/]", "next/prev file"),
                     ("Esc/q", "close"),
                 ])
@@ -794,7 +812,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             place_input_cursor(
                 frame,
                 query_inner,
-                mode.label().chars().count() + 3 + query.chars().count(),
+                mode.label().chars().count() + 3 + query.cursor_col(),
             );
 
             let panes = Layout::horizontal([
@@ -995,7 +1013,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 },
             ]);
             frame.render_widget(Paragraph::new(filter_line), filter_area);
-            place_input_cursor(frame, filter_area, 2 + filter.chars().count());
+            place_input_cursor(frame, filter_area, 2 + filter.cursor_col());
 
             let commands = crate::app::filtered_commands(&filter);
             let width = rows[2].width as usize;
@@ -1076,13 +1094,12 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
         ActiveModal::QueuedEdit {
             index,
             input,
-            cursor,
             error,
         } => {
             let popup_width = area.width.saturating_sub(2).min(64);
             let editor_width = popup_width.saturating_sub(8).max(1) as usize;
             app.queued_editor_width = editor_width as u16;
-            let wrapped = wrap_queued_editor(&input, editor_width);
+            let wrapped = wrap_queued_editor(&input.text, editor_width);
             let editor_lines = wrapped.len() as u16;
             let popup_height = (editor_lines + 6)
                 .clamp(8, 14)
@@ -1115,14 +1132,15 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 .fg(theme::p().surface)
                 .bg(theme::p().accent)
                 .add_modifier(Modifier::BOLD);
-            let (cursor_row, cursor_col) = queued_editor_cursor(&wrapped, &input, cursor);
+            let (cursor_row, cursor_col) =
+                queued_editor_cursor(&wrapped, &input.text, input.cursor);
             let visible = editor_area.height as usize;
             let scroll = cursor_row.saturating_sub(visible.saturating_sub(1));
             for (offset, (start, end)) in wrapped.iter().enumerate().skip(scroll).take(visible) {
                 let y = editor_area.y + (offset - scroll) as u16;
                 let line_rect = Rect::new(editor_area.x, y, editor_area.width, 1);
                 let mut spans = vec![Span::styled("› ", Style::default().fg(theme::p().accent))];
-                let body = &input[*start..*end];
+                let body = &input.text[*start..*end];
                 if offset == cursor_row {
                     let before: String = body.chars().take(cursor_col).collect();
                     let mut after = body.chars().skip(cursor_col);
@@ -1222,7 +1240,10 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                     Style::default().fg(theme::p().faint),
                 )
             } else {
-                (port_input.clone(), Style::default().fg(theme::p().text))
+                (
+                    port_input.text.clone(),
+                    Style::default().fg(theme::p().text),
+                )
             };
             frame.render_widget(
                 Paragraph::new(Span::styled(port_text, port_style)),
@@ -1256,7 +1277,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 )
             } else {
                 (
-                    "•".repeat(secret_input.chars().count()),
+                    "•".repeat(secret_input.cursor_col()),
                     Style::default().fg(theme::p().text),
                 )
             };
@@ -1270,9 +1291,9 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             });
 
             if port_focus {
-                place_input_cursor(frame, port_area, port_input.chars().count());
+                place_input_cursor(frame, port_area, port_input.cursor_col());
             } else {
-                place_input_cursor(frame, secret_area, secret_input.chars().count());
+                place_input_cursor(frame, secret_area, secret_input.cursor_col());
             }
 
             if busy {
@@ -2015,21 +2036,21 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             let mode_label = panel.mode.map_or("parent", |mode| mode.label());
             let fields = [
                 format!("Name    {}", blank_as(&panel.name, "optional")),
-                format!("Agent   {}", panel.agent),
-                format!("Task    {}", panel.task),
+                format!("Agent   {}", panel.agent.text),
+                format!("Task    {}", panel.task.text),
                 format!(
                     "Model   {}",
                     if panel.model.is_empty() {
                         "parent".to_string()
                     } else {
-                        panel.model.clone()
+                        panel.model.text.clone()
                     }
                 ),
                 format!("Mode    {mode_label}  (press m)"),
-                format!("Steps   {}", blank_as(&panel.steps, "preset")),
-                format!("Tokens  {}", blank_as(&panel.tokens, "parent cap")),
-                format!("Cost $  {}", blank_as(&panel.cost, "parent cap")),
-                format!("Tools   {}", blank_as(&panel.tools, "preset")),
+                format!("Steps   {}", blank_as(panel.steps.as_str(), "preset")),
+                format!("Tokens  {}", blank_as(panel.tokens.as_str(), "parent cap")),
+                format!("Cost $  {}", blank_as(panel.cost.as_str(), "parent cap")),
+                format!("Tools   {}", blank_as(panel.tools.as_str(), "preset")),
             ];
             let items: Vec<ListItem<'_>> = fields
                 .into_iter()
@@ -2443,7 +2464,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             } else {
                 format!("Question — {}", prompt.header)
             };
-            let popup = cap_width(centered_rect(area, 72, 72, 48, 14), 76);
+            let popup = cap_width(centered_rect(area, 72, 72, 48, 18), 76);
             dim_backdrop(frame, area, popup);
             let inner = dialog_frame(frame, app, popup, &title, false);
 
@@ -2453,7 +2474,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 Constraint::Length(wrapped_q_lines),
                 Constraint::Length(1),
                 Constraint::Min(2),
-                Constraint::Length(1),
+                Constraint::Length(3),
                 Constraint::Length(1),
             ])
             .split(inner);
@@ -2565,70 +2586,89 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 }
             }
 
-            if y < max_y {
-                let other = prompt.options.len();
-                let text = custom[current].trim();
-                let is_selected = !text.is_empty();
-                let is_focused = focus == other;
-                let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(other));
-                let row_bg = if is_focused || is_hovered {
-                    theme::p().surface_high
-                } else {
-                    theme::p().surface
-                };
-                let prefix = if is_focused { "▸ " } else { "  " };
-                let marker = if prompt.multiple {
-                    if is_selected { "[x]" } else { "[ ]" }
-                } else if is_selected {
-                    "(•)"
-                } else {
-                    "( )"
-                };
-                let label = if is_focused && editing_custom {
-                    format!("Other: {text}▏")
-                } else if is_selected {
-                    format!("Other: {text}")
-                } else {
-                    "Other (type your own)".to_string()
-                };
-                let label_style = if is_focused {
-                    Style::default()
-                        .fg(theme::p().interactive)
-                        .bg(row_bg)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme::p().text).bg(row_bg)
-                };
-                let marker_style = Style::default()
-                    .fg(if is_selected {
-                        theme::p().accent
-                    } else if is_focused {
-                        theme::p().interactive
-                    } else {
-                        theme::p().muted
-                    })
-                    .bg(row_bg)
-                    .add_modifier(Modifier::BOLD);
-                let other_rect = Rect::new(rows[2].x, y, rows[2].width, 1);
-                if is_focused || is_hovered {
-                    frame.render_widget(
-                        Block::default().style(Style::default().bg(row_bg)),
-                        other_rect,
-                    );
-                }
+            let other = prompt.options.len();
+            let input = &custom[current];
+            let text = input.text.trim();
+            let is_selected = !text.is_empty();
+            let is_focused = focus == other;
+            let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(other));
+            let row_bg = if is_focused || is_hovered {
+                theme::p().surface_high
+            } else {
+                theme::p().surface
+            };
+            let prefix = if is_focused { "▸ " } else { "  " };
+            let marker = if prompt.multiple {
+                if is_selected { "[x]" } else { "[ ]" }
+            } else if is_selected {
+                "(•)"
+            } else {
+                "( )"
+            };
+            let other_area = rows[3];
+            if is_focused || is_hovered {
                 frame.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        Span::styled(prefix, label_style),
-                        Span::styled(format!("{marker} "), marker_style),
-                        Span::styled(label, label_style),
-                    ])),
-                    other_rect,
+                    Block::default().style(Style::default().bg(row_bg)),
+                    other_area,
                 );
-                app.modal_hit_zones.push(ModalHitZone {
-                    rect: other_rect,
-                    kind: ModalHitKind::ListItem(other),
-                });
             }
+            let label_style = if is_focused {
+                Style::default()
+                    .fg(theme::p().interactive)
+                    .bg(row_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::p().text).bg(row_bg)
+            };
+            let marker_style = Style::default()
+                .fg(if is_selected {
+                    theme::p().accent
+                } else if is_focused {
+                    theme::p().interactive
+                } else {
+                    theme::p().muted
+                })
+                .bg(row_bg)
+                .add_modifier(Modifier::BOLD);
+            let prefix_text = format!("{prefix}{marker} Other: ");
+            let prefix_width = prefix_text.chars().count() as u16;
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(prefix, label_style),
+                    Span::styled(format!("{marker} "), marker_style),
+                    Span::styled("Other: ", label_style),
+                ])),
+                Rect::new(other_area.x, other_area.y, other_area.width, 1),
+            );
+            let text_area = Rect::new(
+                other_area.x.saturating_add(prefix_width),
+                other_area.y,
+                other_area.width.saturating_sub(prefix_width),
+                other_area.height,
+            );
+            if editing_custom || !text.is_empty() {
+                let mut scroll = 0;
+                render_text_block(
+                    frame,
+                    text_area,
+                    input,
+                    Style::default().fg(theme::p().text).bg(row_bg),
+                    &mut scroll,
+                    editing_custom && is_focused,
+                );
+            } else if text_area.width > 0 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "Other (type your own)",
+                        Style::default().fg(theme::p().faint).bg(row_bg),
+                    )),
+                    Rect::new(text_area.x, text_area.y, text_area.width, 1),
+                );
+            }
+            app.modal_hit_zones.push(ModalHitZone {
+                rect: other_area,
+                kind: ModalHitKind::ListItem(other),
+            });
 
             let action_label = if prompt.multiple { "toggle" } else { "select" };
             frame.render_widget(
@@ -2636,6 +2676,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                     ("↑↓", "move"),
                     ("Space", action_label),
                     ("type", "other"),
+                    ("shift+enter", "newline"),
                     ("Tab", "next"),
                     ("Enter", "submit"),
                     ("Esc", "cancel"),
@@ -2651,7 +2692,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             let Some(request) = queue.first() else {
                 return;
             };
-            let popup = cap_width(centered_rect(area, 68, 54, 52, 14), 76);
+            let popup = cap_width(centered_rect(area, 68, 54, 52, 16), 76);
             dim_backdrop(frame, area, popup);
             let title = if queue.len() > 1 {
                 format!("Approval required ({})", queue.len())
@@ -2674,7 +2715,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 Constraint::Length(1),
                 Constraint::Min(3),
                 Constraint::Length(1),
-                Constraint::Length(2),
+                Constraint::Length(if editing_reason { 4 } else { 2 }),
             ])
             .split(inner);
 
@@ -2741,30 +2782,44 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
             );
 
             if editing_reason {
-                let reason_area = input_band(
+                let reason_area = input_band(frame, rows[4], true);
+                let prefix = "Reason  ";
+                let prefix_width = prefix.chars().count() as u16;
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        prefix,
+                        Style::default()
+                            .fg(theme::p().warning)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Rect::new(reason_area.x, reason_area.y, reason_area.width, 1),
+                );
+                let text_area = Rect::new(
+                    reason_area.x.saturating_add(prefix_width),
+                    reason_area.y,
+                    reason_area.width.saturating_sub(prefix_width),
+                    reason_area.height.saturating_sub(1),
+                );
+                let mut scroll = 0;
+                render_text_block(
                     frame,
-                    Rect::new(rows[4].x, rows[4].y, rows[4].width, 1),
+                    text_area,
+                    &reason,
+                    Style::default().fg(theme::p().text),
+                    &mut scroll,
                     true,
                 );
                 frame.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        Span::styled(
-                            "Reason  ",
-                            Style::default()
-                                .fg(theme::p().warning)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(reason.clone(), Style::default().fg(theme::p().text)),
-                        Span::styled("█", Style::default().fg(theme::p().warning)),
-                    ])),
-                    reason_area,
-                );
-                frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
-                        "Enter:send decline reason  Esc:back",
+                        "Enter:send decline reason · shift+enter:newline · Esc:back",
                         Style::default().fg(theme::p().faint),
                     ))),
-                    Rect::new(rows[4].x, rows[4].y + 1, rows[4].width, 1),
+                    Rect::new(
+                        rows[4].x,
+                        rows[4].y + rows[4].height.saturating_sub(1),
+                        rows[4].width,
+                        1,
+                    ),
                 );
             } else {
                 let actions = [
@@ -2858,7 +2913,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
                 },
             ]);
             frame.render_widget(Paragraph::new(filter_line), filter_area);
-            place_input_cursor(frame, filter_area, 8 + filter.chars().count());
+            place_input_cursor(frame, filter_area, 8 + filter.cursor_col());
 
             let filtered = app.filtered_sessions(&sessions, &filter);
             let selected_idx = selected.min(filtered.len().saturating_sub(1));
@@ -3012,6 +3067,62 @@ fn place_input_cursor(frame: &mut Frame<'_>, area: Rect, char_offset: usize) {
     if area.width > 0 && area.height > 0 {
         let cursor_x = (area.x + char_offset as u16).min(area.x + area.width.saturating_sub(1));
         frame.set_cursor_position(Position::new(cursor_x, area.y));
+    }
+}
+
+fn render_text_block(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    input: &TextInput,
+    style: Style,
+    scroll: &mut usize,
+    show_cursor: bool,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let width = area.width as usize;
+    let height = area.height as usize;
+    let lines = input.wrapped_lines(width);
+    let (cursor_row, cursor_col) = input.cursor_row_col(width);
+    let max_scroll = lines.len().saturating_sub(height);
+    *scroll = (*scroll).min(max_scroll);
+    if cursor_row < *scroll {
+        *scroll = cursor_row;
+    } else if cursor_row >= *scroll + height {
+        *scroll = cursor_row + 1 - height;
+    }
+    for (row, (start, end)) in lines.iter().enumerate().skip(*scroll).take(height) {
+        let y = area.y + (row - *scroll) as u16;
+        let body = &input.text[*start..*end];
+        let line_rect = Rect::new(area.x, y, area.width, 1);
+        if show_cursor && row == cursor_row {
+            let before: String = body.chars().take(cursor_col).collect();
+            let mut after = body.chars().skip(cursor_col);
+            let at = after.next().unwrap_or(' ');
+            let rest: String = after.collect();
+            let cursor_style = Style::default()
+                .fg(theme::p().background)
+                .bg(theme::p().accent)
+                .add_modifier(Modifier::BOLD);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(before, style),
+                    Span::styled(at.to_string(), cursor_style),
+                    Span::styled(rest, style),
+                ])),
+                line_rect,
+            );
+            let cursor_x = area
+                .x
+                .saturating_add(cursor_col.min(width.saturating_sub(1)) as u16);
+            frame.set_cursor_position(Position::new(cursor_x, y));
+        } else {
+            frame.render_widget(
+                Paragraph::new(Span::styled(body.to_string(), style)),
+                line_rect,
+            );
+        }
     }
 }
 
@@ -3207,7 +3318,10 @@ fn render_diff_file_list(
             let is_selected = idx == selected_idx;
             let is_hovered = app.hovered_modal_hit == Some(ModalHitKind::ListItem(idx));
             let marker = if is_current { "● " } else { "  " };
-            let prefix_width = 1 + marker.chars().count() + entry.status.chars().count() + 1;
+            let action = entry.action_label();
+            let action_width = action.chars().count();
+            let prefix_width =
+                1 + marker.chars().count() + entry.status.chars().count() + action_width + 2;
             let path_style = if is_selected {
                 Style::default()
                     .fg(theme::p().accent)
@@ -3236,6 +3350,7 @@ fn render_diff_file_list(
                     truncate_single_line(&entry.path, width.saturating_sub(prefix_width)),
                     path_style,
                 ),
+                Span::styled(format!(" {action}"), Style::default().fg(theme::p().faint)),
             ]));
             if is_hovered && !is_selected {
                 row.style(hover_row_style())
@@ -3342,27 +3457,6 @@ pub(crate) fn queued_editor_cursor(
     let (start, end) = lines[row];
     let cursor = cursor.min(end);
     (row, text[start..cursor].chars().count())
-}
-
-pub(crate) fn queued_editor_vertical(
-    text: &str,
-    cursor: usize,
-    width: usize,
-    delta: isize,
-    goal_col: Option<usize>,
-) -> Option<(usize, usize)> {
-    let lines = wrap_queued_editor(text, width.max(1));
-    let (row, col) = queued_editor_cursor(&lines, text, cursor);
-    let target_row = row.checked_add_signed(delta)?;
-    let (start, end) = *lines.get(target_row)?;
-    let goal = goal_col.unwrap_or(col);
-    let body = &text[start..end];
-    let offset = body
-        .char_indices()
-        .nth(goal)
-        .map(|(index, _)| index)
-        .unwrap_or(body.len());
-    Some((start + offset, goal))
 }
 
 #[cfg(test)]

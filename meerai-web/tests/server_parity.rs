@@ -30,8 +30,8 @@ use meerai_web::{RunningServer, ServeAuth, ServeConfig, ServeSecret, start_serve
 use meerai_web_protocol::{
     ApiError, ApiErrorCode, ChatGptLoginStartResponse, CreateSessionResponse, FileDiffResponse,
     HostInfoDto, ProvidersResponse, ReloadResponse, RewindResponse, RunShellResponse,
-    SessionEventsResponse, SessionHistoryResponse, SetModelResponse, WorkspaceFilesResponse,
-    WorkspacePreviewResponse, WorkspaceSearchResponse,
+    SessionEventsResponse, SessionHistoryResponse, SetModelResponse, TranscriptEntryDto,
+    WorkspaceFilesResponse, WorkspacePreviewResponse, WorkspaceSearchResponse,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -165,6 +165,7 @@ impl ParityOpener {
             provider: "gemini".to_string(),
             model: "gemini-3.8-flash".to_string(),
             approval_mode: ApprovalMode::Ask,
+            transient: false,
             events,
             cmd_tx,
             event_rx,
@@ -235,6 +236,23 @@ impl SessionOpener for ParityOpener {
             Backend::Native,
             Vec::new(),
         ))
+    }
+
+    async fn btw_session(&self, _id: &SessionId) -> anyhow::Result<OpenedSession> {
+        let n = {
+            let mut seq = self.next_seq.lock().unwrap();
+            let n = *seq;
+            *seq += 1;
+            n
+        };
+        let mut opened = self.make_opened(
+            SessionId::from_raw(format!("ses-btw-{n}")),
+            Backend::Native,
+            Vec::new(),
+        );
+        opened.title = Some("btw".to_string());
+        opened.transient = true;
+        Ok(opened)
     }
 
     async fn delete_session(&self, id: &SessionId) -> anyhow::Result<bool> {
@@ -619,6 +637,48 @@ async fn parity_routes_cover_session_turns_approvals_workspace_providers_oauth_a
     assert_eq!(forked.status, 201);
     let fork_dto: CreateSessionResponse = serde_json::from_slice(&forked.body).unwrap();
     assert_eq!(fork_dto.session.id, "ses-fork-1");
+
+    let btw = req(
+        server.addr,
+        "POST",
+        "/api/sessions/ses-stored-1/btw",
+        auth_ref,
+        Some(br#"{"text":"why did we change it?"}"#),
+    )
+    .await;
+    assert_eq!(btw.status, 201);
+    let btw_dto: CreateSessionResponse = serde_json::from_slice(&btw.body).unwrap();
+    assert_eq!(btw_dto.session.id, "ses-btw-2");
+    assert!(btw_dto.session.transient);
+    assert_eq!(btw_dto.session.title.as_deref(), Some("btw"));
+    let (btw_rx, _) = opener.worker("ses-btw-2");
+    assert!(matches!(
+        btw_rx.lock().await.try_recv(),
+        Ok(AgentCommand::SubmitPrompt(text)) if text == "why did we change it?"
+    ));
+    let btw_events = req(
+        server.addr,
+        "GET",
+        "/api/sessions/ses-btw-2/events",
+        auth_ref,
+        None,
+    )
+    .await;
+    assert_eq!(btw_events.status, 200);
+    let btw_events_dto: SessionEventsResponse = serde_json::from_slice(&btw_events.body).unwrap();
+    assert!(btw_events_dto.entries.iter().any(|entry| matches!(
+        entry,
+        TranscriptEntryDto::User { text, .. } if text == "why did we change it?"
+    )));
+    let btw_shell = req(
+        server.addr,
+        "POST",
+        "/api/sessions/ses-btw-2/shell",
+        auth_ref,
+        Some(br#"{"command":"echo nope"}"#),
+    )
+    .await;
+    assert_eq!(btw_shell.status, 403);
 
     // Set model, set mode, apply agent/skill, run shell + plan block
     let model_res = req(

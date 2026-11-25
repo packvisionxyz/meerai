@@ -35,6 +35,7 @@ pub struct OpenedSession {
     pub provider: String,
     pub model: String,
     pub approval_mode: ApprovalMode,
+    pub transient: bool,
     pub events: Vec<LoggedEvent>,
     pub cmd_tx: mpsc::UnboundedSender<AgentCommand>,
     pub event_rx: mpsc::UnboundedReceiver<AgentEvent>,
@@ -312,6 +313,9 @@ pub trait SessionOpener: Send + Sync {
     async fn open_session(&self, id: &SessionId) -> Result<OpenedSession>;
     async fn create_session(&self) -> Result<OpenedSession>;
     async fn fork_session(&self, id: &SessionId, turn: &TurnId) -> Result<OpenedSession>;
+    async fn btw_session(&self, _id: &SessionId) -> Result<OpenedSession> {
+        anyhow::bail!("btw sessions are not supported by this client")
+    }
     async fn delete_session(&self, id: &SessionId) -> Result<bool>;
     async fn create_acp_session(&self, _preset: &str) -> Result<OpenedSession> {
         anyhow::bail!("ACP sessions are not supported by this client")
