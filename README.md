@@ -1041,6 +1041,7 @@ OS sandboxing on Windows hosts.
 - [docs/acp.md](docs/acp.md) — Agent Client Protocol: the landed `agy` client (M13), the planned `meerai acp` editor surface (M14), and the trust boundary
 - [docs/token-efficiency.md](docs/token-efficiency.md) — initiative for prompt caching, tool-result pruning, live call repair, and verified recovery
 - [docs/openai-chatgpt-plan-usage.md](docs/openai-chatgpt-plan-usage.md) — initiative for using a ChatGPT Plus/Pro subscription through OpenAI's Sign in with ChatGPT plan-usage flow
+- [docs/refactor-review.md](docs/refactor-review.md) — crate-by-crate audit of coding standards and structure: measured baseline, six findings axes, and a ranked cleanup backlog
 - [AGENTS.md](AGENTS.md) — working rules for coding agents: commands, contracts, loop, config, security, TUI, commit, and code style
 
 ## License

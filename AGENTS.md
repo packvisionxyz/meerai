@@ -127,6 +127,21 @@ make verify                                    # fmt --check + clippy + test (al
   no body, no bullet list, no paragraphs.
 - Never add a second commit above the base, and never merge.
 
+### File size and error handling
+
+- 900 production lines is a target per file, not a build gate. A file above it is a review prompt.
+  Do not split one coherent file into two coupled halves to reach the number. Every `mod.rs` stays a
+  declaration file: no production logic, no test modules.
+- `unwrap`, `expect`, and `panic!` are allowed in production code only in `meerai-tui`,
+  `meerai-cli`, and `meerai-web-client`. Those three are application ends: a panic there is a crash
+  with no caller to mislead. Every other crate is library surface that an external consumer can
+  call, so it returns a typed error. This includes `meerai-host` and `meerai-web`, which are
+  libraries even though they sit next to the applications.
+- `.expect()` counts the same as `.unwrap()`. Both panic. A message helps only the reader of the
+  crash, not the caller.
+- Test code is exempt. An `unwrap` inside `#[cfg(test)]`, an external `*_tests` module, or a crate
+  `tests/` directory is correct usage and must not be counted against the rule.
+
 ### Code style
 
 - Default to **no comments** (including doc comments). Only add a comment when it is truly crucial:
