@@ -245,7 +245,7 @@ The backlog orders contract work before structural work. Each item states one ob
 | 14 | ~~Write the error-handling policy into `AGENTS.md` and apply it per crate~~ **Policy written**; the per-crate conversion below remains | error handling | all | M | Low | Every library crate reaches zero production `unwrap`/`expect`, or records a line-level exception with its reason |
 | 15 | ~~Move `to_genai` out of `meerai-core` so the leaf crate stops re-exporting `genai`~~ **Withdrawn** | crate boundary | — | — | — | Withdrawn after measurement, see [§6.1](#61-resolved-the-meerai-core-genai-re-export) |
 | 16 | Split `meerai-common/src/settings.rs` into value types and merge logic | file size | `meerai-common` | M | Medium | No file in `meerai-common/src` exceeds 900 lines and the tighten-only tests still pass |
-| 17 | Add tests for the four untested `meerai-tools` files, `meerai-host/src/session.rs`, and `meerai-web/src/mapper.rs` | test organization | `meerai-tools`, `meerai-host`, `meerai-web` | M | Low | Each named file has at least one test exercising its public behavior, and `repo_map/extract.rs` is covered per language it collects |
+| 17 | ~~Add tests for the untested `meerai-tools` and `meerai-web` files~~ **Done** — see [§3.4](#34-completed-work) | test organization | `meerai-tools`, `meerai-web` | M | Low | Done: 64 new tests across 4 files; the two accepted gaps in [§3.3](#33-untested-file-decision) stay untested by design |
 | 18 | ~~Collapse the four macro metadata structs and remove the four `dead_code` allows~~ **Rescoped and Done** — see [§3.4](#34-completed-work) | signature | `meerai-macros`, `meerai-core` | S | Low | Done: the three `ToolsetArgs` types are genuinely distinct and stay; the dead `attrs` field and three pointless test allows are gone |
 
 Items 1 through 3 are contract-adjacent and should land first. Items 4 through 13 are mechanical splits that can run crate by crate with one writer per crate. Items 14 through 18 are policy and coverage work that can run in parallel with any of the above.
@@ -268,6 +268,7 @@ Items 1 through 3 are contract-adjacent and should land first. Items 4 through 1
 | 5 | Split `meerai-agents/src/multi_turn_agent/tests.rs` into `fixtures.rs` plus 9 concern modules | 1 file, 10,017 lines, 156 tests | hub 10 lines, largest module 1,728 lines, 156 tests verified identical by name |
 | 6 | Added `HookArgs` (merged 6 optional parameters across `run_hook`/`run_hook_with_error`, 15 call sites), `StepChannel`, and `ToolCallEnv` | 5 `too_many_arguments` allows in `meerai-agents` | 0 allows; clippy silent |
 | 7 | Added `ItemLayout`, `TextRun`/`CursorTracking`, `TabInit`, `AppDeps` (10 call sites), and `SearchSources`/`SearchOutput` | 5 `too_many_arguments` allows in `meerai-tui` | 0 allows; clippy silent |
+| 17 | Added 14 tests to `repo_map/rank.rs`, 20 to `repo_map/extract.rs` (one per supported language), 14 to `workspace_search.rs`, and 16 to `web/src/mapper.rs` | 4 files, 2,500 lines, zero tests | 64 tests; the workspace suite went 1278 to 1340 |
 
 Item 10 verification went beyond "it compiles". The split was mechanical, so the risk was silent wire drift:
 
