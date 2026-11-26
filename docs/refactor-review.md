@@ -300,6 +300,30 @@ Five more sit between 900 and 1,010 lines. Ten test files also exceed 900 lines,
 
 These are candidates for a second pass, not defects: each is one coherent unit, and splitting `turn.rs` or `event_loop.rs` on line count alone would produce the two coupled halves the policy warns against.
 
+### 3.7 Second pass: route dispatch and library panics
+
+Two structural problems remained after the 18-item backlog. Both are now closed.
+
+**Route dispatch.** `meerai-web/src/server.rs` matched `(method, path)` and, for each of 27 routes, called `extract_session_action(p, "x").is_some()` in the guard and then again to extract the id, followed by `.unwrap()`. Each route parsed the path twice and had an unreachable panic. The dispatch is now grouped by verb, each arm extracts once with `let Some(id) = ... else`, and no route can panic. `server.rs` went from 1,216 to 611 production lines, and the file has zero `unwrap`/`expect`/`panic!`.
+
+**Library panics.** `AGENTS.md` allows panics only in `meerai-tui`, `meerai-cli`, and `meerai-web-client`. The other crates had 120 in production code. That count is now 10, and every remaining one is either a source-literal regex or an infallible construct:
+
+| Site | Why it stays |
+| --- | --- |
+| `meerai-tools/src/web/search.rs` ×4 | Regex literals; annotated `expect_used` with the reason |
+| `meerai-agents/src/screen.rs`, `redact.rs` | Static screening/redaction patterns |
+| `meerai-session/src/session/open.rs` ×2 | In-memory store cannot fail to open |
+| `meerai-client/src/providers.rs` ×2 | Bundled YAML compiled into the binary |
+
+The 110 converted sites fall into four shapes, each now using the narrowest correct construct:
+
+- 33 `get_mut(...).unwrap()` became `let Some(record) = ... else`, returning `SessionNotFound` where the function returns `Result`.
+- 14 `lock().unwrap()` became `lock().map_err(...)`, with a `Result` helper per type. A poisoned lock now surfaces as an error or a documented fail-closed default, never a panic.
+- 27 route guards collapsed into a single `let Some(id) = extract(...) else`.
+- The rest were `Response::builder().body().unwrap()` (cannot fail after a valid status and body), `serde_json` calls on owned data, and `spawn_blocking` joins.
+
+Three sites needed a product decision rather than a mechanical fix. `RegistrySnapshot::poisoned()` reports a poisoned registry instead of rendering an empty one, `subscribe` returns `ResyncRequired`, and `run_pump` stops. Each is recorded in the code beside the fallback.
+
 Item 10 verification went beyond "it compiles". The split was mechanical, so the risk was silent wire drift:
 
 - All 97 `pub` items are present, with zero missing and zero extra, compared by name against the original.
