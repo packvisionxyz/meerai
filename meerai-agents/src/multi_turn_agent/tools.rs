@@ -165,21 +165,40 @@ fn with_sandbox_hint(mut run: ToolRun, hint: &str) -> ToolRun {
     run
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(super) struct StepChannel<'a> {
+    pub(super) event_tx: &'a mpsc::UnboundedSender<AgentEvent>,
+    pub(super) cancel: &'a CancellationToken,
+    pub(super) inbox: Option<&'a mut mpsc::UnboundedReceiver<AgentCommand>>,
+}
+
+struct ToolCallEnv<'a> {
+    tools: &'a [Box<dyn Toolset>],
+    timeout_ms: Option<u64>,
+    max_retries: usize,
+    clock: TurnClock,
+}
+
 async fn request_sandbox_escape(
     ctx: &mut DecisionCtx<'_>,
-    tools: &[Box<dyn Toolset>],
     fn_name: &str,
     args: &str,
     run: ToolRun,
     turn_id: &TurnId,
-    timeout_ms: Option<u64>,
-    max_retries: usize,
-    event_tx: &mpsc::UnboundedSender<AgentEvent>,
-    cancel: &CancellationToken,
-    mut inbox: Option<&mut mpsc::UnboundedReceiver<AgentCommand>>,
-    clock: TurnClock,
+    channel: StepChannel<'_>,
+    env: ToolCallEnv<'_>,
 ) -> (ToolRun, Option<GrantScope>) {
+    let ToolCallEnv {
+        tools,
+        timeout_ms,
+        max_retries,
+        clock,
+    } = env;
+    let StepChannel {
+        event_tx,
+        cancel,
+        inbox,
+    } = channel;
+    let mut inbox = inbox;
     if inbox.is_none() {
         return (run, None);
     }
@@ -447,17 +466,20 @@ impl CallPlan {
 }
 
 impl MultiTurnAgent {
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_tool_calls(
         &mut self,
         tool_calls: &[ToolCall],
         turn_id: &TurnId,
         step_index: usize,
-        event_tx: &mpsc::UnboundedSender<AgentEvent>,
-        cancel: &CancellationToken,
-        mut inbox: Option<&mut mpsc::UnboundedReceiver<AgentCommand>>,
+        channel: StepChannel<'_>,
         clock: TurnClock,
     ) -> Result<Option<String>, TurnError> {
+        let StepChannel {
+            event_tx,
+            cancel,
+            inbox,
+        } = channel;
+        let mut inbox = inbox;
         self.file_changes_this_step = 0;
         let mut plans: Vec<CallPlan> = Vec::with_capacity(tool_calls.len());
 
@@ -503,9 +525,11 @@ impl MultiTurnAgent {
                     &args_str,
                     &item_id,
                     turn_id,
-                    event_tx,
-                    cancel,
-                    inbox.as_deref_mut(),
+                    StepChannel {
+                        event_tx,
+                        cancel,
+                        inbox: inbox.as_deref_mut(),
+                    },
                 )
                 .await
             } else {
@@ -637,17 +661,21 @@ impl MultiTurnAgent {
                         Ok(run) if fn_name == SHELL_TOOL && run.observation.sandbox_denied() => {
                             let (run, scope) = request_sandbox_escape(
                                 &mut ctx,
-                                tools,
                                 &fn_name,
                                 &args,
                                 run,
                                 turn_id,
-                                timeout_ms,
-                                max_retries,
-                                event_tx,
-                                cancel,
-                                inbox.as_deref_mut(),
-                                clock,
+                                StepChannel {
+                                    event_tx,
+                                    cancel,
+                                    inbox: inbox.as_deref_mut(),
+                                },
+                                ToolCallEnv {
+                                    tools,
+                                    timeout_ms,
+                                    max_retries,
+                                    clock,
+                                },
                             )
                             .await;
                             if scope.is_some() {
@@ -865,11 +893,13 @@ impl MultiTurnAgent {
             let report = self
                 .run_hook(
                     hook_event,
-                    Some(turn_id),
-                    Some(&tool_call.fn_name),
-                    Some(&args_str),
-                    Some(&item_output),
-                    None,
+                    HookArgs {
+                        turn_id: Some(turn_id),
+                        tool_name: Some(&tool_call.fn_name),
+                        tool_input: Some(&args_str),
+                        tool_output: Some(&item_output),
+                        ..HookArgs::default()
+                    },
                     event_tx,
                 )
                 .await;
@@ -1117,17 +1147,19 @@ impl MultiTurnAgent {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn authorize(
         &mut self,
         check: &PermissionCheck,
         args: &str,
         item_id: &ItemId,
         turn_id: &TurnId,
-        event_tx: &mpsc::UnboundedSender<AgentEvent>,
-        cancel: &CancellationToken,
-        inbox: Option<&mut mpsc::UnboundedReceiver<AgentCommand>>,
+        channel: StepChannel<'_>,
     ) -> Authorization {
+        let StepChannel {
+            event_tx,
+            cancel,
+            inbox,
+        } = channel;
         let outside = self
             .tools
             .iter()
@@ -1167,11 +1199,12 @@ impl MultiTurnAgent {
         let report = self
             .run_hook(
                 HookEvent::PreToolUse,
-                Some(turn_id),
-                Some(&check.tool_name),
-                Some(args),
-                None,
-                None,
+                HookArgs {
+                    turn_id: Some(turn_id),
+                    tool_name: Some(&check.tool_name),
+                    tool_input: Some(args),
+                    ..HookArgs::default()
+                },
                 event_tx,
             )
             .await;
@@ -1180,11 +1213,12 @@ impl MultiTurnAgent {
             let report = self
                 .run_hook(
                     HookEvent::PermissionRequest,
-                    Some(turn_id),
-                    Some(&check.tool_name),
-                    Some(args),
-                    None,
-                    None,
+                    HookArgs {
+                        turn_id: Some(turn_id),
+                        tool_name: Some(&check.tool_name),
+                        tool_input: Some(args),
+                        ..HookArgs::default()
+                    },
                     event_tx,
                 )
                 .await;

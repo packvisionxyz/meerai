@@ -1,3 +1,4 @@
+use super::tools::StepChannel;
 use super::*;
 use meerai_common::settings::EffortLevel;
 use meerai_core::ToolDefinition;
@@ -208,11 +209,12 @@ impl MultiTurnAgent {
         let prompt_report = self
             .run_hook(
                 HookEvent::UserPromptSubmit,
-                Some(&turn_id),
-                None,
-                Some(prompt),
-                None,
-                Some(prompt),
+                HookArgs {
+                    turn_id: Some(&turn_id),
+                    tool_input: Some(prompt),
+                    prompt: Some(prompt),
+                    ..HookArgs::default()
+                },
                 event_tx,
             )
             .await;
@@ -288,12 +290,11 @@ impl MultiTurnAgent {
                 .await;
                 self.run_hook_with_error(
                     HookEvent::TurnFailed,
-                    Some(&turn_id),
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(&message),
+                    HookArgs {
+                        turn_id: Some(&turn_id),
+                        error: Some(&message),
+                        ..HookArgs::default()
+                    },
                     event_tx,
                 )
                 .await;
@@ -840,9 +841,11 @@ impl MultiTurnAgent {
                         &tool_calls,
                         turn_id,
                         step_index,
-                        event_tx,
-                        &cancel,
-                        inbox.as_deref_mut(),
+                        StepChannel {
+                            event_tx,
+                            cancel: &cancel,
+                            inbox: inbox.as_deref_mut(),
+                        },
                         clock,
                     )
                     .await
@@ -981,11 +984,10 @@ impl MultiTurnAgent {
                     let report = self
                         .run_hook(
                             HookEvent::Stop,
-                            Some(turn_id),
-                            None,
-                            None,
-                            None,
-                            None,
+                            HookArgs {
+                                turn_id: Some(turn_id),
+                                ..HookArgs::default()
+                            },
                             event_tx,
                         )
                         .await;

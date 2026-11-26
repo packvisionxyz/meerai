@@ -41,7 +41,7 @@ use crate::events::{
     SessionItem, SubagentSpec, TurnEndReason, TurnId, TurnTrigger,
 };
 use crate::harness::AgentHarness;
-use crate::hooks::{HookContext, HookEngine, HookReport};
+use crate::hooks::{HookArgs, HookContext, HookEngine, HookReport};
 use crate::intercept::{
     SharedInterceptor, StepAction, StepPlan, ToolContext, ToolOutcome, ToolPlan, TurnStopAction,
 };
@@ -923,11 +923,10 @@ impl MultiTurnAgent {
         self.session_started = true;
         self.run_hook(
             HookEvent::SessionStart,
-            None,
-            None,
-            None,
-            None,
-            None,
+            HookArgs {
+                turn_id: None,
+                ..HookArgs::default()
+            },
             event_tx,
         )
         .await;
@@ -941,11 +940,10 @@ impl MultiTurnAgent {
         self.session_started = false;
         self.run_hook(
             HookEvent::SessionEnd,
-            None,
-            None,
-            None,
-            None,
-            None,
+            HookArgs {
+                turn_id: None,
+                ..HookArgs::default()
+            },
             event_tx,
         )
         .await;
@@ -1045,40 +1043,19 @@ impl MultiTurnAgent {
         ))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn run_hook(
         &self,
         event: HookEvent,
-        turn_id: Option<&TurnId>,
-        tool_name: Option<&str>,
-        tool_input: Option<&str>,
-        tool_output: Option<&str>,
-        prompt: Option<&str>,
+        payload: HookArgs<'_>,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) -> HookReport {
-        self.run_hook_with_error(
-            event,
-            turn_id,
-            tool_name,
-            tool_input,
-            tool_output,
-            prompt,
-            None,
-            event_tx,
-        )
-        .await
+        self.run_hook_with_error(event, payload, event_tx).await
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn run_hook_with_error(
         &self,
         event: HookEvent,
-        turn_id: Option<&TurnId>,
-        tool_name: Option<&str>,
-        tool_input: Option<&str>,
-        tool_output: Option<&str>,
-        prompt: Option<&str>,
-        error: Option<&str>,
+        payload: HookArgs<'_>,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) -> HookReport {
         if self.hooks.is_empty() {
@@ -1089,12 +1066,12 @@ impl MultiTurnAgent {
         };
         let ctx = HookContext {
             session_id: harness.session.id().as_str(),
-            turn_id,
-            tool_name,
-            tool_input,
-            tool_output,
-            prompt,
-            error,
+            turn_id: payload.turn_id,
+            tool_name: payload.tool_name,
+            tool_input: payload.tool_input,
+            tool_output: payload.tool_output,
+            prompt: payload.prompt,
+            error: payload.error,
             cwd: harness.policy.workspace_root(),
         };
         let report = self.hooks.run(event, &ctx).await;

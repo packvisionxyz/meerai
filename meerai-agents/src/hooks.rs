@@ -104,6 +104,61 @@ pub struct HookContext<'a> {
     pub cwd: &'a Path,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HookArgs<'a> {
+    pub turn_id: Option<&'a TurnId>,
+    pub tool_name: Option<&'a str>,
+    pub tool_input: Option<&'a str>,
+    pub tool_output: Option<&'a str>,
+    pub prompt: Option<&'a str>,
+    pub error: Option<&'a str>,
+}
+
+impl<'a> HookArgs<'a> {
+    pub fn turn(turn_id: Option<&'a TurnId>) -> Self {
+        Self {
+            turn_id,
+            ..Self::default()
+        }
+    }
+
+    pub fn tool(turn_id: Option<&'a TurnId>, name: &'a str, input: &'a str) -> Self {
+        Self {
+            turn_id,
+            tool_name: Some(name),
+            tool_input: Some(input),
+            ..Self::default()
+        }
+    }
+
+    pub fn tool_output(
+        turn_id: Option<&'a TurnId>,
+        name: &'a str,
+        input: &'a str,
+        output: &'a str,
+    ) -> Self {
+        Self {
+            turn_id,
+            tool_name: Some(name),
+            tool_input: Some(input),
+            tool_output: Some(output),
+            ..Self::default()
+        }
+    }
+
+    pub fn prompt(prompt: &'a str) -> Self {
+        Self {
+            prompt: Some(prompt),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_error(mut self, error: &'a str) -> Self {
+        self.error = Some(error);
+        self
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct HookEngine {
     entries: Vec<HookEntry>,

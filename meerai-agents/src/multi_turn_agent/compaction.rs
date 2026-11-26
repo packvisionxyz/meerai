@@ -108,11 +108,10 @@ impl MultiTurnAgent {
         let pre_compact = self
             .run_hook(
                 HookEvent::PreCompact,
-                None,
-                None,
-                None,
-                None,
-                None,
+                HookArgs {
+                    turn_id: None,
+                    ..HookArgs::default()
+                },
                 event_tx,
             )
             .await;
@@ -134,11 +133,10 @@ impl MultiTurnAgent {
             .await;
             self.run_hook(
                 HookEvent::PostCompact,
-                None,
-                None,
-                None,
-                None,
-                None,
+                HookArgs {
+                    turn_id: None,
+                    ..HookArgs::default()
+                },
                 event_tx,
             )
             .await;
@@ -162,11 +160,10 @@ impl MultiTurnAgent {
             .await;
             self.run_hook(
                 HookEvent::PostCompact,
-                None,
-                None,
-                None,
-                None,
-                None,
+                HookArgs {
+                    turn_id: None,
+                    ..HookArgs::default()
+                },
                 event_tx,
             )
             .await;
@@ -289,11 +286,10 @@ impl MultiTurnAgent {
                 });
                 self.run_hook(
                     HookEvent::PostCompact,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
+                    HookArgs {
+                        turn_id: None,
+                        ..HookArgs::default()
+                    },
                     event_tx,
                 )
                 .await;
@@ -314,11 +310,10 @@ impl MultiTurnAgent {
                 .await;
                 self.run_hook(
                     HookEvent::PostCompact,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
+                    HookArgs {
+                        turn_id: None,
+                        ..HookArgs::default()
+                    },
                     event_tx,
                 )
                 .await;
