@@ -133,17 +133,21 @@ impl MemorySecretStore {
         Self::default()
     }
 
-    pub fn set_credential(&self, provider_id: &str, credential: Credential) {
+    fn entries(&self) -> Result<std::sync::MutexGuard<'_, HashMap<String, Credential>>> {
         self.entries
             .lock()
-            .unwrap()
-            .insert(provider_id.to_string(), credential);
+            .map_err(|_| anyhow::anyhow!("secret store lock was poisoned"))
+    }
+
+    pub fn set_credential(&self, provider_id: &str, credential: Credential) -> Result<()> {
+        self.entries()?.insert(provider_id.to_string(), credential);
+        Ok(())
     }
 }
 
 impl SecretStore for MemorySecretStore {
     fn get_key(&self, provider_id: &str) -> Result<Option<String>> {
-        let guard = self.entries.lock().unwrap();
+        let guard = self.entries()?;
         Ok(guard
             .get(provider_id)
             .and_then(|credential| credential.api_key().map(str::to_string)))
@@ -154,7 +158,7 @@ impl SecretStore for MemorySecretStore {
         if trimmed.is_empty() {
             anyhow::bail!("API key cannot be empty");
         }
-        let mut guard = self.entries.lock().unwrap();
+        let mut guard = self.entries()?;
         guard.insert(
             provider_id.to_string(),
             Credential::ApiKey(trimmed.to_string()),
@@ -163,13 +167,13 @@ impl SecretStore for MemorySecretStore {
     }
 
     fn delete_key(&self, provider_id: &str) -> Result<()> {
-        let mut guard = self.entries.lock().unwrap();
+        let mut guard = self.entries()?;
         guard.remove(provider_id);
         Ok(())
     }
 
     fn list_providers(&self) -> Result<Vec<String>> {
-        let guard = self.entries.lock().unwrap();
+        let guard = self.entries()?;
         let mut keys: Vec<String> = guard
             .iter()
             .filter(|(_, credential)| credential.api_key().is_some())
@@ -180,31 +184,30 @@ impl SecretStore for MemorySecretStore {
     }
 
     fn read_credential(&self, provider_id: &str) -> Result<Option<Credential>> {
-        Ok(self.entries.lock().unwrap().get(provider_id).cloned())
+        Ok(self.entries()?.get(provider_id).cloned())
     }
 
     fn write_credential(&self, provider_id: &str, credential: &Credential) -> Result<()> {
         if matches!(credential, Credential::ApiKey(key) if key.trim().is_empty()) {
             anyhow::bail!("API key cannot be empty");
         }
-        self.set_credential(provider_id, credential.clone());
-        Ok(())
+        self.set_credential(provider_id, credential.clone())
     }
 
     fn delete_credential(&self, provider_id: &str) -> Result<()> {
-        self.entries.lock().unwrap().remove(provider_id);
+        self.entries()?.remove(provider_id);
         Ok(())
     }
 
     fn reset_vault(&self) -> Result<usize> {
-        let mut guard = self.entries.lock().unwrap();
+        let mut guard = self.entries()?;
         let removed = guard.len();
         guard.clear();
         Ok(removed)
     }
 
     fn list_credentials(&self) -> Result<Vec<(String, CredentialKind)>> {
-        let guard = self.entries.lock().unwrap();
+        let guard = self.entries()?;
         let mut entries: Vec<(String, CredentialKind)> = guard
             .iter()
             .map(|(provider, credential)| (provider.clone(), credential.kind()))

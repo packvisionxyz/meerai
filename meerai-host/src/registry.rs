@@ -582,7 +582,9 @@ fn update_pending_status<F>(
     F: FnOnce(&mut SessionRecord),
 {
     let updated = {
-        let record = state.sessions.get_mut(session_id).unwrap();
+        let Some(record) = state.sessions.get_mut(session_id) else {
+            return;
+        };
         let prev_status = record.summary.status;
         mutate(record);
         record.recompute_status();

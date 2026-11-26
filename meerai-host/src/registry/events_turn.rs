@@ -10,7 +10,9 @@ impl RegistryState {
         match event {
             AgentEvent::TurnStarted { turn_id, model } => {
                 let (summary, updated_user) = {
-                    let record = state.sessions.get_mut(session_id).unwrap();
+                    let Some(record) = state.sessions.get_mut(session_id) else {
+                        return;
+                    };
                     record.recovery_pending = false;
                     record.pending_approvals.clear();
                     record.pending_questions.clear();
@@ -64,7 +66,9 @@ impl RegistryState {
                     id: entry_id,
                     text: format!("Recovery attempt {attempt} after a failed turn."),
                 };
-                let record = state.sessions.get_mut(session_id).unwrap();
+                let Some(record) = state.sessions.get_mut(session_id) else {
+                    return;
+                };
                 record.recovery_pending = true;
                 record.entries.push(entry.clone());
                 state.push_event(
@@ -83,7 +87,9 @@ impl RegistryState {
                     _ => ToolCallStatus::Failed,
                 };
                 let updated_subagents: Vec<LiveEntry> = {
-                    let record = state.sessions.get_mut(session_id).unwrap();
+                    let Some(record) = state.sessions.get_mut(session_id) else {
+                        return;
+                    };
                     finalize_open_entries(record, cancelled_or_failed)
                 };
                 for entry in updated_subagents {
@@ -120,12 +126,11 @@ impl RegistryState {
                     _ => None,
                 };
                 if let Some(entry) = terminal_entry {
-                    state
-                        .sessions
-                        .get_mut(session_id)
-                        .unwrap()
-                        .entries
-                        .push(entry.clone());
+                    let Some(record) = state.sessions.get_mut(session_id) else {
+                        return;
+                    };
+                    record.entries.push(entry.clone());
+
                     state.push_event(
                         broadcast_tx,
                         RegistryEventKind::EntryCompleted {
@@ -135,7 +140,9 @@ impl RegistryState {
                     );
                 }
                 let updated = {
-                    let record = state.sessions.get_mut(session_id).unwrap();
+                    let Some(record) = state.sessions.get_mut(session_id) else {
+                        return;
+                    };
                     let prev = record.summary.clone();
                     record.metrics.turn_count += 1;
                     if let Some(started) = record.turn_started_instant.take() {
@@ -169,7 +176,9 @@ impl RegistryState {
             AgentEvent::Error { code, message } => {
                 state.flush_streaming(session_id, broadcast_tx);
                 let updated_subagents = {
-                    let record = state.sessions.get_mut(session_id).unwrap();
+                    let Some(record) = state.sessions.get_mut(session_id) else {
+                        return;
+                    };
                     finalize_open_entries(record, ToolCallStatus::Failed)
                 };
                 for entry in updated_subagents {
@@ -187,7 +196,9 @@ impl RegistryState {
                     message: message.clone(),
                 };
                 let updated = {
-                    let record = state.sessions.get_mut(session_id).unwrap();
+                    let Some(record) = state.sessions.get_mut(session_id) else {
+                        return;
+                    };
                     let prev = record.summary.clone();
                     if let Some(started) = record.turn_started_instant.take() {
                         record.metrics.last_turn_ms = Some(started.elapsed().as_millis() as u64);

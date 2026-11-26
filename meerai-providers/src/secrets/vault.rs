@@ -159,8 +159,8 @@ impl VaultSecretStore {
             "set a non-empty {PASSPHRASE_ENV} to unlock the credential vault"
         );
         let mut key = Zeroizing::new([0; 32]);
-        let params =
-            Params::new(64 * 1024, 3, 1, Some(32)).expect("valid vault v1 Argon2id parameters");
+        let params = Params::new(64 * 1024, 3, 1, Some(32))
+            .map_err(|_| anyhow!("invalid vault v1 Argon2id parameters"))?;
         Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
             .hash_password_into(passphrase.as_bytes(), salt, &mut *key)
             .map_err(|_| anyhow!("could not derive vault wrapping key"))?;

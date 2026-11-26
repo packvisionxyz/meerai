@@ -4,6 +4,7 @@ use meerai_core::{ToolObservation, ToolOutput, ToolRun};
 use regex::Regex;
 
 struct SignalPattern {
+    #[allow(clippy::expect_used)]
     label: &'static str,
     regex: Regex,
 }

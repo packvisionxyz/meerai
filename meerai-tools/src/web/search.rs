@@ -15,6 +15,9 @@ const MAX_LIMIT: usize = 10;
 const MAX_SNIPPET_CHARS: usize = 300;
 const SEARCH_HINT: &str = "web search uses DuckDuckGo without an account and is best-effort; retry later or fetch a known URL with web-fetch";
 
+// These patterns are source literals, not runtime input: a failure here is a
+// programming error caught by the crate's tests, never a caller-triggered panic.
+#[allow(clippy::expect_used)]
 static ANCHOR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)<a\b([^>]*)>(.*?)</a>").expect("anchor pattern"));
 static ELEMENT: LazyLock<Regex> = LazyLock::new(|| {

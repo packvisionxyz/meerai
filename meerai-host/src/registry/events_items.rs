@@ -10,11 +10,15 @@ impl RegistryState {
         match event {
             AgentEvent::ItemStarted { item } => match item {
                 SessionItem::AgentMessage { id, .. } => {
-                    let record = state.sessions.get_mut(session_id).unwrap();
+                    let Some(record) = state.sessions.get_mut(session_id) else {
+                        return;
+                    };
                     record.streaming_item_id = Some(id.to_string());
                 }
                 SessionItem::Reasoning { id, summary } => {
-                    let record = state.sessions.get_mut(session_id).unwrap();
+                    let Some(record) = state.sessions.get_mut(session_id) else {
+                        return;
+                    };
                     record.streaming_item_id = Some(id.to_string());
                     if !summary.is_empty() {
                         record.streaming_reasoning.push_str(&summary);
@@ -41,7 +45,9 @@ impl RegistryState {
                         edit_diff,
                     };
                     let (updated_summary, entry) = {
-                        let record = state.sessions.get_mut(session_id).unwrap();
+                        let Some(record) = state.sessions.get_mut(session_id) else {
+                            return;
+                        };
                         record.tool_items.insert(id, entry_id);
                         record.metrics.tool_calls += 1;
                         record.summary.active_tool = Some(name);
@@ -95,7 +101,9 @@ impl RegistryState {
                         active_tool,
                     };
                     let (updated_summary, entry) = {
-                        let record = state.sessions.get_mut(session_id).unwrap();
+                        let Some(record) = state.sessions.get_mut(session_id) else {
+                            return;
+                        };
                         record.tool_items.insert(id, entry_id);
                         record.summary.active_tool = Some(agent);
                         record.entries.push(entry.clone());
@@ -121,7 +129,9 @@ impl RegistryState {
             AgentEvent::ItemDelta { item_id, delta } => match delta {
                 ItemDelta::AgentText(chunk) => {
                     let id_str = item_id.to_string();
-                    let record = state.sessions.get_mut(session_id).unwrap();
+                    let Some(record) = state.sessions.get_mut(session_id) else {
+                        return;
+                    };
                     record.streaming_item_id = Some(id_str.clone());
                     record.streaming_text.push_str(&chunk);
                     state.push_event(
@@ -135,7 +145,9 @@ impl RegistryState {
                 }
                 ItemDelta::ReasoningSummary(chunk) => {
                     let id_str = item_id.to_string();
-                    let record = state.sessions.get_mut(session_id).unwrap();
+                    let Some(record) = state.sessions.get_mut(session_id) else {
+                        return;
+                    };
                     record.streaming_item_id = Some(id_str.clone());
                     record.streaming_reasoning.push_str(&chunk);
                     state.push_event(
@@ -149,7 +161,9 @@ impl RegistryState {
                 }
                 ItemDelta::StatusChanged(status) => {
                     let updated = {
-                        let record = state.sessions.get_mut(session_id).unwrap();
+                        let Some(record) = state.sessions.get_mut(session_id) else {
+                            return;
+                        };
                         if let Some(entry_id) = record.tool_items.get(&item_id).cloned()
                             && let Some(entry) =
                                 record.entries.iter_mut().rev().find(|entry| match entry {
@@ -187,7 +201,9 @@ impl RegistryState {
                     active_tool,
                 } => {
                     let updated = {
-                        let record = state.sessions.get_mut(session_id).unwrap();
+                        let Some(record) = state.sessions.get_mut(session_id) else {
+                            return;
+                        };
                         let entry_id = record.tool_items.get(&item_id).cloned();
                         entry_id.and_then(|entry_id| {
                             record
@@ -237,7 +253,9 @@ impl RegistryState {
                 SessionItem::AgentMessage { id, text } => {
                     let id_str = id.to_string();
                     let entry = {
-                        let record = state.sessions.get_mut(session_id).unwrap();
+                        let Some(record) = state.sessions.get_mut(session_id) else {
+                            return;
+                        };
                         let final_text = if !text.is_empty() {
                             text
                         } else {
@@ -272,7 +290,9 @@ impl RegistryState {
                 SessionItem::Reasoning { id, summary } => {
                     let id_str = id.to_string();
                     let entry = {
-                        let record = state.sessions.get_mut(session_id).unwrap();
+                        let Some(record) = state.sessions.get_mut(session_id) else {
+                            return;
+                        };
                         let final_reasoning = if !summary.is_empty() {
                             summary
                         } else {
@@ -314,7 +334,9 @@ impl RegistryState {
                     ..
                 } => {
                     let (entry, updated_summary) = {
-                        let record = state.sessions.get_mut(session_id).unwrap();
+                        let Some(record) = state.sessions.get_mut(session_id) else {
+                            return;
+                        };
                         let entry = update_or_push_tool_entry(
                             record,
                             &id,
@@ -357,7 +379,9 @@ impl RegistryState {
                     ..
                 } => {
                     let (entry, updated_summary) = {
-                        let record = state.sessions.get_mut(session_id).unwrap();
+                        let Some(record) = state.sessions.get_mut(session_id) else {
+                            return;
+                        };
                         let entry = update_or_push_subagent_entry(
                             record,
                             &id,
@@ -397,12 +421,11 @@ impl RegistryState {
                         id: id.to_string(),
                         text: format!("Compaction freed {freed_tokens} tokens"),
                     };
-                    state
-                        .sessions
-                        .get_mut(session_id)
-                        .unwrap()
-                        .entries
-                        .push(entry.clone());
+                    let Some(record) = state.sessions.get_mut(session_id) else {
+                        return;
+                    };
+                    record.entries.push(entry.clone());
+
                     state.push_event(
                         broadcast_tx,
                         RegistryEventKind::EntryCompleted {
@@ -416,7 +439,9 @@ impl RegistryState {
 
             AgentEvent::ItemDiscarded { .. } => {
                 let cleared = {
-                    let record = state.sessions.get_mut(session_id).unwrap();
+                    let Some(record) = state.sessions.get_mut(session_id) else {
+                        return;
+                    };
                     let cleared = record.streaming_item_id.is_some()
                         || !record.streaming_text.is_empty()
                         || !record.streaming_reasoning.is_empty();

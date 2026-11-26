@@ -52,7 +52,9 @@ impl RegistryState {
                     resolved: false,
                 };
                 {
-                    let record = state.sessions.get_mut(session_id).unwrap();
+                    let Some(record) = state.sessions.get_mut(session_id) else {
+                        return;
+                    };
                     record.entries.push(q_entry.clone());
                 }
                 state.push_event(

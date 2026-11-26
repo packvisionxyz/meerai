@@ -5,6 +5,7 @@ use meerai_core::{ToolObservation, ToolOutput, ToolRun};
 use regex::Regex;
 
 struct SecretPattern {
+    #[allow(clippy::expect_used)]
     kind: &'static str,
     regex: Regex,
 }

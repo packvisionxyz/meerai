@@ -70,14 +70,15 @@ fn expand_config_secret_with(
     raw: &str,
     lookup: &impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    static ENV_BRACE_RE: OnceLock<Regex> = OnceLock::new();
-    static DOLLAR_BRACE_RE: OnceLock<Regex> = OnceLock::new();
+    static ENV_BRACE_RE: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+    static DOLLAR_BRACE_RE: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
 
-    let env_re = ENV_BRACE_RE
-        .get_or_init(|| Regex::new(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid env regex"));
-    let dollar_re = DOLLAR_BRACE_RE.get_or_init(|| {
-        Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:\|([^}]*))?\}").expect("valid dollar regex")
-    });
+    let (Ok(env_re), Ok(dollar_re)) = (
+        ENV_BRACE_RE.get_or_init(|| Regex::new(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}")),
+        DOLLAR_BRACE_RE.get_or_init(|| Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:\|([^}]*))?\}")),
+    ) else {
+        return None;
+    };
 
     let stage1 = env_re.replace_all(raw, |caps: &regex::Captures| {
         lookup(&caps[1]).unwrap_or_default()
@@ -535,11 +536,12 @@ pub fn open_store_for_config_dir(dir: Option<&Path>) -> Result<Store> {
 }
 
 fn validate_user_api_keys(settings: &AppSettings) -> Result<()> {
-    static ENV_REFERENCE: OnceLock<Regex> = OnceLock::new();
-    let reference = ENV_REFERENCE.get_or_init(|| {
+    static ENV_REFERENCE: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+    let Ok(reference) = ENV_REFERENCE.get_or_init(|| {
         Regex::new(r"\A(?:\{env:[A-Za-z_][A-Za-z0-9_]*\}|\$\{[A-Za-z_][A-Za-z0-9_]*\})\z")
-            .expect("valid environment reference regex")
-    });
+    }) else {
+        return Ok(());
+    };
     for provider in settings.providers.values() {
         for key in [
             provider.api_key.as_deref(),

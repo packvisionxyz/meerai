@@ -27,7 +27,9 @@ impl SessionRegistry {
 
             let entry_id = state.next_entry_id();
             let (summary, cmd_tx) = {
-                let record = state.sessions.get_mut(session_id).unwrap();
+                let Some(record) = state.sessions.get_mut(session_id) else {
+                    return Err(HostError::SessionNotFound(session_id.clone()));
+                };
                 record.summary.status = SessionStatus::Running;
                 record.summary.turn_started_at_ms = Some(now_millis());
                 record.turn_started_instant = Some(Instant::now());
@@ -90,7 +92,9 @@ impl SessionRegistry {
                 return Err(HostError::WorkerClosed);
             }
             let entry_id = state.next_entry_id();
-            let record = state.sessions.get_mut(session_id).unwrap();
+            let Some(record) = state.sessions.get_mut(session_id) else {
+                return Err(HostError::SessionNotFound(session_id.clone()));
+            };
             record.entries.push(LiveEntry::User {
                 id: entry_id.clone(),
                 turn_id: record.summary.active_turn_id.clone(),
@@ -165,7 +169,9 @@ impl SessionRegistry {
             if record.cmd_tx.is_closed() {
                 return Err(HostError::WorkerClosed);
             }
-            let record = state.sessions.get_mut(session_id).unwrap();
+            let Some(record) = state.sessions.get_mut(session_id) else {
+                return Err(HostError::SessionNotFound(session_id.clone()));
+            };
             record.entries.clear();
             record.streaming_item_id = None;
             record.streaming_text.clear();

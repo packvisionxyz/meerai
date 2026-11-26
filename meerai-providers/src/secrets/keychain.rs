@@ -104,7 +104,7 @@ mod platform {
 
         let mut out = String::with_capacity(bytes.len().saturating_mul(2));
         for byte in bytes {
-            write!(out, "{byte:02x}").expect("writing to String cannot fail");
+            let _ = write!(out, "{byte:02x}");
         }
         Zeroizing::new(out)
     }

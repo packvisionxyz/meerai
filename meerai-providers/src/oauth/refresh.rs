@@ -13,7 +13,9 @@ static REFRESH_LOCKS: OnceLock<Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>> = O
 
 fn refresh_lock(provider_id: &str) -> Arc<AsyncMutex<()>> {
     let locks = REFRESH_LOCKS.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let mut guard = locks.lock().unwrap();
+    let Ok(mut guard) = locks.lock() else {
+        return Arc::new(AsyncMutex::new(()));
+    };
     guard.entry(provider_id.to_string()).or_default().clone()
 }
 
@@ -313,7 +315,9 @@ mod tests {
     fn terminal_failure_blocks_the_matching_credential() {
         let store = meerai_client::secrets::MemorySecretStore::new();
         let current = credential(0);
-        store.set_credential("openai", Credential::OAuth(current.clone()));
+        store
+            .set_credential("openai", Credential::OAuth(current.clone()))
+            .unwrap();
 
         let err = finish_refresh(
             &store,

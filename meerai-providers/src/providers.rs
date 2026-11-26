@@ -67,13 +67,19 @@ pub fn build_genai_client(
             ("user-agent", MEERAI_USER_AGENT),
         ])))
         .with_auth_resolver_fn(move |_model_iden: ModelIden| {
-            let state = auth_runtime.read().unwrap().clone();
+            let state = auth_runtime
+                .read()
+                .map(|guard| guard.clone())
+                .map_err(|_| genai::resolver::Error::Custom("auth runtime poisoned".into()))?;
             let provider = state.active_provider_info();
             resolve_auth_data(&provider, auth_secrets.as_ref())
                 .map_err(genai::resolver::Error::Custom)
         })
         .with_service_target_resolver_fn(move |mut target: genai::ServiceTarget| {
-            let state = target_runtime.read().unwrap().clone();
+            let state = target_runtime
+                .read()
+                .map(|guard| guard.clone())
+                .map_err(|_| genai::resolver::Error::Custom("target runtime poisoned".into()))?;
             let provider = state.active_provider_info();
             if let Some(url) = state.effective_base_url(&provider) {
                 let normalized = if url.ends_with('/') {

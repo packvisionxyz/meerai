@@ -225,6 +225,8 @@ impl Default for ProviderCatalog {
 }
 
 impl ProviderCatalog {
+    // The bundled YAML is compiled in and covered by tests; a parse failure is a build bug.
+    #[allow(clippy::expect_used)]
     pub fn new() -> Self {
         let mut catalog =
             Self::from_yaml(BUNDLED_PROVIDERS_YAML).expect("bundled providers.yml must parse");

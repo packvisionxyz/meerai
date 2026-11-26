@@ -52,7 +52,10 @@ fn build_toolset_trait(
         .map(|tool| {
             let fn_ident = syn::Ident::new(&tool.get_fn_name(), proc_macro2::Span::call_site());
             if let Some(params) = &tool.params  {
-                let args_struct_ident = params.get_ident().unwrap();
+                let Some(args_struct_ident) = params.get_ident() else {
+                    return syn::Error::new_spanned(params, "expected a named argument struct")
+                        .to_compile_error();
+                };
                 quote! {
                     async fn #fn_ident(&self, args: &#args_struct_ident) -> Result<meerai_core::ToolOutput, meerai_core::ToolError>;
                 }
@@ -82,7 +85,10 @@ fn build_definition_fn(derived: &ToolsetDerive) -> proc_macro2::TokenStream {
             let description = &tool.description;
 
             if let Some(params) = &tool.params {
-                let args_struct_ident = params.get_ident().unwrap();
+                let Some(args_struct_ident) = params.get_ident() else {
+                    return syn::Error::new_spanned(params, "expected a named argument struct")
+                        .to_compile_error();
+                };
 
                 quote! {
                     meerai_core::ToolDefinition {
@@ -145,7 +151,10 @@ fn build_invoke_fn(derived: &ToolsetDerive) -> proc_macro2::TokenStream {
         let fn_ident = syn::Ident::new(&tool.get_fn_name(), proc_macro2::Span::call_site());
 
         if let Some(params) = &tool.params {
-            let args_struct_ident = params.get_ident().unwrap();
+            let Some(args_struct_ident) = params.get_ident() else {
+                return syn::Error::new_spanned(params, "expected a named argument struct")
+                    .to_compile_error();
+            };
             quote! {
                 #fn_name => {
                     let args: #args_struct_ident = serde_json::from_str(args).map_err(|e| meerai_core::ToolError::WrongArguments(e))?;

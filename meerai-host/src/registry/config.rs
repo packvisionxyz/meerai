@@ -97,7 +97,9 @@ impl SessionRegistry {
                 id: entry_id,
                 text: notice.clone(),
             };
-            let record = state.sessions.get_mut(session_id).unwrap();
+            let Some(record) = state.sessions.get_mut(session_id) else {
+                return Err(HostError::SessionNotFound(session_id.clone()));
+            };
             if let Some(model) = &app.model {
                 record.summary.model = display_model(model);
             }
@@ -151,7 +153,9 @@ impl SessionRegistry {
                 id: entry_id,
                 text: format!("Loaded skill @{}", app.name),
             };
-            let record = state.sessions.get_mut(session_id).unwrap();
+            let Some(record) = state.sessions.get_mut(session_id) else {
+                return Err(HostError::SessionNotFound(session_id.clone()));
+            };
             record.entries.push(entry.clone());
             let cmd_tx = record.cmd_tx.clone();
             state.push_event(

@@ -105,13 +105,17 @@ impl AuthBackoff {
     }
 
     pub fn record_failure(&self) -> Duration {
-        let mut guard = self.failures.lock().unwrap();
+        let Ok(mut guard) = self.failures.lock() else {
+            return backoff_duration(u32::MAX);
+        };
         *guard = guard.saturating_add(1);
         backoff_duration(*guard)
     }
 
     pub fn reset(&self) {
-        let mut guard = self.failures.lock().unwrap();
+        let Ok(mut guard) = self.failures.lock() else {
+            return;
+        };
         *guard = 0;
     }
 }

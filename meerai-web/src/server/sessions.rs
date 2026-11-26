@@ -149,7 +149,9 @@ pub(super) fn handle_activate_session(state: &AppState, raw_id: &str) -> Respons
     };
     match state.registry.set_active_session(&session_id) {
         Ok(()) => {
-            let summary = state.registry.session_summary(&session_id).unwrap();
+            let Some(summary) = state.registry.session_summary(&session_id) else {
+                return not_found();
+            };
             json_response(
                 StatusCode::OK,
                 &CreateSessionResponse {

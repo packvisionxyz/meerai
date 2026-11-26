@@ -29,7 +29,9 @@ fn opens_provider_select_on_startup_when_key_missing() {
 fn opens_provider_select_on_startup_when_plan_credential_needs_relogin() {
     let (tx, _rx) = mpsc::unbounded_channel();
     let secrets = Arc::new(MemorySecretStore::new());
-    secrets.set_credential("openai", oauth_credential(true));
+    secrets
+        .set_credential("openai", oauth_credential(true))
+        .unwrap();
     let settings = AppSettings::default();
     let runtime = Arc::new(RwLock::new(RuntimeProviderState::from_settings(
         &settings,
@@ -52,7 +54,9 @@ fn opens_provider_select_on_startup_when_plan_credential_needs_relogin() {
 
     let (tx, _rx) = mpsc::unbounded_channel();
     let secrets = Arc::new(MemorySecretStore::new());
-    secrets.set_credential("openai", oauth_credential(false));
+    secrets
+        .set_credential("openai", oauth_credential(false))
+        .unwrap();
     let settings = AppSettings::default();
     let runtime = Arc::new(RwLock::new(RuntimeProviderState::from_settings(
         &settings,
@@ -147,7 +151,9 @@ fn connect_flow_offers_auth_methods_for_openai() {
 #[test]
 fn connect_flow_with_a_stored_plan_skips_auth_methods() {
     let (mut app, _rx, secrets) = test_app();
-    secrets.set_credential("openai", oauth_credential(false));
+    secrets
+        .set_credential("openai", oauth_credential(false))
+        .unwrap();
     app.invalidate_key_status();
 
     type_text(&mut app, "/connect");
@@ -172,7 +178,9 @@ fn connect_flow_with_a_stored_plan_skips_auth_methods() {
 #[test]
 fn connection_screen_updates_and_removes_a_plan_credential() {
     let (mut app, _rx, secrets) = test_app();
-    secrets.set_credential("openai", oauth_credential(false));
+    secrets
+        .set_credential("openai", oauth_credential(false))
+        .unwrap();
     app.invalidate_key_status();
 
     type_text(&mut app, "/connect");
@@ -261,7 +269,9 @@ fn chatgpt_login_retry_requests_a_fresh_flow() {
 #[test]
 fn model_selection_on_a_plan_credential_sends_plan_usage() {
     let (mut app, mut rx, secrets) = test_app();
-    secrets.set_credential("gemini", oauth_credential(false));
+    secrets
+        .set_credential("gemini", oauth_credential(false))
+        .unwrap();
     app.invalidate_key_status();
 
     app.select_provider_and_model("gemini", "gemini-2.5-pro");

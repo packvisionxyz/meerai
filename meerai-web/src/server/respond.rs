@@ -12,6 +12,14 @@ pub(super) fn unauthorized_response(message: &str) -> Response<RespBody> {
     );
     resp
 }
+pub(super) fn internal_error(message: &str) -> Response<RespBody> {
+    json_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ApiErrorCode::Internal,
+        message,
+    )
+}
+
 pub(super) fn not_found() -> Response<RespBody> {
     json_error(
         StatusCode::NOT_FOUND,
@@ -195,19 +203,40 @@ pub(super) async fn read_json_body(req: Request<Incoming>) -> Result<Bytes, &'st
     }
 }
 pub(super) fn text_response(status: StatusCode, msg: &str) -> Response<RespBody> {
-    Response::builder()
+    match Response::builder()
         .status(status)
         .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .body(Full::new(Bytes::from(msg.to_owned())).boxed())
-        .unwrap()
+    {
+        Ok(response) => response,
+        Err(_) => fallback_response(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+fn fallback_response(status: StatusCode) -> Response<RespBody> {
+    let mut response = Response::new(Full::new(Bytes::from_static(b"")).boxed());
+    *response.status_mut() = status;
+    response
 }
 pub(super) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<RespBody> {
-    let bytes = serde_json::to_vec(value).expect("JSON response serializes");
-    Response::builder()
+    let bytes = match serde_json::to_vec(value) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiErrorCode::Internal,
+                "failed to serialize response",
+            );
+        }
+    };
+    match Response::builder()
         .status(status)
         .header(http::header::CONTENT_TYPE, "application/json")
         .body(Full::new(Bytes::from(bytes)).boxed())
-        .unwrap()
+    {
+        Ok(response) => response,
+        Err(_) => fallback_response(StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 pub(super) fn json_error(
     status: StatusCode,

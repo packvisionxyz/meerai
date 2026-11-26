@@ -75,7 +75,7 @@ pub(super) async fn handle_workspace_preview(
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(40)
         .clamp(6, 200);
-    let preview = tokio::task::spawn_blocking(move || {
+    match tokio::task::spawn_blocking(move || {
         let item = SearchMatch {
             path,
             line,
@@ -85,8 +85,10 @@ pub(super) async fn handle_workspace_preview(
         build_search_preview(&root, &item, height)
     })
     .await
-    .unwrap();
-    json_response(StatusCode::OK, &mapper::map_search_preview(preview))
+    {
+        Ok(preview) => json_response(StatusCode::OK, &mapper::map_search_preview(preview)),
+        Err(_) => internal_error("search preview task failed"),
+    }
 }
 pub(super) async fn handle_workspace_changes(state: &AppState) -> Response<RespBody> {
     let Some(root) = state.opener.workspace_root() else {
@@ -182,9 +184,11 @@ pub(super) async fn handle_workspace_diff(
             "workspace root unavailable",
         );
     };
-    let diff = tokio::task::spawn_blocking(move || build_file_diff(&root, &path, &status))
-        .await
-        .unwrap();
+    let diff =
+        match tokio::task::spawn_blocking(move || build_file_diff(&root, &path, &status)).await {
+            Ok(diff) => diff,
+            Err(_) => return internal_error("diff task failed"),
+        };
     json_response(StatusCode::OK, &mapper::map_file_diff(diff))
 }
 pub(super) async fn handle_host_action(

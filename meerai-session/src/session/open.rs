@@ -1,6 +1,8 @@
 use super::*;
 
 impl Session {
+    // An in-memory store cannot fail to open; a failure is a bug, not a caller error.
+    #[allow(clippy::expect_used)]
     pub fn memory(id: SessionId, cwd: PathBuf) -> Self {
         let store = Store::open(":memory:").expect("open in-memory session store");
         let meta = SessionMeta::new(id.clone(), cwd.clone());

@@ -101,7 +101,9 @@ pub(super) async fn handle_chatgpt_start(
     let attempt_id = format!("oauth-{seq}");
     let url = login.url;
     {
-        let mut guard = state.oauth_attempts.lock().unwrap();
+        let Ok(mut guard) = state.oauth_attempts.lock() else {
+            return internal_error("oauth attempt registry was poisoned");
+        };
         guard.insert(
             attempt_id.clone(),
             ActiveOAuthAttempt {
@@ -128,8 +130,8 @@ pub(super) async fn handle_chatgpt_start(
         let still_present = state_bg
             .oauth_attempts
             .lock()
-            .unwrap()
-            .remove(&attempt_bg)
+            .map(|mut guard| guard.remove(&attempt_bg))
+            .unwrap_or(None)
             .is_some();
         if !still_present {
             return;
@@ -185,7 +187,9 @@ pub(super) async fn handle_chatgpt_paste(
         Err(resp) => return resp,
     };
     let paste_tx = {
-        let guard = state.oauth_attempts.lock().unwrap();
+        let Ok(guard) = state.oauth_attempts.lock() else {
+            return internal_error("oauth attempt registry was poisoned");
+        };
         let Some(entry) = guard.get(attempt_id) else {
             return json_error(
                 StatusCode::NOT_FOUND,
@@ -217,7 +221,9 @@ pub(super) fn handle_chatgpt_cancel(
     attempt_id: &str,
 ) -> Response<RespBody> {
     let cancel_tx = {
-        let mut guard = state.oauth_attempts.lock().unwrap();
+        let Ok(mut guard) = state.oauth_attempts.lock() else {
+            return internal_error("oauth attempt registry was poisoned");
+        };
         let Some(entry) = guard.get(attempt_id) else {
             return json_error(
                 StatusCode::NOT_FOUND,

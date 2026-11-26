@@ -1875,18 +1875,20 @@ fn renders_chatgpt_login_modal_with_url_and_paste_field() {
 fn plan_badge_and_colors_for_oauth_credentials() {
     let (tx, _rx) = mpsc::unbounded_channel();
     let secrets = Arc::new(MemorySecretStore::new());
-    secrets.set_credential(
-        "openai",
-        Credential::OAuth(OAuthCredential {
-            access: "plan-access".to_string(),
-            refresh: "plan-refresh".to_string(),
-            expires: u64::MAX,
-            client_id: "plan-client".to_string(),
-            scopes: vec!["chatgpt.tokens.use.direct".to_string()],
-            account: None,
-            needs_relogin: false,
-        }),
-    );
+    secrets
+        .set_credential(
+            "openai",
+            Credential::OAuth(OAuthCredential {
+                access: "plan-access".to_string(),
+                refresh: "plan-refresh".to_string(),
+                expires: u64::MAX,
+                client_id: "plan-client".to_string(),
+                scopes: vec!["chatgpt.tokens.use.direct".to_string()],
+                account: None,
+                needs_relogin: false,
+            }),
+        )
+        .unwrap();
     let settings = AppSettings::default();
     let runtime = Arc::new(RwLock::new(RuntimeProviderState::from_settings(
         &settings,

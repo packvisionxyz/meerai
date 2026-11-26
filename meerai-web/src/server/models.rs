@@ -37,7 +37,9 @@ pub(super) async fn handle_set_model(
     ) {
         Ok(()) => {
             state.registry.emit_providers_updated();
-            let summary = state.registry.session_summary(&session_id).unwrap();
+            let Some(summary) = state.registry.session_summary(&session_id) else {
+                return not_found();
+            };
             json_response(
                 StatusCode::OK,
                 &SetModelResponse {
@@ -64,7 +66,9 @@ pub(super) async fn handle_set_mode(
     let mode = mapper::unmap_approval_mode(body.mode);
     match state.registry.set_approval_mode(&session_id, mode) {
         Ok(()) => {
-            let summary = state.registry.session_summary(&session_id).unwrap();
+            let Some(summary) = state.registry.session_summary(&session_id) else {
+                return not_found();
+            };
             json_response(
                 StatusCode::OK,
                 &SetModelResponse {

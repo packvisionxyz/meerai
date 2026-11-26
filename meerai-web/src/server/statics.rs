@@ -106,11 +106,14 @@ pub(super) fn asset_content_type(rel: &str) -> String {
 }
 pub(super) fn asset_response(rel: &str, bytes: Bytes) -> Response<RespBody> {
     let content_type = asset_content_type(rel);
-    Response::builder()
+    match Response::builder()
         .status(StatusCode::OK)
         .header(http::header::CONTENT_TYPE, content_type)
         .body(Full::new(bytes).boxed())
-        .unwrap()
+    {
+        Ok(response) => response,
+        Err(_) => internal_error("failed to build asset response"),
+    }
 }
 pub(super) fn finalize_response(path: &str, mut resp: Response<RespBody>) -> Response<RespBody> {
     let headers = resp.headers_mut();

@@ -102,7 +102,10 @@ fn repair_invalid_json_escapes(text: &str) -> String {
         match chars.peek() {
             Some('"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u') => {
                 out.push('\\');
-                out.push(chars.next().expect("peeked escape"));
+                let Some(escaped) = chars.next() else {
+                    break;
+                };
+                out.push(escaped);
             }
             Some(_) | None => out.push_str("\\\\"),
         }
@@ -141,7 +144,9 @@ pub fn normalize_tool_arguments(value: &Value) -> Value {
                 parse_tool_arguments(text).and_then(|inner| nested_value(&inner))
             }
             Value::Object(map) if map.len() == 1 => {
-                let (key, inner) = map.iter().next().expect("single entry");
+                let Some((key, inner)) = map.iter().next() else {
+                    break;
+                };
                 if is_argument_wrapper(key) {
                     nested_value(inner)
                 } else {

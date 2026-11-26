@@ -85,7 +85,9 @@ impl AcpSession {
     }
 
     pub fn stderr_tail(&self) -> Vec<String> {
-        let lines = self.stderr.lock().expect("stderr tail lock poisoned");
+        let Ok(lines) = self.stderr.lock() else {
+            return Vec::new();
+        };
         lines.iter().cloned().collect()
     }
 
@@ -134,7 +136,9 @@ pub async fn connect_with(
             if direction != LineDirection::Stderr {
                 return;
             }
-            let mut lines = stderr.lock().expect("stderr tail lock poisoned");
+            let Ok(mut lines) = stderr.lock() else {
+                return;
+            };
             if lines.len() == STDERR_TAIL_LINES {
                 lines.pop_front();
             }

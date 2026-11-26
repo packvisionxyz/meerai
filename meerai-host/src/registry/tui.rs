@@ -25,7 +25,9 @@ impl SessionRegistry {
         }
         let entry_id = state.next_entry_id();
         let summary = {
-            let record = state.sessions.get_mut(session_id).unwrap();
+            let Some(record) = state.sessions.get_mut(session_id) else {
+                return;
+            };
             if record.summary.title.is_none() {
                 record.summary.title = normalize_title(&prompt);
             }

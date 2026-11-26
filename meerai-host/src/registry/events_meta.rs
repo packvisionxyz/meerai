@@ -10,7 +10,9 @@ impl RegistryState {
         match event {
             AgentEvent::ContextUpdated { breakdown } => {
                 {
-                    let record = state.sessions.get_mut(session_id).unwrap();
+                    let Some(record) = state.sessions.get_mut(session_id) else {
+                        return;
+                    };
                     record.context = Some(breakdown.clone());
                 }
                 state.push_event(
@@ -23,7 +25,10 @@ impl RegistryState {
             }
 
             AgentEvent::LoopUpdated { state: loop_state } => {
-                state.sessions.get_mut(session_id).unwrap().loop_state = Some(loop_state.clone());
+                let Some(record) = state.sessions.get_mut(session_id) else {
+                    return;
+                };
+                record.loop_state = Some(loop_state.clone());
                 state.push_event(
                     broadcast_tx,
                     RegistryEventKind::LoopUpdated {
@@ -38,12 +43,11 @@ impl RegistryState {
                     id: state.next_entry_id(),
                     text: format!("Loop continues (turn {turn}/{max_turns})"),
                 };
-                state
-                    .sessions
-                    .get_mut(session_id)
-                    .unwrap()
-                    .entries
-                    .push(entry.clone());
+                let Some(record) = state.sessions.get_mut(session_id) else {
+                    return;
+                };
+                record.entries.push(entry.clone());
+
                 state.push_event(
                     broadcast_tx,
                     RegistryEventKind::EntryCompleted {
@@ -67,12 +71,11 @@ impl RegistryState {
                     id: state.next_entry_id(),
                     text,
                 };
-                state
-                    .sessions
-                    .get_mut(session_id)
-                    .unwrap()
-                    .entries
-                    .push(entry.clone());
+                let Some(record) = state.sessions.get_mut(session_id) else {
+                    return;
+                };
+                record.entries.push(entry.clone());
+
                 state.push_event(
                     broadcast_tx,
                     RegistryEventKind::EntryCompleted {
@@ -88,7 +91,9 @@ impl RegistryState {
                 est_cost_usd,
             } => {
                 let (usage_snap, metrics_snap) = {
-                    let record = state.sessions.get_mut(session_id).unwrap();
+                    let Some(record) = state.sessions.get_mut(session_id) else {
+                        return;
+                    };
                     let session_prompt = cumulative.prompt_tokens.unwrap_or(0).max(0) as u64;
                     let session_completion =
                         cumulative.completion_tokens.unwrap_or(0).max(0) as u64;
@@ -138,7 +143,9 @@ impl RegistryState {
                 error,
             } => {
                 let (entries_after, restored_prompt) = {
-                    let record = state.sessions.get_mut(session_id).unwrap();
+                    let Some(record) = state.sessions.get_mut(session_id) else {
+                        return;
+                    };
                     if error.is_none()
                         && matches!(scope, RewindScope::Both | RewindScope::Conversation)
                         && let Some(idx) = record.entries.iter().position(|entry| {

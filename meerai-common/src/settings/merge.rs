@@ -117,9 +117,9 @@ pub(super) fn combine_rules(
             .is_some_and(|action| matches!(action, "*" | "read" | "edit"))
     }) {
         asks.extend(
-            default_sensitive_rules().into_iter().map(|rule| {
-                serde_yaml::to_value(rule).expect("permission rules serialize to YAML")
-            }),
+            default_sensitive_rules()
+                .into_iter()
+                .filter_map(|rule| serde_yaml::to_value(rule).ok()),
         );
     }
     asks.extend(user_rules);

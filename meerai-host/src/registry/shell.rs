@@ -30,7 +30,9 @@ impl SessionRegistry {
             turn_id: None,
             text: format!("!{command}"),
         };
-        let record = state.sessions.get_mut(session_id).unwrap();
+        let Some(record) = state.sessions.get_mut(session_id) else {
+            return Err(HostError::SessionNotFound(session_id.clone()));
+        };
         record.summary.shell_runs.push(LiveShellRun {
             id: run_id.clone(),
             command: command.to_string(),
@@ -75,7 +77,9 @@ impl SessionRegistry {
                 message: format!("shell command failed: {err}"),
             },
         };
-        let record = state.sessions.get_mut(session_id).unwrap();
+        let Some(record) = state.sessions.get_mut(session_id) else {
+            return;
+        };
         record.summary.shell_runs.retain(|run| run.id != run_id);
         record.summary.user_shell_running = !record.summary.shell_runs.is_empty();
         record.entries.push(entry.clone());
@@ -103,12 +107,11 @@ impl SessionRegistry {
             id: state.next_entry_id(),
             text,
         };
-        state
-            .sessions
-            .get_mut(session_id)
-            .unwrap()
-            .entries
-            .push(entry.clone());
+        let Some(record) = state.sessions.get_mut(session_id) else {
+            return;
+        };
+        record.entries.push(entry.clone());
+
         state.push_event(
             &self.inner.broadcast_tx,
             RegistryEventKind::EntryCompleted {
