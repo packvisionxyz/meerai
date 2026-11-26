@@ -237,7 +237,7 @@ The backlog orders contract work before structural work. Each item states one ob
 | 6 | Introduce parameter structs to remove the five `too_many_arguments` allows in `meerai-agents` | signature | `meerai-agents` | M | Medium | No `#[allow(clippy::too_many_arguments)]` remains in the crate |
 | 7 | Introduce parameter structs to remove the five `too_many_arguments` allows in `meerai-tui` | signature | `meerai-tui` | M | Medium | No `#[allow(clippy::too_many_arguments)]` remains in the crate |
 | 8 | Split `meerai-web/src/server.rs` below 900 lines and narrow its error type | file size | `meerai-web` | M | Medium | The three `result_large_err` suppressions are gone and no file in the crate exceeds 900 lines |
-| 9 | Split `meerai-session/src/session.rs` into `open`, `fork`, and `query` modules | file size | `meerai-session` | M | Medium | No file in `meerai-session/src` exceeds 900 lines |
+| 9 | ~~Split `meerai-session/src/session.rs` into `open`, `fork`, and `query` modules~~ **Done** — see [§3.4](#34-completed-work) | file size | `meerai-session` | M | Medium | Done: 6 modules plus a 419-line parent; no file exceeds 900 production lines |
 | 10 | ~~Split `meerai-web-protocol/src/lib.rs` into domain modules and move DTOs above the tests~~ **Done** — see [§3.4](#34-completed-work) | file size | `meerai-web-protocol` | S | Low | Done: 12 modules, largest 258 lines, wire format unchanged |
 | 11 | Share the Markdown parse options between both clients | duplication | `meerai-input`, `meerai-tui`, `meerai-web-client` | S | Low | Downgraded to optional by [§3.5](#35-corrected-finding-the-markdown-option-blocks-do-not-diverge): the blocks already agree in effect |
 | 12 | Split `meerai-tui/src/app/modals.rs`, `app/input.rs`, `app/mod.rs`, and `ui/transcript.rs` | file size | `meerai-tui` | L | Medium | No file in `meerai-tui/src` exceeds 900 lines, including `app/mod.rs` |
@@ -263,6 +263,8 @@ Items 1 through 3 are contract-adjacent and should land first. Items 4 through 1
 | 3 | Deleted `meerai-session/src/goal.rs` and `SessionEvent::GoalUpdated`, plus `LoopState::from_goal` | 331-line module, a dead wire variant, and a compatibility conversion | 0 references to `GoalState`, `GoalItem`, `GoalItemStatus`, `GoalUpdated`, `last_goal`, or `from_goal` |
 | 3 | `cap_text`, `continuation`, `turn_prompt`, and `open_summary` now exist once each, all in `meerai-skills/src/loop_engine.rs` | 5 functions implemented twice | 4 functions, one implementation each |
 | 10 | Split `meerai-web-protocol/src/lib.rs` into 12 domain modules plus `tests.rs` | 1 file, 1,734 lines, 97 DTOs | 13 files, largest 258 lines, `lib.rs` 28 lines |
+| 9 | Split `meerai-session/src/session.rs` into `open`, `append`, `fork`, `rewind`, `query`, and `update` | 1,151 production lines in one file | parent 419 lines plus six modules, largest 200 lines |
+| 16 | Moved the project-settings merge logic out of `meerai-common/src/settings.rs` into `settings/merge.rs` | 889 production lines mixing value types with merge rules | parent 565 lines, `merge.rs` 328 lines |
 
 Item 10 verification went beyond "it compiles". The split was mechanical, so the risk was silent wire drift:
 
