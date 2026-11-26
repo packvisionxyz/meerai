@@ -1026,8 +1026,8 @@ fn context_field_meta(key: &str) -> (&'static str, &'static str, &'static str) {
         ),
         "max_steps_per_turn" => (
             "Max steps per turn",
-            "Maximum model/tool round-trips in one turn.",
-            "Default",
+            "Maximum model/tool round-trips in one turn. Empty or 0 is unlimited.",
+            "Unlimited",
         ),
         "tool_timeout_ms" => (
             "Tool timeout (ms)",
