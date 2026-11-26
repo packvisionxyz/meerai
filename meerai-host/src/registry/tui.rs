@@ -17,7 +17,9 @@ impl SessionRegistry {
             .filter(|text| !text.is_empty())
             .unwrap_or(&prompt)
             .to_string();
-        let mut state = self.inner.state.lock().unwrap();
+        let Ok(mut state) = self.lock_state() else {
+            return;
+        };
         if !state.sessions.contains_key(session_id) {
             return;
         }
@@ -57,7 +59,9 @@ impl SessionRegistry {
         );
     }
     pub fn note_tui_mode(&self, session_id: &SessionId, mode: ApprovalMode) {
-        let mut state = self.inner.state.lock().unwrap();
+        let Ok(mut state) = self.lock_state() else {
+            return;
+        };
         let Some(record) = state.sessions.get_mut(session_id) else {
             return;
         };
@@ -72,7 +76,9 @@ impl SessionRegistry {
         );
     }
     pub fn note_tui_model(&self, session_id: &SessionId, provider: &str, model: &str) {
-        let mut state = self.inner.state.lock().unwrap();
+        let Ok(mut state) = self.lock_state() else {
+            return;
+        };
         let Some(record) = state.sessions.get_mut(session_id) else {
             return;
         };
@@ -85,7 +91,9 @@ impl SessionRegistry {
         );
     }
     pub fn note_tui_reset(&self, session_id: &SessionId) {
-        let mut state = self.inner.state.lock().unwrap();
+        let Ok(mut state) = self.lock_state() else {
+            return;
+        };
         let Some(record) = state.sessions.get_mut(session_id) else {
             return;
         };
@@ -153,8 +161,10 @@ impl SessionRegistry {
         Ok(())
     }
     pub fn subscribe(&self, after_seq: Option<u64>) -> SubscribeResult {
-        let state = self.inner.state.lock().unwrap();
         let rx = self.inner.broadcast_tx.subscribe();
+        let Ok(state) = self.lock_state() else {
+            return SubscribeResult::ResyncRequired { current_seq: 0, rx };
+        };
         let Some(after) = after_seq else {
             return SubscribeResult::Replay {
                 events: Vec::new(),

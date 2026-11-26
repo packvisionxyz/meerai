@@ -208,6 +208,20 @@ pub struct RegistrySnapshot {
     pub sessions: Vec<LiveSessionSummary>,
     pub active_session: Option<LiveSessionDetail>,
     pub file_changes: Vec<FileChangeEntry>,
+    pub poisoned: bool,
+}
+
+impl RegistrySnapshot {
+    pub fn poisoned() -> Self {
+        Self {
+            event_id: 0,
+            active_session_id: None,
+            sessions: Vec::new(),
+            active_session: None,
+            file_changes: Vec::new(),
+            poisoned: true,
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type", content = "data")]
@@ -496,9 +510,11 @@ async fn run_pump(
     mut event_rx: mpsc::UnboundedReceiver<AgentEvent>,
 ) {
     while let Some(event) = event_rx.recv().await {
-        {
-            let mut state = inner.state.lock().unwrap();
-            apply_agent_event(&mut state, &inner.broadcast_tx, &session_id, event.clone());
+        match inner.state.lock() {
+            Ok(mut state) => {
+                apply_agent_event(&mut state, &inner.broadcast_tx, &session_id, event.clone());
+            }
+            Err(_) => break,
         }
         let _ = inner.agent_broadcast_tx.send((session_id.clone(), event));
     }

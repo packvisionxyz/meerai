@@ -58,7 +58,9 @@ impl SessionRegistry {
         run_id: &str,
         result: Result<String, String>,
     ) {
-        let mut state = self.inner.state.lock().unwrap();
+        let Ok(mut state) = self.lock_state() else {
+            return;
+        };
         if !state.sessions.contains_key(session_id) {
             return;
         }
@@ -91,7 +93,9 @@ impl SessionRegistry {
         );
     }
     pub fn append_system_entry(&self, session_id: &SessionId, text: String) {
-        let mut state = self.inner.state.lock().unwrap();
+        let Ok(mut state) = self.lock_state() else {
+            return;
+        };
         if !state.sessions.contains_key(session_id) {
             return;
         }

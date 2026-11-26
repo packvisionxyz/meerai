@@ -49,7 +49,9 @@ impl SessionRegistry {
             shell_runs: Vec::new(),
         };
 
-        let mut state = self.inner.state.lock().unwrap();
+        let Ok(mut state) = self.lock_state() else {
+            return summary;
+        };
         let entries = replay
             .into_iter()
             .map(|entry| replay_entry_to_live(entry, &mut turn_iter, &mut state))
@@ -110,14 +112,17 @@ impl SessionRegistry {
         summary
     }
     pub fn context_for(&self, id: &SessionId) -> Option<meerai_session::ContextBreakdown> {
-        let state = self.inner.state.lock().unwrap();
+        let state = self.lock_state().ok()?;
         state
             .sessions
             .get(id)
             .and_then(|record| record.context.clone())
     }
     pub fn snapshot(&self) -> RegistrySnapshot {
-        let state = self.inner.state.lock().unwrap();
+        let state = match self.lock_state() {
+            Ok(state) => state,
+            Err(_) => return RegistrySnapshot::poisoned(),
+        };
         let sessions = state
             .session_order
             .iter()
@@ -133,22 +138,24 @@ impl SessionRegistry {
             sessions,
             active_session,
             file_changes: state.file_changes.clone(),
+            poisoned: false,
         }
     }
     pub fn has_session(&self, id: &SessionId) -> bool {
-        let state = self.inner.state.lock().unwrap();
-        state.sessions.contains_key(id)
+        self.lock_state()
+            .map(|state| state.sessions.contains_key(id))
+            .unwrap_or(false)
     }
     pub fn session_detail(&self, id: &SessionId) -> Option<LiveSessionDetail> {
-        let state = self.inner.state.lock().unwrap();
+        let state = self.lock_state().ok()?;
         state.sessions.get(id).map(SessionRecord::to_detail)
     }
     pub fn session_summary(&self, id: &SessionId) -> Option<LiveSessionSummary> {
-        let state = self.inner.state.lock().unwrap();
+        let state = self.lock_state().ok()?;
         state.sessions.get(id).map(|r| r.summary.clone())
     }
     pub fn cmd_tx(&self, id: &SessionId) -> Option<mpsc::UnboundedSender<AgentCommand>> {
-        let state = self.inner.state.lock().unwrap();
+        let state = self.lock_state().ok()?;
         state.sessions.get(id).map(|r| r.cmd_tx.clone())
     }
     pub fn subscribe_agent_events(&self) -> broadcast::Receiver<(SessionId, AgentEvent)> {

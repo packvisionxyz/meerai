@@ -2,7 +2,9 @@ use super::*;
 
 impl SessionRegistry {
     pub fn emit_reload(&self, outcome: &HostReloadOutcome) {
-        let mut state = self.inner.state.lock().unwrap();
+        let Ok(mut state) = self.lock_state() else {
+            return;
+        };
         for record in state.sessions.values() {
             if !record.is_acp() {
                 let _ = record.cmd_tx.send(AgentCommand::Reload {
@@ -25,7 +27,9 @@ impl SessionRegistry {
         );
     }
     pub fn emit_file_changes(&self, changes: Vec<FileChangeEntry>) {
-        let mut state = self.inner.state.lock().unwrap();
+        let Ok(mut state) = self.lock_state() else {
+            return;
+        };
         if state.file_changes == changes {
             return;
         }
@@ -36,14 +40,18 @@ impl SessionRegistry {
         );
     }
     pub fn emit_providers_updated(&self) {
-        let mut state = self.inner.state.lock().unwrap();
+        let Ok(mut state) = self.lock_state() else {
+            return;
+        };
         state.push_event(
             &self.inner.broadcast_tx,
             RegistryEventKind::ProvidersUpdated,
         );
     }
     pub fn emit_chatgpt_login(&self, status: ChatGptLoginStatus) {
-        let mut state = self.inner.state.lock().unwrap();
+        let Ok(mut state) = self.lock_state() else {
+            return;
+        };
         state.push_event(
             &self.inner.broadcast_tx,
             RegistryEventKind::ChatGptLoginUpdated(status),
@@ -51,7 +59,9 @@ impl SessionRegistry {
     }
     pub async fn shutdown_all(&self) {
         let handles = {
-            let mut state = self.inner.state.lock().unwrap();
+            let Ok(mut state) = self.lock_state() else {
+                return;
+            };
             state.push_event(
                 &self.inner.broadcast_tx,
                 RegistryEventKind::HostDisconnected,
