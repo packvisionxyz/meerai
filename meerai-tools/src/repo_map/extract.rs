@@ -1007,3 +1007,209 @@ fn collect_refs(
         collect_refs(lang, child, bytes, def_spans, references);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn defs(lang: SourceLang, source: &str) -> Vec<(String, &'static str)> {
+        extract_tags(lang, source)
+            .definitions
+            .into_iter()
+            .map(|def| (def.name, def.kind))
+            .collect()
+    }
+
+    fn names(lang: SourceLang, source: &str) -> Vec<String> {
+        defs(lang, source)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    fn refs(lang: SourceLang, source: &str) -> HashMap<String, usize> {
+        extract_tags(lang, source).references
+    }
+
+    #[test]
+    fn rust_extracts_items_and_references() {
+        let src = "struct Alpha;\nfn run(a: Alpha) -> Alpha { a }\n";
+        let found = names(SourceLang::Rust, src);
+        assert!(found.contains(&"Alpha".to_string()), "{found:?}");
+        assert!(found.contains(&"run".to_string()), "{found:?}");
+        let refs = refs(SourceLang::Rust, src);
+        assert!(refs.contains_key("Alpha"), "{refs:?}");
+    }
+
+    #[test]
+    fn rust_definition_lines_are_one_based() {
+        let tags = extract_tags(SourceLang::Rust, "\n\nfn third_line() {}\n");
+        let def = tags
+            .definitions
+            .iter()
+            .find(|def| def.name == "third_line")
+            .expect("def");
+        assert_eq!(def.line, 3);
+    }
+
+    #[test]
+    fn typescript_extracts_functions_classes_and_interfaces() {
+        let src = "export interface Shape { area(): number }\n\
+                   export class Circle { area() { return 1 } }\n\
+                   export function draw(s: Shape) { return s }\n";
+        let found = names(SourceLang::TypeScript, src);
+        assert!(found.contains(&"Shape".to_string()), "{found:?}");
+        assert!(found.contains(&"Circle".to_string()), "{found:?}");
+        assert!(found.contains(&"draw".to_string()), "{found:?}");
+    }
+
+    #[test]
+    fn tsx_and_typescript_agree_on_plain_code() {
+        let src = "export function helper() { return 1 }\n";
+        assert_eq!(
+            names(SourceLang::Tsx, src),
+            names(SourceLang::TypeScript, src)
+        );
+    }
+
+    #[test]
+    fn javascript_extracts_functions_and_classes() {
+        let src = "function go() {}\nclass Wheel {}\nconst arrow = () => 1;\n";
+        let found = names(SourceLang::JavaScript, src);
+        assert!(found.contains(&"go".to_string()), "{found:?}");
+        assert!(found.contains(&"Wheel".to_string()), "{found:?}");
+    }
+
+    #[test]
+    fn python_extracts_functions_and_classes() {
+        let src = "class Thing:\n    pass\n\ndef build():\n    return Thing()\n";
+        let found = names(SourceLang::Python, src);
+        assert!(found.contains(&"Thing".to_string()), "{found:?}");
+        assert!(found.contains(&"build".to_string()), "{found:?}");
+    }
+
+    #[test]
+    fn go_extracts_functions_and_types() {
+        let src = "type Point struct { X int }\n\nfunc Move(p Point) Point { return p }\n";
+        let found = names(SourceLang::Go, src);
+        assert!(found.contains(&"Point".to_string()), "{found:?}");
+        assert!(found.contains(&"Move".to_string()), "{found:?}");
+    }
+
+    #[test]
+    fn c_extracts_structs_and_functions() {
+        let src = "struct point { int x; };\nint area(struct point p) { return p.x; }\n";
+        let found = names(SourceLang::C, src);
+        assert!(found.contains(&"point".to_string()), "{found:?}");
+        assert!(found.contains(&"area".to_string()), "{found:?}");
+    }
+
+    #[test]
+    fn cpp_extracts_classes_and_functions() {
+        let src = "class Shape { public: int area(); };\nint draw(Shape s) { return s.area(); }\n";
+        let found = names(SourceLang::Cpp, src);
+        assert!(found.contains(&"Shape".to_string()), "{found:?}");
+        assert!(found.contains(&"draw".to_string()), "{found:?}");
+    }
+
+    #[test]
+    fn java_extracts_classes_and_methods() {
+        let src = "class Widget { int size() { return 1; } }\n";
+        let found = names(SourceLang::Java, src);
+        assert!(found.contains(&"Widget".to_string()), "{found:?}");
+        assert!(found.contains(&"size".to_string()), "{found:?}");
+    }
+
+    #[test]
+    fn csharp_extracts_classes_and_methods() {
+        let src = "class Widget { int Size() { return 1; } }\n";
+        let found = names(SourceLang::CSharp, src);
+        assert!(found.contains(&"Widget".to_string()), "{found:?}");
+        assert!(found.contains(&"Size".to_string()), "{found:?}");
+    }
+
+    #[test]
+    fn kotlin_extracts_classes_and_functions() {
+        let src = "class Widget\nfun build(): Widget = Widget()\n";
+        let found = names(SourceLang::Kotlin, src);
+        assert!(found.contains(&"Widget".to_string()), "{found:?}");
+        assert!(found.contains(&"build".to_string()), "{found:?}");
+    }
+
+    #[test]
+    fn scala_extracts_classes_and_functions() {
+        let src = "class Widget\ndef build(): Widget = new Widget()\n";
+        let found = names(SourceLang::Scala, src);
+        assert!(found.contains(&"Widget".to_string()), "{found:?}");
+        assert!(found.contains(&"build".to_string()), "{found:?}");
+    }
+
+    #[test]
+    fn swift_extracts_types_and_functions() {
+        let src = "struct Point { let x: Int }\nfunc draw(p: Point) -> Int { return p.x }\n";
+        let found = names(SourceLang::Swift, src);
+        assert!(found.contains(&"Point".to_string()), "{found:?}");
+        assert!(found.contains(&"draw".to_string()), "{found:?}");
+    }
+
+    #[test]
+    fn php_extracts_classes_and_functions() {
+        let src = "<?php\nclass Widget { public function size() { return 1; } }\nfunction draw($w) { return $w; }\n";
+        let found = names(SourceLang::Php, src);
+        assert!(found.contains(&"Widget".to_string()), "{found:?}");
+        assert!(found.contains(&"draw".to_string()), "{found:?}");
+    }
+
+    #[test]
+    fn haskell_extracts_functions_and_types() {
+        let src = "data Point = Point Int\n\narea :: Point -> Int\narea p = 1\n";
+        let found = names(SourceLang::Haskell, src);
+        assert!(found.contains(&"Point".to_string()), "{found:?}");
+        assert!(found.contains(&"area".to_string()), "{found:?}");
+    }
+
+    #[test]
+    fn ruby_extracts_classes_and_methods() {
+        let src = "class Widget\n  def size\n    1\n  end\nend\n";
+        let found = names(SourceLang::Ruby, src);
+        assert!(found.contains(&"Widget".to_string()), "{found:?}");
+        assert!(found.contains(&"size".to_string()), "{found:?}");
+    }
+
+    #[test]
+    fn every_language_tolerates_empty_and_broken_source() {
+        for lang in [
+            SourceLang::Rust,
+            SourceLang::TypeScript,
+            SourceLang::Tsx,
+            SourceLang::JavaScript,
+            SourceLang::Python,
+            SourceLang::Go,
+            SourceLang::C,
+            SourceLang::Cpp,
+            SourceLang::Java,
+            SourceLang::CSharp,
+            SourceLang::Kotlin,
+            SourceLang::Scala,
+            SourceLang::Swift,
+            SourceLang::Php,
+            SourceLang::Haskell,
+            SourceLang::Ruby,
+        ] {
+            assert!(extract_tags(lang, "").definitions.is_empty());
+            let _ = extract_tags(lang, "this is ((not valid && code");
+        }
+    }
+
+    #[test]
+    fn duplicate_definitions_record_one_reference_target() {
+        let src = "fn dup() {}\nfn dup() {}\n";
+        let tags = extract_tags(SourceLang::Rust, src);
+        let count = tags
+            .definitions
+            .iter()
+            .filter(|def| def.name == "dup")
+            .count();
+        assert!(count >= 1, "at least one definition");
+    }
+}

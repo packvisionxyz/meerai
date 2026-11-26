@@ -147,3 +147,155 @@ pub(crate) fn render_repo_map(
 
     out.trim_end().to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repo_map::extract::SymbolDef;
+    use std::collections::HashMap;
+
+    fn tags(defs: &[(&'static str, &str, usize)], refs: &[(&str, usize)]) -> FileTags {
+        FileTags {
+            definitions: defs
+                .iter()
+                .map(|(kind, name, line)| SymbolDef {
+                    kind,
+                    name: (*name).to_string(),
+                    line: *line,
+                })
+                .collect(),
+            references: refs
+                .iter()
+                .map(|(name, count)| ((*name).to_string(), *count))
+                .collect::<HashMap<_, _>>(),
+        }
+    }
+
+    #[test]
+    fn normalizes_separators_and_leading_markers() {
+        assert_eq!(normalize_rel("src\\main.rs"), "src/main.rs");
+        assert_eq!(normalize_rel("./src/main.rs"), "src/main.rs");
+        assert_eq!(normalize_rel("/src/main.rs"), "src/main.rs");
+        assert_eq!(normalize_rel("././a.rs"), "a.rs");
+        assert_eq!(normalize_rel(""), "");
+    }
+
+    #[test]
+    fn ranking_an_empty_graph_returns_no_order() {
+        assert!(rank_files(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn focus_file_ranks_first() {
+        let a = tags(&[("fn", "alpha", 1)], &[]);
+        let b = tags(&[("fn", "beta", 2)], &[]);
+        let files = vec![("src/a.rs".to_string(), &a), ("src/b.rs".to_string(), &b)];
+        let order = rank_files(&files, &["src/b.rs".to_string()]);
+        assert_eq!(order.first().copied(), Some(1), "focus must lead");
+    }
+
+    #[test]
+    fn focus_matches_a_suffix_path() {
+        let a = tags(&[("fn", "alpha", 1)], &[]);
+        let b = tags(&[("fn", "beta", 2)], &[]);
+        let files = vec![
+            ("src/deep/a.rs".to_string(), &a),
+            ("src/b.rs".to_string(), &b),
+        ];
+        let order = rank_files(&files, &["a.rs".to_string()]);
+        assert_eq!(order.first().copied(), Some(0));
+    }
+
+    #[test]
+    fn referenced_definition_outranks_an_unreferenced_one() {
+        let hub = tags(&[("fn", "hub", 1)], &[]);
+        let leaves: Vec<FileTags> = (0..3).map(|_| tags(&[], &[("hub", 1)])).collect();
+        let files = vec![
+            ("hub.rs".to_string(), &hub),
+            ("leaf1.rs".to_string(), &leaves[0]),
+            ("leaf2.rs".to_string(), &leaves[1]),
+            ("leaf3.rs".to_string(), &leaves[2]),
+        ];
+        let order = rank_files(&files, &[]);
+        assert_eq!(order.first().copied(), Some(0), "the referenced hub leads");
+    }
+
+    #[test]
+    fn equal_ranks_break_by_path() {
+        let a = tags(&[("fn", "alpha", 1)], &[]);
+        let b = tags(&[("fn", "beta", 2)], &[]);
+        let files = vec![("z.rs".to_string(), &a), ("a.rs".to_string(), &b)];
+        let order = rank_files(&files, &[]);
+        assert_eq!(order, vec![1, 0], "ties sort by ascending path");
+    }
+
+    #[test]
+    fn self_references_do_not_create_edges() {
+        let only = tags(&[("fn", "solo", 1)], &[("solo", 3)]);
+        let files = vec![("solo.rs".to_string(), &only)];
+        assert_eq!(rank_files(&files, &[]), vec![0]);
+    }
+
+    #[test]
+    fn render_reports_an_empty_graph() {
+        assert_eq!(
+            render_repo_map(&[], &[], 100),
+            "(no supported source files found)"
+        );
+    }
+
+    #[test]
+    fn render_lists_definitions_with_lines_and_kinds() {
+        let a = tags(&[("struct", "Alpha", 3), ("fn", "run", 9)], &[]);
+        let files = vec![("src/a.rs".to_string(), &a)];
+        let order = rank_files(&files, &[]);
+        let out = render_repo_map(&files, &order, 1_000);
+        assert!(out.contains("src/a.rs:"), "{out}");
+        assert!(out.contains("  L3: struct Alpha"), "{out}");
+        assert!(out.contains("  L9: fn run"), "{out}");
+    }
+
+    #[test]
+    fn render_omits_the_colon_for_a_file_without_definitions() {
+        let a = tags(&[], &[]);
+        let files = vec![("src/a.rs".to_string(), &a)];
+        let order = rank_files(&files, &[]);
+        assert_eq!(render_repo_map(&files, &order, 1_000), "src/a.rs");
+    }
+
+    #[test]
+    fn render_appends_an_omitted_footer_when_the_budget_runs_out() {
+        let long = "averyverylongfunction";
+        let a = tags(&[("fn", long, 1)], &[]);
+        let b = tags(&[("fn", long, 2)], &[]);
+        let files = vec![("src/a.rs".to_string(), &a), ("src/b.rs".to_string(), &b)];
+        let order = rank_files(&files, &[]);
+        let block_len = render_repo_map(&files, &order[..1], 1_000).len();
+        let footer_len = "... (1 more files omitted)".len();
+        let budget = (block_len + footer_len).div_ceil(4);
+        let out = render_repo_map(&files, &order, budget);
+        assert!(
+            out.contains("more files omitted"),
+            "budget={budget} block={block_len} out={out:?}"
+        );
+        assert!(!out.contains("src/b.rs"), "the second file is dropped");
+    }
+
+    #[test]
+    fn render_truncates_a_single_oversized_block() {
+        let a = tags(&[("fn", "alpha", 1)], &[]);
+        let files = vec![("src/a.rs".to_string(), &a)];
+        let order = vec![0];
+        let out = render_repo_map(&files, &order, 1);
+        assert!(out.len() <= 4, "block is cut to the char budget: {out:?}");
+        assert!(!out.contains("omitted"), "{out}");
+    }
+
+    #[test]
+    fn render_truncation_stays_on_a_char_boundary() {
+        let a = tags(&[("fn", "ünïcode", 1)], &[]);
+        let files = vec![("src/a.rs".to_string(), &a)];
+        let out = render_repo_map(&files, &[0], 1);
+        assert!(out.is_char_boundary(out.len()));
+    }
+}

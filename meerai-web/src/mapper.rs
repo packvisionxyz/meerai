@@ -1213,3 +1213,275 @@ fn format_error_code(code: impl Serialize) -> String {
         None => value.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meerai_agents::TurnId;
+    use meerai_core::ApprovalPreview;
+    use meerai_session::{RequestId, SessionId};
+
+    fn search_match(path: &str, line: Option<usize>) -> SearchMatch {
+        SearchMatch {
+            path: path.to_string(),
+            line,
+            column: Some(2),
+            snippet: "snippet".to_string(),
+        }
+    }
+
+    #[test]
+    fn every_host_error_maps_to_a_non_success_status() {
+        let errors = vec![
+            HostError::EmptyPrompt,
+            HostError::InvalidInput("bad".to_string()),
+            HostError::NotRunning,
+            HostError::SessionNotFound(SessionId::new()),
+            HostError::Busy,
+            HostError::StaleRequest(RequestId::new()),
+            HostError::WorkerClosed,
+            HostError::UnsupportedBackend("x".to_string()),
+            HostError::Poisoned,
+        ];
+        for err in errors {
+            let (status, api) = map_host_error(err);
+            assert!(
+                status.is_client_error() || status.is_server_error(),
+                "{status} must not be a success"
+            );
+            assert!(!api.message.is_empty(), "the message must survive");
+        }
+    }
+
+    #[test]
+    fn host_error_statuses_match_their_cause() {
+        let cases = vec![
+            (HostError::EmptyPrompt, StatusCode::BAD_REQUEST),
+            (
+                HostError::InvalidInput("x".to_string()),
+                StatusCode::BAD_REQUEST,
+            ),
+            (HostError::NotRunning, StatusCode::BAD_REQUEST),
+            (
+                HostError::UnsupportedBackend("x".to_string()),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                HostError::SessionNotFound(SessionId::new()),
+                StatusCode::NOT_FOUND,
+            ),
+            (HostError::Busy, StatusCode::CONFLICT),
+            (
+                HostError::StaleRequest(RequestId::new()),
+                StatusCode::CONFLICT,
+            ),
+            (HostError::WorkerClosed, StatusCode::CONFLICT),
+        ];
+        for (err, expected) in cases {
+            let (status, _) = map_host_error(err);
+            assert_eq!(status, expected);
+        }
+    }
+
+    #[test]
+    fn a_poisoned_registry_is_a_server_error_not_a_client_error() {
+        let (status, api) = map_host_error(HostError::Poisoned);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(api.code, ApiErrorCode::Internal);
+    }
+
+    #[test]
+    fn busy_and_stale_carry_distinct_codes() {
+        let (_, busy) = map_host_error(HostError::Busy);
+        let (_, stale) = map_host_error(HostError::StaleRequest(RequestId::new()));
+        assert_eq!(busy.code, ApiErrorCode::ConflictBusy);
+        assert_eq!(stale.code, ApiErrorCode::ConflictStale);
+        assert_ne!(busy.code, stale.code);
+    }
+
+    #[test]
+    fn search_results_carry_mode_query_and_each_match() {
+        let response = map_search_results(
+            SearchMode::Content,
+            "needle".to_string(),
+            vec![search_match("a.rs", Some(7)), search_match("b.rs", None)],
+        );
+        assert_eq!(response.mode, SearchModeDto::Content);
+        assert_eq!(response.query, "needle");
+        assert_eq!(response.matches.len(), 2);
+        assert_eq!(response.matches[0].path, "a.rs");
+        assert_eq!(response.matches[0].line, Some(7));
+        assert_eq!(response.matches[0].column, Some(2));
+        assert_eq!(response.matches[0].snippet, "snippet");
+        assert_eq!(response.matches[1].line, None);
+    }
+
+    #[test]
+    fn search_mode_files_maps_to_the_files_variant() {
+        let response = map_search_results(SearchMode::Files, "q".to_string(), Vec::new());
+        assert_eq!(response.mode, SearchModeDto::Files);
+        assert!(response.matches.is_empty());
+    }
+
+    #[test]
+    fn search_preview_preserves_line_order_and_highlight_flags() {
+        let preview = SearchPreview {
+            title: "a.rs".to_string(),
+            lines: vec![
+                (1, "first".to_string(), false),
+                (2, "second".to_string(), true),
+            ],
+            scroll: 3,
+        };
+        let response = map_search_preview(preview);
+        assert_eq!(response.title, "a.rs");
+        assert_eq!(response.scroll, 3);
+        assert_eq!(response.lines.len(), 2);
+        assert_eq!(response.lines[0].line_no, 1);
+        assert!(!response.lines[0].highlighted);
+        assert!(response.lines[1].highlighted);
+    }
+
+    #[test]
+    fn approval_mode_maps_for_every_variant() {
+        assert_eq!(map_approval_mode(ApprovalMode::Plan), ApprovalModeDto::Plan);
+        assert_eq!(map_approval_mode(ApprovalMode::Ask), ApprovalModeDto::Ask);
+        assert_eq!(map_approval_mode(ApprovalMode::Auto), ApprovalModeDto::Auto);
+    }
+
+    #[test]
+    fn rewind_scope_maps_for_every_variant() {
+        assert_eq!(map_rewind_scope(RewindScope::Both), RewindScopeDto::Both);
+        assert_eq!(map_rewind_scope(RewindScope::Code), RewindScopeDto::Code);
+        assert_eq!(
+            map_rewind_scope(RewindScope::Conversation),
+            RewindScopeDto::Conversation
+        );
+    }
+
+    #[test]
+    fn approval_request_keeps_its_identity_kind_and_preview() {
+        let request = ApprovalRequest {
+            request_id: RequestId::new(),
+            turn_id: TurnId::new(),
+            kind: ApprovalKind::ToolCall,
+            preview: ApprovalPreview {
+                title: "Run tool".to_string(),
+                detail: "detail".to_string(),
+            },
+            effect: Some(EffectClass::Write),
+        };
+        let dto = map_approval_request(request);
+        assert_eq!(dto.title, "Run tool");
+        assert_eq!(dto.detail, "detail");
+        assert_eq!(dto.kind, ApprovalKindDto::ToolCall);
+        assert_eq!(dto.effect, Some(EffectClassDto::Write));
+    }
+
+    #[test]
+    fn question_request_keeps_every_prompt_and_option() {
+        let request = QuestionRequest {
+            request_id: RequestId::new(),
+            turn_id: TurnId::new(),
+            questions: vec![QuestionPrompt {
+                header: "Pick".to_string(),
+                question: "Pick one".to_string(),
+                options: vec![
+                    meerai_agents::QuestionOption {
+                        label: "a".to_string(),
+                        description: Some("first".to_string()),
+                    },
+                    meerai_agents::QuestionOption {
+                        label: "b".to_string(),
+                        description: None,
+                    },
+                ],
+                multiple: false,
+            }],
+        };
+        let dto = map_question_request(request);
+        assert_eq!(dto.questions.len(), 1);
+        assert_eq!(dto.questions[0].question, "Pick one");
+        assert_eq!(dto.questions[0].options.len(), 2);
+        assert_eq!(dto.questions[0].options[1].label, "b");
+        assert!(!dto.questions[0].multiple);
+    }
+
+    #[test]
+    fn question_answer_maps_to_the_dto() {
+        let dto = map_question_answer(QuestionAnswer {
+            header: "Pick".to_string(),
+            selected: vec!["yes".to_string()],
+        });
+        assert_eq!(dto.header, "Pick");
+        assert_eq!(dto.selected, vec!["yes".to_string()]);
+    }
+
+    #[test]
+    fn usage_copies_each_token_bucket_and_cost() {
+        let dto = map_usage(UsageStatsSnapshot {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(20),
+            total_tokens: Some(30),
+            cached_tokens: Some(4),
+            cache_creation_tokens: Some(5),
+            est_cost_usd: Some(0.25),
+        });
+        assert_eq!(dto.prompt_tokens, Some(10));
+        assert_eq!(dto.completion_tokens, Some(20));
+        assert_eq!(dto.total_tokens, Some(30));
+        assert_eq!(dto.cached_tokens, Some(4));
+        assert_eq!(dto.cache_creation_tokens, Some(5));
+        assert_eq!(dto.est_cost_usd, Some(0.25));
+    }
+
+    #[test]
+    fn usage_keeps_absent_fields_absent() {
+        let dto = map_usage(UsageStatsSnapshot {
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+            cached_tokens: None,
+            cache_creation_tokens: None,
+            est_cost_usd: None,
+        });
+        assert!(dto.prompt_tokens.is_none());
+        assert!(dto.est_cost_usd.is_none());
+    }
+
+    #[test]
+    fn colour_scheme_accepts_only_known_values() {
+        for value in ["host", "system", "light", "dark"] {
+            assert_eq!(
+                normalize_color_scheme(Some(value.to_string())),
+                Some(value.to_string()),
+                "{value} must survive"
+            );
+        }
+        for value in ["neon", "", "HOST ", "unknown"] {
+            let got = normalize_color_scheme(Some(value.to_string()));
+            if value == "HOST " {
+                assert_eq!(got, Some("host".to_string()), "trim and lowercase");
+            } else {
+                assert_eq!(got, None, "{value:?} must be dropped");
+            }
+        }
+        assert_eq!(normalize_color_scheme(None), None);
+    }
+
+    #[test]
+    fn settings_update_drops_an_unknown_colour_scheme() {
+        let req: UpdateSettingsRequest =
+            serde_json::from_value(serde_json::json!({ "theme": { "colorScheme": "neon" } }))
+                .expect("request");
+        let update = map_settings_update(req);
+        assert!(
+            update
+                .theme
+                .as_ref()
+                .and_then(|theme| theme.color_scheme.clone())
+                .is_none(),
+            "an unknown scheme becomes None"
+        );
+    }
+}
