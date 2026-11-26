@@ -1,7 +1,7 @@
 use super::*;
 
 #[component]
-fn ProviderSelectModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn ProviderSelectModal(store: StoreHandle) -> impl IntoView {
     let list_state = Memo::new(move |_| {
         store.with(|s| match &s.modal {
             Some(ActiveModal::ProviderSelect { filter, selected }) => {
@@ -76,7 +76,7 @@ fn ProviderSelectModal(store: StoreHandle) -> impl IntoView {
 }
 
 #[component]
-fn AuthMethodModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn AuthMethodModal(store: StoreHandle) -> impl IntoView {
     let info = Memo::new(move |_| {
         store.with(|s| match &s.modal {
             Some(ActiveModal::AuthMethodSelect {
@@ -145,7 +145,7 @@ fn AuthMethodModal(store: StoreHandle) -> impl IntoView {
 }
 
 #[component]
-fn ProviderConnectionModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn ProviderConnectionModal(store: StoreHandle) -> impl IntoView {
     let info = Memo::new(move |_| {
         store.with(|s| match &s.modal {
             Some(ActiveModal::ProviderConnection {
@@ -302,7 +302,7 @@ fn ProviderConnectionModal(store: StoreHandle) -> impl IntoView {
 }
 
 #[component]
-fn ChatGptLoginModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn ChatGptLoginModal(store: StoreHandle) -> impl IntoView {
     let snapshot = Memo::new(move |_| {
         store.with(|s| match &s.modal {
             Some(ActiveModal::ChatGptLogin {
@@ -436,7 +436,7 @@ fn ChatGptLoginModal(store: StoreHandle) -> impl IntoView {
 }
 
 #[component]
-fn ApiKeyModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn ApiKeyModal(store: StoreHandle) -> impl IntoView {
     let status_memo = Memo::new(move |_| {
         store.with(|s| match &s.modal {
             Some(ActiveModal::ApiKeyInput {
@@ -628,7 +628,7 @@ fn ApiKeyModal(store: StoreHandle) -> impl IntoView {
 }
 
 #[component]
-fn ModelInputModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn ModelInputModal(store: StoreHandle) -> impl IntoView {
     let is_acp_memo = Memo::new(move |_| {
         store.with(|s| {
             s.active_session()
@@ -893,7 +893,7 @@ fn ModelInputModal(store: StoreHandle) -> impl IntoView {
     shell("Set model", store, body, actions)
 }
 
-fn find_provider(store: &StoreHandle, id: &str) -> Option<ProviderItemDto> {
+pub(super) fn find_provider(store: &StoreHandle, id: &str) -> Option<ProviderItemDto> {
     store.with(|s| {
         s.providers
             .as_ref()
@@ -901,7 +901,7 @@ fn find_provider(store: &StoreHandle, id: &str) -> Option<ProviderItemDto> {
     })
 }
 
-fn find_provider_state<'a>(
+pub(super) fn find_provider_state<'a>(
     state: &'a crate::state::AppState,
     id: &str,
 ) -> Option<&'a ProviderItemDto> {
@@ -911,7 +911,7 @@ fn find_provider_state<'a>(
         .and_then(|providers| providers.providers.iter().find(|p| p.id == id))
 }
 
-fn provider_row(
+pub(super) fn provider_row(
     store: StoreHandle,
     provider: ProviderItemDto,
     selected: bool,
@@ -945,7 +945,7 @@ fn provider_row(
     .into_any()
 }
 
-fn model_row(
+pub(super) fn model_row(
     store: StoreHandle,
     model: ModelItemDto,
     selected: bool,

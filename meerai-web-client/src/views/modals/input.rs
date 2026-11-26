@@ -1,7 +1,7 @@
 use super::*;
 
 #[component]
-fn ApprovalModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn ApprovalModal(store: StoreHandle) -> impl IntoView {
     let state_memo = Memo::new(move |_| {
         store.with(|s| match &s.modal {
             Some(ActiveModal::Approval {
@@ -119,7 +119,7 @@ fn ApprovalModal(store: StoreHandle) -> impl IntoView {
 }
 
 #[component]
-fn QuestionModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn QuestionModal(store: StoreHandle) -> impl IntoView {
     let q_state = Memo::new(move |_| {
         store.with(|s| match &s.modal {
             Some(ActiveModal::Question {
@@ -314,7 +314,7 @@ fn QuestionModal(store: StoreHandle) -> impl IntoView {
 }
 
 #[component]
-fn CommandPaletteModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn CommandPaletteModal(store: StoreHandle) -> impl IntoView {
     let list_state = Memo::new(move |_| {
         store.with(|s| match &s.modal {
             Some(ActiveModal::CommandPalette { filter, selected }) => {

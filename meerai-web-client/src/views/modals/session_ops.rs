@@ -1,7 +1,7 @@
 use super::*;
 
 #[component]
-fn TerminalModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn TerminalModal(store: StoreHandle) -> impl IntoView {
     let status_memo = Memo::new(move |_| {
         store.with(|s| match &s.modal {
             Some(ActiveModal::Terminal {
@@ -80,7 +80,7 @@ fn TerminalModal(store: StoreHandle) -> impl IntoView {
 }
 
 #[component]
-fn QueuedEditModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn QueuedEditModal(store: StoreHandle) -> impl IntoView {
     let (index, initial) = store.with(|s| match &s.modal {
         Some(ActiveModal::QueuedEdit { index, input, .. }) => (*index, input.text.clone()),
         _ => (0, String::new()),
@@ -133,7 +133,7 @@ fn QueuedEditModal(store: StoreHandle) -> impl IntoView {
 }
 
 #[component]
-fn RewindModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn RewindModal(store: StoreHandle) -> impl IntoView {
     let rewind_state = Memo::new(move |_| {
         store.with(|s| match &s.modal {
             Some(ActiveModal::RewindMenu {
@@ -212,7 +212,7 @@ fn RewindModal(store: StoreHandle) -> impl IntoView {
 }
 
 #[component]
-fn SubagentModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn SubagentModal(store: StoreHandle) -> impl IntoView {
     let sub_state = Memo::new(move |_| {
         store.with(|s| match &s.modal {
             Some(ActiveModal::SubagentOverlay {
@@ -372,7 +372,7 @@ fn SubagentModal(store: StoreHandle) -> impl IntoView {
 }
 
 #[component]
-fn RunsModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn RunsModal(store: StoreHandle) -> impl IntoView {
     let now_ms = RwSignal::new(js_sys::Date::now() as u64);
     let interval_handle: Arc<Mutex<Option<i32>>> = Arc::new(Mutex::new(None));
     let interval_cleanup = interval_handle.clone();
@@ -506,7 +506,7 @@ fn RunsModal(store: StoreHandle) -> impl IntoView {
 }
 
 #[component]
-fn ShellRunModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn ShellRunModal(store: StoreHandle) -> impl IntoView {
     let now_ms = RwSignal::new(js_sys::Date::now() as u64);
     let interval_handle: Arc<Mutex<Option<i32>>> = Arc::new(Mutex::new(None));
     let interval_cleanup = interval_handle.clone();
@@ -617,7 +617,7 @@ fn ShellRunModal(store: StoreHandle) -> impl IntoView {
     let title = move || {
         store.with(|s| match &s.modal {
             Some(ActiveModal::ShellRun { command, .. }) => {
-                format!("Shell — !{}", super::truncate(command, 40))
+                format!("Shell — !{}", crate::views::truncate(command, 40))
             }
             _ => "Shell".to_owned(),
         })

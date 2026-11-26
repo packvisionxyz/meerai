@@ -1,6 +1,6 @@
 use super::*;
 
-fn clear_search_timer(timer: &Mutex<Option<i32>>) {
+pub(super) fn clear_search_timer(timer: &Mutex<Option<i32>>) {
     if let Ok(mut guard) = timer.lock()
         && let Some(id) = guard.take()
         && let Some(window) = web_sys::window()
@@ -9,7 +9,7 @@ fn clear_search_timer(timer: &Mutex<Option<i32>>) {
     }
 }
 
-fn switch_search_mode(store: StoreHandle, next: SearchModeDto) {
+pub(super) fn switch_search_mode(store: StoreHandle, next: SearchModeDto) {
     let query = store.with(|s| match &s.modal {
         Some(ActiveModal::Search { query, .. }) => query.text.trim().to_owned(),
         _ => String::new(),
@@ -40,15 +40,20 @@ fn switch_search_mode(store: StoreHandle, next: SearchModeDto) {
     }
 }
 
-fn shell(title: &str, store: StoreHandle, body: AnyView, actions: AnyView) -> AnyView {
+pub(super) fn shell(title: &str, store: StoreHandle, body: AnyView, actions: AnyView) -> AnyView {
     shell_with_width(title, store, body, actions, false)
 }
 
-fn shell_wide(title: &str, store: StoreHandle, body: AnyView, actions: AnyView) -> AnyView {
+pub(super) fn shell_wide(
+    title: &str,
+    store: StoreHandle,
+    body: AnyView,
+    actions: AnyView,
+) -> AnyView {
     shell_with_width(title, store, body, actions, true)
 }
 
-fn shell_reactive(
+pub(super) fn shell_reactive(
     title: impl Fn() -> String + Send + 'static,
     store: StoreHandle,
     body: AnyView,
@@ -57,7 +62,7 @@ fn shell_reactive(
     shell_reactive_class(title, store, body, actions, "modal")
 }
 
-fn shell_reactive_full(
+pub(super) fn shell_reactive_full(
     title: impl Fn() -> String + Send + 'static,
     store: StoreHandle,
     body: AnyView,
@@ -66,7 +71,7 @@ fn shell_reactive_full(
     shell_reactive_class(title, store, body, actions, "modal modal-full")
 }
 
-fn shell_reactive_class(
+pub(super) fn shell_reactive_class(
     title: impl Fn() -> String + Send + 'static,
     store: StoreHandle,
     body: AnyView,
@@ -95,7 +100,7 @@ fn shell_reactive_class(
     .into_any()
 }
 
-fn shell_with_width(
+pub(super) fn shell_with_width(
     title: &str,
     store: StoreHandle,
     body: AnyView,
@@ -125,11 +130,11 @@ fn shell_with_width(
     .into_any()
 }
 
-fn empty_actions() -> AnyView {
+pub(super) fn empty_actions() -> AnyView {
     view! { <span></span> }.into_any()
 }
 
-fn decide(
+pub(super) fn decide(
     store: &StoreHandle,
     session_id: &str,
     request_id: &str,
@@ -147,7 +152,7 @@ fn decide(
     store.update(|s| s.modal = None);
 }
 
-fn set_scope(store: &StoreHandle, next: RewindScopeDto) {
+pub(super) fn set_scope(store: &StoreHandle, next: RewindScopeDto) {
     store.update(|s| {
         if let Some(ActiveModal::RewindMenu { scope, .. }) = &mut s.modal {
             *scope = next;
@@ -155,7 +160,7 @@ fn set_scope(store: &StoreHandle, next: RewindScopeDto) {
     });
 }
 
-fn help_modal(store: StoreHandle) -> AnyView {
+pub(super) fn help_modal(store: StoreHandle) -> AnyView {
     let commands = filtered_commands("")
         .into_iter()
         .map(|spec| {
@@ -207,7 +212,7 @@ fn help_modal(store: StoreHandle) -> AnyView {
 }
 
 #[component]
-fn VaultResetModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn VaultResetModal(store: StoreHandle) -> impl IntoView {
     let value = Memo::new(move |_| {
         store.with(|state| match &state.modal {
             Some(ActiveModal::VaultReset { input, .. }) => input.text.clone(),

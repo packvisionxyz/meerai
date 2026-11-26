@@ -1,7 +1,7 @@
 use super::*;
 
 #[component]
-fn DiffModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn DiffModal(store: StoreHandle) -> impl IntoView {
     let diff_state = Memo::new(move |_| {
         store.with(|s| {
             let files = s.file_changes.clone();
@@ -35,7 +35,7 @@ fn DiffModal(store: StoreHandle) -> impl IntoView {
 }
 
 #[component]
-fn SearchModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn SearchModal(store: StoreHandle) -> impl IntoView {
     let search_state = Memo::new(move |_| {
         store.with(|s| match &s.modal {
             Some(ActiveModal::Search {
@@ -242,7 +242,7 @@ fn SearchModal(store: StoreHandle) -> impl IntoView {
     shell_wide("Search", store, body, empty_actions())
 }
 
-fn stage_workspace_file(store: StoreHandle, path: String, stage: bool) {
+pub(super) fn stage_workspace_file(store: StoreHandle, path: String, stage: bool) {
     if let Some(t) = crate::transport::current() {
         t.stage_workspace_file(path, stage);
     }
@@ -254,7 +254,7 @@ fn stage_workspace_file(store: StoreHandle, path: String, stage: bool) {
     });
 }
 
-fn diff_body(
+pub(super) fn diff_body(
     store: StoreHandle,
     files: Vec<meerai_web_protocol::FileChangeDto>,
     selected_path: Option<String>,
@@ -390,7 +390,7 @@ fn diff_body(
     .into_any()
 }
 
-fn set_diff_mode(store: StoreHandle, next: bool) {
+pub(super) fn set_diff_mode(store: StoreHandle, next: bool) {
     store.update(|s| {
         if let Some(ActiveModal::DiffView { unified, .. }) = &mut s.modal {
             *unified = next;
@@ -398,7 +398,7 @@ fn set_diff_mode(store: StoreHandle, next: bool) {
     });
 }
 
-fn render_unified_rows(diff: &FileDiffResponse) -> Vec<AnyView> {
+pub(super) fn render_unified_rows(diff: &FileDiffResponse) -> Vec<AnyView> {
     let mut rows = Vec::new();
     for row in &diff.rows {
         match &row.kind {
@@ -458,7 +458,7 @@ fn render_unified_rows(diff: &FileDiffResponse) -> Vec<AnyView> {
     rows
 }
 
-fn render_split_rows(diff: &FileDiffResponse) -> Vec<AnyView> {
+pub(super) fn render_split_rows(diff: &FileDiffResponse) -> Vec<AnyView> {
     let mut rows = Vec::new();
     for row in &diff.rows {
         match &row.kind {
@@ -499,7 +499,7 @@ fn render_split_rows(diff: &FileDiffResponse) -> Vec<AnyView> {
     rows
 }
 
-fn diff_line(class: &str, no: &str, sign: &str, text: &str) -> AnyView {
+pub(super) fn diff_line(class: &str, no: &str, sign: &str, text: &str) -> AnyView {
     view! {
         <div class=format!("udiff-row {class}")>
             <span class="udiff-no">{no.to_owned()}</span>
@@ -510,7 +510,7 @@ fn diff_line(class: &str, no: &str, sign: &str, text: &str) -> AnyView {
     .into_any()
 }
 
-fn line_no(value: Option<usize>) -> String {
+pub(super) fn line_no(value: Option<usize>) -> String {
     value.map(|line| line.to_string()).unwrap_or_default()
 }
 
@@ -544,7 +544,7 @@ struct PanelSnapshot {
 }
 
 #[component]
-fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
+pub(super) fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
     let snapshot = Memo::new(move |_| {
         store.with(|state| match &state.modal {
             Some(ActiveModal::WorkspacePanel {
