@@ -6,6 +6,7 @@ use meerai_core::text::{ceil_char_boundary, floor_char_boundary};
 use ratatui::layout::Rect;
 
 use super::commands::parse_mentions;
+use super::modals::{SearchOutput, SearchSources};
 use super::*;
 use crate::completion::CompletionKind;
 use crate::search::SearchMode;
@@ -128,14 +129,18 @@ impl AppState {
                         } => {
                             query.insert_str(&clean);
                             Self::refresh_search(
-                                workspace.as_ref(),
-                                &self.workspace_root,
-                                *mode,
-                                workspace_files,
-                                query,
-                                results,
-                                selected,
-                                preview,
+                                SearchSources {
+                                    workspace: workspace.as_ref(),
+                                    workspace_root: &self.workspace_root,
+                                    mode: *mode,
+                                    workspace_files,
+                                    query,
+                                },
+                                SearchOutput {
+                                    results,
+                                    selected,
+                                    preview,
+                                },
                             );
                         }
                         ActiveModal::SessionSelect {

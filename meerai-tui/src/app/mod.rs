@@ -1,4 +1,5 @@
 mod commands;
+pub(crate) use commands::{MentionKind, mention_is_known, parse_mention_token};
 mod events;
 mod input;
 mod modals;
@@ -9,7 +10,6 @@ mod runs;
 mod tests;
 mod text_input;
 
-pub(crate) use commands::{MentionKind, mention_is_known, parse_mention_token};
 pub use events::{session_usage_from_events, transcript_from_events, user_turn_map};
 pub use input::{clamp_pos_to_bounds, normalize_selection_in_bounds};
 pub(crate) use palette::{PaletteAction, filtered_commands};
@@ -798,24 +798,34 @@ pub struct SessionTab {
     pub(super) cmd_tx: mpsc::UnboundedSender<AgentCommand>,
 }
 
+pub struct TabInit {
+    pub tab_id: u64,
+    pub session_id: SessionId,
+    pub title: Option<String>,
+    pub active_provider: String,
+    pub model: String,
+    pub approval_mode: ApprovalMode,
+    pub cmd_tx: mpsc::UnboundedSender<AgentCommand>,
+}
+
 impl SessionTab {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        tab_id: u64,
-        session_id: SessionId,
-        title: Option<String>,
-        active_provider: impl Into<String>,
-        model: impl Into<String>,
-        approval_mode: ApprovalMode,
-        cmd_tx: mpsc::UnboundedSender<AgentCommand>,
-    ) -> Self {
+    pub fn new(init: TabInit) -> Self {
+        let TabInit {
+            tab_id,
+            session_id,
+            title,
+            active_provider,
+            model,
+            approval_mode,
+            cmd_tx,
+        } = init;
         Self {
             tab_id,
             session_id,
             title: title.and_then(normalize_tab_title),
             backend: Backend::default(),
-            active_provider: canonical_provider_id(&active_provider.into()),
-            model: model.into(),
+            active_provider: canonical_provider_id(&active_provider),
+            model,
             approval_mode,
             ephemeral: false,
             input: String::new(),
@@ -1459,20 +1469,32 @@ impl AppState {
         self.workspace = workspace.clone();
         self.completion.set_workspace(workspace);
     }
+}
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        active_provider: impl Into<String>,
-        model: impl Into<String>,
-        workspace_root: PathBuf,
-        cmd_tx: mpsc::UnboundedSender<AgentCommand>,
-        runtime: Arc<RwLock<RuntimeProviderState>>,
-        secrets: Arc<dyn SecretStore>,
-        settings: AppSettings,
-        config_dir: Option<PathBuf>,
-    ) -> Self {
-        let active_provider = canonical_provider_id(&active_provider.into());
-        let model = model.into();
+pub struct AppDeps {
+    pub active_provider: String,
+    pub model: String,
+    pub workspace_root: PathBuf,
+    pub cmd_tx: mpsc::UnboundedSender<AgentCommand>,
+    pub runtime: Arc<RwLock<RuntimeProviderState>>,
+    pub secrets: Arc<dyn SecretStore>,
+    pub settings: AppSettings,
+    pub config_dir: Option<PathBuf>,
+}
+
+impl AppState {
+    pub fn new(deps: AppDeps) -> Self {
+        let AppDeps {
+            active_provider,
+            model,
+            workspace_root,
+            cmd_tx,
+            runtime,
+            secrets,
+            settings,
+            config_dir,
+        } = deps;
+        let active_provider = canonical_provider_id(&active_provider);
         let mut completion = CompletionEngine::new(workspace_root.clone());
 
         let missing_key_idx = {
@@ -1514,15 +1536,15 @@ impl AppState {
             None
         };
 
-        let tab = SessionTab::new(
-            1,
-            SessionId::new(),
-            None,
+        let tab = SessionTab::new(TabInit {
+            tab_id: 1,
+            session_id: SessionId::new(),
+            title: None,
             active_provider,
             model,
-            ApprovalMode::Ask,
+            approval_mode: ApprovalMode::Ask,
             cmd_tx,
-        );
+        });
 
         Self {
             mode: InputMode::Insert,
@@ -1937,15 +1959,15 @@ impl AppState {
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
 
-        let mut tab = SessionTab::new(
+        let mut tab = SessionTab::new(TabInit {
             tab_id,
-            opened.session_id,
-            opened.title,
-            opened.provider,
-            opened.model,
-            opened.approval_mode,
-            opened.cmd_tx,
-        );
+            session_id: opened.session_id,
+            title: opened.title,
+            active_provider: opened.provider,
+            model: opened.model,
+            approval_mode: opened.approval_mode,
+            cmd_tx: opened.cmd_tx,
+        });
         tab.backend = opened.backend;
         tab.ephemeral = opened.transient;
         tab.transcript = transcript_from_events(&opened.events);

@@ -28,16 +28,16 @@ fn test_app() -> (
         &settings,
         ProviderCatalog::new(),
     )));
-    let app = AppState::new(
-        "gemini",
-        "gemini-3.8-flash",
-        PathBuf::from("."),
-        tx,
+    let app = AppState::new(AppDeps {
+        active_provider: "gemini".to_string(),
+        model: "gemini-3.8-flash".to_string(),
+        workspace_root: PathBuf::from("."),
+        cmd_tx: tx,
         runtime,
-        secrets.clone(),
+        secrets: secrets.clone(),
         settings,
-        None,
-    );
+        config_dir: None,
+    });
     (app, rx, secrets)
 }
 

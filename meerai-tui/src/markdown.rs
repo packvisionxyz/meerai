@@ -298,11 +298,13 @@ fn render_list<'a>(
         render_item_children(
             item,
             out,
-            indent,
-            reserved,
-            &marker,
-            marker_width,
-            max_width,
+            ItemLayout {
+                indent,
+                reserved,
+                marker: &marker,
+                marker_width,
+                max_width,
+            },
             &mut first,
             &mut rendered,
         );
@@ -312,18 +314,28 @@ fn render_list<'a>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct ItemLayout<'a> {
+    indent: usize,
+    reserved: usize,
+    marker: &'a str,
+    marker_width: usize,
+    max_width: usize,
+}
+
 fn render_item_children<'a>(
     item: &'a AstNode<'a>,
     out: &mut Vec<MarkdownLine>,
-    indent: usize,
-    reserved: usize,
-    marker: &str,
-    marker_width: usize,
-    max_width: usize,
+    layout: ItemLayout<'_>,
     first: &mut bool,
     rendered: &mut bool,
 ) {
+    let ItemLayout {
+        indent,
+        reserved,
+        marker,
+        marker_width,
+        max_width,
+    } = layout;
     for child in item.children() {
         let value = child.data.borrow().value.clone();
         match value {
@@ -331,11 +343,13 @@ fn render_item_children<'a>(
                 render_item_children(
                     child,
                     out,
-                    indent,
-                    reserved,
-                    marker,
-                    marker_width,
-                    max_width,
+                    ItemLayout {
+                        indent,
+                        reserved,
+                        marker,
+                        marker_width,
+                        max_width,
+                    },
                     first,
                     rendered,
                 );

@@ -13,6 +13,20 @@ use crate::search::{
     SearchMatch, SearchMode, SearchPreview, build_search_preview, search_content, search_files,
 };
 
+pub(super) struct SearchSources<'a> {
+    pub(super) workspace: &'a dyn crate::workspace::WorkspaceQuery,
+    pub(super) workspace_root: &'a Path,
+    pub(super) mode: SearchMode,
+    pub(super) workspace_files: &'a [String],
+    pub(super) query: &'a str,
+}
+
+pub(super) struct SearchOutput<'a> {
+    pub(super) results: &'a mut Vec<SearchMatch>,
+    pub(super) selected: &'a mut usize,
+    pub(super) preview: &'a mut Option<SearchPreview>,
+}
+
 impl AppState {
     pub fn open_diff_modal(&mut self, file_index: usize) {
         let Some(entry) = self.file_changes.get(file_index) else {
@@ -34,14 +48,18 @@ impl AppState {
         let mut selected = 0;
         let mut preview = None;
         Self::refresh_search(
-            self.workspace.as_ref(),
-            &self.workspace_root,
-            mode,
-            &workspace_files,
-            &query,
-            &mut results,
-            &mut selected,
-            &mut preview,
+            SearchSources {
+                workspace: self.workspace.as_ref(),
+                workspace_root: &self.workspace_root,
+                mode,
+                workspace_files: &workspace_files,
+                query: &query,
+            },
+            SearchOutput {
+                results: &mut results,
+                selected: &mut selected,
+                preview: &mut preview,
+            },
         );
         self.modal = Some(ActiveModal::Search {
             query,
@@ -53,17 +71,19 @@ impl AppState {
         });
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn refresh_search(
-        workspace: &dyn crate::workspace::WorkspaceQuery,
-        workspace_root: &Path,
-        mode: SearchMode,
-        workspace_files: &[String],
-        query: &str,
-        results: &mut Vec<SearchMatch>,
-        selected: &mut usize,
-        preview: &mut Option<SearchPreview>,
-    ) {
+    pub(super) fn refresh_search(sources: SearchSources<'_>, out: SearchOutput<'_>) {
+        let SearchSources {
+            workspace,
+            workspace_root,
+            mode,
+            workspace_files,
+            query,
+        } = sources;
+        let SearchOutput {
+            results,
+            selected,
+            preview,
+        } = out;
         *results = match mode {
             SearchMode::Files => search_files(workspace_files, query),
             SearchMode::Content => search_content(workspace, workspace_files, query),
@@ -825,14 +845,18 @@ impl AppState {
                 }
                 if key.code == KeyCode::Tab || key.code == KeyCode::BackTab || changed {
                     Self::refresh_search(
-                        self.workspace.as_ref(),
-                        &self.workspace_root,
-                        mode,
-                        &workspace_files,
-                        &query,
-                        &mut results,
-                        &mut selected,
-                        &mut preview,
+                        SearchSources {
+                            workspace: self.workspace.as_ref(),
+                            workspace_root: &self.workspace_root,
+                            mode,
+                            workspace_files: &workspace_files,
+                            query: &query,
+                        },
+                        SearchOutput {
+                            results: &mut results,
+                            selected: &mut selected,
+                            preview: &mut preview,
+                        },
                     );
                 }
                 self.modal = Some(ActiveModal::Search {
@@ -2553,14 +2577,18 @@ impl AppState {
             ) => {
                 mode = mode.toggle();
                 Self::refresh_search(
-                    self.workspace.as_ref(),
-                    &self.workspace_root,
-                    mode,
-                    &workspace_files,
-                    &query,
-                    &mut results,
-                    &mut selected,
-                    &mut preview,
+                    SearchSources {
+                        workspace: self.workspace.as_ref(),
+                        workspace_root: &self.workspace_root,
+                        mode,
+                        workspace_files: &workspace_files,
+                        query: &query,
+                    },
+                    SearchOutput {
+                        results: &mut results,
+                        selected: &mut selected,
+                        preview: &mut preview,
+                    },
                 );
                 self.modal = Some(ActiveModal::Search {
                     query,

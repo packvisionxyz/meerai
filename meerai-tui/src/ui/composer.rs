@@ -520,12 +520,16 @@ pub(super) fn render_composer_line(
                 push_composer_text(
                     &mut spans,
                     &mut plain,
-                    plain_start,
-                    index,
-                    cursor_byte,
-                    &mut display_col,
-                    &mut cursor_col,
-                    line,
+                    TextRun {
+                        start: plain_start,
+                        end: index,
+                        line,
+                    },
+                    CursorTracking {
+                        cursor_byte,
+                        display_col: &mut display_col,
+                        cursor_col: &mut cursor_col,
+                    },
                 );
             }
             if cursor_col.is_none()
@@ -554,29 +558,46 @@ pub(super) fn render_composer_line(
         push_composer_text(
             &mut spans,
             &mut plain,
-            plain_start,
-            line.len(),
-            cursor_byte,
-            &mut display_col,
-            &mut cursor_col,
-            line,
+            TextRun {
+                start: plain_start,
+                end: line.len(),
+                line,
+            },
+            CursorTracking {
+                cursor_byte,
+                display_col: &mut display_col,
+                cursor_col: &mut cursor_col,
+            },
         );
     }
 
     (spans, cursor_col.unwrap_or(display_col))
 }
 
-#[allow(clippy::too_many_arguments)]
+struct TextRun<'a> {
+    start: usize,
+    end: usize,
+    line: &'a str,
+}
+
+struct CursorTracking<'a> {
+    cursor_byte: Option<usize>,
+    display_col: &'a mut usize,
+    cursor_col: &'a mut Option<usize>,
+}
+
 fn push_composer_text(
     spans: &mut Vec<Span<'static>>,
     plain: &mut String,
-    start: usize,
-    end: usize,
-    cursor_byte: Option<usize>,
-    display_col: &mut usize,
-    cursor_col: &mut Option<usize>,
-    line: &str,
+    run: TextRun<'_>,
+    cursor: CursorTracking<'_>,
 ) {
+    let TextRun { start, end, line } = run;
+    let CursorTracking {
+        cursor_byte,
+        display_col,
+        cursor_col,
+    } = cursor;
     let text = std::mem::take(plain);
     if cursor_col.is_none()
         && let Some(cursor) = cursor_byte

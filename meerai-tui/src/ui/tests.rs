@@ -19,6 +19,7 @@ use ratatui::backend::TestBackend;
 use tokio::sync::mpsc;
 
 use super::*;
+use crate::app::AppDeps;
 
 fn test_app() -> AppState {
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -29,16 +30,16 @@ fn test_app() -> AppState {
         &settings,
         ProviderCatalog::new(),
     )));
-    AppState::new(
-        "gemini",
-        "gemini-3.8-flash",
-        PathBuf::from("."),
-        tx,
+    AppState::new(AppDeps {
+        active_provider: "gemini".to_string(),
+        model: "gemini-3.8-flash".to_string(),
+        workspace_root: PathBuf::from("."),
+        cmd_tx: tx,
         runtime,
         secrets,
         settings,
-        None,
-    )
+        config_dir: None,
+    })
 }
 
 fn render_to_string_with_size(app: &mut AppState, width: u16, height: u16) -> String {
@@ -1891,16 +1892,16 @@ fn plan_badge_and_colors_for_oauth_credentials() {
         &settings,
         ProviderCatalog::new(),
     )));
-    let mut app = AppState::new(
-        "openai",
-        "gpt-5",
-        PathBuf::from("."),
-        tx,
+    let mut app = AppState::new(AppDeps {
+        active_provider: "openai".to_string(),
+        model: "gpt-5".to_string(),
+        workspace_root: PathBuf::from("."),
+        cmd_tx: tx,
         runtime,
         secrets,
         settings,
-        None,
-    );
+        config_dir: None,
+    });
     let sidebar = render_to_string(&mut app);
     assert!(sidebar.contains("auth"));
     assert!(sidebar.contains("[plan]"));

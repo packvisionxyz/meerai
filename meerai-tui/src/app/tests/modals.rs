@@ -9,16 +9,16 @@ fn opens_provider_select_on_startup_when_key_missing() {
     let runtime = Arc::new(RwLock::new(RuntimeProviderState::from_settings(
         &settings, catalog,
     )));
-    let app = AppState::new(
-        "custom-test-provider",
-        "test-model",
-        PathBuf::from("."),
-        tx,
+    let app = AppState::new(AppDeps {
+        active_provider: "custom-test-provider".to_string(),
+        model: "test-model".to_string(),
+        workspace_root: PathBuf::from("."),
+        cmd_tx: tx,
         runtime,
         secrets,
         settings,
-        None,
-    );
+        config_dir: None,
+    });
     assert!(matches!(
         app.modal,
         Some(ActiveModal::ProviderSelect { .. })
@@ -35,16 +35,16 @@ fn opens_provider_select_on_startup_when_plan_credential_needs_relogin() {
         &settings,
         ProviderCatalog::new(),
     )));
-    let app = AppState::new(
-        "openai",
-        "gpt-5",
-        PathBuf::from("."),
-        tx,
+    let app = AppState::new(AppDeps {
+        active_provider: "openai".to_string(),
+        model: "gpt-5".to_string(),
+        workspace_root: PathBuf::from("."),
+        cmd_tx: tx,
         runtime,
         secrets,
         settings,
-        None,
-    );
+        config_dir: None,
+    });
     assert!(matches!(
         app.modal,
         Some(ActiveModal::ProviderSelect { .. })
@@ -58,16 +58,16 @@ fn opens_provider_select_on_startup_when_plan_credential_needs_relogin() {
         &settings,
         ProviderCatalog::new(),
     )));
-    let app = AppState::new(
-        "openai",
-        "gpt-5",
-        PathBuf::from("."),
-        tx,
+    let app = AppState::new(AppDeps {
+        active_provider: "openai".to_string(),
+        model: "gpt-5".to_string(),
+        workspace_root: PathBuf::from("."),
+        cmd_tx: tx,
         runtime,
         secrets,
         settings,
-        None,
-    );
+        config_dir: None,
+    });
     assert!(app.modal.is_none());
     assert!(app.active_key_status().is_configured());
 }
@@ -500,16 +500,16 @@ fn opens_model_input_on_startup_when_model_empty_and_blocks_empty_submit() {
         &settings,
         ProviderCatalog::new(),
     )));
-    let mut app = AppState::new(
-        "openai",
-        "",
-        PathBuf::from("."),
-        tx,
+    let mut app = AppState::new(AppDeps {
+        active_provider: "openai".to_string(),
+        model: "".to_string(),
+        workspace_root: PathBuf::from("."),
+        cmd_tx: tx,
         runtime,
         secrets,
         settings,
-        None,
-    );
+        config_dir: None,
+    });
     assert!(matches!(app.modal, Some(ActiveModal::ModelInput { .. })));
 
     app.handle_key_event(key(KeyCode::Esc));
@@ -920,16 +920,16 @@ fn clicking_file_change_opens_diff_modal_and_search_attaches_file() {
         &settings,
         ProviderCatalog::new(),
     )));
-    let mut app = AppState::new(
-        "gemini",
-        "gemini-3.8-flash",
-        root.clone(),
-        tx,
+    let mut app = AppState::new(AppDeps {
+        active_provider: "gemini".to_string(),
+        model: "gemini-3.8-flash".to_string(),
+        workspace_root: root.clone(),
+        cmd_tx: tx,
         runtime,
         secrets,
         settings,
-        None,
-    );
+        config_dir: None,
+    });
 
     app.handle_terminal_event(Event::Resize(90, 30));
     assert!(!app.is_sidebar_visible());
@@ -1257,16 +1257,16 @@ fn diff_list_app(label: &str) -> (AppState, std::path::PathBuf) {
         &settings,
         ProviderCatalog::new(),
     )));
-    let mut app = AppState::new(
-        "gemini",
-        "gemini-3.8-flash",
-        root.clone(),
-        tx,
+    let mut app = AppState::new(AppDeps {
+        active_provider: "gemini".to_string(),
+        model: "gemini-3.8-flash".to_string(),
+        workspace_root: root.clone(),
+        cmd_tx: tx,
         runtime,
         secrets,
         settings,
-        None,
-    );
+        config_dir: None,
+    });
     app.handle_terminal_event(Event::Resize(120, 30));
     app.file_changes = vec![
         FileChangeEntry {

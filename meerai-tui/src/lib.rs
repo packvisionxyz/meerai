@@ -27,7 +27,7 @@ pub mod update;
 pub mod workspace;
 
 pub use app::{
-    ActiveModal, AppState, FileChangeEntry, HoverZone, InputMode, MIN_SIDEBAR_WIDTH,
+    ActiveModal, AppDeps, AppState, FileChangeEntry, HoverZone, InputMode, MIN_SIDEBAR_WIDTH,
     PendingSessionAction, ScreenPos, SessionTab, TabHitKind, TabHitZone, TextSelection,
     ThinkingHitZone, ToolCallEntry, ToolCallStatus, TranscriptEntry, TurnMetrics, UsageStats,
     approval_mode_badge, approval_mode_label, parse_approval_mode, session_usage_from_events,
@@ -87,16 +87,16 @@ pub async fn run_tui(
 ) -> Result<TuiExit> {
     let mut terminal = TerminalGuard::enter()?;
     let workspace_root = config.workspace_root.clone();
-    let mut app = AppState::new(
-        config.initial_provider.clone(),
-        config.initial_model.clone(),
-        config.workspace_root,
-        cmd_tx.clone(),
-        config.runtime,
-        config.secrets,
-        config.settings,
-        config.config_dir,
-    );
+    let mut app = AppState::new(AppDeps {
+        active_provider: config.initial_provider.clone(),
+        model: config.initial_model.clone(),
+        workspace_root: config.workspace_root,
+        cmd_tx: cmd_tx.clone(),
+        runtime: config.runtime,
+        secrets: config.secrets,
+        settings: config.settings,
+        config_dir: config.config_dir,
+    });
     app.context_temperature = config.context_temperature;
     app.context_effort = config.context_effort;
     app.explicit_context_window = config.explicit_context_window;
