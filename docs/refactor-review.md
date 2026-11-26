@@ -233,7 +233,7 @@ The backlog orders contract work before structural work. Each item states one ob
 | 2 | ~~Replace the 73 production unwraps in the registry with typed `HostError` returns~~ **Partly done** — 15 of 34 lock sites converted, see [§3.4](#34-completed-work) | error handling | `meerai-host` | M | Medium | Remaining: 19 lock sites in methods that cannot fail today, plus 33 `get`/`get_mut` unwraps |
 | 3 | ~~Unify `goal.rs` and `loop_engine.rs` into one loop model~~ **Done** — `goal.rs` was dead, so it was deleted, see [§3.4](#34-completed-work) | duplication | `meerai-session`, `meerai-skills` | M | Medium | Done: the four prompt builders exist once; no live behavior changed |
 | 4 | Split `meerai-host/src/registry.rs` into `state`, `events`, and `snapshot` modules | file size | `meerai-host` | M | Medium | No file in `meerai-host/src` exceeds 900 lines and the public re-export list is unchanged |
-| 5 | Split `meerai-agents/src/multi_turn_agent/tests.rs` (10,018 lines) and `tools.rs` (2,134 test lines) into per-concern test modules | test organization | `meerai-agents` | M | Low | No test file in `multi_turn_agent/` exceeds 1,500 lines and each module under test has its own test file |
+| 5 | ~~Split `meerai-agents/src/multi_turn_agent/tests.rs` (10,018 lines) into per-concern test modules~~ **Done** — see [§3.4](#34-completed-work) | test organization | `meerai-agents` | M | Low | Done: 9 concern modules plus `fixtures.rs`; the 10,017-line file is now a 10-line hub and all 156 tests survive |
 | 6 | Introduce parameter structs to remove the five `too_many_arguments` allows in `meerai-agents` | signature | `meerai-agents` | M | Medium | No `#[allow(clippy::too_many_arguments)]` remains in the crate |
 | 7 | Introduce parameter structs to remove the five `too_many_arguments` allows in `meerai-tui` | signature | `meerai-tui` | M | Medium | No `#[allow(clippy::too_many_arguments)]` remains in the crate |
 | 8 | Split `meerai-web/src/server.rs` below 900 lines and narrow its error type | file size | `meerai-web` | M | Medium | The three `result_large_err` suppressions are gone and no file in the crate exceeds 900 lines |
@@ -265,6 +265,7 @@ Items 1 through 3 are contract-adjacent and should land first. Items 4 through 1
 | 10 | Split `meerai-web-protocol/src/lib.rs` into 12 domain modules plus `tests.rs` | 1 file, 1,734 lines, 97 DTOs | 13 files, largest 258 lines, `lib.rs` 28 lines |
 | 9 | Split `meerai-session/src/session.rs` into `open`, `append`, `fork`, `rewind`, `query`, and `update` | 1,151 production lines in one file | parent 419 lines plus six modules, largest 200 lines |
 | 16 | Moved the project-settings merge logic out of `meerai-common/src/settings.rs` into `settings/merge.rs` | 889 production lines mixing value types with merge rules | parent 565 lines, `merge.rs` 328 lines |
+| 5 | Split `meerai-agents/src/multi_turn_agent/tests.rs` into `fixtures.rs` plus 9 concern modules | 1 file, 10,017 lines, 156 tests | hub 10 lines, largest module 1,728 lines, 156 tests verified identical by name |
 
 Item 10 verification went beyond "it compiles". The split was mechanical, so the risk was silent wire drift:
 
