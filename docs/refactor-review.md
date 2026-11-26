@@ -234,8 +234,8 @@ The backlog orders contract work before structural work. Each item states one ob
 | 3 | ~~Unify `goal.rs` and `loop_engine.rs` into one loop model~~ **Done** — `goal.rs` was dead, so it was deleted, see [§3.4](#34-completed-work) | duplication | `meerai-session`, `meerai-skills` | M | Medium | Done: the four prompt builders exist once; no live behavior changed |
 | 4 | Split `meerai-host/src/registry.rs` into `state`, `events`, and `snapshot` modules | file size | `meerai-host` | M | Medium | No file in `meerai-host/src` exceeds 900 lines and the public re-export list is unchanged |
 | 5 | ~~Split `meerai-agents/src/multi_turn_agent/tests.rs` (10,018 lines) into per-concern test modules~~ **Done** — see [§3.4](#34-completed-work) | test organization | `meerai-agents` | M | Low | Done: 9 concern modules plus `fixtures.rs`; the 10,017-line file is now a 10-line hub and all 156 tests survive |
-| 6 | Introduce parameter structs to remove the five `too_many_arguments` allows in `meerai-agents` | signature | `meerai-agents` | M | Medium | No `#[allow(clippy::too_many_arguments)]` remains in the crate |
-| 7 | Introduce parameter structs to remove the five `too_many_arguments` allows in `meerai-tui` | signature | `meerai-tui` | M | Medium | No `#[allow(clippy::too_many_arguments)]` remains in the crate |
+| 6 | ~~Introduce parameter structs to remove the `too_many_arguments` allows in `meerai-agents`~~ **Done** — see [§3.4](#34-completed-work) | signature | `meerai-agents` | M | Medium | Done: `HookArgs`, `StepChannel`, `ToolCallEnv`; 5 allows removed |
+| 7 | ~~Introduce parameter structs to remove the `too_many_arguments` allows in `meerai-tui`~~ **Done** — see [§3.4](#34-completed-work) | signature | `meerai-tui` | M | Medium | Done: `ItemLayout`, `TextRun`, `CursorTracking`, `TabInit`, `AppDeps`, `SearchSources`, `SearchOutput`; 5 allows removed |
 | 8 | Split `meerai-web/src/server.rs` below 900 lines and narrow its error type | file size | `meerai-web` | M | Medium | The three `result_large_err` suppressions are gone and no file in the crate exceeds 900 lines |
 | 9 | ~~Split `meerai-session/src/session.rs` into `open`, `fork`, and `query` modules~~ **Done** — see [§3.4](#34-completed-work) | file size | `meerai-session` | M | Medium | Done: 6 modules plus a 419-line parent; no file exceeds 900 production lines |
 | 10 | ~~Split `meerai-web-protocol/src/lib.rs` into domain modules and move DTOs above the tests~~ **Done** — see [§3.4](#34-completed-work) | file size | `meerai-web-protocol` | S | Low | Done: 12 modules, largest 258 lines, wire format unchanged |
@@ -266,6 +266,8 @@ Items 1 through 3 are contract-adjacent and should land first. Items 4 through 1
 | 9 | Split `meerai-session/src/session.rs` into `open`, `append`, `fork`, `rewind`, `query`, and `update` | 1,151 production lines in one file | parent 419 lines plus six modules, largest 200 lines |
 | 16 | Moved the project-settings merge logic out of `meerai-common/src/settings.rs` into `settings/merge.rs` | 889 production lines mixing value types with merge rules | parent 565 lines, `merge.rs` 328 lines |
 | 5 | Split `meerai-agents/src/multi_turn_agent/tests.rs` into `fixtures.rs` plus 9 concern modules | 1 file, 10,017 lines, 156 tests | hub 10 lines, largest module 1,728 lines, 156 tests verified identical by name |
+| 6 | Added `HookArgs` (merged 6 optional parameters across `run_hook`/`run_hook_with_error`, 15 call sites), `StepChannel`, and `ToolCallEnv` | 5 `too_many_arguments` allows in `meerai-agents` | 0 allows; clippy silent |
+| 7 | Added `ItemLayout`, `TextRun`/`CursorTracking`, `TabInit`, `AppDeps` (10 call sites), and `SearchSources`/`SearchOutput` | 5 `too_many_arguments` allows in `meerai-tui` | 0 allows; clippy silent |
 
 Item 10 verification went beyond "it compiles". The split was mechanical, so the risk was silent wire drift:
 
