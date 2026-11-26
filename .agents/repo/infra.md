@@ -92,10 +92,10 @@ that string. Squash-merge the PR and keep its title as the commit message, or th
 start. Read `open_bump_pr.py` outputs `created`, `branch`, `number`, `url`, and `sha` to follow the
 PR in the run summary.
 
-When `BUMP_TOKEN` is not set, the branch push uses `GITHUB_TOKEN`, and such a push does not start
-`ci.yml`. The `Grant the pull request a CI run` step detects the missing run for the head SHA and
-dispatches `ci.yml` on the bump branch. With `BUMP_TOKEN` the push starts CI by itself, and the step
-finds the existing run and does nothing.
+When `BUMP_TOKEN` is not set, `open_bump_pr.py` uses `GITHUB_TOKEN`, so GitHub opens the PR as
+`github-actions[bot]` and holds the `pull_request` run of `ci.yml` until a maintainer clicks
+**Approve workflows to run**. With `BUMP_TOKEN`, the PR starts `ci.yml` automatically without
+approval.
 
 ## Release (`release.yml`)
 

@@ -33,7 +33,6 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      actions: write
     steps:
       - name: Checkout main
         uses: actions/checkout@v7
@@ -95,21 +94,6 @@ jobs:
           MEMBERS: ${{ steps.bump.outputs.members }}
           PR_TITLE: ${{ steps.bump.outputs.subject }}
         run: python3 .github/scripts/open_bump_pr.py
-
-      - name: Grant the pull request a CI run
-        if: inputs.dry_run == false && steps.pr.outputs.branch != ''
-        env:
-          GH_TOKEN: ${{ secrets.BUMP_TOKEN || secrets.GITHUB_TOKEN }}
-          PR_BRANCH: ${{ steps.pr.outputs.branch }}
-        run: |
-          set -euo pipefail
-          head_sha="$(git rev-parse HEAD)"
-          if gh run list --workflow ci.yml --commit "$head_sha" --limit 1 --json databaseId --jq '.[0].databaseId' | grep -q .; then
-            echo "::notice::CI is already registered for ${head_sha}."
-            exit 0
-          fi
-          gh workflow run ci.yml --ref "$PR_BRANCH"
-          echo "::notice::Dispatched CI for ${head_sha} on ${PR_BRANCH}."
 
       - name: Summarize the bump
         run: |

@@ -7,6 +7,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import verify_release_version as gate
+
 MAX_COMMITS = int(os.environ.get("NOTES_MAX_COMMITS", "100"))
 TAG_PATTERN = re.compile(r"^v\d+\.\d+\.\d+.*$")
 CONVENTIONAL = re.compile(
@@ -71,6 +75,26 @@ def previous_tag(current_tag: str) -> str:
     return ""
 
 
+def resolve_previous_version(current_version: str, base_tag: str) -> str:
+    explicit = os.environ.get("PREVIOUS_VERSION", "").strip()
+    if explicit:
+        return explicit
+
+    for ref in (base_tag, "HEAD^"):
+        if not ref:
+            continue
+        manifest = git_optional("show", f"{ref}:Cargo.toml")
+        if not manifest:
+            continue
+        found = gate.workspace_version_from_lines(manifest)
+        if found and found != current_version:
+            return found
+
+    if base_tag:
+        return base_tag[1:] if base_tag[:1] in ("v", "V") else base_tag
+    return ""
+
+
 def read_commits(revision_range: str) -> list[dict]:
     raw = git(
         "log",
@@ -126,7 +150,11 @@ def group_commits(commits: list[dict]) -> dict[str, list[dict]]:
 def render_body(context: dict) -> str:
     version = context["version"]
     lines = [f"meerai {version}", ""]
-    lines.append(f"Workspace version `{context['previous_version']}` -> `{version}`.")
+    if context["previous_version"] and context["previous_version"] != version:
+        lines.append(f"Workspace version `{context['previous_version']}` -> `{version}`.")
+    else:
+        lines.append(f"Workspace version `{version}`.")
+    lines.append("")
     if context["previous_tag"]:
         lines.append(f"Changes since `{context['previous_tag']}`.")
     else:
@@ -202,7 +230,7 @@ def main() -> None:
 
     context = {
         "version": version,
-        "previous_version": os.environ.get("PREVIOUS_VERSION", "").strip() or version,
+        "previous_version": resolve_previous_version(version, base_tag),
         "previous_tag": base_tag,
         "commits": commits,
         "compare_url": (
