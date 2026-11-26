@@ -535,7 +535,7 @@ impl AppState {
             _ => false,
         }
     }
-    fn handle_modal_scroll(&mut self, kind: MouseEventKind) -> bool {
+    pub(crate) fn handle_modal_scroll(&mut self, kind: MouseEventKind) -> bool {
         if let Some(ActiveModal::DiffView { diff, scroll, .. }) = &mut self.modal {
             let max_scroll = diff.rows.len().saturating_sub(1);
             return match kind {

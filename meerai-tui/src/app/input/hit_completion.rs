@@ -65,7 +65,7 @@ impl AppState {
             }
         }
     }
-    fn queued_hit_at(&self, column: u16, row: u16) -> Option<QueuedHitKind> {
+    pub(crate) fn queued_hit_at(&self, column: u16, row: u16) -> Option<QueuedHitKind> {
         self.queued_hit_zones
             .iter()
             .find(|zone| {
@@ -76,7 +76,7 @@ impl AppState {
             })
             .map(|zone| zone.kind)
     }
-    fn click_queued_at(&mut self, column: u16, row: u16) -> bool {
+    pub(crate) fn click_queued_at(&mut self, column: u16, row: u16) -> bool {
         let Some(kind) = self.queued_hit_at(column, row) else {
             return false;
         };

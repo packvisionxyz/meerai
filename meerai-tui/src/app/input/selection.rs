@@ -1,7 +1,7 @@
 use super::*;
 
 impl AppState {
-    fn refresh_active_doc_selection_head(&mut self) {
+    pub(crate) fn refresh_active_doc_selection_head(&mut self) {
         let Some(mut sel) = self.doc_selection else {
             return;
         };
@@ -15,7 +15,7 @@ impl AppState {
             self.doc_selection = Some(sel);
         }
     }
-    fn register_click(&mut self, column: u16, row: u16) -> u8 {
+    pub(crate) fn register_click(&mut self, column: u16, row: u16) -> u8 {
         const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
         let now = Instant::now();
         let streak = match self.last_click {
@@ -47,7 +47,7 @@ impl AppState {
         }
         self.screen_to_doc_pos_clamped(column, row)
     }
-    fn screen_to_doc_pos_clamped(&self, column: u16, row: u16) -> Option<DocPos> {
+    pub(crate) fn screen_to_doc_pos_clamped(&self, column: u16, row: u16) -> Option<DocPos> {
         let inner = self.transcript_inner_area;
         if self.transcript_wrapped_lines.is_empty() || inner.width == 0 || inner.height == 0 {
             return None;
@@ -81,14 +81,14 @@ impl AppState {
             sel,
         )
     }
-    fn extract_subagent_selected_text(&self, sel: DocSelection) -> String {
+    pub(crate) fn extract_subagent_selected_text(&self, sel: DocSelection) -> String {
         selected_text_from_lines(
             &self.subagent_view_cache.doc_lines,
             self.subagent_view_cache.body.width,
             sel,
         )
     }
-    fn handle_subagent_selection_mouse(
+    pub(crate) fn handle_subagent_selection_mouse(
         &mut self,
         kind: MouseEventKind,
         column: u16,
@@ -173,7 +173,7 @@ impl AppState {
             _ => false,
         }
     }
-    fn subagent_doc_pos(&self, column: u16, row: u16) -> Option<DocPos> {
+    pub(crate) fn subagent_doc_pos(&self, column: u16, row: u16) -> Option<DocPos> {
         let body = self.subagent_view_cache.body;
         let lines = &self.subagent_view_cache.doc_lines;
         if lines.is_empty() || body.width == 0 || body.height == 0 {
@@ -197,7 +197,7 @@ impl AppState {
         };
         Some(DocPos { line, col })
     }
-    fn scroll_subagent_view(&mut self, delta: isize) {
+    pub(crate) fn scroll_subagent_view(&mut self, delta: isize) {
         if let Some(ActiveModal::RunDetail { scroll, .. }) = &mut self.modal {
             let max = self.run_detail_max_scroll;
             let next = if delta < 0 {

@@ -1,7 +1,7 @@
 use super::*;
 
 impl AppState {
-    fn composer_pointer_down(&mut self, column: u16, row: u16) -> bool {
+    pub(crate) fn composer_pointer_down(&mut self, column: u16, row: u16) -> bool {
         let Some(cursor) = self.composer_cursor_at(column, row) else {
             return false;
         };
@@ -21,7 +21,7 @@ impl AppState {
         self.update_completion();
         true
     }
-    fn composer_cursor_at(&self, column: u16, row: u16) -> Option<usize> {
+    pub(crate) fn composer_cursor_at(&self, column: u16, row: u16) -> Option<usize> {
         let block = self.composer_block_area;
         if block.width == 0
             || block.height == 0
@@ -34,14 +34,14 @@ impl AppState {
         }
         self.composer_cursor_in_block(column, row)
     }
-    fn composer_cursor_clamped(&self, column: u16, row: u16) -> Option<usize> {
+    pub(crate) fn composer_cursor_clamped(&self, column: u16, row: u16) -> Option<usize> {
         let block = self.composer_block_area;
         if block.width == 0 || block.height == 0 {
             return None;
         }
         self.composer_cursor_in_block(column, row)
     }
-    fn composer_cursor_in_block(&self, column: u16, row: u16) -> Option<usize> {
+    pub(crate) fn composer_cursor_in_block(&self, column: u16, row: u16) -> Option<usize> {
         let area = self.composer_input_area;
         if area.width == 0 || area.height == 0 {
             return Some(self.tab().cursor);
@@ -70,7 +70,7 @@ impl AppState {
             &self.skills,
         ))
     }
-    fn composer_word_bounds_at(&self, cursor: usize) -> Option<(usize, usize)> {
+    pub(crate) fn composer_word_bounds_at(&self, cursor: usize) -> Option<(usize, usize)> {
         let input = self.tab().input.as_str();
         if input.is_empty() {
             return None;
@@ -93,7 +93,7 @@ impl AppState {
         }
         (start < end).then_some((start, end))
     }
-    fn extend_composer_drag(&mut self, anchor: usize, column: u16, row: u16) {
+    pub(crate) fn extend_composer_drag(&mut self, anchor: usize, column: u16, row: u16) {
         let head = self
             .composer_cursor_at(column, row)
             .or_else(|| self.composer_cursor_clamped(column, row))
@@ -106,7 +106,7 @@ impl AppState {
         self.composer_selection = (start < end).then_some((start, end));
         self.tab_mut().cursor = head;
     }
-    fn delete_composer_selection(&mut self) -> bool {
+    pub(crate) fn delete_composer_selection(&mut self) -> bool {
         let Some((start, end)) = self.composer_selection.take() else {
             return false;
         };
@@ -121,7 +121,7 @@ impl AppState {
         self.update_completion();
         true
     }
-    fn composer_width(&self) -> usize {
+    pub(crate) fn composer_width(&self) -> usize {
         let width = self.composer_input_area.width;
         if width > 0 {
             width as usize

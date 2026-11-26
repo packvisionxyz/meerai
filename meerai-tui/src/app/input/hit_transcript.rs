@@ -1,7 +1,7 @@
 use super::*;
 
 impl AppState {
-    fn sidebar_changes_contains(&self, column: u16, row: u16) -> bool {
+    pub(crate) fn sidebar_changes_contains(&self, column: u16, row: u16) -> bool {
         let area = self.sidebar_changes_inner_area;
         area.width > 0
             && area.height > 0
@@ -167,7 +167,12 @@ impl AppState {
         }
         self.hovered_zone_at(self.transcript_inner_area, self.effective_scroll(), pos)
     }
-    fn hovered_zone_at(&self, area: Rect, scroll: usize, pos: ScreenPos) -> Option<usize> {
+    pub(crate) fn hovered_zone_at(
+        &self,
+        area: Rect,
+        scroll: usize,
+        pos: ScreenPos,
+    ) -> Option<usize> {
         if area.width == 0
             || pos.col < area.x
             || pos.col >= area.x + area.width
@@ -182,7 +187,7 @@ impl AppState {
             .find(|zone| row >= zone.start_line && row < zone.end_line)
             .map(|zone| zone.entry_idx)
     }
-    fn entry_at(&self, column: u16, row: u16) -> Option<usize> {
+    pub(crate) fn entry_at(&self, column: u16, row: u16) -> Option<usize> {
         let area = self.transcript_inner_area;
         if area.width == 0
             || area.height == 0
@@ -207,7 +212,7 @@ impl AppState {
             None => false,
         }
     }
-    fn open_first_diff(&mut self) -> bool {
+    pub(crate) fn open_first_diff(&mut self) -> bool {
         if self.file_changes.is_empty() {
             self.status_notice = Some("No file changes to review".to_string());
         } else {
@@ -215,7 +220,7 @@ impl AppState {
         }
         true
     }
-    fn digest_at(&self, column: u16, row: u16) -> Option<usize> {
+    pub(crate) fn digest_at(&self, column: u16, row: u16) -> Option<usize> {
         let area = self.transcript_inner_area;
         if area.width == 0
             || area.height == 0
@@ -234,7 +239,7 @@ impl AppState {
             .find(|z| virtual_line >= z.start_line && virtual_line < z.end_line)
             .map(|z| z.entry_idx)
     }
-    fn toggle_turn_activity(&mut self, group_idx: usize) -> bool {
+    pub(crate) fn toggle_turn_activity(&mut self, group_idx: usize) -> bool {
         if !crate::ui::transcript::is_activity_group_start(&self.tab().transcript, group_idx) {
             return false;
         }
@@ -243,7 +248,7 @@ impl AppState {
         tab.turn_activity.insert(group_idx, !expanded);
         true
     }
-    fn toggle_entry_index(&mut self, entry_idx: usize) -> bool {
+    pub(crate) fn toggle_entry_index(&mut self, entry_idx: usize) -> bool {
         let mut load_child: Option<String> = None;
         let toggled = match self.tab_mut().transcript.get_mut(entry_idx) {
             Some(TranscriptEntry::Assistant {
@@ -288,7 +293,7 @@ impl AppState {
         }
         toggled
     }
-    fn rewind_to_entry(&mut self, entry_idx: usize, message: String) -> bool {
+    pub(crate) fn rewind_to_entry(&mut self, entry_idx: usize, message: String) -> bool {
         if self.tab().is_running {
             self.status_notice = Some("Cancel the running turn before rewinding".to_string());
             return true;
@@ -312,7 +317,7 @@ impl AppState {
             Some("Rewound code and conversation; message restored to the composer".to_string());
         true
     }
-    fn fork_from_entry(&mut self, entry_idx: usize, draft: String) -> bool {
+    pub(crate) fn fork_from_entry(&mut self, entry_idx: usize, draft: String) -> bool {
         if self.tab().is_running {
             self.status_notice = Some("Cancel the running turn before forking".to_string());
             return true;

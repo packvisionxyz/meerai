@@ -1,13 +1,13 @@
 use super::*;
 
 impl AppState {
-    fn insert_char(&mut self, c: char) {
+    pub(crate) fn insert_char(&mut self, c: char) {
         self.delete_composer_selection();
         let tab = self.tab_mut();
         tab.input.insert(tab.cursor, c);
         tab.cursor += c.len_utf8();
     }
-    fn consume_line_continuation_backslash(&mut self) -> bool {
+    pub(crate) fn consume_line_continuation_backslash(&mut self) -> bool {
         let tab = self.tab_mut();
         let before = &tab.input[..tab.cursor.min(tab.input.len())];
         if before.ends_with('\\') && !before.ends_with("\\\\") {
@@ -19,7 +19,7 @@ impl AppState {
             false
         }
     }
-    fn backspace(&mut self) {
+    pub(crate) fn backspace(&mut self) {
         if self.delete_composer_selection() {
             return;
         }
@@ -34,7 +34,7 @@ impl AppState {
         tab.input.drain(prev..tab.cursor);
         tab.cursor = prev;
     }
-    fn delete_forward(&mut self) {
+    pub(crate) fn delete_forward(&mut self) {
         if self.delete_composer_selection() {
             return;
         }
@@ -48,7 +48,7 @@ impl AppState {
         );
         tab.input.drain(tab.cursor..next);
     }
-    fn move_left(&mut self) {
+    pub(crate) fn move_left(&mut self) {
         self.composer_selection = None;
         let tab = self.tab_mut();
         if tab.cursor > 0 {
@@ -58,7 +58,7 @@ impl AppState {
             );
         }
     }
-    fn move_right(&mut self) {
+    pub(crate) fn move_right(&mut self) {
         self.composer_selection = None;
         let tab = self.tab_mut();
         if tab.cursor < tab.input.len() {
@@ -68,13 +68,13 @@ impl AppState {
             );
         }
     }
-    fn move_home(&mut self) {
+    pub(crate) fn move_home(&mut self) {
         self.composer_selection = None;
         let tab = self.tab_mut();
         let before = &tab.input[..tab.cursor];
         tab.cursor = before.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
     }
-    fn move_end(&mut self) {
+    pub(crate) fn move_end(&mut self) {
         self.composer_selection = None;
         let tab = self.tab_mut();
         let after = &tab.input[tab.cursor..];
@@ -84,7 +84,7 @@ impl AppState {
             tab.cursor = tab.input.len();
         }
     }
-    fn move_up(&mut self) {
+    pub(crate) fn move_up(&mut self) {
         self.composer_selection = None;
         let (input, cursor) = {
             let tab = self.tab();
@@ -103,7 +103,7 @@ impl AppState {
             self.composer_goal_col = Some(goal);
         }
     }
-    fn move_down(&mut self) {
+    pub(crate) fn move_down(&mut self) {
         self.composer_selection = None;
         let (input, cursor) = {
             let tab = self.tab();
