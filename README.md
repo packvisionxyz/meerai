@@ -59,21 +59,21 @@ cargo build --release -p meerai-cli --features web    # target/release/meerai
 `make package` builds the same web-enabled binary into a `dist/` archive plus
 `.sha256`, matching the release artifacts.
 
-Rust `1.100.0` (pinned in [rust-toolchain.toml](rust-toolchain.toml)) is
-required; `rustup` installs it automatically. The bundle step also needs the
-`wasm32-unknown-unknown` target and a matching `wasm-bindgen` CLI
-(`cargo install wasm-bindgen-cli --version 0.2.130 --locked`; the version comes
-from `Cargo.lock`).
+Rust `1.100.0` and the `wasm32-unknown-unknown` target (pinned in
+[rust-toolchain.toml](rust-toolchain.toml)) are required; `rustup` installs both
+automatically, and `scripts/build-web.py` runs the workspace's
+`meerai-web-bindgen` helper using the `wasm-bindgen` version locked in
+`Cargo.lock`.
 
 ### Platform support
 
 | Platform | Status | Notes |
 | --- | --- | --- |
-| macOS arm64 / x64 | Release target | Unsigned and not notarized; Gatekeeper may warn |
-| Linux x86_64 / aarch64 (GNU) | Release target | No static musl build |
+| macOS arm64 | Release target | Unsigned and not notarized; Gatekeeper may warn |
+| Linux x86_64 (GNU) | Release target | No static musl build |
 | Windows x64 (MSVC) | Release target | The shell tool uses `cmd /C`; unsigned; x64 only |
 
-The release workflow builds exactly these five targets. Windows on Arm runs the
+The release workflow builds these three targets. Windows on Arm runs the
 x64 build under emulation; other architectures have no prebuilt binary.
 
 ## Quick start
@@ -918,7 +918,7 @@ live-provider headless turn when `OPENROUTER_API_KEY` is set.
 `chore(release): bump version to <version>`, or on manual dispatch. A `run-name` cannot read the
 version on the push path, so the run title stays `Release from version bump` and the job names carry
 the tag instead (`Build <triple> (v0.0.2)`, `Publish v0.0.2`). It verifies the commit is a pure
-version bump, builds the five targets when `v<workspace version>` is not yet released, and publishes
+version bump, builds the three targets when `v<workspace version>` is not yet released, and publishes
 web-enabled archives plus SHA256 checksums. The release body lists the release commit and the commits
 grouped by type since the previous tag, with a link to the full changelog; it does not list changed
 files. `.github/workflows/bump.yml` is the only writer

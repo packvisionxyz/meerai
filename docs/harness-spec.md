@@ -967,7 +967,7 @@ policies, or tools on the same spine.
 | M3 | Coding tools + effect classes | Seven `code-*` tools, path guards, unified-diff `FileChange` items | Implemented |
 | M4 | Policy engine + approvals | Ordered rules, approval suspend/resume, TUI overlay, grants | Implemented |
 | M5 | Context engine v1 | Spill, ephemera/reasoning pruning, age-based clearing, watermark compaction with bracket lock, cache-safe summaries | Implemented (multi-section prefix planned) |
-| D1 | Distribution hardening | Apache-2.0, CI gate, tag-driven 5-target release, Pages installers | Implemented |
+| D1 | Distribution hardening | Apache-2.0, CI gate, tag-driven 3-target release, Pages installers | Implemented |
 | M6 | Checkpoints + rewind | Pre-write capture, `/rewind` menu, staged restore with rollback | Implemented v1 (shell edits, gitignored files, summarize-from-here planned) |
 | M7 | Hooks | 13-event set, JSON stdin/exit-2 contract, trust gate, concurrent timeouts, `HookFired`, tighten-only integration | Implemented v1 |
 | M8 | Subagent runtime | Child sessions, depth-1 isolation, built-ins, forwarded approvals, usage rollup, `SubagentRun` items | Implemented |

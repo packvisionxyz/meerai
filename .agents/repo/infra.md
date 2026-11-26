@@ -11,7 +11,7 @@ Repository knowledge for `.agents/skills/*`.
 | `.editorconfig` | Line endings (`lf`), indentation (`4` for `.rs`/`.md`/`.json`, `2` default) |
 | `.vscode/settings.json` | Format-on-save and `rust-analyzer.check.command = "clippy"` |
 | `.github/workflows/ci.yml` | Push/PR verification on `ubuntu-24.04` |
-| `.github/workflows/release.yml` | Release on a `main` push that changes `Cargo.toml` with the bump commit subject, or on dispatch: tag/version detect, pure-bump check, notes, 5-target build, GitHub Release |
+| `.github/workflows/release.yml` | Release on a `main` push that changes `Cargo.toml` with the bump commit subject, or on dispatch: tag/version detect, pure-bump check, notes, 3-target build, GitHub Release |
 | `.github/workflows/bump.yml` | Manual `workflow_dispatch` version bump: rewrites `Cargo.toml` and `Cargo.lock`, commits, opens the bump PR against `main` |
 | `.github/scripts/compose_installers.py` | Splices `site/requirements.json` into the generated blocks of both installers |
 | `.github/scripts/verify_release_version.py` | Resolves the release tag, compares it with `[workspace.package] version`, emits `tag`/`version`/`prerelease` outputs |
@@ -110,7 +110,7 @@ Jobs run `detect -> release-notes -> build -> publish`:
 | :--- | :--- | :--- |
 | `detect` | `ubuntu-24.04` | Full-history checkout of `github.sha`, then `.github/scripts/verify_release_version.py` with `TAG_FROM_VERSION=1`, so the tag is `v<workspace version>`. The step `Require the bump commit message` compares `git log -1 --format=%s` with `chore(release): bump version to <version>` and fails on a mismatch (a warning on `workflow_dispatch`). `verify_bump_commit.py` then proves the commit is a pure version bump. Finally `gh release view` sets `skip=true` when the release already exists. |
 | `release-notes` | `ubuntu-24.04` | `needs: detect`. Full-history checkout, then `.github/scripts/generate_release_notes.py` writes `release-notes.md` and uploads it as the `release-notes` artifact (1 day). |
-| `build` | matrix | `needs: [detect, release-notes]`, skipped when `skip` is true. Adds `wasm32-unknown-unknown`, installs the `wasm-bindgen-cli` version pinned in `Cargo.lock`, runs `python3 scripts/build-web.py`, then `cargo build --release --locked -p meerai-cli --features web --target <triple>`, so the binary embeds the browser bundle. Conditional macOS `codesign`/`notarytool` (when `APPLE_CERTIFICATE` + Apple credentials exist) and Windows `signtool` (when `WINDOWS_CERTIFICATE` exists), archive plus `.sha256`, `actions/upload-artifact` (1-day retention) |
+| `build` | matrix | `needs: [detect, release-notes]`, skipped when `skip` is true. Adds `wasm32-unknown-unknown`, runs `python3 scripts/build-web.py` (which invokes the workspace `meerai-web-bindgen` helper), then `cargo build --release --locked -p meerai-cli --features web --target <triple>`, so the binary embeds the browser bundle. Conditional macOS `codesign`/`notarytool` (when `APPLE_CERTIFICATE` + Apple credentials exist) and Windows `signtool` (when `WINDOWS_CERTIFICATE` exists), archive plus `.sha256`, `actions/upload-artifact` (1-day retention) |
 | `publish` | `ubuntu-24.04` | `needs: [detect, release-notes, build]`, skipped when `skip` is true. Checkout the release commit, download the notes and the artifacts, build `SHA256SUMS.txt`, then `gh release create <tag> --target <release sha> --title "meerai <tag>" --notes-file notes/release-notes.md` with `--prerelease` when the version has a pre-release part and `--notes-start-tag <previous tag>` when one exists. |
 
 The run title is `Release from version bump` for the push trigger and `Release <tag>` (or `Release
@@ -135,14 +135,12 @@ refactor, docs, test, build, ci, chore, style), a link to the full compare, and 
 It does not list changed files. It caps the commit list at 100 (`NOTES_MAX_COMMITS`) and emits
 `previous_tag`, `base_sha`, and `commit_count`.
 
-Build matrix — five published targets, each with the `web` feature and the embedded bundle:
+Build matrix — three published targets, each with the `web` feature and the embedded bundle:
 
 | Target | Runner | Archive |
 | :--- | :--- | :--- |
 | `x86_64-unknown-linux-gnu` | `ubuntu-24.04` | `meerai-x86_64-unknown-linux-gnu.tar.gz` |
-| `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` | `meerai-aarch64-unknown-linux-gnu.tar.gz` |
 | `aarch64-apple-darwin` | `macos-15` | `meerai-aarch64-apple-darwin.tar.gz` |
-| `x86_64-apple-darwin` | `macos-15` | `meerai-x86_64-apple-darwin.tar.gz` |
 | `x86_64-pc-windows-msvc` | `windows-latest` | `meerai-x86_64-pc-windows-msvc.zip` |
 
 Tag/version gate: `.github/scripts/verify_release_version.py` derives
@@ -157,7 +155,7 @@ Release flow: run the `Bump version` workflow. It rewrites `Cargo.toml` and `Car
 `chore(release): bump version to <version>` on `release/bump-v<version>`, and opens a PR against
 `main`. Squash-merge that PR with the title as the commit message. The resulting push changes
 `Cargo.toml` and matches the subject, so `release.yml` starts, verifies the commit is a pure version
-bump, builds the five targets, and publishes `v<version>` with generated notes. No tag is pushed by
+bump, builds the three targets, and publishes `v<version>` with generated notes. No tag is pushed by
 hand; `gh release create` creates it at the release commit.
 
 A `workflow_dispatch` release uses the checked-out `main` commit. The pure-bump check becomes a
@@ -181,6 +179,8 @@ serve` works after install; no separate web archive is published.
   between `# BEGIN GENERATED REQUIREMENTS` and `# END GENERATED REQUIREMENTS` in each installer is
   generated. Regenerate with
   `python3 .github/scripts/compose_installers.py --in-place` after editing the JSON, never by hand.
+- `site/install.sh` publishes for Linux `x86_64` and macOS `arm64` (including Rosetta-translated
+  processes); Linux `aarch64` and Intel macOS exit with an unsupported-architecture error.
 - Windows publishes the x64 build only. On an ARM64 host the installer downloads
   `meerai-x86_64-pc-windows-msvc.zip` and prints a warning that the binary runs under emulation;
   unsupported architectures fail with an actionable message.

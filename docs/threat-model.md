@@ -365,7 +365,7 @@ processes cannot write or delete the same live session concurrently;
   `--all-features check advisories licenses bans sources` on every
   push/PR, denying known vulnerabilities and yanked crates and enforcing
   permissive OSI licenses.
-- **Release integrity:** five targets build with per-archive `.sha256`
+- **Release integrity:** three targets build with per-archive `.sha256`
   files and `SHA256SUMS.txt`; installers verify checksums.
 - **Conditional signing:** `release.yml` signs macOS binaries
   (`codesign` + `notarytool`) when `APPLE_CERTIFICATE` and notarization

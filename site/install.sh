@@ -116,11 +116,8 @@ detect_target() {
                 x86_64|amd64)
                     printf '%s' "x86_64-unknown-linux-gnu"
                     ;;
-                aarch64|arm64)
-                    printf '%s' "aarch64-unknown-linux-gnu"
-                    ;;
                 *)
-                    err "unsupported Linux architecture: $arch"
+                    err "unsupported Linux architecture: $arch (prebuilt binaries are x86_64 only)"
                     ;;
             esac
             ;;
@@ -130,7 +127,7 @@ detect_target() {
                     if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = "1" ]; then
                         printf '%s' "aarch64-apple-darwin"
                     else
-                        printf '%s' "x86_64-apple-darwin"
+                        err "unsupported macOS architecture: $arch (prebuilt binaries are Apple Silicon arm64 only)"
                     fi
                     ;;
                 arm64|aarch64)

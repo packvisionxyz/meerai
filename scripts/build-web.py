@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import sys
 import time
-import tomllib
 from pathlib import Path
 
 MARKER = (
@@ -118,24 +117,6 @@ def resolve_cargo(env: dict[str, str]) -> str:
     return cargo
 
 
-def expected_wasm_bindgen_version(lock_path: Path) -> str:
-    with lock_path.open("rb") as f:
-        lock = tomllib.load(f)
-    for pkg in lock.get("package", []):
-        if pkg.get("name") == "wasm-bindgen":
-            return str(pkg["version"])
-    sys.exit(f"wasm-bindgen not found in {lock_path}")
-
-
-def check_wasm_bindgen(expected_version: str) -> None:
-    exe = shutil.which("wasm-bindgen")
-    actual = capture([exe, "--version"]) if exe else None
-    if actual != f"wasm-bindgen {expected_version}":
-        sys.exit(
-            f"Install the matching CLI: cargo install wasm-bindgen-cli --version {expected_version} --locked"
-        )
-
-
 def write_html_entry(out: Path) -> None:
     (out / "boot.js").write_text(BOOT_JS, encoding="utf-8")
     index_path = out / "index.html"
@@ -177,9 +158,7 @@ def main() -> int:
     meta = json.loads(meta_raw)
     target_dir = Path(meta["target_directory"])
     workspace_root = Path(meta["workspace_root"])
-
-    version = expected_wasm_bindgen_version(workspace_root / "Cargo.lock")
-    check_wasm_bindgen(version)
+    bindgen_env = env.copy()
 
     if args.dev:
         profile = "web-dev"
@@ -241,9 +220,13 @@ def main() -> int:
     next_dir.mkdir(parents=True)
 
     bindgen_cmd = [
-        "wasm-bindgen",
-        "--target",
-        "web",
+        cargo,
+        "run",
+        "--manifest-path",
+        str(workspace_root / "Cargo.toml"),
+        "-p",
+        "meerai-web-bindgen",
+        "--",
         "--out-dir",
         str(next_dir),
         "--out-name",
@@ -252,7 +235,7 @@ def main() -> int:
     if not args.dev and not args.names:
         bindgen_cmd.append("--remove-name-section")
     bindgen_cmd.append(str(artifact))
-    subprocess.run(bindgen_cmd, env=env, check=True)
+    subprocess.run(bindgen_cmd, env=bindgen_env, check=True)
 
     if run_opt:
         wasm_path = next_dir / "app_bg.wasm"

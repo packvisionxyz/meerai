@@ -45,6 +45,7 @@ events. Depth lives in the owning documents: product behavior in
 | `meerai-web-protocol` | Serde-only Wasm-safe wire DTOs (`SnapshotResponse`, `ViewEvent`, `SubmitPromptRequest`, `ApiError`) with adjacent serde tagging |
 | `meerai-web` | Loopback HTTP/SSE server (`hyper` + `subtle` Basic auth, `Host`/`Origin`/JSON checks, embedded Wasm bundle serving) |
 | `meerai-web-client` | Leptos 0.8 CSR browser client crate (`scripts/build-web.py`), DOM transcript, modals, and theme ([browser-ui.md](browser-ui.md)) |
+| `meerai-web-bindgen` | Workspace build helper binary wrapping `wasm-bindgen-cli-support` for `scripts/build-web.py` |
 | `meerai-tui` | Modal TUI library (`ratatui` + `crossterm`): transcript replay and cached rendering, tabs, approvals, questions, rewind/fork menus, diff/search modals, mentions, palette, theme, re-exporting `meerai-host` seams |
 | `meerai-acp` | ACP client bridge: `agy` preset, handshake, typed `AcpEvent` stream, `AcpWorker` (event mapping + session log), permission replies, cancel, `session/load` |
 | `meerai-cli` | Binary crate (`meerai`): CLI flags, headless runner, `auth`/`sessions`/`memory`/`routes`/`pack`/`config`/`hooks`/`acp doctor`/`serve` (feature `web`) subcommands, TUI launcher, host wiring |

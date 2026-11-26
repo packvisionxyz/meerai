@@ -58,6 +58,7 @@
 | `meerai-web-protocol/` | Serde-only Wasm-safe wire DTOs (`SnapshotResponse`, `ViewEvent`, `HostInfoDto`, `ProvidersResponse`, `SettingsSnapshotDto`, `ApiError`) |
 | `meerai-web/` | Loopback HTTP/SSE server (`hyper` + `subtle` Basic auth, `Host`/`Origin`/JSON checks, parity REST/SSE routes, embedded Wasm bundle serving) |
 | `meerai-web-client/` | Leptos 0.8 CSR Wasm browser client ([browser-ui.md](../../docs/browser-ui.md)): DOM transcript, Markdown + code highlighting, left Sessions sidebar plus TUI modal surfaces, approval scopes, Settings, palette actions, `@` mentions, completions, a sidebar Diagnose block shown by default (cache hit/write, context, memory) and a collapsible changed-files block, built via `scripts/build-web.py` |
+| `meerai-web-bindgen/` | Internal build helper binary wrapping `wasm-bindgen-cli-support` for `scripts/build-web.py` |
 | `meerai-tui/` | Modal TUI library (`ratatui` + `crossterm`) split into `ui/` panels and `app/` modules, transcript replay, `/serve`, tabs, collapsible digests, a sidebar `AGENTS` list (main + subagents, display-only), a sidebar Diagnose block shown by default, and a collapsible File Changes block, turn-anchor rail, diff/search, re-exporting `meerai-host` seams (no `meerai-tools`, `meerai-providers`, or `meerai-web` dependency) |
 | `meerai-syntax/` | Tree-sitter highlighting for Rust, C, C++, C#, Java, Kotlin, Scala, Swift, PHP, Haskell, Ruby, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML, CSS, and JSON plus a lexical fallback; `highlight_block` returns per-line `Token`s; depends only on grammar crates |
 | `meerai-cli/` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions` (`list`, `rm`, `prune`, `fork`) / `serve` (feature `web`) subcommands, and TUI launcher |
@@ -97,7 +98,7 @@
 | TUI without update | `cargo check -p meerai-tui --no-default-features` |
 | Local gate | `make verify` (alias of `make ci`) |
 | CI | `.github/workflows/ci.yml` on push/PR to `main`: fmt check, clippy, reduced-feature and Wasm checks, tests on `ubuntu-24.04`; docs-only, site-only, and bump-commit pushes are skipped |
-| Release | `.github/workflows/release.yml` on a `main` push whose subject is the bump message, or on dispatch: tag/version detect, build 5 web-enabled targets, GitHub Release |
+| Release | `.github/workflows/release.yml` on a `main` push whose subject is the bump message, or on dispatch: tag/version detect, build 3 web-enabled targets, GitHub Release |
 | Deploy site | `.github/workflows/pages.yml` on `site/**` changes: deploy `site/` to GitHub Pages |
 
 Notes:
@@ -498,7 +499,7 @@ Detail in [`infra.md`](infra.md). Summary:
   `cargo-deny` audit runs on a pull request only when `Cargo.toml` or `Cargo.lock` changed.
 - **Release:** `.github/workflows/release.yml` runs on a `main` push whose subject is the bump
   message, or on manual dispatch. `detect` derives the tag from `[workspace.package] version`,
-  blocks all artifacts on a mismatch, and skips a version that is already released; five targets
+  blocks all artifacts on a mismatch, and skips a version that is already released; three targets
   build and archive with SHA256, all with `--features web` and the embedded browser bundle, and
   `publish` creates the GitHub Release at the built commit. The run title carries the bump commit
   message, so the version is visible in the Actions list.
