@@ -277,6 +277,29 @@ Items 1 through 3 are contract-adjacent and should land first. Items 4 through 1
 | 12 | Fixed the wasm build, which the modal split broke: `pub(super)` on the extracted renderers and `crate::views::truncate` instead of `super::truncate` | 55 wasm-only errors | `scripts/build-web.py --dev` exit 0 in 46.6s |
 | 11 | Removed `options.parse.smart = false` from the browser renderer, which restated a `comrak` default | 1 redundant assignment | Both clients set exactly the same 14 extension flags and no parse flags, verified by comparing the extracted keys |
 
+### 3.6 What the backlog did not cover
+
+All 18 items are closed, but the 900-line target is a per-file review prompt, not a workspace-wide result. 17 production files still exceed it and were never in the backlog, because each named item covered one specific file:
+
+| Lines | File |
+| --- | --- |
+| 1,663 | `meerai-tui/src/event_loop.rs` |
+| 1,550 | `meerai-web-client/src/transport/wasm.rs` |
+| 1,462 | `meerai-web-client/src/views/mod.rs` |
+| 1,348 | `meerai-agents/src/multi_turn_agent/turn.rs` |
+| 1,235 | `meerai-cli/src/cli.rs` |
+| 1,216 | `meerai-web/src/mapper.rs` |
+| 1,154 | `meerai-web-client/src/views/modals/workspace.rs` |
+| 1,121 | `meerai-web-client/src/views/settings.rs` |
+| 1,076 | `meerai-agents/src/subagent.rs` |
+| 1,028 | `meerai-web-client/src/views/modals/provider.rs` |
+| 1,011 | `meerai-tui/src/app/events.rs` |
+| 1,010 | `meerai-tools/src/repo_map/extract.rs` |
+
+Five more sit between 900 and 1,010 lines. Ten test files also exceed 900 lines, which the target does not cover.
+
+These are candidates for a second pass, not defects: each is one coherent unit, and splitting `turn.rs` or `event_loop.rs` on line count alone would produce the two coupled halves the policy warns against.
+
 Item 10 verification went beyond "it compiles". The split was mechanical, so the risk was silent wire drift:
 
 - All 97 `pub` items are present, with zero missing and zero extra, compared by name against the original.
