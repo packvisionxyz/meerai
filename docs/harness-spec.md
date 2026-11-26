@@ -394,8 +394,8 @@ The extension seam is `meerai_agents::intercept`: an ordered
 `before_tool` (authorized plan + context, returns session events to log),
 `after_tool` (post-redaction/post-spill outcome, may add one model-visible
 note), and `turn_stopping` (may continue the turn, consulted only when no
-tool calls were made; a later stop can continue again, bounded by the
-remaining step budget). Checkpoint capture is the built-in
+tool calls were made; a later stop can continue again, bounded by the turn
+clock, the token cap, and the step cap when one is set). Checkpoint capture is the built-in
 `CheckpointInterceptor`. The built-in `LoopInterceptor` keeps a loop turn
 alive while an item is open, at the phase the `loop-*` tools name, up to 24
 rounds.
@@ -430,7 +430,7 @@ Per-model context comes from `ProviderCatalog`. Knobs (`context` in
 | `verbatim_window_turns` | 4 | recent turns never compacted or cleared |
 | `reasoning_pruning` | true | strip settled-step reasoning from projections |
 | `prompt_caching` | true | request-level `CacheControl::Ephemeral`; cache counts reported |
-| `max_steps_per_turn` | 32 | final step strips tools and asks for a summary |
+| `max_steps_per_turn` | 0 (unlimited) | optional cap; a set cap strips tools and asks for a summary on its final step |
 | `no_progress_fail_steps` | 12 | fail the turn after this many write steps with no file change; read-only steps do not count; the diagnostic notice fires at two thirds |
 | `tool_timeout_ms` | 120 000 | per-tool wall clock |
 | `max_turn_secs` | 1800 | per-turn wall clock; `0` disables |
@@ -532,7 +532,7 @@ Implemented: `compose_system_prompt` builds one system string from
 root `AGENTS.md` + `.meerai/instructions.md` (32 KiB/file, 64 KiB block),
 sent with `ChatRequest::with_system` and logged as a `SystemMessage` with
 a generation counter. Tool schemas attach separately with stable ordering
-and strip on the final step. Scoped `AGENTS.md` files are injected once
+and strip on the final step of a capped turn. Scoped `AGENTS.md` files are injected once
 per turn as `RuntimeContext` user messages (16 KiB, max 8), not into the
 system prefix. The loop never reorders the composed string between steps;
 compaction summaries project at their replacement point. The full
@@ -688,8 +688,9 @@ a pass clears the baseline. With `context.rollback_on_verify_failure` in
 
 #### Budgets and circuit breakers
 
-- `max_steps_per_turn` (default 32; the final step strips tools and asks
-  for a text summary), `no_progress_fail_steps` (default 12; the turn fails
+- `max_steps_per_turn` (default `0`, unlimited; a positive value caps the
+  turn and its final step strips tools and asks for a text summary),
+  `no_progress_fail_steps` (default 12; the turn fails
   after that many write steps with no file change, with a diagnostic at two
   thirds; read-only steps do not count), per-tool timeouts, per-turn wall clock
   (`max_turn_secs`, also bounding streams, summarization, and tool
@@ -819,8 +820,9 @@ permission set, and tool subset, exposed as one `subagent-run` tool.
 - Built-ins: `explore` (4 steps, read-only), `plan` (16 steps, read-only),
   `build` (32 steps, write), `general` (16 steps, write). Read-only
   profiles use a fixed tool allowlist and forced `ApprovalMode::Plan`;
-  step budgets clamp to the parent's. Custom definitions run write-capable
-  (16 steps) and are offered only when they are `mode: all` or
+  a finite step budget clamps to a finite parent `max_steps_per_turn`; an
+  unlimited parent leaves the preset cap in place. Custom definitions run
+  write-capable (16 steps) and are offered only when they are `mode: all` or
   `mode: subagent`; their `permissions` join the child policy as agent rules,
   so a definition can deny or ask but never allow.
 - Depth-1 isolation: `ChildToolsetFilter` rejects `subagent-*` tools;

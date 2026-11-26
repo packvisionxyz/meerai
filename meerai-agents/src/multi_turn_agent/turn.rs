@@ -430,13 +430,16 @@ impl MultiTurnAgent {
         }
 
         let harnessed = self.harness.is_some();
-        let max_steps = self
+        let step_cap = match self
             .harness
             .as_ref()
-            .map_or(self.config.max_cycles, |harness| {
-                harness.config.max_steps_per_turn
-            })
-            .max(1);
+            .map(|harness| harness.config.max_steps_per_turn)
+        {
+            Some(0) => None,
+            Some(cap) => Some(cap.max(1)),
+            None => Some(self.config.max_cycles.max(1)),
+        };
+        let max_steps = step_cap.unwrap_or(usize::MAX);
         let continuations = if harnessed {
             self.harness
                 .as_ref()
@@ -444,7 +447,9 @@ impl MultiTurnAgent {
         } else {
             0
         };
-        let total_steps = max_steps.saturating_mul(continuations.saturating_add(1));
+        let total_steps = step_cap.map_or(usize::MAX, |cap| {
+            cap.saturating_mul(continuations.saturating_add(1))
+        });
         let max_turn_secs = self
             .harness
             .as_ref()

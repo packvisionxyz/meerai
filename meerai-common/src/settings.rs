@@ -1156,7 +1156,7 @@ providers:
     #[test]
     fn project_context_does_not_redirect_models_or_relax_guards() {
         let project = settings_from_yaml(
-            "context:\n  recovery_model: other::model\n  summarizer_model: other:model\n  max_steps_per_turn: 64\n  tool_timeout_ms: 240000\n  rollback_on_verify_failure: true\n",
+            "context:\n  recovery_model: other::model\n  summarizer_model: other:model\n  tool_timeout_ms: 240000\n  rollback_on_verify_failure: true\n",
         );
         let (merged, _) = merge_project_settings(AppSettings::default(), project.clone());
         assert_eq!(merged.context.unwrap(), ContextSettings::default());
@@ -1262,6 +1262,32 @@ providers:
                 "user={user:?} project={project:?}"
             );
         }
+    }
+
+    #[test]
+    fn merge_project_step_cap_only_tightens() {
+        let merge = |user: Option<usize>, project: Option<usize>| {
+            merge_context(
+                Some(ContextSettings {
+                    max_steps_per_turn: user,
+                    ..ContextSettings::default()
+                }),
+                Some(ContextSettings {
+                    max_steps_per_turn: project,
+                    ..ContextSettings::default()
+                }),
+            )
+            .unwrap()
+            .max_steps_per_turn
+        };
+        assert_eq!(merge(None, Some(64)), Some(64));
+        assert_eq!(merge(Some(16), Some(64)), Some(16));
+        assert_eq!(merge(Some(64), Some(16)), Some(16));
+        assert_eq!(merge(Some(0), Some(64)), Some(64));
+        assert_eq!(merge(Some(64), Some(0)), Some(64));
+        assert_eq!(merge(Some(0), Some(0)), None);
+        assert_eq!(merge(None, None), None);
+        assert_eq!(merge(Some(16), None), Some(16));
     }
 
     #[test]

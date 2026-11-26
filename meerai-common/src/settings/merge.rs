@@ -208,8 +208,7 @@ pub(super) fn merge_context(
         prompt_caching: project.prompt_caching.or(user.prompt_caching),
         rollback_on_verify_failure: user.rollback_on_verify_failure,
         recovery_model: same_provider_model(project.recovery_model).or(user.recovery_model),
-        // Match the harness defaults when the user has not set these limits.
-        max_steps_per_turn: tighten_limit(user.max_steps_per_turn, project.max_steps_per_turn, 32),
+        max_steps_per_turn: merge_step_limit(user.max_steps_per_turn, project.max_steps_per_turn),
         no_progress_fail_steps: tighten_limit(
             user.no_progress_fail_steps,
             project.no_progress_fail_steps,
@@ -249,6 +248,17 @@ pub(super) fn tighten_limit<T: Ord>(user: Option<T>, project: Option<T>, default
         (None, Some(project)) if project < default => Some(project),
         (user, _) => user,
     }
+}
+
+pub(super) fn merge_step_limit(user: Option<usize>, project: Option<usize>) -> Option<usize> {
+    let rank = |steps: usize| if steps == 0 { usize::MAX } else { steps };
+    let effective = match (user, project) {
+        (None, None) => return None,
+        (Some(user), None) => rank(user),
+        (None, Some(project)) => rank(project),
+        (Some(user), Some(project)) => rank(user).min(rank(project)),
+    };
+    (effective != usize::MAX).then_some(effective)
 }
 
 pub(super) fn merge_max_session_tokens(user: Option<u64>, project: Option<u64>) -> Option<u64> {

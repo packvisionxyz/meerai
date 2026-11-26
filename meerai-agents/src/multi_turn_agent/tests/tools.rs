@@ -418,6 +418,59 @@ async fn step_budget_continuation_keeps_tools_and_asks_to_finish() {
 }
 
 #[tokio::test]
+async fn default_step_budget_is_unlimited() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![tool_call("c1", "a")]))],
+        vec![ChatStreamEvent::End(tool_end(vec![tool_call("c2", "b")]))],
+        vec![ChatStreamEvent::End(tool_end(vec![tool_call("c3", "c")]))],
+        vec![ChatStreamEvent::End(text_end("finished the work"))],
+    ]));
+
+    let session = memory_session();
+    let mut agent = harness_agent(
+        streamer.clone(),
+        vec![Box::new(EchoToolset)],
+        "",
+        &session,
+        auto_mode(),
+        HarnessConfig::default(),
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let out = agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out, "finished the work");
+
+    let reqs = streamer.requests.lock().unwrap();
+    assert_eq!(reqs.len(), 4);
+    assert!(
+        reqs.iter().all(|request| request.tools.is_some()),
+        "an unlimited turn never strips tools"
+    );
+
+    let notices: Vec<String> = session_events(&session)
+        .into_iter()
+        .filter_map(|event| match event {
+            SessionEvent::UserMessage {
+                source: InputSource::RuntimeContext,
+                content,
+            } => content.into_iter().find_map(|block| match block {
+                ContentBlock::Text(text) => Some(text),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !notices
+            .iter()
+            .any(|text| text.starts_with("Step limit reached."))
+    );
+}
+
+#[tokio::test]
 async fn tool_batches_preserve_call_order_across_effect_classes() {
     let order = Arc::new(Mutex::new(Vec::new()));
     let streamer = Arc::new(FakeStreamer::new(vec![

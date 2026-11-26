@@ -626,7 +626,7 @@ impl Toolset for SubagentToolset {
                     },
                     "max_steps": {
                         "type": "integer",
-                        "description": "Optional step cap for the child; it is clamped to the preset and the parent turn cap. Omit it or send 0 to use the preset"
+                        "description": "Optional step cap for the child; it is clamped to the preset and, when the parent turn has a step cap, to that cap. Omit it or send 0 to use the preset"
                     },
                     "max_tokens": {
                         "type": "integer",
@@ -754,7 +754,12 @@ impl Toolset for SubagentToolset {
         let item_id = parsed.item_id.clone().unwrap_or_default();
         let requested_steps = parsed.max_steps.unwrap_or(preset_max_steps).max(1);
         let max_steps = bridge.as_ref().map_or(requested_steps, |bridge| {
-            requested_steps.min(bridge.parent_harness_config.max_steps_per_turn)
+            let parent_cap = bridge.parent_harness_config.max_steps_per_turn;
+            if parent_cap == 0 {
+                requested_steps
+            } else {
+                requested_steps.min(parent_cap)
+            }
         });
         let child_tools = self.build_child_tools(read_only, allowed_tools);
         let child_config = MultiTurnAgentConfig {

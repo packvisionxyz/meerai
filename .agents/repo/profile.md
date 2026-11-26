@@ -185,8 +185,9 @@ Notes:
     `ask` cannot downgrade a user `deny`, and a project `deny` always adds a denial after user
     rules. Invalid shapes drop the block with a warning. Project `active_provider`, `active_model`,
     `providers`, `approval_mode`, and `sessions` are ignored with a warning. Project `context`
-    overrides field by field, with `max_session_tokens` and `max_turn_secs` clamped so a project can
-    only tighten them. A malformed file warns and is ignored.
+    overrides field by field, with `max_session_tokens`, `max_turn_secs`, and
+    `max_steps_per_turn` clamped so a project can only tighten them; `max_steps_per_turn = 0`
+    means unlimited. A malformed file warns and is ignored.
 18. **Redaction call site:** `redact_run` runs in `meerai-agents` immediately after a tool run and
     before spill, `SessionEvent::ToolResult`, `ItemCompleted`, or model text. It covers observation
     stdout/stderr/hint, `ToolOutput` text, and `FileChange` diffs; dispatch error text goes through
@@ -305,12 +306,14 @@ Notes:
     before the parent cancels it. The parent bridge deadline stays as the backstop. Do not set the
     child clock to `0` while the parent is bounded. A requested child `max_tokens` floors at 50,000
     before it clamps to the parent remaining budget, so a model cannot buy a cap below one request.
-31. **Step-budget continuations:** a turn gets `max_steps_per_turn` plus
-    `step_limit_continuations` extra budgets (default 32 + two x 32 = 96).
-    Each boundary logs `STEP_CONTINUE_NOTICE` and keeps tools; only the
-    absolute final step logs `STEP_LIMIT_NOTICE` and strips tools. Never let
-    a subagent inherit continuations: its preset cap is a contract, so set
-    `step_limit_continuations = 0` on the child harness.
+31. **Step budget:** a turn has no step cap by default
+    (`max_steps_per_turn = 0`). A positive `max_steps_per_turn` plus
+    `step_limit_continuations` (default 2) bounds it. Each continuation
+    boundary logs `STEP_CONTINUE_NOTICE` and keeps tools; only the absolute
+    final step logs `STEP_LIMIT_NOTICE` and strips tools. Never let a subagent
+    inherit continuations: its preset cap is a contract, so set
+    `step_limit_continuations = 0` on the child harness. A child cap clamps to
+    a finite parent cap; an unlimited parent leaves the preset cap in place.
 32. **Host actions:** `meerai_host::parse_host_action` and
     `execute_host_action` are the single implementation of `/context`,
     `/memory`, `/remember`, `/forget`, `/pin`, `/routing`, `/packs`, `/pack`,
@@ -571,7 +574,8 @@ Detail in [`infra.md`](infra.md). Summary:
   subagents. Headless auto-cancels with a hint.
 - Loop extension: M6 checkpoint capture is the built-in `CheckpointInterceptor` on async
   `before_tool`; do not add loop-semantics branches to `turn.rs`. `turn_stopping` may continue the
-  turn more than once; the remaining step budget bounds repeats, and the Stop hook keeps running at
+  turn more than once; the turn clock, token cap, and the step cap when one is set
+  bound repeats, and the Stop hook keeps running at
   each stop until it blocks once. The skill loop is the built-in `LoopInterceptor` plus the
   `loop-plan`/`loop-act`/`loop-observe`/`loop-adjust`/`loop-status` tools on one shared
   `LoopHandle`; the CLI registers both on the main agent only, so subagents do not inherit them.

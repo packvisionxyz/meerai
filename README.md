@@ -146,8 +146,8 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 
 - **Agent loop:** multi-turn steps with streaming output, approval
   suspend/resume, steering, cancellation, provider retries with one bounded
-  recovery turn, token and wall-clock budgets, automatic step-budget
-  continuations, compaction with a cache-aware summarizer, and live context
+  recovery turn, token and wall-clock budgets, optional step caps, compaction
+  with a cache-aware summarizer, and live context
   and usage telemetry.
 - **Tools and sandbox:** read, write, edit, list, grep, glob, and shell tools
   with workspace path guards and unified diffs; a tree-sitter repository map;
@@ -345,9 +345,9 @@ pricing for the model.
 
 Old tool results leave the working context but stay in the session log.
 `context.verbatim_window_turns` (default 4) keeps the newest N turns verbatim.
-A long turn is compacted at a safe step boundary, and a turn that reaches its
-step budget continues automatically. Both limits are configurable; see
-[Project config](#project-config).
+A long turn is compacted at a safe step boundary. A turn has no step cap by
+default; set `context.max_steps_per_turn` to cap it. Both limits are
+configurable; see [Project config](#project-config).
 
 ### Approval modes
 
@@ -515,7 +515,7 @@ to the `subagent-run` tool.
   tools. `@goal <instruction>` (or `@skill/goal`, `/skill goal`, `--skill goal`)
   starts the goal preset; `orchestrate` is the multi-area preset. While an item
   is open, the harness continues the turn with the current phase, up to 24
-  rounds and the normal step, time, and token budgets. A user, pack, or project
+  rounds and the step cap when set, the time cap, and the token cap. A user, pack, or project
   skill with either id shadows the built-in. In headless mode, use
   `--mode auto`: the first write asks for approval in `ask` mode and exits `2`.
 
@@ -591,7 +591,7 @@ approves it. A `research` or `review` subagent answer is not human approval.
 The harness enforces the loop. When the model stops with an open item,
 `LoopInterceptor` re-enters the turn with the current phase, up to 24 rounds. If
 the turn still ends with open items, the worker starts a follow-up turn, up to 4
-turns; each turn resets the round count. The normal step budget, token cap,
+turns; each turn resets the round count. The step cap (when set), token cap,
 approvals, cancellation, and `quit` still apply.
 
 `/loop` opens a read-only Loop panel in the TUI and the browser. It
@@ -601,9 +601,9 @@ as a `LoopUpdated` session event, so the panel and the model state come back
 after `--resume`.
 
 `loop-status` re-reads the in-process state after compaction. A headless
-one-shot runs one turn only: use `--mode auto` and raise
-`context.max_steps_per_turn` for a longer run. In `ask` mode the first write
-stops the run with exit `2`.
+one-shot runs one turn only: use `--mode auto`. Steps are unlimited by default;
+set `context.max_steps_per_turn` only when you need a cap. In `ask` mode the
+first write stops the run with exit `2`.
 
 ### Headless exit codes
 
@@ -788,7 +788,8 @@ context:
   `temperature`). The budget caps
   `max_session_tokens` and `max_turn_secs` are clamped against user values: a
   project value cannot raise a user cap, and a project cannot use `0` to disable
-  the turn clock.
+  the turn clock. `max_steps_per_turn` has no cap by default (`0` means
+  unlimited); a project value can add a cap or lower a finite user cap.
 - **`theme`** — reviewed like any other color choice and merged field by field
   over the user theme. It changes only the palette, never a capability.
 - **Ignored fields** — `active_provider`, `active_model`, `providers`, and

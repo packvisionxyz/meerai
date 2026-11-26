@@ -52,7 +52,7 @@ impl Default for HarnessConfig {
             plan_usage: false,
             rollback_on_verify_failure: false,
             recovery_model: None,
-            max_steps_per_turn: 32,
+            max_steps_per_turn: 0,
             no_progress_fail_steps: 12,
             step_limit_continuations: 2,
             auto_memory: true,
@@ -206,19 +206,27 @@ mod tests {
     }
 
     #[test]
-    fn step_continuations_flow_from_context_settings() {
+    fn step_budget_defaults_to_unlimited_and_caps_flow_from_settings() {
+        assert_eq!(HarnessConfig::default().max_steps_per_turn, 0);
         assert_eq!(HarnessConfig::default().step_limit_continuations, 2);
-        assert_eq!(
-            HarnessConfig::default().max_steps_per_turn
-                * (HarnessConfig::default().step_limit_continuations + 1),
-            96,
-            "the default turn allows two automatic step-budget continuations"
-        );
-        let config = HarnessConfig::from_context_settings(Some(&ContextSettings {
+
+        let capped = HarnessConfig::from_context_settings(Some(&ContextSettings {
+            max_steps_per_turn: Some(7),
+            ..ContextSettings::default()
+        }));
+        assert_eq!(capped.max_steps_per_turn, 7);
+
+        let unlimited = HarnessConfig::from_context_settings(Some(&ContextSettings {
+            max_steps_per_turn: Some(0),
+            ..ContextSettings::default()
+        }));
+        assert_eq!(unlimited.max_steps_per_turn, 0);
+
+        let no_continuations = HarnessConfig::from_context_settings(Some(&ContextSettings {
             step_limit_continuations: Some(0),
             ..ContextSettings::default()
         }));
-        assert_eq!(config.step_limit_continuations, 0);
+        assert_eq!(no_continuations.step_limit_continuations, 0);
     }
 
     #[test]

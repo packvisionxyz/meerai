@@ -148,7 +148,7 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   `high_watermark_pct` (75), `spill_max_inline_tokens` (12 500),
   `verbatim_window_turns` (4), `reasoning_pruning` (true),
   `prompt_caching` (true), `rollback_on_verify_failure` (false),
-  `recovery_model`, `max_steps_per_turn` (32), `no_progress_fail_steps` (12),
+  `recovery_model`, `max_steps_per_turn` (unlimited; `0`), `no_progress_fail_steps` (12),
   `tool_timeout_ms`
   (120 000), `max_session_tokens` (unset), `max_turn_secs` (1800),
   `summarizer_model`, `post_edit_diagnostics` (false), `temperature`
@@ -438,14 +438,14 @@ implementation invariants.
 - Spend approval at the session token cap: `Accept` raises the cap by one
   context window, `AcceptForSession` removes it, `Decline` fails the turn
   with `Budget`.
-- Step budget: `max_steps_per_turn` (default 32) is the first budget.
-  `step_limit_continuations` (default 2) grants that many automatic
-  continuations, so a turn gets 96 steps by default. At each continuation
-  boundary the loop logs `STEP_CONTINUE_NOTICE` ("Continue now and finish
-  the task... Do not summarize or list next steps") and keeps the tools.
-  Only the absolute final step logs `STEP_LIMIT_NOTICE` and strips tools.
-  Subagents set `step_limit_continuations = 0`, so their preset caps stay
-  exact.
+- Step budget: no cap by default (`max_steps_per_turn = 0`). A positive
+  `max_steps_per_turn` caps each budget, and `step_limit_continuations`
+  (default 2) grants that many automatic continuations, so a cap of 32 gives
+  96 steps in total. At each continuation boundary the loop logs
+  `STEP_CONTINUE_NOTICE` ("Continue now and finish the task... Do not
+  summarize or list next steps") and keeps the tools. Only the absolute final
+  step logs `STEP_LIMIT_NOTICE` and strips tools. Subagents set
+  `step_limit_continuations = 0`, so their preset caps stay exact.
 - No-progress breaker: `no_progress_fail_steps` (default 12) fails the turn
   when that many write steps make no file change and delegate no
   subagent. A read-only step never increments the counter. At two thirds of
@@ -501,7 +501,8 @@ implementation invariants.
   `after_tool` sees the post-redaction/post-spill `ToolOutcome` and may
   return one model-visible note, and `turn_stopping` may continue the
   turn (consulted only when no tool calls were made). It can continue
-  more than once, bounded by the remaining step budget; the `Stop` hook
+  more than once, bounded by the turn clock, the token cap, and the step cap
+  when one is set; the `Stop` hook
   keeps running at each stop until it blocks once. Checkpoint
   capture is the built-in `CheckpointInterceptor` on `before_tool`
   (Write-effect tools only). The built-in `LoopInterceptor` continues

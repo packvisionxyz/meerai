@@ -262,8 +262,8 @@ containment:
   `code-list_dir`, `code-grep`, `code-glob`, `retrieval-repo_map`,
   `lsp-go_to_definition`, `lsp-find_references`, `lsp-get_diagnostics`)
   and forced into `ApprovalMode::Plan`. `build` (32 steps) and `general`
-  (16 steps) write under the parent's mode. Step budgets clamp to the
-  parent's `max_steps_per_turn`.
+  (16 steps) write under the parent's mode. A finite step budget clamps to a
+  finite parent `max_steps_per_turn`; the default parent budget is unlimited.
 - **Custom definitions:** a repository-defined agent is offered to
   `subagent-run` only when its `mode` is `all` or `subagent`. It runs
   write-capable under the parent's mode, inherits the parent rules, and adds its
@@ -287,16 +287,18 @@ refuses `--acp` and denies `acp-run`. Full boundary: [acp.md](acp.md) §5.
 
 ### 2.10 Budgets and circuit breakers
 
-`max_steps_per_turn` (default 32) and `step_limit_continuations` (default 2,
-so 96 steps; the absolute final step strips tools and asks for a summary;
-subagents get no continuations), `no_progress_fail_steps` (default 12; a
-turn that makes no file change on that many write steps fails; read-only
-steps do not count; a diagnostic notice fires at two thirds), per-tool
-timeout (default 120 s), per-turn wall clock
+`max_steps_per_turn` can cap the turn (default `0`, unlimited; a positive value
+caps it, and `step_limit_continuations` (default 2) can extend a cap; the
+absolute final step strips tools and asks for a summary; subagents get no
+continuations). The per-turn wall clock
 (`max_turn_secs`, default 1800, `0` disables; a subagent child gets the
 parent's remaining turn time minus a 5 s margin, with a 1 s minimum, so it
-normally fails its own turn first), and an optional session token cap with a
-Spend approval pause bound runaway execution. Breakers: the 3rd identical failing call injects a
+normally fails its own turn first), per-tool timeout (default 120 s),
+`no_progress_fail_steps` (default 12; a
+turn that makes no file change on that many write steps fails; read-only
+steps do not count; a diagnostic notice fires at two thirds), and an optional
+session token cap with a Spend approval pause bound runaway execution by
+default. Breakers: the 3rd identical failing call injects a
 diagnostic and the 4th fails the turn; the 3rd identical batch injects a
 diagnostic and the 5th fails; `NoProgress` diagnoses at 8 write-less steps
 and fails at 12 (disabled in `plan` and without a write tool; read-only
