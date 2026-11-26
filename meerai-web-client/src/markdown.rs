@@ -22,7 +22,6 @@ pub fn render_markdown(source: &str) -> AnyView {
     options.extension.subscript = true;
     options.extension.math_dollars = true;
     options.extension.math_dollars_block = true;
-    options.parse.smart = false;
 
     let root = parse_document(&arena, source, &options);
     let blocks = root.children().filter_map(render_block).collect::<Vec<_>>();
