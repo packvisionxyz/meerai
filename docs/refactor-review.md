@@ -241,7 +241,7 @@ The backlog orders contract work before structural work. Each item states one ob
 | 10 | ~~Split `meerai-web-protocol/src/lib.rs` into domain modules and move DTOs above the tests~~ **Done** — see [§3.4](#34-completed-work) | file size | `meerai-web-protocol` | S | Low | Done: 12 modules, largest 258 lines, wire format unchanged |
 | 11 | Share the Markdown parse options between both clients | duplication | `meerai-input`, `meerai-tui`, `meerai-web-client` | S | Low | Downgraded to optional by [§3.5](#35-corrected-finding-the-markdown-option-blocks-do-not-diverge): the blocks already agree in effect |
 | 12 | Split `meerai-tui/src/app/modals.rs`, `app/input.rs`, `app/mod.rs`, and `ui/transcript.rs` | file size | `meerai-tui` | L | Medium | No file in `meerai-tui/src` exceeds 900 lines, including `app/mod.rs` |
-| 13 | Split `meerai-web-client/src/state.rs` and `views/modals.rs` | file size | `meerai-web-client` | L | Medium | No file in `meerai-web-client/src` exceeds 900 lines |
+| 13 | ~~Split `meerai-web-client/src/state.rs` and `views/modals.rs`~~ **Done** — see [§3.4](#34-completed-work) | file size | `meerai-web-client` | L | Medium | Done: `state.rs` 44 lines over 14 modules; `modals.rs` 39 lines over 6 modules; largest file 1,154 lines |
 | 14 | ~~Write the error-handling policy into `AGENTS.md` and apply it per crate~~ **Policy written**; the per-crate conversion below remains | error handling | all | M | Low | Every library crate reaches zero production `unwrap`/`expect`, or records a line-level exception with its reason |
 | 15 | ~~Move `to_genai` out of `meerai-core` so the leaf crate stops re-exporting `genai`~~ **Withdrawn** | crate boundary | — | — | — | Withdrawn after measurement, see [§6.1](#61-resolved-the-meerai-core-genai-re-export) |
 | 16 | Split `meerai-common/src/settings.rs` into value types and merge logic | file size | `meerai-common` | M | Medium | No file in `meerai-common/src` exceeds 900 lines and the tighten-only tests still pass |
@@ -271,6 +271,7 @@ Items 1 through 3 are contract-adjacent and should land first. Items 4 through 1
 | 17 | Added 14 tests to `repo_map/rank.rs`, 20 to `repo_map/extract.rs` (one per supported language), 14 to `workspace_search.rs`, and 16 to `web/src/mapper.rs` | 4 files, 2,500 lines, zero tests | 64 tests; the workspace suite went 1278 to 1340 |
 | 8 | Split `meerai-web/src/server.rs` into 9 route modules plus a `respond` module for shared HTTP helpers | 1 file, 2,245 production lines, 81 functions | parent 631 lines; largest module 391 lines; 33 tests unchanged |
 | 4 | Split `meerai-host/src/registry.rs` into 7 method modules and 4 event-family modules | 1 file, 2,815 production lines, one 885-line `apply_agent_event` match | parent 851 lines; largest module 441 lines; 27 tests unchanged |
+| 13 | Split `meerai-web-client/src/state.rs` into 13 domain modules and `views/modals.rs` into 6 modal families | 4,368 and 3,684 lines | parents 44 and 39 lines; largest module 1,154 lines; 50 tests unchanged |
 
 Item 10 verification went beyond "it compiles". The split was mechanical, so the risk was silent wire drift:
 
