@@ -303,15 +303,22 @@ async fn dispatch_request(
         return json_error(status, code, err.as_str());
     }
 
-    match (method, path) {
-        (&Method::GET, "/api/snapshot") => handle_snapshot(&state).await,
-        (&Method::GET, "/api/events") => handle_events(&state, &req),
-        (&Method::POST, "/api/sessions") => handle_create_session(&state, req).await,
-        (&Method::POST, p) if extract_session_action(p, "prompt").is_some() => {
-            let raw_id = extract_session_action(p, "prompt").unwrap().to_string();
-            handle_submit_prompt(&state, &raw_id, req).await
+    match *method {
+        Method::GET => match path {
+            "/api/snapshot" => handle_snapshot(&state).await,
+            "/api/events" => handle_events(&state, &req),
+            _ if !is_api_path(path) => handle_static(path).await,
+            _ => dispatch_privileged_route(&state, req, method, path).await,
+        },
+        Method::POST => {
+            if path == "/api/sessions" {
+                return handle_create_session(&state, req).await;
+            }
+            match extract_session_action(path, "prompt") {
+                Some(raw_id) => handle_submit_prompt(&state, raw_id, req).await,
+                None => dispatch_privileged_route(&state, req, method, path).await,
+            }
         }
-        (&Method::GET, p) if !is_api_path(p) => handle_static(p).await,
         _ => dispatch_privileged_route(&state, req, method, path).await,
     }
 }
@@ -335,155 +342,125 @@ async fn dispatch_privileged_route(
         return unauthorized_response("authentication required for privileged routes");
     }
 
-    match (method, path) {
-        (&Method::GET, "/api/sessions/history") => handle_sessions_history(state).await,
-        (&Method::GET, "/api/workspace/files") => handle_workspace_files(state).await,
-        (&Method::GET, "/api/workspace/search") => handle_workspace_search(state, &req).await,
-        (&Method::GET, "/api/workspace/preview") => handle_workspace_preview(state, &req).await,
-        (&Method::GET, "/api/workspace/changes") => handle_workspace_changes(state).await,
-        (&Method::GET, "/api/workspace/diff") => handle_workspace_diff(state, &req).await,
-        (&Method::POST, "/api/workspace/stage") => handle_workspace_stage(state, req).await,
-        (&Method::GET, "/api/providers") => handle_get_providers(state).await,
-        (&Method::POST, "/api/actions") => handle_host_action(state, req).await,
-        (&Method::GET, "/api/memories") => handle_memories(state, &req).await,
-        (&Method::GET, "/api/routes") => handle_routes(state).await,
-        (&Method::GET, "/api/packs") => handle_packs(state).await,
-        (&Method::GET, "/api/definitions/diagnostics") => handle_definitions(state).await,
-        (&Method::GET, p) if extract_session_action(p, "context").is_some() => {
-            let raw_id = extract_session_action(p, "context").unwrap();
-            handle_session_context(state, raw_id)
+    match *method {
+        Method::GET => {
+            match path {
+                "/api/sessions/history" => return handle_sessions_history(state).await,
+                "/api/workspace/files" => return handle_workspace_files(state).await,
+                "/api/workspace/search" => return handle_workspace_search(state, &req).await,
+                "/api/workspace/preview" => return handle_workspace_preview(state, &req).await,
+                "/api/workspace/changes" => return handle_workspace_changes(state).await,
+                "/api/workspace/diff" => return handle_workspace_diff(state, &req).await,
+                "/api/providers" => return handle_get_providers(state).await,
+                "/api/memories" => return handle_memories(state, &req).await,
+                "/api/routes" => return handle_routes(state).await,
+                "/api/packs" => return handle_packs(state).await,
+                "/api/definitions/diagnostics" => return handle_definitions(state).await,
+                _ => {}
+            }
+            if let Some(raw_id) = extract_session_action(path, "context") {
+                return handle_session_context(state, raw_id);
+            }
+            if let Some((raw_id, blob_key)) = extract_blob_path(path) {
+                return handle_session_blob(state, raw_id, blob_key).await;
+            }
+            if let Some(raw_id) = extract_single_session_id(path) {
+                return handle_session_detail(state, raw_id);
+            }
+            if let Some(raw_id) = extract_session_action(path, "events") {
+                return handle_session_events(state, raw_id).await;
+            }
+            not_found()
         }
-        (&Method::GET, p) if extract_blob_path(p).is_some() => {
-            let (raw_id, blob_key) = extract_blob_path(p).unwrap();
-            handle_session_blob(state, raw_id, blob_key).await
+        Method::DELETE => {
+            if let Some(raw_id) = extract_single_session_id(path) {
+                return handle_delete_session(state, raw_id).await;
+            }
+            if let Some(pid) = extract_provider_action(path, "credential") {
+                return handle_remove_credential(state, pid).await;
+            }
+            not_found()
         }
-        (&Method::POST, "/api/settings") => handle_update_settings(state, req).await,
-        (&Method::POST, "/api/reload") => handle_reload(state).await,
-        (&Method::GET, p) if extract_single_session_id(p).is_some() => {
-            let raw_id = extract_single_session_id(p).unwrap();
-            handle_session_detail(state, raw_id)
+        Method::POST => {
+            match path {
+                "/api/workspace/stage" => return handle_workspace_stage(state, req).await,
+                "/api/actions" => return handle_host_action(state, req).await,
+                "/api/settings" => return handle_update_settings(state, req).await,
+                "/api/reload" => return handle_reload(state).await,
+                _ => {}
+            }
+            if let Some(raw_id) = extract_session_subaction(path, "approvals") {
+                let (raw_id, req_id) = raw_id;
+                return handle_approval_decision(state, raw_id, req_id, req).await;
+            }
+            if let Some((raw_id, req_id)) = extract_session_subaction(path, "questions") {
+                return handle_question_answer(state, raw_id, req_id, req).await;
+            }
+            if let Some(pid) = extract_provider_action(path, "api-key") {
+                return handle_set_api_key(state, pid, req).await;
+            }
+            if let Some(pid) = extract_provider_action(path, "base-url") {
+                return handle_set_base_url(state, pid, req).await;
+            }
+            if let Some(pid) = extract_provider_action(path, "chatgpt/start") {
+                return handle_chatgpt_start(state, pid).await;
+            }
+            if let Some((pid, attempt)) = extract_provider_chatgpt_action(path, "paste") {
+                return handle_chatgpt_paste(state, pid, attempt, req).await;
+            }
+            if let Some((pid, attempt)) = extract_provider_chatgpt_action(path, "cancel") {
+                return handle_chatgpt_cancel(state, pid, attempt);
+            }
+            if let Some(raw_id) = extract_session_action(path, "open") {
+                return handle_open_session(state, raw_id).await;
+            }
+            if let Some(raw_id) = extract_session_action(path, "activate") {
+                return handle_activate_session(state, raw_id);
+            }
+            if let Some(raw_id) = extract_session_action(path, "close") {
+                return handle_close_session(state, raw_id).await;
+            }
+            if let Some(raw_id) = extract_session_action(path, "fork") {
+                return handle_fork_session(state, raw_id, req).await;
+            }
+            if let Some(raw_id) = extract_session_action(path, "btw") {
+                return handle_btw_session(state, raw_id, req).await;
+            }
+            if let Some(raw_id) = extract_session_action(path, "steer") {
+                return handle_steer_prompt(state, raw_id, req).await;
+            }
+            if let Some(raw_id) = extract_session_action(path, "cancel") {
+                return handle_simple_session_cmd(state, raw_id, |id| {
+                    state.registry.cancel_turn(id)
+                });
+            }
+            if let Some(raw_id) = extract_session_action(path, "compact") {
+                return handle_simple_session_cmd(state, raw_id, |id| state.registry.compact(id));
+            }
+            if let Some(raw_id) = extract_session_action(path, "reset") {
+                return handle_simple_session_cmd(state, raw_id, |id| state.registry.reset(id));
+            }
+            if let Some(raw_id) = extract_session_action(path, "rewind") {
+                return handle_rewind_session(state, raw_id, req).await;
+            }
+            if let Some(raw_id) = extract_session_action(path, "model") {
+                return handle_set_model(state, raw_id, req).await;
+            }
+            if let Some(raw_id) = extract_session_action(path, "mode") {
+                return handle_set_mode(state, raw_id, req).await;
+            }
+            if let Some(raw_id) = extract_session_action(path, "apply-agent") {
+                return handle_apply_agent(state, raw_id, req).await;
+            }
+            if let Some(raw_id) = extract_session_action(path, "apply-skill") {
+                return handle_apply_skill(state, raw_id, req).await;
+            }
+            if let Some(raw_id) = extract_session_action(path, "shell") {
+                return handle_user_shell(state, raw_id, req).await;
+            }
+            not_found()
         }
-        (&Method::DELETE, p) if extract_single_session_id(p).is_some() => {
-            let raw_id = extract_single_session_id(p).unwrap().to_string();
-            handle_delete_session(state, &raw_id).await
-        }
-        (&Method::GET, p) if extract_session_action(p, "events").is_some() => {
-            let raw_id = extract_session_action(p, "events").unwrap().to_string();
-            handle_session_events(state, &raw_id).await
-        }
-        (&Method::POST, p) if extract_session_action(p, "open").is_some() => {
-            let raw_id = extract_session_action(p, "open").unwrap().to_string();
-            handle_open_session(state, &raw_id).await
-        }
-        (&Method::POST, p) if extract_session_action(p, "activate").is_some() => {
-            let raw_id = extract_session_action(p, "activate").unwrap();
-            handle_activate_session(state, raw_id)
-        }
-        (&Method::POST, p) if extract_session_action(p, "close").is_some() => {
-            let raw_id = extract_session_action(p, "close").unwrap().to_string();
-            handle_close_session(state, &raw_id).await
-        }
-        (&Method::POST, p) if extract_session_action(p, "fork").is_some() => {
-            let raw_id = extract_session_action(p, "fork").unwrap().to_string();
-            handle_fork_session(state, &raw_id, req).await
-        }
-        (&Method::POST, p) if extract_session_action(p, "btw").is_some() => {
-            let raw_id = extract_session_action(p, "btw").unwrap().to_string();
-            handle_btw_session(state, &raw_id, req).await
-        }
-        (&Method::POST, p) if extract_session_action(p, "steer").is_some() => {
-            let raw_id = extract_session_action(p, "steer").unwrap().to_string();
-            handle_steer_prompt(state, &raw_id, req).await
-        }
-        (&Method::POST, p) if extract_session_action(p, "cancel").is_some() => {
-            let raw_id = extract_session_action(p, "cancel").unwrap();
-            handle_simple_session_cmd(state, raw_id, |id| state.registry.cancel_turn(id))
-        }
-        (&Method::POST, p) if extract_session_action(p, "compact").is_some() => {
-            let raw_id = extract_session_action(p, "compact").unwrap();
-            handle_simple_session_cmd(state, raw_id, |id| state.registry.compact(id))
-        }
-        (&Method::POST, p) if extract_session_action(p, "reset").is_some() => {
-            let raw_id = extract_session_action(p, "reset").unwrap();
-            handle_simple_session_cmd(state, raw_id, |id| state.registry.reset(id))
-        }
-        (&Method::POST, p) if extract_session_action(p, "rewind").is_some() => {
-            let raw_id = extract_session_action(p, "rewind").unwrap().to_string();
-            handle_rewind_session(state, &raw_id, req).await
-        }
-        (&Method::POST, p) if extract_session_action(p, "model").is_some() => {
-            let raw_id = extract_session_action(p, "model").unwrap().to_string();
-            handle_set_model(state, &raw_id, req).await
-        }
-        (&Method::POST, p) if extract_session_action(p, "mode").is_some() => {
-            let raw_id = extract_session_action(p, "mode").unwrap().to_string();
-            handle_set_mode(state, &raw_id, req).await
-        }
-        (&Method::POST, p) if extract_session_action(p, "apply-agent").is_some() => {
-            let raw_id = extract_session_action(p, "apply-agent")
-                .unwrap()
-                .to_string();
-            handle_apply_agent(state, &raw_id, req).await
-        }
-        (&Method::POST, p) if extract_session_action(p, "apply-skill").is_some() => {
-            let raw_id = extract_session_action(p, "apply-skill")
-                .unwrap()
-                .to_string();
-            handle_apply_skill(state, &raw_id, req).await
-        }
-        (&Method::POST, p) if extract_session_action(p, "shell").is_some() => {
-            let raw_id = extract_session_action(p, "shell").unwrap().to_string();
-            handle_user_shell(state, &raw_id, req).await
-        }
-        (&Method::POST, p) if extract_session_subaction(p, "approvals").is_some() => {
-            let (raw_id, req_id) = extract_session_subaction(p, "approvals").unwrap();
-            let raw_id = raw_id.to_string();
-            let req_id = req_id.to_string();
-            handle_approval_decision(state, &raw_id, &req_id, req).await
-        }
-        (&Method::POST, p) if extract_session_subaction(p, "questions").is_some() => {
-            let (raw_id, req_id) = extract_session_subaction(p, "questions").unwrap();
-            let raw_id = raw_id.to_string();
-            let req_id = req_id.to_string();
-            handle_question_answer(state, &raw_id, &req_id, req).await
-        }
-        (&Method::POST, p) if extract_provider_action(p, "api-key").is_some() => {
-            let pid = extract_provider_action(p, "api-key").unwrap().to_string();
-            handle_set_api_key(state, &pid, req).await
-        }
-        (&Method::DELETE, p) if extract_provider_action(p, "credential").is_some() => {
-            let pid = extract_provider_action(p, "credential")
-                .unwrap()
-                .to_string();
-            handle_remove_credential(state, &pid).await
-        }
-        (&Method::POST, p) if extract_provider_action(p, "base-url").is_some() => {
-            let pid = extract_provider_action(p, "base-url").unwrap().to_string();
-            handle_set_base_url(state, &pid, req).await
-        }
-        (&Method::POST, p) if extract_provider_action(p, "chatgpt/start").is_some() => {
-            let pid = extract_provider_action(p, "chatgpt/start")
-                .unwrap()
-                .to_string();
-            handle_chatgpt_start(state, &pid).await
-        }
-        (&Method::POST, p) if extract_provider_chatgpt_action(p, "paste").is_some() => {
-            let (pid, attempt) = extract_provider_chatgpt_action(p, "paste").unwrap();
-            let pid = pid.to_string();
-            let attempt = attempt.to_string();
-            handle_chatgpt_paste(state, &pid, &attempt, req).await
-        }
-        (&Method::POST, p) if extract_provider_chatgpt_action(p, "cancel").is_some() => {
-            let (pid, attempt) = extract_provider_chatgpt_action(p, "cancel").unwrap();
-            let pid = pid.to_string();
-            let attempt = attempt.to_string();
-            handle_chatgpt_cancel(state, &pid, &attempt)
-        }
-        _ => json_error(
-            StatusCode::NOT_FOUND,
-            ApiErrorCode::NotFound,
-            "endpoint not found",
-        ),
+        _ => not_found(),
     }
 }
 
@@ -513,11 +490,18 @@ fn handle_events(state: &AppState, req: &Request<Incoming>) -> Response<RespBody
 
     let stream = ReceiverStream::new(rx);
     let body = StreamBody::new(stream).boxed();
-    Response::builder()
+    match Response::builder()
         .status(StatusCode::OK)
         .header(http::header::CONTENT_TYPE, "text/event-stream")
         .body(body)
-        .unwrap()
+    {
+        Ok(response) => response,
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiErrorCode::Internal,
+            "failed to build event stream response",
+        ),
+    }
 }
 
 fn parse_after_seq(req: &Request<Incoming>) -> Result<Option<u64>, String> {
@@ -622,7 +606,10 @@ async fn pump_sse(
 }
 
 fn format_sse_event(seq: Option<u64>, event: &ViewEvent) -> String {
-    let data = serde_json::to_string(event).expect("ViewEvent serializes to JSON");
+    let data = match serde_json::to_string(event) {
+        Ok(data) => data,
+        Err(_) => return String::new(),
+    };
     match seq {
         Some(id) => format!("id: {id}\ndata: {data}\n\n"),
         None => format!("data: {data}\n\n"),

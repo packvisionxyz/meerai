@@ -12,6 +12,14 @@ pub(super) fn unauthorized_response(message: &str) -> Response<RespBody> {
     );
     resp
 }
+pub(super) fn not_found() -> Response<RespBody> {
+    json_error(
+        StatusCode::NOT_FOUND,
+        ApiErrorCode::NotFound,
+        "endpoint not found",
+    )
+}
+
 pub(super) fn method_not_allowed() -> Response<RespBody> {
     json_error(
         StatusCode::METHOD_NOT_ALLOWED,
