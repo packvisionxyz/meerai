@@ -1,7 +1,9 @@
 mod approval;
 pub mod env;
+pub mod expand;
 pub mod fs_perms;
 pub mod lenient;
+pub mod redact;
 pub mod text;
 mod tools;
 

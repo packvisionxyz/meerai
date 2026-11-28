@@ -581,6 +581,15 @@ impl AppState {
                 Some(action) => self.queue_host_action(action),
                 None => self.host_action_usage(command),
             },
+            "/mcp" => match arg {
+                "" | "list" => {
+                    self.modal = Some(ActiveModal::McpServers { selected: 0 });
+                }
+                _ => match parse_host_action(command) {
+                    Some(action) => self.queue_host_action(action),
+                    None => self.host_action_usage(command),
+                },
+            },
             "/vault-reset" | "/vault" => {
                 self.modal = Some(ActiveModal::VaultReset {
                     input: TextInput::default(),
@@ -826,35 +835,21 @@ impl AppState {
 }
 
 fn format_help_text() -> String {
-    let commands = crate::completion::SLASH_COMMANDS
-        .iter()
-        .map(|(cmd, _, _)| match *cmd {
-            "/sessions" => "/sessions [id]".to_string(),
-            "/model" => "/model [name]".to_string(),
+    let commands = crate::completion::slash_commands_for_tui()
+        .into_iter()
+        .map(|spec| match spec.name {
             "/effort" => "/effort [low|medium|high|xhigh|max] (no arg opens sampling)".to_string(),
-            "/sampling" => "/sampling [effort and temperature]".to_string(),
-            "/temperature" => "/temperature [0.0..2.0|default]".to_string(),
             "/agent" => "/agent <id> (or @agent/<id>)".to_string(),
             "/skill" => "/skill <id> (or @skill/<id>)".to_string(),
             "/loop" => "/loop (or @goal / @orchestrate <instruction>)".to_string(),
-            "/mode" => "/mode [plan|ask|auto]".to_string(),
             "/btw" => "/btw [question] (read-only side session with this history)".to_string(),
-            "/search" => "/search [query]".to_string(),
-            "/grep" => "/grep [query]".to_string(),
-            "/diff" => "/diff [path]".to_string(),
-            "/memory" => "/memory [query]".to_string(),
-            "/remember" => "/remember <note>".to_string(),
-            "/forget" => "/forget <id>".to_string(),
-            "/pin" => "/pin <id> [off]".to_string(),
             "/routing" => {
                 "/routing [set <task> <provider::model> [max_cost] [max_tokens] [concurrency]]"
                     .to_string()
             }
-            "/pack" => "/pack <add|enable|disable|trust|untrust|pin|remove> <id> [rev]".to_string(),
             "/subagent" => "/subagent <agent> <task> | /subagent cancel <item-id>".to_string(),
-            "/open" => "/open <path>[:line]".to_string(),
             "/vault-reset" => "/vault-reset (type reset to confirm)".to_string(),
-            other => (*other).to_string(),
+            _ => spec.label(),
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -863,7 +858,7 @@ fn format_help_text() -> String {
          Tabs: alt+1..9 / alt+left/right / ctrl+pageup/down / click tab, alt+shift+left/right move tab, ctrl+w close tab, click [+] new tab\n\
          Shortcuts: ctrl+p command palette, shift+tab approval mode, ctrl+f search, ctrl+b toggle sidebar, drag+scroll or click then shift+click to copy, click a thought block to expand it\n\
          Insert: Enter send (queues while a turn runs), ctrl+g send queued now, shift/alt/ctrl+enter or ctrl+j or \\+Enter newline, @ file, / command, Esc Normal\n\
-         Normal: j/k/Up/Down scroll, gt/gT/[ / ] switch tab, / search, t toggle thinking, y copy reply, ctrl+d/ctrl+u half-page, gg/G top/bottom, i/a Insert, q quit"
+         Normal: j/k/Up/Down scroll, gt/gT/[ / ] switch tab, / search, t toggle the visible thought block (or the latest reply), y copy reply, ctrl+d/ctrl+u half-page, gg/G top/bottom, i/a Insert, q quit"
     )
 }
 

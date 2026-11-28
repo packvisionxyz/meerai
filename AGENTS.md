@@ -17,6 +17,7 @@ implementation detail in `docs/`, not here.
 | Local browser UI and parity | [docs/browser-ui.md](docs/browser-ui.md) |
 | Security controls and residual risk | [docs/threat-model.md](docs/threat-model.md) |
 | ACP client and trust boundary | [docs/acp.md](docs/acp.md) |
+| MCP config, trust, and policy | [README.md](README.md#mcp-servers), [docs/threat-model.md](docs/threat-model.md) §2.10 |
 
 ## Commands
 
@@ -86,8 +87,35 @@ make verify                                    # fmt --check + clippy + test (al
   definition adds `permissions` that tighten only. `skill-load` may read files inside a skill
   directory; nothing grants tools or permissions. Discovery order is `.meerai`, then `.agents`,
   then `.claude`: never copy or import definitions.
-- Never describe agent or skill definitions, hooks, or an ACP backend as a security boundary.
-  Hooks run unsandboxed host commands; an ACP backend keeps its own tools and policy.
+- Never describe agent or skill definitions, hooks, an ACP backend, or an MCP server as a
+  security boundary. Hooks run unsandboxed host commands; an ACP backend and an MCP server keep
+  their own tools and policy.
+
+### MCP
+
+- `.mcp.json` is the only MCP config surface: `.mcp.json` at the project root, plus
+  `$XDG_CONFIG_HOME/meerai/.mcp.json`. Do not add a second format or a `.meerai` variant.
+- Trust is per project and bound to the SHA-256 of the file bytes. An edited file drops trust and
+  asks again. Never fall back to path-only trust, and never let a project file trust itself.
+- The first interactive run in a project may prompt once for MCP trust. Headless runs, a piped
+  stdin, and a declined prompt stay untrusted. An untrusted project file must list its servers as
+  `needs trust` in the statusline, sidebar, and panel; never render it as "no servers".
+- A project `.mcp.json` may tighten only: disable a server, set `read_only`, or narrow `tools.allow`.
+  It never adds a server, enables a disabled one, or widens an allowlist.
+- Expand `${VAR}`, `{env:VAR}`, and `${VAR|default}` at connect time only, in
+  `meerai_mcp::client::spawn_plan`. A parsed `McpServerConfig` must never hold a secret.
+- MCP tools are `PermissionAction::Mcp` with a `<server>/<tool>` resource and
+  `EffectClass::External`. Never let a `webfetch` rule or an `External` default authorize one.
+- `plan` mode registers only servers declared `read_only`, and `PolicyEngine` denies every `mcp`
+  call in `plan` regardless of rules. `readOnlyHint` is the server's claim; it never widens policy.
+- Withhold a tool description outright when `detect_injection_signals` matches; never wrap it.
+  Never let a server's annotations, schemas, or descriptions decide policy.
+- Keep MCP admission budgeted: over the schema budget, expose `load_tool_schema` and one line per
+  tool, and gate `contain()` on a loaded schema. Never inline a schema the model did not ask for
+  once indexed, and keep the loaded cap so a turn cannot refill the prompt.
+- Tool names are `mcp__<server>__<tool>`; the double-underscore prefix must not collide with a
+  built-in toolset. `meerai-tui` must not depend on `meerai-mcp`.
+- Share one `Arc` connection per server through `McpRegistry`. Never spawn a server per subagent.
 
 ### TUI and Web
 
@@ -109,6 +137,8 @@ make verify                                    # fmt --check + clippy + test (al
 - Modal text fields use `meerai_input::TextInput` and the composer editing keys. Do not add a
   `String`-backed or append-only field. `Enter` submits and `shift`/`alt`/`ctrl+enter` inserts a
   newline.
+- MCP server status is a statusline counter plus a `McpServers` modal, and both clients show it. Keep the
+  failed count and the error text visible: a server that failed to connect must never look connected.
 - Every user-facing command and workflow gets a dedicated panel or modal in both
   `meerai-tui` and `meerai-web-client`. Do not ship a transcript-only flow in
   one client, or require a typed confirmation argument in one client and a

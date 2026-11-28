@@ -35,6 +35,51 @@ pub(super) async fn handle_create_session(
     };
     json_response(StatusCode::CREATED, &resp)
 }
+pub(super) async fn handle_switch_workspace(
+    state: &AppState,
+    raw_id: &str,
+    req: Request<Incoming>,
+) -> Response<RespBody> {
+    let session_id = match parse_session_id(raw_id) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let body: serde_json::Value = match parse_json(req).await {
+        Ok(body) => body,
+        Err(resp) => return resp,
+    };
+    let Some(path) = body.get("path").and_then(|value| value.as_str()) else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::BadRequest,
+            "path is required",
+        );
+    };
+    let path = std::path::PathBuf::from(path);
+    if !path.is_dir() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::BadRequest,
+            "path is not a directory",
+        );
+    }
+    let _ = state.registry.close_and_wait_session(&session_id).await;
+    let opened = match state.opener.switch_workspace(&session_id, &path).await {
+        Ok(opened) => opened,
+        Err(err) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiErrorCode::Internal,
+                &format!("failed to switch workspace: {err}"),
+            );
+        }
+    };
+    let summary = state.registry.register_opened_active(opened);
+    let resp = CreateSessionResponse {
+        session: mapper::map_summary(summary),
+    };
+    json_response(StatusCode::OK, &resp)
+}
 pub(super) async fn handle_sessions_history(state: &AppState) -> Response<RespBody> {
     let stored = match state.opener.list_sessions().await {
         Ok(list) => list,

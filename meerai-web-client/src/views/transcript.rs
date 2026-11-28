@@ -240,7 +240,10 @@ fn render_block(store: StoreHandle, tab: &SessionTabState, block: TranscriptBloc
             view! {
                 <article class="turn" id=anchor>
                     <div class="turn-head">
-                        <span class="turn-num">{format!("#{turn_num}")}</span>
+                        <div class="turn-author-group">
+                            <span class="turn-author">"You"</span>
+                            <span class="turn-num">{format!("#{turn_num}")}</span>
+                        </div>
                         <div class="turn-actions">
                             <button class="btn tiny" title="Copy message" on:click=move |_| {
                                 crate::store::copy_text(copy_text.clone());
@@ -270,7 +273,6 @@ fn render_block(store: StoreHandle, tab: &SessionTabState, block: TranscriptBloc
                             >"Fork"</button>
                         </div>
                     </div>
-                    <div class="msg-label">"You"</div>
                     <div class="user-msg">
                         {AnyView::from(Fragment::new(body))}
                     </div>
@@ -349,7 +351,7 @@ fn render_digest(
         view! { <div></div> }.into_any()
     };
     view! {
-        <div class="digest" class:running=has_running>
+        <div class="digest" class:running=has_running class:expanded=expanded>
             <button class="digest-head" aria-expanded=expanded on:click=move |_| {
                 let key = toggle_id.clone();
                 store.update(|s| {
@@ -363,7 +365,9 @@ fn render_digest(
                     }
                 });
             }>
-                <span class="digest-caret">{if expanded { "▾" } else { "▸" }}</span>
+                <span class="digest-caret" class:expanded=expanded>
+                    <super::icons::IconChevronRight />
+                </span>
                 {has_running.then(|| view! {
                     <span class="working-dots" aria-hidden="true"><span></span><span></span><span></span></span>
                 })}
@@ -511,7 +515,10 @@ fn render_assistant(store: StoreHandle, entry: &TranscriptEntryDto) -> AnyView {
                         crate::store::copy_text(copy_text.clone());
                         store.update(|s| set_status_notice(s, "Copied reply"));
                     }
-                >"Copy"</button>
+                >
+                    <super::icons::IconCopy />
+                    <span>"Copy"</span>
+                </button>
             </div>
             {body}
         </div>
@@ -879,16 +886,19 @@ fn render_question(entry: &TranscriptEntryDto) -> AnyView {
 fn render_empty_state(store: StoreHandle, title: &str, description: &str) -> AnyView {
     let suggestions = [
         (
+            "map",
             "Explain this repository",
             "Summarize the architecture, crates, and main flows.",
             "Explain this repository: the crates, the main flows, and where to start.",
         ),
         (
+            "wrench",
             "Fix a failing test",
             "Find the failing test, fix it, and verify the result.",
             "Find the failing test, fix it, and verify the result.",
         ),
         (
+            "diff",
             "Review my changes",
             "Review the working-tree diff for bugs, risks, and missing tests.",
             "Review the working-tree diff for bugs, risks, and missing tests.",
@@ -896,8 +906,13 @@ fn render_empty_state(store: StoreHandle, title: &str, description: &str) -> Any
     ];
     let rows = suggestions
         .into_iter()
-        .map(|(title, description, prompt)| {
+        .map(|(icon, title, description, prompt)| {
             let prompt = prompt.to_owned();
+            let icon_view = match icon {
+                "map" => view! { <super::icons::IconMap /> }.into_any(),
+                "wrench" => view! { <super::icons::IconWrench /> }.into_any(),
+                _ => view! { <super::icons::IconFileDiff /> }.into_any(),
+            };
             view! {
                 <button class="suggestion" on:click=move |_| {
                     let prompt = prompt.clone();
@@ -907,6 +922,7 @@ fn render_empty_state(store: StoreHandle, title: &str, description: &str) -> Any
                     });
                     store.effect(UiEffect::Focus("composer".to_owned()));
                 }>
+                    <span class="suggestion-icon">{icon_view}</span>
                     <span class="suggestion-title">{title}</span>
                     <span class="suggestion-desc">{description}</span>
                 </button>
@@ -920,10 +936,6 @@ fn render_empty_state(store: StoreHandle, title: &str, description: &str) -> Any
             <h2>{title.to_owned()}</h2>
             <p>{description.to_owned()}</p>
             <div class="suggestions">{AnyView::from(Fragment::new(rows))}</div>
-            <div class="empty-hint">
-                <kbd>"Enter"</kbd>" to send · " <kbd>"Shift"</kbd>" + " <kbd>"Enter"</kbd>" for a new line · "
-                <kbd>"Alt+K"</kbd>" command palette"
-            </div>
         </div>
     }
     .into_any()

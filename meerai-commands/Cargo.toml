@@ -1,0 +1,18 @@
+[package]
+name = "meerai-commands"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "meerai_commands"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]

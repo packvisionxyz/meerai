@@ -82,7 +82,12 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
   `MemorySecretStore`, auth listing.
 - `meerai-providers` — genai client factory plus the AEAD `VaultSecretStore`
   (OS keychain DEK or `MEERAI_VAULT_PASSPHRASE` Argon2id fallback); re-exports
-  the client surface.
+  the client surface. `build_genai_client_for(provider_id)` closes its auth and
+  endpoint resolvers over one provider, so a request cannot borrow another
+  provider's key. `meerai-cli`'s `ProviderStreamer` keeps one client per
+  provider and picks it from the provider id that `ChatStreamer::stream_chat`
+  now carries. `RuntimeProviderState.active_provider` is a UI default only: it
+  is never read to authenticate a turn.
 - `meerai-agents` — `MultiTurnAgent`, `AgentHarness`/`HarnessConfig`
   (including `TokenPricing`), `AgentEvent`/`AgentCommand`, `intercept`
   (`Interceptor`, `StepPlan`, `ToolPlan`, `ToolContext`, `ToolOutcome`,
@@ -105,6 +110,17 @@ Dependency spine: `core -> macros`, `core -> session -> agents -> cli`,
 - `meerai-acp` — `AGY` preset, `connect`/`connect_with`, `AcpHandshake`,
   typed `AcpEvent`, `AcpWorker`, permission replies, cancel,
   `session/load`, stderr tail. Only `meerai-cli` depends on it.
+- `meerai-mcp` — MCP client on `rmcp` 3.12 (`client` +
+  `transport-child-process` + `transport-streamable-http-client-reqwest`,
+  `default-features = false` so `server`, `macros`, `chrono`, and `auth` stay
+  out). `config` parses `.mcp.json` (OpenCode shape: `type` `local`/`remote`,
+  `command` string or array, `cwd`, `environment`), `merge` applies
+  tighten-only project rules, `client` connects and calls a tool,
+  `toolset` is `McpToolset` behind the `ToolCaller` seam, `budget` decides full
+  versus indexed admission and renders the one-line index, `registry` caches one
+  `Arc` connection per server, `setup` builds the `/mcp` report, and `stderr` keeps a bounded tail of a stdio child's
+  stderr. Env expansion is deferred to `client::spawn_plan`, so a secret never enters the
+  parsed config. Only `meerai-cli` depends on it; `meerai-tui` must not.
 - `meerai-cli` — `meerai` binary: flags, headless runner,
   `auth`/`sessions`/`hooks`/`acp doctor` subcommands, TUI launcher, host
   wiring.
@@ -469,6 +485,11 @@ implementation invariants.
   `GoalUpdated` events still deserialize and map to `LoopState`.
   `AgentEvent::LoopContinued` announces an automatic follow-up turn and
   renders as a system row.
+- Auto-approval notice: in `auto` mode a tool with no matching rule and an
+  `Execute` or `External` effect is allowed silently. `authorize` then emits
+  `AgentEvent::AutoApproved { tool, effect }` once per turn, and both clients
+  render it as a system row. `read` and `write` effects stay silent, and
+  `ask` mode never emits it because the prompt itself is the notice.
 - Routing and spend: `HarnessConfig::routing` holds `ModelRoute` entries.
   `RoutingCoordinator` owns a global and per-provider semaphore from
   `max_concurrency`, plus a USD ledger from `note_cost` and a cap from the
@@ -563,6 +584,30 @@ implementation invariants.
   resolution and the shell sandbox. `outside_grants` are session-scoped
   and cleared on reset/rewind. Do not bypass the guard for unapproved
   paths.
+
+#### Workspace switching
+
+- The workspace root is per session, read from `SessionMeta.cwd`, not from
+  the launcher directory. `build_agent_scoped`, the policy engine, the
+  readable and writable roots, the MCP project lookup, and the memory
+  scope all derive from it.
+- `workspace-cd` is `EffectClass::External` and asks with
+  `PermissionAction::Read` on its `path` argument, so an outside path
+  goes through the ordinary approval before the user answers the
+  carry-or-new question. The tool is handled in the loop, next to
+  `question-ask`, and never reaches a process.
+- A carry cannot run mid-turn: replacing the worker would drop the turn.
+  The tool answers with the decision, and the host emits
+  `RegistryEventKind::WorkspaceChanged` when the tool result lands.
+- A carry keeps the session id and the whole event log. It rewrites
+  `SessionMeta.cwd` and reopens a worker at the new root, so the
+  transcript survives. The old worker holds the session lock, so a carry
+  must close it first: the TUI calls `close_and_wait_session`, then
+  `SessionOpener::switch_workspace`. The browser posts to
+  `/api/sessions/<id>/workspace`, which does the same in the host.
+- Do not apply the switch by mutating `CliSessionHost.workspace_root`.
+  That field stays the launch directory; display and policy follow the
+  event.
 
 #### Tool names and arguments
 
@@ -678,8 +723,8 @@ Implementation-level targets are owned by their documents: incremental
 projection and stable prefix ordering
 ([token-efficiency.md](token-efficiency.md) §3), `meerai serve` and the
 provider trait ([architecture.md](architecture.md) §3), M14 and ACP
-preset catalog ([acp.md](acp.md) §3), MCP and definition mapping
-([harness-spec.md](harness-spec.md) §4.1).
+preset catalog ([acp.md](acp.md) §3), MCP surfaces and definition mapping
+([harness-spec.md](harness-spec.md) §3).
 
 ## 4. Reference: documentation map
 

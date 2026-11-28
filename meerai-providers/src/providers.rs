@@ -52,6 +52,60 @@ pub fn resolve_auth_data(
     }
 }
 
+pub fn build_genai_client_for(
+    runtime: Arc<RwLock<RuntimeProviderState>>,
+    secrets: Arc<dyn SecretStore>,
+    provider_id: String,
+) -> Result<Client> {
+    let auth_runtime = runtime.clone();
+    let auth_secrets = secrets.clone();
+    let target_runtime = runtime;
+    let target_secrets = secrets;
+    let auth_provider = provider_id.clone();
+    let target_provider = provider_id;
+    let default_session_id = generate_opencode_session_id();
+
+    let client = Client::builder()
+        .with_chat_options(ChatOptions::default().with_extra_headers(Headers::from([
+            ("x-opencode-session", default_session_id.as_str()),
+            ("user-agent", MEERAI_USER_AGENT),
+        ])))
+        .with_auth_resolver_fn(move |_model_iden: ModelIden| {
+            let state = auth_runtime
+                .read()
+                .map(|guard| guard.clone())
+                .map_err(|_| genai::resolver::Error::Custom("auth runtime poisoned".into()))?;
+            let provider = state.catalog.provider_or_synthesized(&auth_provider);
+            resolve_auth_data(&provider, auth_secrets.as_ref())
+                .map_err(genai::resolver::Error::Custom)
+        })
+        .with_service_target_resolver_fn(move |mut target: genai::ServiceTarget| {
+            let state = target_runtime
+                .read()
+                .map(|guard| guard.clone())
+                .map_err(|_| genai::resolver::Error::Custom("target runtime poisoned".into()))?;
+            let provider = state.catalog.provider_or_synthesized(&target_provider);
+            let plan_usage = matches!(
+                resolve_credential(&provider, target_secrets.as_ref())
+                    .ok()
+                    .flatten(),
+                Some(Credential::OAuth(_))
+            );
+            if let Some(url) = state.effective_base_url_with_plan(&provider, plan_usage) {
+                let normalized = if url.ends_with('/') {
+                    url
+                } else {
+                    format!("{url}/")
+                };
+                target.endpoint = Endpoint::from_owned(normalized);
+            }
+            Ok(target)
+        })
+        .build()?;
+
+    Ok(client)
+}
+
 pub fn build_genai_client(
     runtime: Arc<RwLock<RuntimeProviderState>>,
     secrets: Arc<dyn SecretStore>,
@@ -124,6 +178,28 @@ mod tests {
         let provider = catalog.provider("openai").unwrap();
         let auth = resolve_auth_data(provider, &store).unwrap();
         assert!(matches!(auth, Some(AuthData::Key(ref value)) if value == "access-token"));
+    }
+
+    #[test]
+    fn each_client_authenticates_as_its_own_provider() {
+        let store = MemorySecretStore::new();
+        store
+            .write_credential("gemini", &Credential::ApiKey("gemini-key".to_string()))
+            .unwrap();
+        store
+            .write_credential("openai", &Credential::ApiKey("openai-key".to_string()))
+            .unwrap();
+
+        let catalog = ProviderCatalog::new();
+        let gemini = catalog.provider("gemini").unwrap();
+        let openai = catalog.provider("openai").unwrap();
+
+        let gemini_auth = resolve_auth_data(gemini, &store).unwrap();
+        let openai_auth = resolve_auth_data(openai, &store).unwrap();
+
+        assert!(matches!(gemini_auth, Some(AuthData::Key(ref value)) if value == "gemini-key"));
+        assert!(matches!(openai_auth, Some(AuthData::Key(ref value)) if value == "openai-key"));
+        assert_ne!(gemini.adapter, openai.adapter);
     }
 
     #[test]

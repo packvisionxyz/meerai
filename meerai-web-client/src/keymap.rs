@@ -13,6 +13,7 @@ use crate::store::StoreHandle;
 enum EscapeAction {
     Ignore,
     ApprovalReason,
+    CancelQuestion,
     Close,
     BackToRuns(RunKindDto),
 }
@@ -47,6 +48,7 @@ pub fn handle_global_key(store: StoreHandle, ev: &web_sys::KeyboardEvent) {
                 from_runs: Some(kind),
                 ..
             }) => EscapeAction::BackToRuns(*kind),
+            Some(ActiveModal::Question { .. }) => EscapeAction::CancelQuestion,
             Some(_) => EscapeAction::Close,
         });
         match action {
@@ -62,6 +64,24 @@ pub fn handle_global_key(store: StoreHandle, ev: &web_sys::KeyboardEvent) {
             }
             EscapeAction::BackToRuns(kind) => {
                 store.update(|s| crate::state::back_to_runs(s, kind));
+                ev.prevent_default();
+                return;
+            }
+            EscapeAction::CancelQuestion => {
+                let target = store.with(|s| match &s.modal {
+                    Some(ActiveModal::Question {
+                        session_id,
+                        request,
+                        ..
+                    }) => Some((session_id.clone(), request.request_id.clone())),
+                    _ => None,
+                });
+                if let Some((session_id, request_id)) = target
+                    && let Some(t) = crate::transport::current()
+                {
+                    t.cancel_question(session_id, request_id);
+                }
+                store.update(|s| s.modal = None);
                 ev.prevent_default();
                 return;
             }
@@ -236,6 +256,8 @@ fn handle_modal_key(
     lower: &str,
     text_target: bool,
 ) -> bool {
+    let ctrl = ev.ctrl_key();
+    let meta = ev.meta_key();
     match modal {
         ActiveModal::Approval {
             session_id,
@@ -257,6 +279,14 @@ fn handle_modal_key(
                     "n" => Some((meerai_web_protocol::ApprovalDecisionDto::Decline, None)),
                     "c" => Some((meerai_web_protocol::ApprovalDecisionDto::Cancel, None)),
                     _ => None,
+                };
+                let accept_enter = key == "Enter" && !ctrl && !meta;
+                let decision = match decision {
+                    Some(pair) => Some(pair),
+                    None if accept_enter => {
+                        Some((meerai_web_protocol::ApprovalDecisionDto::Accept, None))
+                    }
+                    None => None,
                 };
                 if let Some((decision, scope)) = decision {
                     if let Some(t) = crate::transport::current() {
@@ -312,10 +342,10 @@ fn handle_modal_key(
                     let idx = selected.min(total - 1);
                     if idx < cmds.len() {
                         let spec = cmds[idx];
-                        let cmd = spec.cmd.to_owned();
+                        let cmd = spec.name.to_owned();
                         if spec.takes_arg {
                             store.update_with_effects(|s, fx| {
-                                s.draft.replace_text(format!("{cmd} "));
+                                s.draft.replace_text(spec.insert());
                                 s.modal = None;
                                 update_completion(s);
                                 fx.focus("composer");
@@ -683,6 +713,52 @@ fn handle_modal_key(
                 true
             } else {
                 false
+            }
+        }
+        ActiveModal::McpServers { selected } => {
+            let count = store.with(|s| s.host_info.mcp_servers.len());
+            let run = |command: &'static str| {
+                if let Some(t) = crate::transport::current() {
+                    t.run_host_action(command.to_owned());
+                }
+            };
+            match key {
+                "ArrowDown" => {
+                    if count > 0 {
+                        store.update(|s| {
+                            if let Some(ActiveModal::McpServers { selected }) = &mut s.modal {
+                                *selected = (*selected + 1) % count;
+                            }
+                        });
+                    }
+                    ev.prevent_default();
+                    true
+                }
+                "ArrowUp" => {
+                    if count > 0 {
+                        store.update(|s| {
+                            if let Some(ActiveModal::McpServers { selected }) = &mut s.modal {
+                                *selected = (*selected + count - 1) % count;
+                            }
+                        });
+                    }
+                    ev.prevent_default();
+                    true
+                }
+                "r" => {
+                    run("/mcp reload");
+                    ev.prevent_default();
+                    true
+                }
+                "t" => {
+                    run("/mcp trust");
+                    ev.prevent_default();
+                    true
+                }
+                _ => {
+                    let _ = selected;
+                    false
+                }
             }
         }
         _ => false,

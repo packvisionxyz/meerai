@@ -7,13 +7,14 @@ use crate::rule::{ActionSelector, PermissionAction};
 
 pub(crate) const MATCH_ALL: &str = "*";
 
-const ACTIONS: [PermissionAction; 6] = [
+const ACTIONS: [PermissionAction; 7] = [
     PermissionAction::Read,
     PermissionAction::Edit,
     PermissionAction::Shell,
     PermissionAction::Subagent,
     PermissionAction::WebFetch,
     PermissionAction::ExternalDirectory,
+    PermissionAction::Mcp,
 ];
 
 pub(crate) fn is_path_action(action: PermissionAction) -> bool {

@@ -176,6 +176,9 @@ pub enum ActiveModal {
         kind: RunKind,
         selected: usize,
     },
+    McpServers {
+        selected: usize,
+    },
     RunDetail {
         run: RunTarget,
         selected: usize,
@@ -314,6 +317,13 @@ pub enum PendingSessionAction {
         session_id: SessionId,
     },
     CreateNewTab,
+    CreateTabAt {
+        path: std::path::PathBuf,
+    },
+    SwitchWorkspace {
+        session_id: SessionId,
+        path: std::path::PathBuf,
+    },
     ReplaceLastTab,
     SyncContext,
     CreateAcpTab {
@@ -482,11 +492,50 @@ pub enum RunKind {
     Shells,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpServerView {
+    pub name: String,
+    pub kind: String,
+    pub status: String,
+    pub tools: Vec<String>,
+    pub error: Option<String>,
+}
+
+impl McpServerView {
+    pub fn is_connected(&self) -> bool {
+        self.status == "connected"
+    }
+
+    pub fn is_failed(&self) -> bool {
+        self.status == "failed"
+    }
+
+    pub fn needs_trust(&self) -> bool {
+        matches!(self.status.as_str(), "needs trust" | "untrusted")
+    }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "configured" | "untrusted" | "needs trust"
+        )
+    }
+
+    pub fn badge(&self) -> &str {
+        if self.status.is_empty() {
+            "unknown"
+        } else {
+            &self.status
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusHitKind {
     Run(RunKind),
     Update,
     WebServer,
+    McpServers,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1380,7 +1429,7 @@ pub struct AppState {
     pub sidebar_changes_head_area: Rect,
     pub terminal_width: u16,
     pub file_changes: Vec<FileChangeEntry>,
-    pub mcp_servers: Vec<String>,
+    pub mcp_servers: Vec<McpServerView>,
     pub registered_tools: Vec<String>,
     pub agents: Vec<AgentDefinition>,
     pub skills: Vec<SkillDefinition>,
@@ -1422,6 +1471,7 @@ pub struct AppState {
     pub update_hit: Option<Rect>,
     pub web_server: Option<RunningWebServer>,
     pub web_server_hit: Option<Rect>,
+    pub mcp_hit: Option<Rect>,
     pub hovered_status: Option<StatusHitKind>,
     pub hovered_sidebar: Option<SidebarHitKind>,
     pub registry: Option<Arc<SessionRegistry>>,
@@ -1468,6 +1518,27 @@ impl AppState {
     pub fn set_workspace_query(&mut self, workspace: Arc<dyn WorkspaceQuery>) {
         self.workspace = workspace.clone();
         self.completion.set_workspace(workspace);
+    }
+
+    pub fn apply_host_info(&mut self, info: &meerai_host::HostInfoSnapshot) {
+        self.context_temperature = info
+            .settings
+            .context
+            .temperature
+            .and_then(meerai_common::settings::Temperature::effective);
+        self.context_effort = info.settings.context.effort;
+        self.explicit_context_window = info.settings.context.context_window_tokens;
+        self.mcp_servers = info
+            .mcp_servers
+            .iter()
+            .map(|server| McpServerView {
+                name: server.name.clone(),
+                kind: server.kind.clone(),
+                status: server.status.label().to_string(),
+                tools: server.tools.clone(),
+                error: server.detail.clone(),
+            })
+            .collect();
     }
 }
 
@@ -1573,6 +1644,7 @@ impl AppState {
             terminal_width: 120,
             file_changes: Vec::new(),
             mcp_servers: Vec::new(),
+            mcp_hit: None,
             registered_tools: Vec::new(),
             agents: Vec::new(),
             skills: Vec::new(),
@@ -2058,9 +2130,11 @@ impl AppState {
         }
         let provider_id = &self.tab().active_provider;
         let provider = {
-            let mut rt = self.runtime.write().unwrap();
-            rt.active_provider = provider_id.clone();
-            rt.active_provider_info()
+            let rt = self.runtime.read().unwrap();
+            rt.catalog
+                .provider(provider_id)
+                .cloned()
+                .unwrap_or_else(|| rt.active_provider_info())
         };
         self.cached_key_status(&provider)
     }

@@ -1,66 +1,9 @@
-use std::sync::OnceLock;
-
 use meerai_core::{ToolObservation, ToolOutput, ToolRun};
-use regex::Regex;
 
-struct SignalPattern {
-    #[allow(clippy::expect_used)]
-    label: &'static str,
-    regex: Regex,
-}
-
-fn patterns() -> &'static [SignalPattern] {
-    static PATTERNS: OnceLock<Vec<SignalPattern>> = OnceLock::new();
-    PATTERNS.get_or_init(|| {
-        [
-            (
-                "ignore_previous_instructions",
-                r"(?i)\bignore\s+(?:all\s+previous(?:\s+instructions?)?|(?:any\s+)?(?:previous|prior|above)\s+instructions?)\b",
-            ),
-            (
-                "disregard_prior_instructions",
-                r"(?i)\bdisregard\s+(?:all\s+above|(?:all\s+|any\s+)?(?:previous|prior|above)\s+instructions?)\b",
-            ),
-            (
-                "forget_previous_instructions",
-                r"(?i)\bforget\s+(?:all\s+|any\s+)?(?:previous|prior|above)\s+instructions?\b",
-            ),
-            (
-                "override_system_prompt",
-                r"(?i)\boverride\s+(?:your\s+|the\s+)?system\s+prompt\b",
-            ),
-            (
-                "new_system_instructions",
-                r"(?i)\b(?:new\s+system\s+instructions?|obey\s+these\s+new\s+instructions?)\b",
-            ),
-            ("im_start_system", r"(?i)<\|im_start\|>\s*system\b"),
-            ("system_role_marker", r"(?i)<\|system\|>"),
-            ("inst_marker", r"(?i)\[inst\]"),
-            ("markdown_system_marker", r"(?i)###\s*system\s*:"),
-            ("system_prompt_tag", r"(?i)<\s*system[-_]prompt\s*>"),
-        ]
-        .into_iter()
-        .map(|(label, pattern)| SignalPattern {
-            label,
-            regex: Regex::new(pattern).expect("static screening pattern compiles"),
-        })
-        .collect()
-    })
-}
-
-pub fn detect_injection_signals(text: &str) -> Vec<&'static str> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    patterns()
-        .iter()
-        .filter(|pattern| pattern.regex.is_match(text))
-        .map(|pattern| pattern.label)
-        .collect()
-}
+pub use meerai_core::redact::detect_injection_signals;
 
 pub fn screen_untrusted_text(source: &str, text: &str) -> String {
-    let signals = detect_injection_signals(text);
+    let signals = meerai_core::redact::detect_injection_signals(text);
     if signals.is_empty() {
         return text.to_string();
     }

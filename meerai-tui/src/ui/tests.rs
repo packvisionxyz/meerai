@@ -1631,7 +1631,7 @@ fn renders_approval_overlay_with_preview_and_key_hints() {
     assert!(rendered.contains("y accept"));
     assert!(rendered.contains("t turn"));
     assert!(rendered.contains("a session"));
-    assert!(rendered.contains("esc cancel"));
+    assert!(rendered.contains("c cancel"));
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
     let editing = render_to_string(&mut app);
@@ -3634,4 +3634,242 @@ fn typing_loop_arguments_places_the_cursor_after_the_last_digit() {
             y: content.y
         }
     );
+}
+
+fn mcp_view(name: &str, status: &str, error: Option<&str>) -> crate::app::McpServerView {
+    crate::app::McpServerView {
+        name: name.to_string(),
+        kind: "stdio".to_string(),
+        status: status.to_string(),
+        tools: vec![format!("mcp__{name}__ping")],
+        error: error.map(str::to_string),
+    }
+}
+
+#[test]
+fn statusline_mcp_counter_shows_connected_and_failed() {
+    let mut app = test_app();
+    app.mcp_servers = vec![
+        mcp_view("docs", "connected", None),
+        mcp_view("search", "connected", None),
+        mcp_view("broken", "failed", Some("connection refused")),
+    ];
+    let rendered = render_to_string(&mut app);
+
+    assert!(rendered.contains("mcp 2/3"), "{rendered}");
+    assert!(rendered.contains("1 failed"), "{rendered}");
+    assert!(app.mcp_hit.is_some(), "the counter must be clickable");
+}
+
+#[test]
+fn statusline_hides_the_mcp_counter_when_no_servers_exist() {
+    let mut app = test_app();
+    app.mcp_servers.clear();
+    let rendered = render_to_string(&mut app);
+    assert!(!rendered.contains("mcp "), "{rendered}");
+    assert!(app.mcp_hit.is_none());
+}
+
+#[test]
+fn clicking_the_mcp_counter_opens_the_servers_modal() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = test_app();
+    app.mcp_servers = vec![
+        mcp_view("docs", "connected", None),
+        mcp_view("broken", "failed", Some("connection refused")),
+    ];
+    let _ = render_to_string(&mut app);
+    let hit = app.mcp_hit.expect("mcp counter");
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: hit.x,
+        row: hit.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(matches!(app.modal, Some(ActiveModal::McpServers { .. })));
+}
+
+#[test]
+fn hovering_the_mcp_counter_sets_the_status_hit() {
+    use crossterm::event::{MouseEvent, MouseEventKind};
+
+    let mut app = test_app();
+    app.mcp_servers = vec![mcp_view("docs", "connected", None)];
+    let _ = render_to_string(&mut app);
+    let hit = app.mcp_hit.expect("mcp counter");
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: hit.x,
+        row: hit.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(app.hovered_status, Some(StatusHitKind::McpServers));
+}
+
+#[test]
+fn the_mcp_modal_lists_connected_and_failed_servers_with_errors() {
+    let mut app = test_app();
+    app.mcp_servers = vec![
+        mcp_view("docs", "connected", None),
+        mcp_view("broken", "failed", Some("connection refused")),
+        mcp_view("idle", "configured", None),
+    ];
+    app.modal = Some(ActiveModal::McpServers { selected: 0 });
+    let rendered = render_to_string(&mut app);
+
+    assert!(rendered.contains("MCP servers"), "{rendered}");
+    assert!(rendered.contains("1 connected"), "{rendered}");
+    assert!(rendered.contains("1 failed"), "{rendered}");
+    assert!(rendered.contains("docs"), "{rendered}");
+    assert!(rendered.contains("broken"), "{rendered}");
+    assert!(rendered.contains("connection refused"), "{rendered}");
+    assert!(rendered.contains("idle"), "{rendered}");
+}
+
+#[test]
+fn the_mcp_modal_sorts_failures_first() {
+    let mut app = test_app();
+    app.mcp_servers = vec![
+        mcp_view("aaa_connected", "connected", None),
+        mcp_view("zzz_broken", "failed", Some("boom")),
+    ];
+    app.modal = Some(ActiveModal::McpServers { selected: 0 });
+    let rendered = render_to_string(&mut app);
+    let broken = rendered.find("zzz_broken").expect("failed server");
+    let connected = rendered.find("aaa_connected").expect("connected server");
+    assert!(broken < connected, "failures must render before successes");
+}
+
+#[test]
+fn an_untrusted_project_server_is_visible_and_explains_the_fix() {
+    let mut app = test_app();
+    app.mcp_servers = vec![mcp_view("dbx", "needs trust", Some("run /mcp trust"))];
+    let rendered = render_to_string(&mut app);
+
+    assert!(rendered.contains("mcp 0/1"), "{rendered}");
+    assert!(rendered.contains("1 needs trust"), "{rendered}");
+    assert!(app.mcp_hit.is_some(), "the counter must stay clickable");
+}
+
+#[test]
+fn an_untrusted_server_is_never_silent_in_the_modal() {
+    let mut app = test_app();
+    app.mcp_servers = vec![mcp_view("dbx", "needs trust", Some("run /mcp trust"))];
+    app.modal = Some(ActiveModal::McpServers { selected: 0 });
+    let rendered = render_to_string(&mut app);
+
+    assert!(rendered.contains("dbx"), "{rendered}");
+    assert!(rendered.contains("needs trust"), "{rendered}");
+    assert!(
+        rendered.contains("1 need trust"),
+        "the title must count them: {rendered}"
+    );
+    assert!(
+        !rendered.contains("No MCP servers configured"),
+        "the file exists; the empty state would be a lie: {rendered}"
+    );
+    assert!(
+        rendered.contains("t trust"),
+        "the t hint must be discoverable: {rendered}"
+    );
+}
+
+#[test]
+fn the_sidebar_marks_untrusted_servers_before_connected_ones() {
+    let mut app = test_app();
+    app.mcp_servers = vec![
+        mcp_view("live", "connected", None),
+        mcp_view("dbx", "needs trust", Some("run /mcp trust")),
+    ];
+    let rendered = render_to_string(&mut app);
+
+    assert!(rendered.contains("1 need trust"), "{rendered}");
+    assert!(
+        rendered.contains("dbx"),
+        "the sidebar clips; an untrusted server must win the visible row: {rendered}"
+    );
+}
+
+#[test]
+fn the_mcp_modal_closes_on_escape() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = test_app();
+    app.mcp_servers = vec![mcp_view("docs", "connected", None)];
+    app.modal = Some(ActiveModal::McpServers { selected: 0 });
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.modal.is_none());
+}
+
+#[test]
+fn the_mcp_modal_renders_an_empty_hint() {
+    let mut app = test_app();
+    app.mcp_servers.clear();
+    app.modal = Some(ActiveModal::McpServers { selected: 0 });
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains(".mcp.json"), "{rendered}");
+}
+
+#[test]
+fn sidebar_lists_mcp_servers_with_their_status() {
+    let mut app = test_app();
+    app.mcp_servers = vec![
+        mcp_view("docs", "connected", None),
+        mcp_view("broken", "failed", Some("boom")),
+    ];
+    let rendered = render_to_string(&mut app);
+    assert!(rendered.contains("MCP (2)"), "{rendered}");
+    assert!(rendered.contains("1 failed"), "{rendered}");
+    assert!(
+        rendered.contains("[failed]"),
+        "a failed server must be visible in the sidebar: {rendered}"
+    );
+    assert!(
+        rendered.contains("mcp 1/2"),
+        "the statusline must show the totals"
+    );
+}
+
+#[test]
+fn sidebar_reports_mcp_failures_first_when_rows_are_clipped() {
+    let mut app = test_app();
+    app.mcp_servers = vec![
+        mcp_view("aaa_connected", "connected", None),
+        mcp_view("zzz_broken", "failed", Some("boom")),
+    ];
+    let rendered = render_to_string(&mut app);
+    assert!(
+        rendered.contains("zzz_broken"),
+        "the failing server must survive clipping: {rendered}"
+    );
+}
+
+#[test]
+fn apply_host_info_fills_servers_and_context_from_the_snapshot() {
+    let mut app = test_app();
+    app.mcp_servers.clear();
+    let info = meerai_host::HostInfoSnapshot {
+        mcp_servers: vec![meerai_host::HostMcpServerInfo {
+            name: "dbx".to_string(),
+            kind: "http".to_string(),
+            enabled: true,
+            status: meerai_host::HostMcpStatus::Configured,
+            tools: Vec::new(),
+            detail: None,
+        }],
+        ..Default::default()
+    };
+    app.apply_host_info(&info);
+
+    assert_eq!(app.mcp_servers.len(), 1);
+    assert_eq!(app.mcp_servers[0].status, "configured");
+    let rendered = render_to_string(&mut app);
+    assert!(
+        !rendered.contains("MCP       none"),
+        "the sidebar must not say none after the snapshot: {rendered}"
+    );
+    assert!(rendered.contains("dbx"), "{rendered}");
 }

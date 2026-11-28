@@ -90,7 +90,9 @@ pub(super) fn shell_reactive_class(
             <div class=class role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabindex="-1">
                 <div class="modal-head">
                     <h2 id="dialog-title">{move || title()}</h2>
-                    <button class="modal-close" aria-label="Close dialog" title="Close (Esc)" on:click=move |_| store.update(|s| s.modal = None)>"×"</button>
+                    <button class="modal-close" aria-label="Close dialog" title="Close (Esc)" on:click=move |_| store.update(|s| s.modal = None)>
+                        <crate::views::icons::IconClose />
+                    </button>
                 </div>
                 <div class="modal-body">{body}</div>
                 <div class="modal-actions">{actions}</div>
@@ -120,7 +122,9 @@ pub(super) fn shell_with_width(
             <div class=class role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabindex="-1">
                 <div class="modal-head">
                     <h2 id="dialog-title">{title.to_owned()}</h2>
-                    <button class="modal-close" aria-label="Close dialog" title="Close (Esc)" on:click=move |_| store.update(|s| s.modal = None)>"×"</button>
+                    <button class="modal-close" aria-label="Close dialog" title="Close (Esc)" on:click=move |_| store.update(|s| s.modal = None)>
+                        <crate::views::icons::IconClose />
+                    </button>
                 </div>
                 <div class="modal-body">{body}</div>
                 <div class="modal-actions">{actions}</div>
@@ -212,6 +216,104 @@ pub(super) fn help_modal(store: StoreHandle) -> AnyView {
 }
 
 #[component]
+pub(super) fn McpServersModal(store: StoreHandle) -> impl IntoView {
+    let servers = Memo::new(move |_| {
+        let mut rows = store.with(|s| s.host_info.mcp_servers.clone());
+        rows.sort_by_key(|server| match server.status.as_str() {
+            "failed" | "unsupported" => 0,
+            "needs trust" | "untrusted" => 1,
+            "connected" | "configured" => 2,
+            _ => 3,
+        });
+        rows
+    });
+    let selected = Memo::new(move |_| {
+        let count = servers.with(Vec::len);
+        store.with(|s| match &s.modal {
+            Some(ActiveModal::McpServers { selected }) => (*selected).min(count.saturating_sub(1)),
+            _ => 0,
+        })
+    });
+    let title = move || {
+        let rows = servers.get();
+        let total = rows.len();
+        let failed = rows
+            .iter()
+            .filter(|server| matches!(server.status.as_str(), "failed" | "unsupported"))
+            .count();
+        let connected = rows
+            .iter()
+            .filter(|server| matches!(server.status.as_str(), "connected" | "configured"))
+            .count();
+        format!("MCP servers ({connected} connected, {failed} failed, {total} total)")
+    };
+    let run_action = move |command: &'static str| {
+        if let Some(t) = crate::transport::current() {
+            t.run_host_action(command.to_owned());
+        }
+    };
+    let body = view! {
+        {move || {
+            let rows = servers.get();
+            if rows.is_empty() {
+                return view! {
+                    <div class="modal-form">
+                        <div class="hint">"No MCP servers are configured. Add one to .mcp.json at the project root, then reconnect."</div>
+                    </div>
+                }.into_any();
+            }
+            let active = selected.get();
+            let items = rows.into_iter().enumerate().map(|(index, server)| {
+                let status_class = match server.status.as_str() {
+                    "connected" | "configured" => "ok",
+                    "failed" | "unsupported" => "warn",
+                    "needs trust" | "untrusted" => "warn",
+                    _ => "muted",
+                };
+                let needs_trust = matches!(server.status.as_str(), "needs trust" | "untrusted");
+                let detail = server.detail.clone();
+                let tool_count = server.tools.len();
+                view! {
+                    <div class=format!("mcp-row {}", if index == active { "selected" } else { "" })>
+                        <div class="mcp-row-main">
+                            <span class="panel-title">{server.name.clone()}</span>
+                            <span class="panel-meta">{format!("({})", server.kind)}</span>
+                            <span class=format!("badge {status_class}")>{
+                                if server.status.is_empty() { format!("{tool_count} tools") } else { format!("{} · {tool_count} tools", server.status) }
+                            }</span>
+                            {if needs_trust {
+                                view! {
+                                    <button class="btn tiny" on:click=move |_| run_action("/mcp trust")>"Trust"</button>
+                                }.into_any()
+                            } else {
+                                view! { <span></span> }.into_any()
+                            }}
+                        </div>
+                        {detail.map(|detail| view! {
+                            <div class="mcp-row-error">{format!("↳ {detail}")}</div>
+                        }.into_any()).unwrap_or_else(|| view! { <span></span> }.into_any())}
+                    </div>
+                }.into_any()
+            }).collect::<Vec<_>>();
+            view! {
+                <div class="modal-form">
+                    <div class="hint">"Failed servers sort first. A server that failed to connect is never shown as connected."</div>
+                    <div class="panel-list">{AnyView::from(Fragment::new(items))}</div>
+                </div>
+            }.into_any()
+        }}
+    }
+    .into_any();
+    let actions = view! {
+        <button class="btn" on:click=move |_| run_action("/mcp reload")>"Reload (r)"</button>
+        <button class="btn" on:click=move |_| run_action("/mcp trust")>"Trust project (t)"</button>
+        <button class="btn" on:click=move |_| store.update(|s| s.modal = None)>"Close"</button>
+    }
+    .into_any();
+    shell_reactive(title, store, body, actions)
+}
+
+#[component]
 pub(super) fn VaultResetModal(store: StoreHandle) -> impl IntoView {
     let value = Memo::new(move |_| {
         store.with(|state| match &state.modal {
@@ -228,64 +330,61 @@ pub(super) fn VaultResetModal(store: StoreHandle) -> impl IntoView {
     let store_input = store;
     let store_cancel = store;
     let store_reset = store;
-    view! {
-        <div class="modal-backdrop">
-            <div class="modal">
-                <div class="modal-head">
-                    <h2>"Reset credential vault"</h2>
-                    <button class="btn tiny" on:click=move |_| {
-                        store_cancel.update(|state| state.modal = None);
-                    }>"Close"</button>
-                </div>
-                <div class="modal-form column">
-                    <p class="panel-status error">
-                        "This deletes every saved API key and OAuth credential and creates a new vault key. The old data cannot be recovered."
-                    </p>
-                    <label class="field">
-                        <span class="field-label">"Type reset to confirm"</span>
-                        <input
-                            class="input"
-                            prop:value=value
-                            on:input=move |ev| {
-                                let value = event_target_value(&ev);
-                                store_input.update(|state| {
-                                    if let Some(ActiveModal::VaultReset { input, error }) = state.modal.as_mut() {
-                                        input.replace_text(value);
-                                        *error = None;
-                                    }
-                                });
-                            }
-                        />
-                    </label>
-                    {move || error.get().map(|message| view! {
-                        <p class="panel-status error">{message}</p>
-                    })}
-                    <button class="btn danger" on:click=move |_| {
-                        let value = store_reset.with(|state| match &state.modal {
-                            Some(ActiveModal::VaultReset { input, .. }) => input.text.clone(),
-                            _ => String::new(),
-                        });
-                        if value.trim() != "reset" {
-                            store_reset.update(|state| {
-                                if let Some(ActiveModal::VaultReset { error, .. }) = state.modal.as_mut() {
-                                    *error = Some("Type reset exactly to confirm.".to_owned());
-                                }
-                            });
-                            return;
-                        }
-                        if let Some(transport) = crate::transport::current() {
-                            transport.run_host_action("/vault-reset reset".to_owned());
-                            store_reset.update(|state| state.modal = None);
-                        } else {
-                            store_reset.update(|state| {
-                                if let Some(ActiveModal::VaultReset { error, .. }) = state.modal.as_mut() {
-                                    *error = Some("Reset needs a live server connection.".to_owned());
-                                }
-                            });
-                        }
-                    }>"Reset vault"</button>
-                </div>
+    let body = view! {
+        <div class="modal-form">
+            <div class="banner error">
+                "This deletes every saved API key and OAuth credential and creates a new vault key. The old data cannot be recovered."
             </div>
+            <label class="field">
+                <span class="field-label">"Type reset to confirm"</span>
+                <input
+                    class="input"
+                    placeholder="reset"
+                    prop:value=value
+                    on:input=move |ev| {
+                        let value = event_target_value(&ev);
+                        store_input.update(|state| {
+                            if let Some(ActiveModal::VaultReset { input, error }) = state.modal.as_mut() {
+                                input.replace_text(value);
+                                *error = None;
+                            }
+                        });
+                    }
+                />
+            </label>
+            {move || error.get().map(|message| view! {
+                <div class="banner error">{message}</div>
+            })}
         </div>
     }
+    .into_any();
+    let actions = view! {
+        <button class="btn" on:click=move |_| store_cancel.update(|state| state.modal = None)>"Cancel"</button>
+        <button class="btn danger" on:click=move |_| {
+            let value = store_reset.with(|state| match &state.modal {
+                Some(ActiveModal::VaultReset { input, .. }) => input.text.clone(),
+                _ => String::new(),
+            });
+            if value.trim() != "reset" {
+                store_reset.update(|state| {
+                    if let Some(ActiveModal::VaultReset { error, .. }) = state.modal.as_mut() {
+                        *error = Some("Type reset exactly to confirm.".to_owned());
+                    }
+                });
+                return;
+            }
+            if let Some(transport) = crate::transport::current() {
+                transport.run_host_action("/vault-reset reset".to_owned());
+                store_reset.update(|state| state.modal = None);
+            } else {
+                store_reset.update(|state| {
+                    if let Some(ActiveModal::VaultReset { error, .. }) = state.modal.as_mut() {
+                        *error = Some("Reset needs a live server connection.".to_owned());
+                    }
+                });
+            }
+        }>"Reset vault"</button>
+    }
+    .into_any();
+    shell("Reset credential vault", store, body, actions)
 }

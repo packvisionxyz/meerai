@@ -67,25 +67,25 @@ The protocol crate exists because `AgentEvent` lives in `meerai-agents`, which d
 | `highlight.rs` | Lexical highlighting returns semantic spans; CSS owns colour. |
 | `theme.rs` | Validates `ThemeTokensDto` (hex and CSS named colors), computes `color-scheme` and contrast foregrounds, and manages browser-only `BrowserTheme` (`Host`, `System`, `Light`, `Dark`). |
 | `keymap.rs` | Normalizes `KeyboardEvent.code` to app actions, handles modal navigation and `Tab` focus trapping, and keeps text-field handling separate. |
-| `views/` | `App`, header, tabs, workspace inspector sidebar, transcript, composer, modals, and Settings. |
+| `views/` | `App`, top bar with integrated tabs (`header.rs`), bottom status bar, Sessions rail (`sessions.rs`), workspace inspector sidebar (`sidebar.rs`), transcript, two-zone composer (`composer.rs`), modals, and Settings. |
 
 The client renders:
 
 - Snapshot-first state, SSE cursor resume, resync, a manual Reconnect control, and dismissible notice/error banners.
-- Draggable tabs with `+` session creation, status dots, `ACP` tags, unread markers, a workspace inspector sidebar (MCP servers, tools, cost/metrics, a Diagnose block shown by default, collapsible changed files, subagents), a mobile drawer, and a numbered turn rail with a jump-to-latest pill.
+- Draggable tabs with `+` session creation, status dots, `ACP` tags, unread markers, a workspace inspector sidebar (MCP servers, tools, cost/metrics, a Diagnose block shown by default, collapsible changed files, subagents), a mobile drawer, and a numbered turn rail with a jump-to-latest pill. Each MCP server row shows its transport, status badge, tool count, and the connection error beneath it when a server failed. A server reads `configured` until a client connects it, then `connected` or `failed`; the sidebar fills from the host snapshot at load, so servers appear before any `/mcp` command. A server that needs trust shows a `warn` badge and `run /mcp trust` beneath it, matching the TUI, so an unaccepted `.mcp.json` is never invisible. The statusline shows a `mcp <connected>/<total>` chip (with `· <n> failed` when any server failed) that opens the MCP servers modal; `/mcp` opens the same modal, and `/mcp trust|untrust|reload` runs the host action. In the modal, `↑↓` move, `r` reloads, and `t` trusts the project.
 - Collapsed activity digests per contiguous activity run (with thoughts, tools, and subagents in chronological order, including reasoning preceding a visible reply), using the TUI category counts, gerund phrasing, and structured tool summaries.
 - Markdown, highlighted code blocks, per-reply and tool-output copy buttons, and inline unified edit diffs.
 - Streaming assistant text and reasoning, system lines, errors, subagent rows, and question results.
-- Header model/mode pills, `ACP:<preset>` and update status badges, and a pending request reopen pill.
+- Composer model/mode toolbar (`provider/model` or `ACP:<preset>`, `Plan | Ask | Auto` segmented control, active run chips), top-bar `ACP:<preset>`, update status, and pending request reopen pills.
 - FIFO composer queue, steering (queued items or the active draft), cancel, compact, reset, and resolved `@agent`/`@skill` definition chips in the composer and in directly submitted user messages. The built-in `goal` and `orchestrate` skills also accept `@goal` and `@orchestrate`. Submitting strips known mention tokens from the prompt sent to the model and keeps the chip in the user message; replay shows the stripped prompt.
 - Approval decisions for once, turn, session, decline, decline with reason, and cancel.
 - Question answers with single or multiple choice, a multiline free-text field, Back/Next, keyboard navigation, submit, and cancel.
 - Session picker, history, fork, rewind, delete, workspace diff, debounced search with highlighted preview lines, and workspace inspector actions.
-- User shell through `!command`, with a scrollable shell dialog, concurrent runs, and transcript result. Running shells and subagents appear as clickable `N agents` and `N shells` chips under the composer; a chip opens a `Runs` list, and a row opens the agent conversation or the shell detail. Opening the agent conversation does not expand the transcript card. Rows and cards show an optional run name with its preset. The agent conversation is a full-height overlay that renders the child transcript with the same transcript components as the chat, and its text is selectable with native browser selection. `Esc` closes the agent overlay to the chat and returns from a shell detail to the list.
+- User shell through `!command`, with a scrollable shell dialog, concurrent runs, and transcript result. Running shells and subagents appear as clickable `N agents` and `N shells` chips inside the composer toolbar; a chip opens a `Runs` list, and a row opens the agent conversation or the shell detail. Opening the agent conversation does not expand the transcript card. Rows and cards show an optional run name with its preset. The agent conversation is a full-height overlay that renders the child transcript with the same transcript components as the chat, and its text is selectable with native browser selection. `Esc` closes the agent overlay to the chat and returns from a shell detail to the list.
 - Provider and model pickers (cross-provider or scoped by provider, recent and custom models, active/configured sorting, type-to-filter with prefix matches ranked first, `Tab` completion of the highlighted model, removal of recent or misspelled model ids via the `Forget` badge), API key and base URL entry (including independent Base URL edits for keyless or already-configured providers), clickable ChatGPT sign-in, removal of stored credentials, and Settings (`Providers & Models`, `Current session`, grouped `Context & Limits` with model spec suggestions and a reasoning-effort tier selector (`low` 0.00, `medium` 0.20, `high` 0.50), `Theme` with color swatches, `Retention`, `Sandbox`, `Permissions`) with `config_writable` guards.
 - Command palette, slash commands, `@` mentions, completion, Help, an auto-refreshing subagent overlay, and the running-work panels.
 
-The interface is flat and DOM-native: one surface scale, 1px borders, a single teal accent, rounded cards, no gradients, and a shared transcript and composer column capped at 880 px alongside the left Sessions panel (`Sessions`) and the right inspector sidebar (toggled from the far-right utility cluster). Every dialog uses the same shell: a title band with a close control, an optional footer action row, `pick-row` lists for selectable rows, and `Esc` closes the dialog or returns to the previous panel. Titles use sentence case; TUI slash-command hints are omitted because the same dialog opens from the palette, the sidebar, and a shortcut. Transcript bubbles, error/system banners, markdown blocks, and subagent cards wrap long content inside the conversation column; subagent entries keep both their Markdown `Report` and child `Messages` collapsible inside `<details>` blocks, the child `Messages` body uses the same transcript renderer as the chat, and optimistic in-flight prompts render at the bottom of the transcript until committed, while queued prompts render only in the composer queue strip as stacked rows with `Steer`, `Edit`, and `Remove` actions and one shared strip background. Hover and focus states are visible, dialogs trap `Tab` focus and restore focus to the opener on close, and the composer is a focused input card with an inline pending-request reopen bar when needed, anchored completion, an embedded stateful send/queue/stop action, working status animations, and hint keys below the card. The empty state offers three starter prompts that fill the composer. Light, dark, or custom colors come from the browser color scheme selector (`Host theme`, `System`, `Light`, `Dark`) or the host theme tokens; the client validates host tokens, sets `color-scheme` and contrast foregrounds, and writes CSS custom properties.
+The interface is a flat, DOM-native studio workbench: a single-row `46px` top bar integrating the session tabs and utility actions, a `28px` bottom status bar, borderless `1px`-divided `Sessions` (left) and `Inspector` (right) rails, a single teal accent, rounded surfaces, no gradients, and a shared transcript and composer column capped at `840px`. Every dialog uses a unified modal shell with backdrop click-to-close, a title band with a close control, an optional footer action row, `pick-row` lists for selectable rows, and `Esc` to close or return to the previous panel. Titles use sentence case; TUI slash-command hints are omitted because the same dialog opens from the palette, the sidebar, and a shortcut. Transcript bubbles, error/system banners, markdown blocks, and subagent cards wrap long content inside the conversation column; subagent entries keep both their Markdown `Report` and child `Messages` collapsible inside `<details>` blocks, the child `Messages` body uses the same transcript renderer as the chat, and optimistic in-flight prompts render at the bottom of the transcript until committed, while queued prompts render only in the composer queue strip as stacked rows with `Steer`, `Edit`, and `Remove` actions and one shared strip background. Hover and focus states are visible, dialogs trap `Tab` focus and restore focus to the opener on close, and the two-zone composer card pairs the prompt input with an inline model selector, approval-mode switcher, active run chips, live working status, and send/queue/stop action, with hint keys below the card. The empty state opens directly on the canvas with three starter prompt cards that fill the composer. Light, dark, or custom colors come from the browser color scheme selector (`Host theme`, `System`, `Light`, `Dark`) or the host theme tokens; the client validates host tokens, sets `color-scheme` and contrast foregrounds, and writes CSS custom properties.
 
 The base stylesheet is [`meerai-web-client/styles/app.css`](../meerai-web-client/styles/app.css). Theme values become `--m-*` custom properties on the app shell. The layout uses CSS media queries instead of a manual breakpoint constant, and `env(safe-area-inset-*)` for insets.
 
@@ -207,14 +207,14 @@ The launch surfaces always configure Basic auth. The four open rows are a librar
 
 | Control | Key | Decision | Grant |
 | --- | --- | --- | --- |
-| Approve once | `y` | `Accept` | none |
+| Approve once | `y` / `Enter` | `Accept` | none |
 | Allow turn | `t` | `Accept` with `Turn` | Turn grant, cleared at turn end |
 | Allow session | `a` | `AcceptForSession` | Session grant |
 | Decline | `n` | `Decline` | none |
 | With reason | `r` | `DeclineWithReason` | none |
 | Cancel request | `c` | `Cancel` | none |
 
-`Esc` leaves reason editing back to the action row without a decision; closing the dialog with `Esc` leaves the request pending so it can be reopened from the pending pill (`c` cancels the request). Any attached client can resolve it; the first valid decision wins and later decisions are rejected as stale.
+`Esc` leaves reason editing back to the action row without a decision; closing the dialog with `Esc` leaves the request pending so it can be reopened from the pending pill (`c` cancels the request). This differs from the TUI on purpose: there `Esc` and `c` both cancel, because a terminal overlay has no other meaning for `Esc`. In the question dialog `Esc` cancels the question in both clients. Any attached client can resolve it; the first valid decision wins and later decisions are rejected as stale.
 
 ### 4.3 Browser shortcuts
 
@@ -278,10 +278,32 @@ cargo run -p meerai-cli --features web -- serve
 make build-web
 make run-web
 make serve
+make dev
 make install
 ```
 
 `MEERAI_WEB_DIR` points the server at an unembedded bundle during development. The release build embeds `target/web`, and every release archive and `make install` binary ships with `--features web`.
+
+### 4.6 Hot-restart development loop
+
+`make dev` (or `python3 scripts/dev.py`) runs the build-and-restart loop under `watchexec`. It is the intended way to work on meerai in meerai.
+
+```sh
+make dev                                  # full loop, resume the latest session
+python3 scripts/dev.py --no-web           # skip the Wasm build for Rust-only changes
+python3 scripts/dev.py --no-resume        # always start a fresh session
+python3 scripts/dev.py -- --port 3000     # forward flags to `meerai serve`
+```
+
+The loop has two layers. `watchexec` watches `*.rs`, `*.toml`, `*.yml`, `*.css`, `*.html`, `*.js`, `*.svg`, and `*.py` outside `target/`, `dist/`, and `.git/`, and sends `SIGHUP` to the supervisor on a change. The supervisor rebuilds the Wasm bundle with `--dev` and then `cargo build -p meerai-cli --features web`. It restarts `meerai serve` only when both steps succeed.
+
+The observable guarantees:
+
+- A failed build leaves the previous server running. The browser keeps its SSE connection, so an in-flight turn is not interrupted.
+- A successful build stops the old server with `SIGINT`, waits for its graceful shutdown, and starts the new binary on the same port.
+- The new server resumes the latest session with `--continue`, so the browser tab reconnects to the same session log. When no stored session exists yet, the loop falls back to a fresh session once and then keeps resuming.
+- Each restart resets the registry sequence. A reconnecting client whose cursor is ahead of the new host sends `?after=<n>` with `n` greater than the new `current_seq`, and the registry answers `ResyncRequired`, so the client re-bootstraps from a snapshot instead of waiting on a silent stream.
+- Server output goes to `target/dev-serve.log`. The supervisor prints the tail when a start fails.
 
 ## 5. Invariants
 

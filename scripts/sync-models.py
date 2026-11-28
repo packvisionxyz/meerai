@@ -6,10 +6,11 @@ Usage:
 
 The default source is downloaded from https://models.dev/api.json. The output
 is checked in so the binary needs no network access. Each provider keeps at
-most MAX_MODELS text models, newest first, with the newest model of every
-FEATURED_FAMILY pinned. Reasoning tiers come from the model's `effort`
-reasoning option, as the `low`, `medium`, `high`, `extrahigh`, and `max`
-tiers that meerai exposes.
+most MAX_MODELS text models, selected newest first with the newest model of
+every FEATURED_FAMILY pinned. The rendered entries are sorted by model id so
+a sync diff stays small even when upstream date ties reshuffle. Reasoning
+tiers come from the model's `effort` reasoning option, as the `low`,
+`medium`, `high`, `extrahigh`, and `max` tiers that meerai exposes.
 """
 
 from __future__ import annotations
@@ -150,7 +151,7 @@ def render(models: list[tuple[str, list[dict]]]) -> str:
         "models:",
     ]
     for provider, entries in models:
-        for model in entries:
+        for model in sorted(entries, key=lambda m: m["id"]):
             lines.append(f"  - provider: {provider}")
             model_id = model["id"]
             lines.append(f"    id: '{model_id}'")

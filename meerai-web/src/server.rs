@@ -396,6 +396,9 @@ async fn dispatch_privileged_route(
             if let Some((raw_id, req_id)) = extract_session_subaction(path, "questions") {
                 return handle_question_answer(state, raw_id, req_id, req).await;
             }
+            if let Some(raw_id) = extract_session_action(path, "workspace") {
+                return handle_switch_workspace(state, raw_id, req).await;
+            }
             if let Some(pid) = extract_provider_action(path, "api-key") {
                 return handle_set_api_key(state, pid, req).await;
             }

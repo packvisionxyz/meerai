@@ -247,6 +247,7 @@ Typing `/` opens completion. The implemented handler set
 | `/subagent` | Spawn form: agent, task, model, mode, steps, tokens, cost, tool subset |
 | `/subagent <agent> <task>`, `/subagent cancel <item>` | Direct spawn or cancel |
 | `/vault-reset` | Confirmation dialog; typing `reset` deletes all saved credentials and reinitializes the vault |
+| `/mcp [list\|trust\|untrust\|reload]` | Open the MCP servers panel, or trust, revoke, or reload this project's `.mcp.json` |
 | `/open <path>[:line]` | Open a workspace file in `$EDITOR` at the given line. Absolute paths and `..` are rejected |
 | `/search [query]` (aliases `/tv`, `/find`), `/grep [query]` | File/content search |
 | `/diff [path]` | Diff review |
@@ -268,9 +269,17 @@ Typing `/` opens completion. The implemented handler set
 
 `/agent` and `/skill` send `AgentCommand::ApplyAgent`/`ApplySkill`, which
 append a System instruction at the next step boundary. Unknown or missing
-ids print a System error and send nothing. Note: `/update`, `/tv`, `/find`,
-and `/q` are handled but not listed in the completion table; `/update` is
-discoverable from the statusline hint.
+ids print a System error and send nothing. `/tv`, `/find`, `/q`, `/ctx`,
+`/routes`, `/subagents`, and `/vault` are handled aliases and stay out of the
+table so completion shows one name per command. `/update` is also reachable
+from the statusline hint.
+
+The table itself lives in `meerai-commands`, shared with the browser client, so
+both clients list the same commands with the same argument hints. Each entry
+carries `clients` (`Tui`, `Web`, or `Both`) and `takes_arg`, which means
+"completion leaves a trailing space for an argument" — not "the command fails
+without one". A unit test fails the build when a listed command has no dispatch
+arm in `app/commands.rs`.
 
 ### 2.6 Mentions popup and chips
 
@@ -318,7 +327,12 @@ show a count.
 | `a` | Approve for the session (Session grant) |
 | `n` | Deny (structured refusal to the model) |
 | `r` | Deny with a reason (inline mini-prompt; Enter sends) |
-| `Esc` | Cancel the request and the turn |
+| `c` / `Esc` | Cancel the request and the turn |
+
+`c` and `Esc` do the same thing here. A terminal has no other use for `Esc` in
+this overlay, so both cancel. The browser keeps `Esc` for "dismiss the dialog"
+and uses `c` to cancel, because a web dialog is expected to close on `Esc`; the
+request stays pending there and `c` is the only key that cancels it.
 
 There is no "inspect full file context" key; open the sidebar or diff modal
 before deciding. External-agent (ACP) permissions use the same overlay and
@@ -465,11 +479,27 @@ statusline does not repeat keyboard hints; the composer and the palette carry
 input guidance.
 
 The counters include running work only and appear only when the count is
-non-zero. Each clickable statusline item (both counters and the `web` badge)
-gets a `surface_high` background and `text` foreground while
+non-zero. Each clickable statusline item (both counters, the `web` badge, and the
+`mcp` counter) gets a `surface_high` background and `text` foreground while
 the pointer is over it. Clicking `N agents` or `N shells` opens the `Runs` modal
 for that kind. A row lists one running agent (name, preset, status, steps) or one
 running shell (`!command`, elapsed). `Enter` or a row click opens the detail view.
+The `mcp <connected>/<total>` counter appears whenever at least one server is
+configured, shows `<n> failed` when any server failed, and is colored `success`,
+`warning`, or `faint` by that state. An untrusted project server shows
+`<n> needs trust` in the same slot and is never hidden: a `.mcp.json` that is
+present but unaccepted must not read as an empty list. It opens the `McpServers`
+modal: one row per server with name, transport, status badge, tool count, and the
+connection error when a server failed. Failed servers sort first, then untrusted,
+then connected, then pending. `↑↓` moves, `t` runs `/mcp trust` (only when a
+server needs trust), `r` runs `/mcp reload`, and `Esc` closes. The title counts
+connected, then `need trust` or `failed`, then total. The sidebar shows the same
+state compactly: a `MCP (n)` header with a `failed` or `need trust` count, then
+at most two rows (failures and untrusted first) and a `+N more` line. The full
+list lives in the modal. The sidebar and the statusline fill from the host
+snapshot at launch, so both show servers before the first `/mcp` command. A
+server reads `configured` until a client connects it, then `connected` or
+`failed`.
 The agent detail is a full-pane overlay over the chat transcript area. `Esc`
 closes it back to the chat. It renders the child conversation with the normal
 transcript styles: Markdown, code highlighting, reasoning, tool rows and

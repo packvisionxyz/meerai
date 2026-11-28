@@ -6,7 +6,7 @@ use meerai_policy::ApprovalMode;
 use meerai_store::{ModelRoute, NewProjectMemory, ProjectMemory, ProjectMemoryKind, TaskType};
 use tokio::sync::mpsc;
 
-use crate::session::{HostDefinitionsDiagnostics, SessionOpener};
+use crate::session::{HostDefinitionsDiagnostics, HostMcpServerInfo, SessionOpener};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum HostAction {
@@ -54,6 +54,10 @@ pub enum HostAction {
         task_type: String,
     },
     ListPacks,
+    ListMcpServers,
+    McpTrustProject,
+    McpRevokeProject,
+    McpReload,
     InstallPack {
         source: String,
         rev: Option<String>,
@@ -121,6 +125,13 @@ pub fn parse_host_action(raw: &str) -> Option<HostAction> {
         "/routing" | "/routes" => parse_routing(rest),
         "/packs" => Some(HostAction::ListPacks),
         "/pack" => parse_pack(rest),
+        "/mcp" => match rest.trim() {
+            "" | "list" => Some(HostAction::ListMcpServers),
+            "trust" => Some(HostAction::McpTrustProject),
+            "untrust" | "revoke" => Some(HostAction::McpRevokeProject),
+            "reload" => Some(HostAction::McpReload),
+            _ => None,
+        },
         "/definitions" | "/skills" => Some(HostAction::Definitions),
         "/subagent" | "/subagents" => parse_subagent(rest),
         "/open" => parse_open(rest),
@@ -496,6 +507,22 @@ pub async fn execute_host_action(ctx: HostActionContext<'_>, action: HostAction)
             let packs = ctx.opener.list_packs().await?;
             Ok(render_packs(&packs))
         }
+        HostAction::ListMcpServers => {
+            let servers = ctx.opener.mcp_servers().await?;
+            Ok(render_mcp_servers(&servers))
+        }
+        HostAction::McpTrustProject => {
+            let outcome = ctx.opener.mcp_trust_project().await?;
+            Ok(outcome)
+        }
+        HostAction::McpRevokeProject => {
+            let outcome = ctx.opener.mcp_revoke_project().await?;
+            Ok(outcome)
+        }
+        HostAction::McpReload => {
+            let servers = ctx.opener.mcp_reload().await?;
+            Ok(render_mcp_servers(&servers))
+        }
         HostAction::InstallPack { source, rev } => {
             let pack = ctx.opener.install_pack(&source, rev.as_deref()).await?;
             Ok(format!("Installed pack {} at {}", pack.id, pack.pinned_rev))
@@ -669,6 +696,27 @@ pub fn render_packs(packs: &[meerai_store::InstalledPack]) -> String {
     out
 }
 
+pub fn render_mcp_servers(servers: &[HostMcpServerInfo]) -> String {
+    if servers.is_empty() {
+        return "No MCP servers configured. Add .mcp.json to the project root or the user config directory."
+            .to_string();
+    }
+    let mut out = format!("MCP servers ({}):", servers.len());
+    for server in servers {
+        out.push_str(&format!(
+            "\n- {} [{}] [{}] {} tool(s)",
+            server.name,
+            server.kind,
+            server.status.label(),
+            server.tools.len()
+        ));
+        if let Some(detail) = &server.detail {
+            out.push_str(&format!("\n  {detail}"));
+        }
+    }
+    out
+}
+
 pub fn render_definitions(diagnostics: &HostDefinitionsDiagnostics) -> String {
     let mut out = format!(
         "Definitions: {} agents, {} skills",
@@ -736,11 +784,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn renders_mcp_servers_with_status_and_detail() {
+        let servers = vec![
+            HostMcpServerInfo {
+                name: "docs".to_string(),
+                kind: "stdio".to_string(),
+                enabled: true,
+                status: crate::session::HostMcpStatus::Connected,
+                tools: vec!["mcp__docs__get_page".to_string()],
+                detail: None,
+            },
+            HostMcpServerInfo {
+                name: "search".to_string(),
+                kind: "http".to_string(),
+                enabled: true,
+                status: crate::session::HostMcpStatus::Failed,
+                tools: Vec::new(),
+                detail: Some("connection refused".to_string()),
+            },
+        ];
+        let rendered = render_mcp_servers(&servers);
+        assert!(rendered.contains("MCP servers (2):"), "{rendered}");
+        assert!(
+            rendered.contains("docs [stdio] [connected] 1 tool(s)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("search [http] [failed] 0 tool(s)"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("connection refused"), "{rendered}");
+    }
+
+    #[test]
+    fn renders_an_empty_mcp_list_with_a_hint() {
+        let rendered = render_mcp_servers(&[]);
+        assert!(rendered.contains(".mcp.json"), "{rendered}");
+    }
+
+    #[test]
+    fn mcp_status_labels_are_stable() {
+        use crate::session::HostMcpStatus;
+        assert_eq!(HostMcpStatus::Disabled.label(), "disabled");
+        assert_eq!(HostMcpStatus::Unsupported.label(), "unsupported");
+        assert_eq!(HostMcpStatus::Untrusted.label(), "needs trust");
+        assert_eq!(HostMcpStatus::Configured.label(), "configured");
+        assert_eq!(HostMcpStatus::Connected.label(), "connected");
+        assert_eq!(HostMcpStatus::Failed.label(), "failed");
+        assert!(HostMcpStatus::Configured.is_usable());
+        assert!(HostMcpStatus::Connected.is_usable());
+        assert!(!HostMcpStatus::Untrusted.is_usable());
+        assert!(!HostMcpStatus::Failed.is_usable());
+    }
+
+    #[test]
     fn parses_each_host_command() {
         assert_eq!(
             parse_host_action("/context"),
             Some(HostAction::InspectContext)
         );
+        assert_eq!(parse_host_action("/mcp"), Some(HostAction::ListMcpServers));
+        assert_eq!(
+            parse_host_action("/mcp list"),
+            Some(HostAction::ListMcpServers)
+        );
+        assert_eq!(
+            parse_host_action("/mcp trust"),
+            Some(HostAction::McpTrustProject)
+        );
+        assert_eq!(
+            parse_host_action("/mcp untrust"),
+            Some(HostAction::McpRevokeProject)
+        );
+        assert_eq!(
+            parse_host_action("/mcp revoke"),
+            Some(HostAction::McpRevokeProject)
+        );
+        assert_eq!(
+            parse_host_action("/mcp reload"),
+            Some(HostAction::McpReload)
+        );
+        assert_eq!(parse_host_action("/mcp bogus"), None);
         assert_eq!(
             parse_host_action("/memory parser"),
             Some(HostAction::ListMemories {

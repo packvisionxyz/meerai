@@ -8,310 +8,16 @@ use super::types::*;
 use super::views::*;
 use super::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SlashCommandSpec {
-    pub cmd: &'static str,
-    pub args: &'static str,
-    pub desc: &'static str,
-    pub takes_arg: bool,
-}
+pub use meerai_commands::CommandSpec as SlashCommandSpec;
 
-pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
-    SlashCommandSpec {
-        cmd: "/help",
-        args: "",
-        desc: "Show commands and browser shortcuts",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/sessions",
-        args: "[id|filter]",
-        desc: "Browse, switch, fork, or delete sessions",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/new",
-        args: "",
-        desc: "Start a new native session",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/fork",
-        args: "",
-        desc: "Fork the current session from a turn",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/btw",
-        args: "[question]",
-        desc: "Open a read-only side session seeded from this history",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/acp",
-        args: "[preset]",
-        desc: "Start an ACP session (e.g. agy)",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/close",
-        args: "",
-        desc: "Close and shut down the active session",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/auth",
-        args: "",
-        desc: "Manage provider credentials",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/connect",
-        args: "",
-        desc: "Connect a provider",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/provider",
-        args: "",
-        desc: "Switch or configure provider",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/models",
-        args: "[name]",
-        desc: "Choose a model",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/model",
-        args: "[name]",
-        desc: "Switch active model",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/effort",
-        args: "[low|medium|high|xhigh|max]",
-        desc: "Set reasoning effort, or open Context settings with no argument",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/sampling",
-        args: "",
-        desc: "Set reasoning effort and temperature together",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/temperature",
-        args: "",
-        desc: "Set the sampling temperature override in Context settings",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/agent",
-        args: "<id>",
-        desc: "Apply an agent definition to this session",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/agents",
-        args: "",
-        desc: "Pick an @agent mention",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/skill",
-        args: "<id>",
-        desc: "Apply a skill definition to this session",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/definitions",
-        args: "",
-        desc: "Show discovered agents and skills",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/context",
-        args: "",
-        desc: "Inspect the context breakdown and token headroom",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/memory",
-        args: "[query]",
-        desc: "List or search project memories",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/remember",
-        args: "<note>",
-        desc: "Save a project memory",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/forget",
-        args: "<id>",
-        desc: "Delete a project memory",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/pin",
-        args: "<id> [off]",
-        desc: "Pin or unpin a project memory",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/routing",
-        args: "[set <task> <provider::model>]",
-        desc: "List or edit task model routes",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/packs",
-        args: "",
-        desc: "List installed declarative packs",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/pack",
-        args: "<verb> <id> [rev]",
-        desc: "Install, enable, trust, pin, or remove a pack",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/subagent",
-        args: "<agent> <task>",
-        desc: "Spawn or cancel a manual subagent",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/vault-reset",
-        args: "reset",
-        desc: "Delete every saved credential and reinitialize the vault",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/skills",
-        args: "",
-        desc: "Show discovered skills, warnings, and token estimates",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/loop",
-        args: "",
-        desc: "Show the active loop checklist (or use @goal <instruction>)",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/search",
-        args: "[query]",
-        desc: "Search workspace files or content",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/tv",
-        args: "[query]",
-        desc: "Search workspace files or content",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/find",
-        args: "[query]",
-        desc: "Find workspace files by path",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/grep",
-        args: "[query]",
-        desc: "Search workspace file contents",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/diff",
-        args: "[path]",
-        desc: "Inspect workspace git diffs",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/sidebar",
-        args: "",
-        desc: "Toggle the right details sidebar",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/diagnose",
-        args: "",
-        desc: "Show or hide cache, context, and memory diagnostics",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/clear",
-        args: "",
-        desc: "Clear visible chat transcript",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/reset",
-        args: "",
-        desc: "Reset conversation history",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/cancel",
-        args: "",
-        desc: "Interrupt the active turn",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/compact",
-        args: "",
-        desc: "Compact conversation history",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/mode",
-        args: "[plan|ask|auto]",
-        desc: "Inspect or set approval mode",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/rewind",
-        args: "[turn]",
-        desc: "Rewind files and/or conversation to a turn",
-        takes_arg: true,
-    },
-    SlashCommandSpec {
-        cmd: "/reload",
-        args: "",
-        desc: "Reload settings, theme, hooks, and definitions",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/settings",
-        args: "",
-        desc: "Configure theme, context, sessions, and sandbox",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/update",
-        args: "",
-        desc: "Show version and update instructions",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/quit",
-        args: "",
-        desc: "Session close info",
-        takes_arg: false,
-    },
-    SlashCommandSpec {
-        cmd: "/serve",
-        args: "",
-        desc: "Show active web server status note",
-        takes_arg: false,
-    },
-];
+pub const SLASH_COMMANDS: &[SlashCommandSpec] = meerai_commands::COMMANDS;
+
+pub fn slash_commands_for_web() -> Vec<&'static SlashCommandSpec> {
+    SLASH_COMMANDS
+        .iter()
+        .filter(|spec| spec.clients.has_web())
+        .collect()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaletteActionSpec {
@@ -623,6 +329,15 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
                 error: None,
             });
         }
+        "/mcp" => {
+            if arg.is_empty() || arg == "list" {
+                state.modal = Some(ActiveModal::McpServers { selected: 0 });
+            } else if let Some(transport) = crate::transport::current() {
+                transport.run_host_action(trimmed.to_string());
+            } else {
+                set_status_notice(state, "Host actions need a live server connection.");
+            }
+        }
         "/remember" | "/forget" | "/pin" | "/pack" | "/open" => {
             if let Some(transport) = crate::transport::current() {
                 transport.run_host_action(trimmed.to_string());
@@ -713,7 +428,18 @@ pub fn execute_slash_command(state: &mut AppState, raw: &str) {
         }
         "/mode" => {
             if arg.is_empty() {
-                cycle_approval_mode(state);
+                let label = state
+                    .active_session()
+                    .map(|session| match session.approval_mode {
+                        ApprovalModeDto::Plan => "plan",
+                        ApprovalModeDto::Ask => "ask",
+                        ApprovalModeDto::Auto => "auto",
+                    })
+                    .unwrap_or("ask");
+                set_status_notice(
+                    state,
+                    format!("Approval mode: {label}. Use /mode plan|ask|auto."),
+                );
             } else {
                 let mode = match arg.to_ascii_lowercase().as_str() {
                     "plan" => Some(ApprovalModeDto::Plan),
@@ -788,9 +514,10 @@ pub fn filtered_commands(filter: &str) -> Vec<&'static SlashCommandSpec> {
     let q = filter.trim().to_ascii_lowercase();
     SLASH_COMMANDS
         .iter()
+        .filter(|c| c.clients.has_web())
         .filter(|c| {
             q.is_empty()
-                || c.cmd.to_ascii_lowercase().contains(&q)
+                || c.name.to_ascii_lowercase().contains(&q)
                 || c.desc.to_ascii_lowercase().contains(&q)
         })
         .collect()

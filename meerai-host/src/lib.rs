@@ -34,10 +34,11 @@ pub use search::{
 pub use session::{
     AcpPresetInfo, Backend, ChatGptLogin, ChatGptLoginOutcome, ForgetModel, HostAgentInfo,
     HostAuthKind, HostDefinitionInfo, HostDefinitionsDiagnostics, HostInfoSnapshot,
-    HostMcpServerInfo, HostModelItem, HostProviderItem, HostProvidersSnapshot, HostReloadOutcome,
-    HostReloadPayload, HostSettingsUpdate, HostSettingsView, HostShadowedDefinition, HostSkillInfo,
-    OpenedSession, ResolvedAgentApplication, ResolvedModelSelection, ResolvedSkillApplication,
-    SessionOpener, WebServerHandle, WebServerLauncher, WebServerStart, definition_token_estimate,
+    HostMcpServerInfo, HostMcpStatus, HostModelItem, HostProviderItem, HostProvidersSnapshot,
+    HostReloadOutcome, HostReloadPayload, HostSettingsUpdate, HostSettingsView,
+    HostShadowedDefinition, HostSkillInfo, OpenedSession, ResolvedAgentApplication,
+    ResolvedModelSelection, ResolvedSkillApplication, SessionOpener, WebServerHandle,
+    WebServerLauncher, WebServerStart, definition_token_estimate,
 };
 pub use theme::{HostColor, HostPalette, NamedColor, ResolvedThemeHex};
 pub use workspace::{LocalWorkspace, WorkspaceMatch, WorkspaceQuery, local_workspace};

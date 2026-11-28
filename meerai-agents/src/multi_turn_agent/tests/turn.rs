@@ -1726,3 +1726,101 @@ async fn turn_end_heals_calls_left_unexecuted_by_a_cancel() {
         "repair must be idempotent"
     );
 }
+
+struct GrowingToolset {
+    admitted: std::sync::atomic::AtomicBool,
+}
+
+impl GrowingToolset {
+    fn new() -> Self {
+        Self {
+            admitted: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "q": { "type": "string" } },
+            "description": "y".repeat(4_000)
+        })
+    }
+}
+
+#[async_trait]
+impl Toolset for GrowingToolset {
+    fn name(&self) -> String {
+        "growing".to_string()
+    }
+
+    fn definition(&self) -> Vec<ToolDefinition> {
+        let mut definitions = vec![ToolDefinition {
+            r#type: "function".to_string(),
+            name: "grow-load".to_string(),
+            description: "admit another tool".to_string(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        }];
+        if self.admitted.load(Ordering::SeqCst) {
+            definitions.push(ToolDefinition {
+                r#type: "function".to_string(),
+                name: "grow-target".to_string(),
+                description: "the lazily admitted tool".to_string(),
+                parameters: Self::schema(),
+            });
+        }
+        definitions
+    }
+
+    fn contain(&self, fn_name: &str) -> bool {
+        fn_name == "grow-load" || (fn_name == "grow-target" && self.admitted.load(Ordering::SeqCst))
+    }
+
+    fn effect_of(&self, _fn_name: &str) -> EffectClass {
+        EffectClass::Read
+    }
+
+    async fn invoke(&self, fn_name: &str, _args: &str) -> Result<ToolOutput, ToolError> {
+        if fn_name == "grow-load" {
+            self.admitted.store(true, Ordering::SeqCst);
+            return Ok(ToolOutput::Text("loaded".to_string()));
+        }
+        Ok(ToolOutput::Text("target ran".to_string()))
+    }
+}
+
+#[tokio::test]
+async fn a_schema_admitted_mid_turn_reaches_the_next_step() {
+    let calls = vec![ToolCall {
+        call_id: "c1".to_string(),
+        fn_name: "grow-load".to_string(),
+        fn_arguments: serde_json::json!({}),
+        thought_signatures: None,
+    }];
+
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(calls))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+
+    let mut agent = MultiTurnAgent::with_streamer(
+        streamer,
+        "test-model",
+        vec![Box::new(GrowingToolset::new())],
+        "",
+        MultiTurnAgentConfig::default(),
+    );
+    let before = agent.tool_schema_tokens;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent
+        .prompt_streaming("go", &tx, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let after = agent.tool_schema_tokens;
+    assert!(
+        after > before,
+        "a schema admitted mid-turn must be counted on the next step: before {before}, after {after}"
+    );
+    assert!(after > 900, "the 4 KB schema must be counted, got {after}");
+}

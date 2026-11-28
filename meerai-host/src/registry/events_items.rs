@@ -1,4 +1,17 @@
 use super::*;
+fn workspace_decision(tool_name: &str, output: Option<&str>) -> Option<(String, bool)> {
+    if tool_name != meerai_agents::WORKSPACE_CD_TOOL {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(output?.trim()).ok()?;
+    let path = value.get("path")?.as_str()?.to_string();
+    let carry = match value.get("action")?.as_str()? {
+        "carried" => true,
+        "opened" => false,
+        _ => return None,
+    };
+    Some((path, carry))
+}
 impl RegistryState {
     pub(super) fn apply_items_event(
         &mut self,
@@ -333,6 +346,7 @@ impl RegistryState {
                     output,
                     ..
                 } => {
+                    let workspace_change = workspace_decision(&name, output.as_deref());
                     let (entry, updated_summary) = {
                         let Some(record) = state.sessions.get_mut(session_id) else {
                             return;
@@ -355,6 +369,16 @@ impl RegistryState {
                             };
                         (entry, updated_summary)
                     };
+                    if let Some((path, carry)) = workspace_change {
+                        state.push_event(
+                            broadcast_tx,
+                            RegistryEventKind::WorkspaceChanged {
+                                session_id: session_id.clone(),
+                                path,
+                                carry,
+                            },
+                        );
+                    }
                     state.push_event(
                         broadcast_tx,
                         RegistryEventKind::EntryCompleted {
@@ -462,5 +486,44 @@ impl RegistryState {
 
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::workspace_decision;
+
+    #[test]
+    fn reads_a_carried_decision() {
+        let output = r#"{"action":"carried","path":"/tmp/x"}"#;
+        assert_eq!(
+            workspace_decision("workspace-cd", Some(output)),
+            Some(("/tmp/x".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn reads_an_opened_decision() {
+        let output = r#"{"action":"opened","path":"/tmp/y"}"#;
+        assert_eq!(
+            workspace_decision("workspace-cd", Some(output)),
+            Some(("/tmp/y".to_string(), false))
+        );
+    }
+
+    #[test]
+    fn ignores_other_tools_and_plain_prose() {
+        assert_eq!(
+            workspace_decision("read_file", Some(r#"{"action":"opened"}"#)),
+            None
+        );
+        assert_eq!(
+            workspace_decision(
+                "workspace-cd",
+                Some("workspace unchanged; the user cancelled")
+            ),
+            None
+        );
+        assert_eq!(workspace_decision("workspace-cd", None), None);
     }
 }

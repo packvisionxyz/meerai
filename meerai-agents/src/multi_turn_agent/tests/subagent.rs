@@ -76,6 +76,7 @@ impl BarrierStreamer {
 impl ChatStreamer for BarrierStreamer {
     async fn stream_chat(
         &self,
+        _provider: Option<&str>,
         _model: &str,
         _request: ChatRequest,
         _options: &ChatOptions,
@@ -1176,6 +1177,7 @@ async fn subagent_ignores_single_tool_timeout_ms() {
     impl ChatStreamer for SlowOnceStreamer {
         async fn stream_chat(
             &self,
+            _provider: Option<&str>,
             _model: &str,
             _request: ChatRequest,
             _options: &ChatOptions,

@@ -57,6 +57,7 @@ impl AppState {
                             editing_reason = true;
                             None
                         }
+                        KeyCode::Char('c') => Some((ApprovalDecision::Cancel, None)),
                         KeyCode::Esc => Some((ApprovalDecision::Cancel, None)),
                         _ => None,
                     };
@@ -107,10 +108,14 @@ impl AppState {
                     KeyCode::Up | KeyCode::Char('k') => {
                         scroll = scroll.saturating_sub(1);
                     }
-                    KeyCode::PageDown | KeyCode::Char('d') if key.code == KeyCode::PageDown => {
+                    KeyCode::PageDown | KeyCode::Char('d')
+                        if key.code == KeyCode::PageDown || has_ctrl =>
+                    {
                         scroll = (scroll + 10).min(max);
                     }
-                    KeyCode::PageUp | KeyCode::Char('u') if key.code == KeyCode::PageUp => {
+                    KeyCode::PageUp | KeyCode::Char('u')
+                        if key.code == KeyCode::PageUp || has_ctrl =>
+                    {
                         scroll = scroll.saturating_sub(10);
                     }
                     _ => {}

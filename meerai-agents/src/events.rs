@@ -247,6 +247,10 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    AutoApproved {
+        tool: String,
+        effect: EffectClass,
+    },
     ContextUpdated {
         breakdown: ContextBreakdown,
     },

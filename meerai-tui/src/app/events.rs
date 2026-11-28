@@ -4,6 +4,7 @@ use meerai_agents::events::RequestId;
 use meerai_agents::{
     AgentEvent, ErrorCode, ItemDelta, ItemId, ItemStatus, SessionItem, TurnEndReason,
 };
+use meerai_core::EffectClass;
 use meerai_session::replay::{ReplayEntry, ReplaySubagent, ReplayToolCall, replay_from_events};
 use meerai_session::{LoggedEvent, SessionEvent};
 
@@ -647,6 +648,17 @@ impl SessionTab {
                     text.extend(reason.chars().take(200));
                 }
                 self.transcript.push(TranscriptEntry::System { text });
+            }
+            AgentEvent::AutoApproved { tool, effect } => {
+                let label = match effect {
+                    EffectClass::Execute => "shell",
+                    EffectClass::External => "external",
+                    EffectClass::Read => "read",
+                    EffectClass::Write => "write",
+                };
+                self.transcript.push(TranscriptEntry::System {
+                    text: format!("auto mode allowed a {label} effect without asking: {tool}"),
+                });
             }
             AgentEvent::UsageUpdated {
                 usage, cumulative, ..

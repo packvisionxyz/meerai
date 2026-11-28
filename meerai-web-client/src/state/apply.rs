@@ -130,6 +130,17 @@ pub fn apply_view_event(state: &mut AppState, event: ViewEvent) -> EventEffect {
             }
             EventEffect::None
         }
+        ViewEvent::WorkspaceChanged {
+            session_id,
+            path,
+            carry,
+        } => {
+            state.host_info.workspace_root = path.clone();
+            if carry {
+                return EventEffect::ReopenWorkspace { session_id, path };
+            }
+            EventEffect::None
+        }
         ViewEvent::SessionActivated { session_id } => {
             state.hidden_session_ids.remove(&session_id);
             switch_to_session(state, &session_id);

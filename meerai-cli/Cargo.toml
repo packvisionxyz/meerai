@@ -26,6 +26,7 @@ meerai-client = { path = "../meerai-client/" }
 meerai-common = { path = "../meerai-common/" }
 meerai-core = { path = "../meerai-core/" }
 meerai-host = { path = "../meerai-host/", optional = true }
+meerai-mcp = { path = "../meerai-mcp/" }
 meerai-policy = { path = "../meerai-policy/" }
 meerai-providers = { path = "../meerai-providers/" }
 meerai-session = { path = "../meerai-session/" }

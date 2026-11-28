@@ -1129,6 +1129,95 @@ permissions:
     }
 
     #[test]
+    fn mcp_rules_match_server_and_tool_resources() {
+        let engine = PolicyEngine::new(ApprovalMode::Ask).with_rules(vec![
+            rule(
+                ActionSelector::Action(PermissionAction::Mcp),
+                "github/*",
+                Effect::Allow,
+            ),
+            rule(
+                ActionSelector::Action(PermissionAction::Mcp),
+                "evil/*",
+                Effect::Deny,
+            ),
+        ]);
+
+        assert_eq!(
+            engine.decide(&check(
+                PermissionAction::Mcp,
+                "github/search_issues",
+                EffectClass::External
+            )),
+            Decision::Allow
+        );
+        assert_eq!(
+            engine.decide(&check(
+                PermissionAction::Mcp,
+                "evil/exfiltrate",
+                EffectClass::External
+            )),
+            deny()
+        );
+        assert_eq!(
+            engine.decide(&check(
+                PermissionAction::Mcp,
+                "unknown/tool",
+                EffectClass::External
+            )),
+            Decision::Ask,
+            "an unmatched mcp resource falls back to the ask tier"
+        );
+    }
+
+    #[test]
+    fn mcp_is_not_governed_by_webfetch_rules() {
+        let engine = PolicyEngine::new(ApprovalMode::Ask).with_rules(vec![rule(
+            ActionSelector::Action(PermissionAction::WebFetch),
+            "*",
+            Effect::Allow,
+        )]);
+
+        assert_eq!(
+            engine.decide(&check(
+                PermissionAction::Mcp,
+                "github/search_issues",
+                EffectClass::External
+            )),
+            Decision::Ask,
+            "a webfetch allow must not silently authorize mcp"
+        );
+    }
+
+    #[test]
+    fn plan_mode_denies_every_mcp_call() {
+        let engine = PolicyEngine::new(ApprovalMode::Plan).with_rules(vec![rule(
+            ActionSelector::Action(PermissionAction::Mcp),
+            "*",
+            Effect::Allow,
+        )]);
+
+        assert_eq!(
+            engine.decide(&check(
+                PermissionAction::Mcp,
+                "github/search_issues",
+                EffectClass::External
+            )),
+            plan_deny()
+        );
+    }
+
+    #[test]
+    fn mcp_action_string_contract() {
+        assert_eq!(PermissionAction::Mcp.as_str(), "mcp");
+        assert_eq!(PermissionAction::parse("mcp"), Some(PermissionAction::Mcp));
+
+        let selector: ActionSelector = serde_yaml::from_str("\"mcp\"").unwrap();
+        assert_eq!(selector, ActionSelector::Action(PermissionAction::Mcp));
+        assert_eq!(String::from(selector), "mcp");
+    }
+
+    #[test]
     fn plan_denial_reason_reaches_the_refusal_message() {
         let engine = PolicyEngine::new(ApprovalMode::Plan);
 

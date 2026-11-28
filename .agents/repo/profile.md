@@ -10,7 +10,7 @@
 
 - **Product:** `meerai` (Pack Vision) — a pure, provider-agnostic terminal agent harness
   written in Rust, featuring a selection-first modal TUI and a scriptable headless CLI mode.
-- **Shape:** Rust Cargo workspace (`edition = "2024"`, toolchain pinned to `1.100.0`). Seventeen
+- **Shape:** Rust Cargo workspace (`edition = "2024"`, toolchain pinned to `1.100.0`). Eighteen
   library crates plus the `meerai` binary, built by `meerai-cli`. Milestones M1–M13 of
   `docs/harness-spec.md` have landed; the repo is distribution-hardened (Apache-2.0
   license, CI, tag-driven releases, Pages site) and includes project-root config discovery, TUI
@@ -51,7 +51,7 @@
 | `meerai-tools/` | `code` (`CodeTools`, seven `code-*` tools, path guards, unified diffs, `ToolRun` observations, secret env scrub), `repo_map` (`RepoMapToolset`), `lsp` (`LspToolset`; opt-in post-edit diagnostics via `context.post_edit_diagnostics`), `search_as_code` (`SearchAsCodeToolset`), `web` (`WebTools`; `web-fetch`, `web-search`, private-address guard) |
 | `meerai-common/` | SQLite-backed `AppSettings`, project-root discovery (`find_project_root`) plus project settings load/merge (`load_project_settings`, `merge_project_settings`), markdown agent/skill discovery (`definitions`: `load_definitions`, user/pack/project sources, diagnostics), hook configuration (`hooks`: `HookEvent`, `HookEntry`, `load_hooks`), declarative packs (`packs`) |
 | `meerai-client/` | Client-facing provider surface: `ProviderCatalog` + `providers.yml` plus the generated `models.yml` model table (context windows, prices, per-model `effort_levels`), `ModelInfo`, `RuntimeProviderState`, `KeyStatus`, `SecretStore` contract, `MemorySecretStore`, auth listing |
-| `meerai-providers/` | `genai` client factory + AEAD `VaultSecretStore` (ChaCha20-Poly1305, OS keychain DEK or Argon2id passphrase); re-exports the client surface |
+| `meerai-providers/` | `genai` client factory (`build_genai_client_for(provider_id)` binds auth + endpoint resolvers to one provider), AEAD `VaultSecretStore` (ChaCha20-Poly1305, OS keychain DEK or Argon2id passphrase); re-exports the client surface |
 | `meerai-agents/` | `MultiTurnAgent` turn/step loop, `AgentHarness`/`HarnessConfig` (+ `TokenPricing`), `AgentEvent`, `intercept` (`Interceptor`/`StepPlan`/`ToolPlan`/`ToolContext`/`ToolOutcome`, async `before_tool`), hook engine (`hooks`: `HookEngine`/`HookContext`/`HookReport`, `HookFired` logging), `question-ask` (`QuestionAsked`/`AnswerQuestion`, not an approval), the `LoopInterceptor` adapter over `meerai-skills`, `prompt`, `spawn_worker`, `subagent` runtime (`SubagentToolset`, built-ins `explore`/`plan`/`build`/`general`/`research`/`review` + custom child runs filtered by `mode` and tightened by definition `permissions`, `child_session_id` on `SubagentRun`), delegated `acp-run` (`acp_subagent`: `AcpRunToolset`/`AcpSpawner`), `ApplyAgent`/`ApplySkill` instruction application, tool-output redaction (`redact.rs`) |
 | `meerai-skills/` | Built-in `goal` and `orchestrate` skill bodies (`skills/`), `builtin` catalog merge, `skill-load` (`SkillToolset`), the shared four-phase loop engine (`LoopHandle`, `LoopState` render/prompts, `turn_stopping`/`follow_up_turn`), and `loop-*` (`loop-plan`/`loop-act`/`loop-observe`/`loop-adjust`/`loop-status`) |
 | `meerai-host/` | UI-neutral host seams (`SessionOpener`, `OpenedSession`, `WorkspaceQuery`/`LocalWorkspace`, `WebServerLauncher`), shared `diff` (list, build, stage, unstage)/`search`/`syntax`/`theme`/`update`, and live `SessionRegistry` event pump/ring |
@@ -59,7 +59,7 @@
 | `meerai-web/` | Loopback HTTP/SSE server (`hyper` + `subtle` Basic auth, `Host`/`Origin`/JSON checks, parity REST/SSE routes, embedded Wasm bundle serving) |
 | `meerai-web-client/` | Leptos 0.8 CSR Wasm browser client ([browser-ui.md](../../docs/browser-ui.md)): DOM transcript, Markdown + code highlighting, left Sessions sidebar plus TUI modal surfaces, approval scopes, Settings, palette actions, `@` mentions, completions, a sidebar Diagnose block shown by default (cache hit/write, context, memory) and a collapsible changed-files block, built via `scripts/build-web.py` |
 | `meerai-web-bindgen/` | Internal build helper binary wrapping `wasm-bindgen-cli-support` for `scripts/build-web.py` |
-| `meerai-tui/` | Modal TUI library (`ratatui` + `crossterm`) split into `ui/` panels and `app/` modules, transcript replay, `/serve`, tabs, collapsible digests, a sidebar `AGENTS` list (main + subagents, display-only), a sidebar Diagnose block shown by default, and a collapsible File Changes block, turn-anchor rail, diff/search, re-exporting `meerai-host` seams (no `meerai-tools`, `meerai-providers`, or `meerai-web` dependency) |
+| `meerai-tui/` | Modal TUI library (`ratatui` + `crossterm`) split into `ui/` panels and `app/` modules, transcript replay, `/serve`, tabs, collapsible digests, a sidebar `AGENTS` list (main + subagents, display-only), a statusline `mcp <connected>/<total>` counter with `failed` and `needs trust` counts that opens the `McpServers` modal (`t` trust, `r` reload), a sidebar `MCP` summary (failures and untrusted first), a sidebar Diagnose block shown by default, and a collapsible File Changes block, turn-anchor rail, diff/search, re-exporting `meerai-host` seams (no `meerai-tools`, `meerai-providers`, or `meerai-web` dependency) |
 | `meerai-syntax/` | Tree-sitter highlighting for Rust, C, C++, C#, Java, Kotlin, Scala, Swift, PHP, Haskell, Ruby, Python, JavaScript, TypeScript/TSX, Go, Bash, HTML, CSS, and JSON plus a lexical fallback; `highlight_block` returns per-line `Token`s; depends only on grammar crates |
 | `meerai-cli/` | Binary crate (`meerai`): CLI flags (`--fork`), headless runner, `auth`/`sessions` (`list`, `rm`, `prune`, `fork`) / `serve` (feature `web`) subcommands, and TUI launcher |
 | `.agents/agents/`, `.agents/skills/` | Default agent (`*.md`) and skill (`*/SKILL.md`) definitions, read at runtime |
@@ -78,6 +78,25 @@
   replies, cancel, `session/load`, stderr tail, ignored live tests. The CLI/TUI depend on it.
   OpenCode/Claude presets and M14 remain backlog.
 
+### MCP (see `docs/threat-model.md` §2.10)
+
+- `meerai-mcp/` — MCP client on `rmcp` 3.12 with `default-features = false`
+  (`client` + `transport-child-process` +
+  `transport-streamable-http-client-reqwest`; `server`, `macros`, `chrono`, and `auth` stay
+  out). `config` parses `.mcp.json` in the OpenCode shape (`type` `local`/`remote`, `command`
+  string or array, `cwd`, `environment`), `merge` applies tighten-only project rules,
+  `client` connects over stdio or streamable HTTP and calls a tool, `toolset` is
+  `McpToolset` behind the `ToolCaller` seam on `PermissionAction::Mcp`, `budget` decides full
+  versus indexed admission (~2k tokens) and renders the one-line tool index, `registry` caches
+  one `Arc` connection per server and records every failed connect in `failures` so it surfaces
+  as `failed`, `setup` builds the `/mcp` report. A configured server reports `configured`, not
+  `connected`, until a client opens it. Over budget, only
+  `load_tool_schema` plus loaded schemas are exposed, capped at 12 entries / ~4k tokens. Env expansion is deferred to
+  `client::spawn_plan`, so a secret never enters the parsed config. A stdio server's stderr is
+  piped into a bounded 200-line tail (`stderr::StderrTail`) and appended to a connect
+  failure, so launcher output never reaches the alternate screen. Trust is per project and
+  bound to the file's SHA-256. Only `meerai-cli` depends on it; `meerai-tui` must not.
+
 ## 3. Commands
 
 | Task | Command |
@@ -86,6 +105,7 @@
 | Install / build | `cargo build --workspace` |
 | Install binary | `make install` (builds the Wasm bundle, installs with `--features web`) |
 | Dev | `cargo check --workspace --all-targets` |
+| Dev (browser hot restart) | `make dev` (`python3 scripts/dev.py`) — watchexec loop that rebuilds Wasm + binary and restarts `meerai serve` only on a green build; `--no-web`, `--no-resume`, and serve flags after `--` |
 | Format | `cargo fmt --all` (check only: `cargo fmt --all -- --check`) |
 | Lint | `cargo clippy --workspace --all-targets` |
 | Test (workspace) | `cargo test --workspace` |
@@ -369,7 +389,14 @@ Notes:
     `ApplyAgent`, and `Reload`; keep those fields in sync when adding a
     model-switch path. Do not hand-edit `models.yml`; regenerate it with
     `scripts/sync-models.py`.
-40. **Web tools:** `WebTools` registers `web-fetch` and `web-search` as
+40. **Per-provider requests:** every LLM request resolves its own provider.
+    `ChatStreamer::stream_chat` carries the provider id; `meerai-cli`'s
+    `ProviderStreamer` keeps one genai client per provider and each client's
+    resolvers close over their provider. `RuntimeProviderState.active_provider`
+    is a UI default only: never read it to authenticate or route a turn, and
+    never write it from a render path or a tab switch. Returning it to the
+    request path re-creates the cross-tab and cross-instance key bleed.
+41. **Web tools:** `WebTools` registers `web-fetch` and `web-search` as
     `EffectClass::External` under the `webfetch` action. `web-fetch` allows only
     http and https, rejects URL userinfo, re-checks the address guard on every
     redirect hop, and refuses loopback, private, link-local, CGNAT, and
@@ -384,7 +411,7 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 
 | Layer | Canonical shape | Reference |
 | :--- | :--- | :--- |
-| LLM Provider | `genai::Client` builder + auth resolver + `RuntimeProviderState` | `meerai-common/src/providers.rs` |
+| LLM Provider | one `genai::Client` per provider (`build_genai_client_for`) + `RuntimeProviderState` as a UI default only | `meerai-providers/src/providers.rs` |
 | Toolset macro | `#[derive(Toolset)]` struct + same-module `impl <Struct>Invoke` | `meerai-macros/tests/derive_toolset_pass.rs` |
 | Free-fn tool | `#[tool(...)] async fn` generating `<PascalName>Toolset` | `meerai-macros/src/tool/attribute_tool.rs` |
 | Hand-written toolset | `impl Toolset` with `definition`/`contain`/`effect_of`/`invoke_structured` | `meerai-tools/src/code/mod.rs` |
@@ -407,6 +434,7 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
 | TUI overlay | `ActiveModal` variant + `handle_agent_event` queue + key handler | `meerai-tui/src/app.rs` (`ActiveModal::Approval`) |
 | Markdown | `comrak` AST walker; the TUI emits width-aware `MarkdownLine`s with a hang prefix, the browser emits Leptos views | `meerai-tui/src/markdown.rs`, `meerai-web-client/src/markdown.rs` |
 | ACP bridge | `connect_with` spawns `AcpAgent`, handshake/`session/load`, typed `AcpEvent`, `AcpWorker` to `AgentCommand`/`AgentEvent`, permission oneshot replies, cancel | `meerai-acp/src/{client,events,worker}.rs`, `meerai-cli/src/{acp_cmd,main,headless}.rs`, `meerai-tui/src/{lib,app,ui}` |
+| MCP integration | `build_setup` merges user + trusted project `.mcp.json`; an untrusted project file lists its servers as `needs trust` instead of dropping them silently; a first interactive run prompts once and stores the content hash; `McpRegistry` connects configured servers once and shares an `Arc` with subagents, recording each failed connect so it reports `failed` with its error; `McpToolset` emits `mcp__<server>__<tool>` on `PermissionAction::Mcp` with a `<server>/<tool>` resource and gates indexed tools behind `load_tool_schema`; `/mcp`, `/mcp trust`, `/mcp untrust`, `/mcp reload` | `meerai-mcp/src/{config,merge,client,toolset,registry,setup}.rs`, `meerai-cli/src/main.rs` (`prompt_project_mcp_trust`, `mcp_registry`, `mcp_snapshot`), `meerai-host/src/{actions,session}.rs` |
 
 ## 6. Generated and vendored paths
 
@@ -415,13 +443,15 @@ Canonical implementations live in [`patterns.md`](patterns.md). Summary:
   hand-edit snapshot expectations without verifying macro output.
 - `meerai-client/models.yml` — generated by `scripts/sync-models.py` from
   `https://models.dev/api.json`. Do not hand-edit; run the script and commit the diff. Providers
-  with more than 50 text models keep the 50 newest plus one flagship per major family.
+  with more than 50 text models keep the 50 newest plus one flagship per major family. Entries
+  render sorted by model id (provider order fixed by `PROVIDERS`), so a sync diff stays small.
 - `target/` — Cargo build artifacts (gitignored).
 
 ## 7. Verification matrix
 
 | Touched | Required gate |
 | :--- | :--- |
+| `meerai-commands` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-commands -p meerai-tui -p meerai-web-client` |
 | `meerai-input` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-input` |
 | `meerai-core` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-core` |
 | `meerai-macros` | `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p meerai-macros` |
@@ -573,6 +603,10 @@ Detail in [`infra.md`](infra.md). Summary:
 - Questions are not approvals. `question-ask` is read-classified, runs before the rest of the
   batch, uses `QuestionAsked`/`AnswerQuestion`, records no grant, and is not registered for
   subagents. Headless auto-cancels with a hint.
+- Auto-approval notice: in `auto` mode an `Execute`/`External` tool with no matching rule is
+  allowed silently, and `authorize` emits `AgentEvent::AutoApproved { tool, effect }` once per
+  turn (`auto_approved_notified` resets per turn). Both clients render it as a system row. `ask`
+  mode never emits it, because the prompt is the notice.
 - Loop extension: M6 checkpoint capture is the built-in `CheckpointInterceptor` on async
   `before_tool`; do not add loop-semantics branches to `turn.rs`. `turn_stopping` may continue the
   turn more than once; the turn clock, token cap, and the step cap when one is set
@@ -606,6 +640,10 @@ Detail in [`infra.md`](infra.md). Summary:
 - TUI client seam: `WorkspaceQuery` supplies file listing and content search; the local
   implementation lives in `meerai-tui/src/workspace.rs` and is injectable through
   `TuiLaunchConfig::workspace_query`. Do not re-add `meerai-tools` to the TUI.
+- Slash-command table: `meerai-commands::COMMANDS` is the single list both clients render.
+  Each entry carries `clients` and `takes_arg` (completion leaves a trailing space). Add a
+  command there, then add a dispatch arm in each client it applies to; a TUI test fails the
+  build when a listed TUI command has no arm.
 - TUI and browser input: `meerai-input::TextInput` is the shared multiline model (cursor,
   selection, word/line motion, paste, visual wrapping, row/column mapping). The composer, question
   `Other`, approval reason, queued edit, subagent task, and every other modal text field use it

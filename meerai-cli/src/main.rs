@@ -11,6 +11,7 @@ mod headless;
 mod hooks_cmd;
 mod sessions_cmd;
 mod store_cmd;
+mod streamer;
 #[cfg(test)]
 mod tests;
 
@@ -29,8 +30,9 @@ use meerai_acp::{AGY, AcpStart, AcpWorkerConfig, spawn_acp_worker};
 use meerai_agents::spawn_worker;
 use meerai_agents::{
     AcpChild, AcpRunToolset, AcpSpawner, AgentHarness, DEFAULT_GLOBAL_CONCURRENCY, HarnessConfig,
-    HookEngine, LoopInterceptor, MemoryCapture, MemoryToolset, MultiTurnAgent, QuestionToolset,
-    RoutingCoordinator, SubagentToolFactory, SubagentToolset, TokenPricing,
+    HookEngine, LoopInterceptor, MemoryCapture, MemoryToolset, MultiTurnAgent,
+    MultiTurnAgentConfig, QuestionToolset, RoutingCoordinator, SubagentToolFactory,
+    SubagentToolset, TokenPricing,
 };
 use meerai_client::providers::{
     ProviderAuthKind, ProviderCatalog, RuntimeProviderState, canonical_provider_id,
@@ -49,16 +51,15 @@ use meerai_core::{Toolset, async_trait};
 #[cfg(any(feature = "tui", feature = "web"))]
 use meerai_host::{
     AcpPresetInfo, Backend, ChatGptLogin, ChatGptLoginOutcome, HostAgentInfo, HostAuthKind,
-    HostDefinitionInfo, HostDefinitionsDiagnostics, HostInfoSnapshot, HostModelItem, HostPalette,
-    HostProviderItem, HostProvidersSnapshot, HostReloadOutcome, HostReloadPayload,
-    HostSettingsUpdate, HostSettingsView, HostSkillInfo, OpenedSession, ResolvedAgentApplication,
-    ResolvedModelSelection, ResolvedSkillApplication, SessionOpener, SessionRegistry,
-    WebServerLauncher,
+    HostDefinitionInfo, HostDefinitionsDiagnostics, HostInfoSnapshot, HostMcpServerInfo,
+    HostMcpStatus, HostModelItem, HostPalette, HostProviderItem, HostProvidersSnapshot,
+    HostReloadOutcome, HostReloadPayload, HostSettingsUpdate, HostSettingsView, HostSkillInfo,
+    OpenedSession, ResolvedAgentApplication, ResolvedModelSelection, ResolvedSkillApplication,
+    SessionOpener, SessionRegistry, WebServerLauncher,
 };
 #[cfg(feature = "web")]
 use meerai_host::{WebServerHandle, WebServerStart};
 use meerai_policy::{ApprovalMode, PolicyEngine, parse_approval_mode, rules_from_yaml};
-use meerai_providers::providers::build_genai_client;
 use meerai_providers::secrets::default_secret_store;
 use meerai_session::{
     LoggedEvent, LoopState, Session, SessionConfig, SessionId, SessionSummary, TurnId,
@@ -83,6 +84,7 @@ use meerai_web::{
     BASIC_USERNAME, DEFAULT_SERVE_PORT, DEFAULT_SERVE_SECRET, RunningServer, ServeAuth,
     ServeConfig, ServeSecret, start_server,
 };
+use streamer::ProviderStreamer;
 
 use auth_cmd::run_auth;
 use cli::{CliSubcommand, help_text, parse_args};
@@ -303,6 +305,63 @@ fn prompt_project_hook_trust(
         .hooks
         .get_or_insert_with(HooksSettings::default);
     hooks.trusted_projects = trusted;
+    true
+}
+
+fn prompt_project_mcp_trust(
+    project_root: &Path,
+    config_dir: Option<&Path>,
+    user_settings: &mut AppSettings,
+) -> bool {
+    let (project, hash, _) = meerai_mcp::load_project_config(project_root);
+    let Some(config) = project else {
+        return false;
+    };
+    let Some(hash) = hash else {
+        return false;
+    };
+    let names: Vec<&str> = config
+        .servers
+        .iter()
+        .map(|server| server.name.as_str())
+        .collect();
+    eprintln!(
+        "Project {} declares MCP server(s): {}",
+        meerai_mcp::MCP_CONFIG_FILE,
+        names.join(", ")
+    );
+    eprintln!("MCP servers can run commands and reach the network as you.");
+    eprintln!("Trust this project's MCP servers? [y/N]");
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    let answer = answer.trim().to_ascii_lowercase();
+    if answer != "y" && answer != "yes" {
+        return false;
+    }
+    let Some(dir) = config_dir else {
+        let mcp = user_settings.mcp.get_or_insert_with(Default::default);
+        return mcp.trust_project(project_root, &hash);
+    };
+
+    let mut disk_settings = match load_settings_from(dir) {
+        Ok(settings) => settings,
+        Err(err) => {
+            eprintln!("Warning: failed to save project mcp trust: {err:#}");
+            return false;
+        }
+    };
+    disk_settings
+        .mcp
+        .get_or_insert_with(Default::default)
+        .trust_project(project_root, &hash);
+    if let Err(err) = save_settings_to(dir, &disk_settings) {
+        eprintln!("Warning: failed to save project mcp trust: {err:#}");
+        return false;
+    }
+    let mcp = user_settings.mcp.get_or_insert_with(Default::default);
+    mcp.trust_project(project_root, &hash);
     true
 }
 
@@ -582,8 +641,6 @@ async fn main() -> Result<()> {
     {
         eprintln!("Warning: ChatGPT plan credential: {err:#}");
     }
-    let client = build_genai_client(runtime.clone(), secrets.clone())?;
-
     let approval_mode =
         resolve_approval_mode(cli.mode.as_deref(), settings.approval_mode.as_deref())?;
     let policy = build_policy(
@@ -795,6 +852,21 @@ async fn main() -> Result<()> {
             "Warning: ignoring project hooks: run `meerai hooks trust`, set MEERAI_TRUST_PROJECT_HOOKS=1, or set hooks.trust_project: true"
         );
     }
+    let mcp_project_present = project_root.join(meerai_mcp::MCP_CONFIG_FILE).is_file();
+    let mcp_already_trusted = settings
+        .mcp
+        .as_ref()
+        .and_then(|mcp| mcp.trusted_hash(&project_root))
+        .is_some();
+    if mcp_project_present
+        && !mcp_already_trusted
+        && cli.prompt.is_none()
+        && io::stdin().is_terminal()
+        && prompt_project_mcp_trust(&project_root, config_dir.as_deref(), &mut user_settings)
+        && let Some(mcp) = user_settings.mcp.as_ref()
+    {
+        settings.mcp = Some(mcp.clone());
+    }
     let hooks = if hooks_enabled {
         let (entries, hook_warnings) = load_hooks_for_run(
             config_dir.as_deref(),
@@ -822,7 +894,11 @@ async fn main() -> Result<()> {
         user_settings: std::sync::Mutex::new(user_settings.clone()),
         config_dir: config_dir.clone(),
         data_dir: data_dir.clone(),
-        client,
+        streamer: Arc::new(ProviderStreamer::new(
+            runtime.clone(),
+            secrets.clone(),
+            active_provider.clone(),
+        )),
         approval_mode,
         execution_world,
         sensitive_env_vars,
@@ -835,6 +911,7 @@ async fn main() -> Result<()> {
         script_runtime,
         default_provider: active_provider.clone(),
         default_model: active_model.clone(),
+        mcp: Arc::new(tokio::sync::Mutex::new(None)),
     });
 
     if let Some(prompt) = cli.prompt {
@@ -848,8 +925,9 @@ async fn main() -> Result<()> {
             let exit_code = run_headless_channels(cmd_tx, event_rx, prompt, cli.json).await?;
             std::process::exit(exit_code);
         }
-        let mut agent =
-            host.build_agent(session, &active_provider, &active_model, initial_system)?;
+        let mut agent = host
+            .build_agent(session, &active_provider, &active_model, initial_system)
+            .await?;
         agent.set_loop_auto_continue(false);
         if let Err(err) =
             meerai_providers::oauth::ensure_fresh_credential(secrets.as_ref(), &active_provider)
@@ -867,7 +945,9 @@ async fn main() -> Result<()> {
     } else {
         let meta = session.meta();
         let events = session.events();
-        let agent = host.build_agent(session, &active_provider, &active_model, initial_system)?;
+        let agent = host
+            .build_agent(session, &active_provider, &active_model, initial_system)
+            .await?;
         let (cmd_tx, event_rx) = spawn_worker(agent);
         OpenedSession {
             session_id: meta.id,
@@ -1355,7 +1435,7 @@ struct CliSessionHost {
     user_settings: std::sync::Mutex<AppSettings>,
     config_dir: Option<PathBuf>,
     data_dir: Option<PathBuf>,
-    client: meerai_core::genai::Client,
+    streamer: Arc<dyn meerai_agents::ChatStreamer>,
     approval_mode: ApprovalMode,
     execution_world: Arc<dyn ExecutionWorld>,
     sensitive_env_vars: Vec<String>,
@@ -1368,6 +1448,7 @@ struct CliSessionHost {
     script_runtime: Option<ScriptRuntime>,
     default_provider: String,
     default_model: String,
+    mcp: Arc<tokio::sync::Mutex<Option<meerai_mcp::McpRegistry>>>,
 }
 
 impl CliSessionHost {
@@ -1416,7 +1497,7 @@ impl CliSessionHost {
         )
     }
 
-    fn build_agent(
+    async fn build_agent(
         &self,
         session: Session,
         provider: &str,
@@ -1424,9 +1505,10 @@ impl CliSessionHost {
         system: String,
     ) -> Result<MultiTurnAgent> {
         self.build_agent_scoped(session, provider, model, system, false)
+            .await
     }
 
-    fn build_btw_agent(
+    async fn build_btw_agent(
         &self,
         session: Session,
         provider: &str,
@@ -1434,9 +1516,10 @@ impl CliSessionHost {
         system: String,
     ) -> Result<MultiTurnAgent> {
         self.build_agent_scoped(session, provider, model, system, true)
+            .await
     }
 
-    fn build_agent_scoped(
+    async fn build_agent_scoped(
         &self,
         session: Session,
         provider: &str,
@@ -1449,13 +1532,10 @@ impl CliSessionHost {
         } else {
             self.approval_mode
         };
-        let policy = build_policy(
-            mode,
-            self.settings.permissions.as_ref(),
-            &self.workspace_root,
-        )?;
+        let workspace_root = session.meta().cwd;
+        let policy = build_policy(mode, self.settings.permissions.as_ref(), &workspace_root)?;
 
-        let mut readable_roots = vec![self.workspace_root.clone()];
+        let mut readable_roots = vec![workspace_root.clone()];
         if let Some(dir) = session.dir() {
             readable_roots.push(dir.to_path_buf());
         }
@@ -1479,17 +1559,17 @@ impl CliSessionHost {
             .and_then(|sandbox| sandbox.strict_env)
             .unwrap_or(false);
 
-        let code_tools = CodeTools::new(self.workspace_root.clone())
-            .with_writable_roots(vec![self.workspace_root.clone()])
+        let code_tools = CodeTools::new(workspace_root.clone())
+            .with_writable_roots(vec![workspace_root.clone()])
             .with_readable_roots(readable_roots.clone())
             .with_sensitive_env_vars(self.sensitive_env_vars.clone())
             .with_execution_world(self.execution_world.clone())
             .with_require_sandbox(require_for_shell)
             .with_strict_env(strict_env);
-        let repo_map = RepoMapToolset::new(self.workspace_root.clone())
-            .with_readable_roots(readable_roots.clone());
-        let lsp = LspToolset::new(self.workspace_root.clone()).with_readable_roots(readable_roots);
-        let mut sac = SearchAsCodeToolset::new(self.workspace_root.clone())
+        let repo_map =
+            RepoMapToolset::new(workspace_root.clone()).with_readable_roots(readable_roots.clone());
+        let lsp = LspToolset::new(workspace_root.clone()).with_readable_roots(readable_roots);
+        let mut sac = SearchAsCodeToolset::new(workspace_root.clone())
             .with_sensitive_env_vars(self.sensitive_env_vars.clone())
             .with_execution_world(self.execution_world.clone())
             .with_require_sandbox(require_for_scripts)
@@ -1499,7 +1579,7 @@ impl CliSessionHost {
         }
         let mut initial_tools =
             build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, read_only);
-        let memory_project_root = find_project_root(&self.workspace_root);
+        let memory_project_root = find_project_root(&workspace_root);
         let memory_store = if read_only { None } else { Some(self.store()?) };
         if let Some(store) = &memory_store {
             initial_tools.push(Box::new(
@@ -1507,6 +1587,7 @@ impl CliSessionHost {
                     .with_source_session(Some(session.id().clone())),
             ));
             initial_tools.push(Box::new(QuestionToolset));
+            initial_tools.push(Box::new(meerai_agents::WorkspaceToolset));
         }
         if self.skill_catalog.iter().any(|skill| skill.model_invocable) {
             initial_tools.push(Box::new(SkillToolset::new(self.skill_catalog.clone())));
@@ -1516,8 +1597,34 @@ impl CliSessionHost {
                 AcpRunToolset::new(Arc::new(CliAcpSpawner)).with_hooks(self.hooks.clone()),
             ));
         }
+        let mcp_registry = self.mcp_registry(&memory_project_root, read_only).await;
+        for (server, connection) in mcp_registry.toolsets_filtered(read_only).await {
+            let Some(config) = mcp_registry.server(&server).cloned() else {
+                continue;
+            };
+            initial_tools.push(Box::new(meerai_mcp::McpRegistry::build_toolset(
+                connection,
+                config.timeout_ms,
+            )));
+        }
+        let mcp_for_subagents = mcp_registry.clone();
         let subagent_factory: SubagentToolFactory = Arc::new(move |read_only| {
-            build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, read_only)
+            let mut tools = build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, read_only);
+            for server in mcp_for_subagents.servers() {
+                if !server.is_connectable() {
+                    continue;
+                }
+                if read_only && !server.read_only {
+                    continue;
+                }
+                if let Some(connection) = mcp_for_subagents.cached(&server.name) {
+                    tools.push(Box::new(meerai_mcp::McpRegistry::build_toolset(
+                        connection,
+                        server.timeout_ms,
+                    )));
+                }
+            }
+            tools
         });
 
         let model_spec = if model.trim().is_empty() {
@@ -1530,7 +1637,13 @@ impl CliSessionHost {
                 .format_genai_spec(provider, model)
         };
 
-        let mut agent = MultiTurnAgent::new(self.client.clone(), model_spec, initial_tools, system);
+        let mut agent = MultiTurnAgent::with_streamer(
+            self.streamer.clone(),
+            model_spec,
+            initial_tools,
+            system,
+            MultiTurnAgentConfig::default(),
+        );
         agent.set_provider(canonical_provider_id(provider));
         let mut config = self.harness_config(provider, model);
         if read_only {
@@ -1625,17 +1738,18 @@ impl CliSessionHost {
     }
 
     #[cfg(any(feature = "tui", feature = "web"))]
-    fn build_opened_session(
+    async fn build_opened_session(
         &self,
         session: Session,
         provider: String,
         model: String,
     ) -> Result<OpenedSession> {
         self.build_opened_session_with(session, provider, model, false)
+            .await
     }
 
     #[cfg(any(feature = "tui", feature = "web"))]
-    fn build_opened_session_with(
+    async fn build_opened_session_with(
         &self,
         session: Session,
         provider: String,
@@ -1661,9 +1775,11 @@ impl CliSessionHost {
                 .unwrap_or(self.approval_mode)
         };
         let mut agent = if transient {
-            self.build_btw_agent(session, &provider, &model, self.base_system.clone())?
+            self.build_btw_agent(session, &provider, &model, self.base_system.clone())
+                .await?
         } else {
-            self.build_agent(session, &provider, &model, self.base_system.clone())?
+            self.build_agent(session, &provider, &model, self.base_system.clone())
+                .await?
         };
         agent.set_permission_mode(approval_mode);
         let (cmd_tx, event_rx) = spawn_worker(agent);
@@ -1724,6 +1840,7 @@ impl CliSessionHost {
         }
         let mut toolsets = build_workspace_toolsets(&code_tools, &repo_map, &lsp, &sac, false);
         toolsets.push(Box::new(QuestionToolset));
+        toolsets.push(Box::new(meerai_agents::WorkspaceToolset));
         toolsets.push(Box::new(AcpRunToolset::new(Arc::new(CliAcpSpawner))));
         let mut names = toolsets
             .into_iter()
@@ -1736,6 +1853,95 @@ impl CliSessionHost {
         names
     }
 
+    #[allow(dead_code)]
+    async fn mcp_registry(
+        &self,
+        project_root: &std::path::Path,
+        _read_only: bool,
+    ) -> meerai_mcp::McpRegistry {
+        let mut guard = self.mcp.lock().await;
+        match guard.as_ref() {
+            Some(registry) => registry.clone(),
+            None => {
+                let (_, merged, _) = self.load_merged_settings();
+                let trusted = merged
+                    .mcp
+                    .as_ref()
+                    .and_then(|mcp| mcp.trusted_hash(project_root));
+                let report =
+                    meerai_mcp::build_setup(self.config_dir.as_deref(), project_root, trusted);
+                let allowed: std::collections::BTreeSet<String> = report
+                    .servers
+                    .iter()
+                    .filter(|server| server.status == meerai_mcp::ServerStatus::Configured)
+                    .map(|server| server.name.clone())
+                    .collect();
+                let servers = report
+                    .configs
+                    .into_iter()
+                    .filter(|server| allowed.contains(&server.name))
+                    .collect();
+                let registry = meerai_mcp::McpRegistry::new(servers, project_root);
+                *guard = Some(registry.clone());
+                registry
+            }
+        }
+    }
+
+    #[cfg(any(feature = "tui", feature = "web"))]
+    async fn mcp_reports(&self, project_root: &std::path::Path) -> Vec<meerai_mcp::ServerReport> {
+        let registry = self.mcp.lock().await.clone();
+        match registry {
+            Some(registry) => registry.reports(),
+            None => self.mcp_config_reports(project_root),
+        }
+    }
+
+    #[cfg(any(feature = "tui", feature = "web"))]
+    fn mcp_config_reports(&self, project_root: &std::path::Path) -> Vec<meerai_mcp::ServerReport> {
+        let (_, merged, _) = self.load_merged_settings();
+        let trusted = merged
+            .mcp
+            .as_ref()
+            .and_then(|mcp| mcp.trusted_hash(project_root));
+        meerai_mcp::build_setup(self.config_dir.as_deref(), project_root, trusted).servers
+    }
+
+    #[cfg(any(feature = "tui", feature = "web"))]
+    async fn mcp_snapshot(
+        &self,
+        project_root: &std::path::Path,
+        _merged: &AppSettings,
+    ) -> Vec<HostMcpServerInfo> {
+        self.mcp_reports(project_root)
+            .await
+            .into_iter()
+            .map(|server| HostMcpServerInfo {
+                name: server.name,
+                kind: server.kind,
+                enabled: server.enabled,
+                status: match server.status {
+                    meerai_mcp::ServerStatus::Disabled => HostMcpStatus::Disabled,
+                    meerai_mcp::ServerStatus::Unsupported => HostMcpStatus::Unsupported,
+                    meerai_mcp::ServerStatus::Untrusted => HostMcpStatus::Untrusted,
+                    meerai_mcp::ServerStatus::Configured => HostMcpStatus::Configured,
+                    meerai_mcp::ServerStatus::Connected => HostMcpStatus::Connected,
+                    meerai_mcp::ServerStatus::Failed => HostMcpStatus::Failed,
+                },
+                tools: server.tools,
+                detail: server.detail,
+            })
+            .collect()
+    }
+
+    #[cfg(any(feature = "tui", feature = "web"))]
+    async fn clear_mcp_cache(&self) {
+        let previous = self.mcp.lock().await.take();
+        if let Some(registry) = previous {
+            registry.shutdown().await;
+        }
+    }
+
     #[cfg(any(feature = "tui", feature = "web"))]
     fn persist_user_settings(&self, user: &AppSettings) -> Result<()> {
         let dir = self
@@ -1745,7 +1951,7 @@ impl CliSessionHost {
         save_settings_to(dir, user)
     }
 
-    #[cfg(any(feature = "tui", feature = "web"))]
+    #[allow(dead_code)]
     fn load_merged_settings(&self) -> (AppSettings, AppSettings, Vec<String>) {
         let project_root = find_project_root(&self.workspace_root);
         let user = self
@@ -1769,7 +1975,11 @@ impl CliSessionHost {
     }
 
     #[cfg(any(feature = "tui", feature = "web"))]
-    fn compute_host_info_from(&self, merged: &AppSettings, hooks_count: usize) -> HostInfoSnapshot {
+    async fn compute_host_info_from(
+        &self,
+        merged: &AppSettings,
+        hooks_count: usize,
+    ) -> HostInfoSnapshot {
         let project_root = find_project_root(&self.workspace_root);
         let definitions = load_definitions_for_runtime(self.config_dir.as_deref(), &project_root);
         let git_branch = meerai_host::current_branch(&self.workspace_root);
@@ -1805,6 +2015,7 @@ impl CliSessionHost {
             .collect();
         let raw_theme = merged.theme.clone().unwrap_or_default();
         let (palette, _) = HostPalette::from_settings(&raw_theme);
+        let mcp_servers = self.mcp_snapshot(&project_root, merged).await;
         let permissions_summary = merged
             .permissions
             .as_ref()
@@ -1830,7 +2041,7 @@ impl CliSessionHost {
             acp_presets,
             agents,
             skills,
-            mcp_servers: Vec::new(),
+            mcp_servers,
             enabled_tools: self.enabled_tool_names(),
             hooks_count,
             update_available: None,
@@ -1951,7 +2162,7 @@ impl SessionOpener for CliSessionHost {
         let meta = session.meta();
         let (provider, model) =
             self.resolve_session_provider_model(meta.provider.as_deref(), meta.model.as_deref());
-        self.build_opened_session(session, provider, model)
+        self.build_opened_session(session, provider, model).await
     }
 
     async fn create_session(&self) -> Result<OpenedSession> {
@@ -1966,7 +2177,42 @@ impl SessionOpener for CliSessionHost {
         if !model.trim().is_empty() {
             session.set_model(&model).await?;
         }
-        self.build_opened_session(session, provider, model)
+        self.build_opened_session(session, provider, model).await
+    }
+
+    async fn switch_workspace(
+        &self,
+        id: &SessionId,
+        cwd: &std::path::Path,
+    ) -> Result<OpenedSession> {
+        let current = Session::open(
+            &self.session_config,
+            id.clone(),
+            self.workspace_root.clone(),
+        )
+        .await?;
+        let meta = current.meta();
+        let (provider, model) =
+            self.resolve_session_provider_model(meta.provider.as_deref(), meta.model.as_deref());
+        current
+            .update_meta(|meta| meta.cwd = cwd.to_path_buf())
+            .await?;
+        drop(current);
+
+        let session = Session::open(&self.session_config, id.clone(), cwd.to_path_buf()).await?;
+        self.build_opened_session(session, provider, model).await
+    }
+
+    async fn create_session_at(&self, cwd: &std::path::Path) -> Result<OpenedSession> {
+        let session =
+            Session::open_or_create(&self.session_config, SessionId::new(), cwd.to_path_buf())
+                .await?;
+        let (provider, model) = self.resolve_session_provider_model(None, None);
+        session.set_provider(&provider).await?;
+        if !model.trim().is_empty() {
+            session.set_model(&model).await?;
+        }
+        self.build_opened_session(session, provider, model).await
     }
 
     async fn run_user_shell(&self, command: &str) -> Result<String> {
@@ -2039,7 +2285,7 @@ impl SessionOpener for CliSessionHost {
         let meta = forked.meta();
         let (provider, model) =
             self.resolve_session_provider_model(meta.provider.as_deref(), meta.model.as_deref());
-        self.build_opened_session(forked, provider, model)
+        self.build_opened_session(forked, provider, model).await
     }
 
     async fn btw_session(&self, id: &SessionId) -> Result<OpenedSession> {
@@ -2050,7 +2296,9 @@ impl SessionOpener for CliSessionHost {
         let session = Session::memory_fork(&self.session_config, id).await?;
         let (provider, model) = self
             .resolve_session_provider_model(source.provider.as_deref(), source.model.as_deref());
-        let mut opened = self.build_opened_session_with(session, provider, model, true)?;
+        let mut opened = self
+            .build_opened_session_with(session, provider, model, true)
+            .await?;
         opened.title = Some("btw".to_string());
         Ok(opened)
     }
@@ -2086,6 +2334,7 @@ impl SessionOpener for CliSessionHost {
     async fn host_info(&self) -> HostInfoSnapshot {
         let (_user, merged, _warnings) = self.load_merged_settings();
         self.compute_host_info_from(&merged, self.hooks.entries().len())
+            .await
     }
 
     async fn providers_snapshot(&self) -> Result<HostProvidersSnapshot> {
@@ -2388,7 +2637,9 @@ impl SessionOpener for CliSessionHost {
         } else {
             Vec::new()
         };
-        let host_info = self.compute_host_info_from(&merged, hook_entries.len());
+        let host_info = self
+            .compute_host_info_from(&merged, hook_entries.len())
+            .await;
         Ok(HostReloadOutcome {
             host_info,
             warnings,
@@ -2549,6 +2800,63 @@ impl SessionOpener for CliSessionHost {
             .as_deref()
             .context("no data directory; set HOME or XDG_DATA_HOME")?;
         meerai_providers::secrets::open_vault(Some(data_dir))?.reset()
+    }
+
+    async fn mcp_servers(&self) -> Result<Vec<HostMcpServerInfo>> {
+        let (_, merged, _) = self.load_merged_settings();
+        Ok(self
+            .mcp_snapshot(&find_project_root(&self.workspace_root), &merged)
+            .await)
+    }
+
+    async fn mcp_trust_project(&self) -> Result<String> {
+        let project_root = find_project_root(&self.workspace_root);
+        let (has_project, hash, _) = meerai_mcp::load_project_config(&project_root);
+        if has_project.is_none() {
+            bail!(
+                "no {} in {}",
+                meerai_mcp::MCP_CONFIG_FILE,
+                project_root.display()
+            );
+        }
+        let hash = hash.context("could not hash the project mcp config")?;
+
+        let mut user = self.load_merged_settings().0;
+        user.mcp
+            .get_or_insert_with(Default::default)
+            .trust_project(&project_root, &hash);
+        self.persist_user_settings(&user)?;
+        self.clear_mcp_cache().await;
+        Ok(format!(
+            "Trusted {} for this project ({}).",
+            meerai_mcp::MCP_CONFIG_FILE,
+            &hash[..hash.len().min(19)]
+        ))
+    }
+
+    async fn mcp_revoke_project(&self) -> Result<String> {
+        let project_root = find_project_root(&self.workspace_root);
+        let mut user = self.load_merged_settings().0;
+        let changed = user
+            .mcp
+            .as_mut()
+            .is_some_and(|mcp| mcp.revoke_project(&project_root));
+        if changed {
+            self.persist_user_settings(&user)?;
+            self.clear_mcp_cache().await;
+            Ok("Revoked project mcp trust.".to_string())
+        } else {
+            Ok("This project was not trusted.".to_string())
+        }
+    }
+
+    async fn mcp_reload(&self) -> Result<Vec<HostMcpServerInfo>> {
+        self.clear_mcp_cache().await;
+        let project_root = find_project_root(&self.workspace_root);
+        let registry = self.mcp_registry(&project_root, false).await;
+        registry.toolsets().await;
+        let (_, merged, _) = self.load_merged_settings();
+        Ok(self.mcp_snapshot(&project_root, &merged).await)
     }
 
     async fn read_session_blob(&self, id: &SessionId, blob_key: &str) -> Result<String> {

@@ -59,6 +59,22 @@ cargo build --release -p meerai-cli --features web    # target/release/meerai
 `make package` builds the same web-enabled binary into a `dist/` archive plus
 `.sha256`, matching the release artifacts.
 
+### Developing meerai in meerai
+
+`make dev` runs a hot-restart loop for browser-UI work. It rebuilds the Wasm
+bundle and the binary on every change and restarts `meerai serve` only after a
+green build, so a failed build never drops the browser connection.
+
+```sh
+make dev                                  # resume the latest session
+python3 scripts/dev.py --no-web           # Rust-only loop; skip the Wasm build
+python3 scripts/dev.py -- --port 3000     # forward flags to `meerai serve`
+```
+
+It needs `watchexec` (`cargo install watchexec-cli --locked`). Then open
+`http://127.0.0.1:28860` and sign in with `meerai` / `12345678`. See
+[docs/browser-ui.md](docs/browser-ui.md#46-hot-restart-development-loop).
+
 Rust `1.100.0` and the `wasm32-unknown-unknown` target (pinned in
 [rust-toolchain.toml](rust-toolchain.toml)) are required; `rustup` installs both
 automatically, and `scripts/build-web.py` runs the workspace's
@@ -194,7 +210,7 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 
 - OS sandbox on Windows hosts and on hosts without Seatbelt or bubblewrap.
 - `meerai export`.
-- Tool and permission mapping from agent definitions and MCP servers.
+- MCP elicitation/sampling/roots prompts, and MCP resources and prompts.
 - USD cost, unless the provider catalog carries model prices.
 - ACP presets for OpenCode and Claude, and `meerai acp` for editors.
 - Multi-account ChatGPT plan switching.
@@ -226,6 +242,7 @@ Headless runs print the assistant text to stdout. `--json` prints one NDJSON
 | `meerai-web-client` | Browser client |
 | `meerai-cli` | The `meerai` binary: CLI, headless runner, and TUI launcher |
 | `meerai-acp` | ACP client bridge |
+| `meerai-mcp` | MCP client: `.mcp.json`, trust, and toolsets |
 
 ## Usage
 
@@ -485,6 +502,7 @@ to the `subagent-run` tool.
 - Pack definitions load only when the pack is enabled and trusted
   (`meerai pack enable|trust`). Pack hooks and `mcp_servers` declarations are
   validated and listed in diagnostics, but they are not executed or connected.
+  Connect MCP servers with `.mcp.json` instead (see MCP below).
 - `.meerai/agents` and `.meerai/skills` are repository-owned definition
   directories. Use them for this repository's native agents and skills.
 - Discovery is read-only. meerai copies nothing, writes no import lock, and
@@ -605,6 +623,132 @@ one-shot runs one turn only: use `--mode auto`. Steps are unlimited by default;
 set `context.max_steps_per_turn` only when you need a cap. In `ask` mode the
 first write stops the run with exit `2`.
 
+### MCP servers
+
+meerai reads `.mcp.json` from the project root and
+`$XDG_CONFIG_HOME/meerai/.mcp.json`. The format matches OpenCode and the wider
+ecosystem, so a server block moves between tools without edits:
+
+```json
+{
+  "mcpServers": {
+    "everything": {
+      "type": "local",
+      "command": ["npx", "-y", "@modelcontextprotocol/server-everything"],
+      "cwd": ".",
+      "environment": {
+        "LOG_LEVEL": "info",
+        "MCP_API_KEY": "{env:MCP_API_KEY}"
+      }
+    },
+    "docs": {
+      "type": "remote",
+      "url": "https://mcp.example.com/v1",
+      "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" }
+    }
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `type` | `local` or `stdio` (spawns a process), `remote`, `http`, or `streamable-http` (connects to a URL). `sse` and `ws` are reported as unsupported and never started. |
+| `command` | A string or an array. With an array, the tail becomes arguments, and any `args` are appended after it. |
+| `cwd` | Working directory. A relative path resolves against the directory that holds `.mcp.json`. |
+| `environment` / `env` | Environment variables for the child process. Both spellings work. |
+| `url`, `headers` | Endpoint and request headers for a remote server. |
+| `enabled` | `false` disables a server without deleting it. |
+| `read_only` | Declares that every tool on this server is safe in `plan` mode. |
+| `timeout` / `timeout_ms` | Per-call timeout, clamped to 1–600 seconds. |
+| `tools.allow` | A list of tool-name patterns. An empty list allows all. |
+
+Environment expansion accepts `{env:VAR}`, `${VAR}`, and `${VAR|default}`. It
+runs when meerai connects, not when the file is read, so a secret never enters
+the parsed config, the session log, or an error message. A server whose
+`command` expands to nothing fails with a typed error.
+
+A server must be trusted before it runs. meerai stores trust per project, keyed
+by the SHA-256 of the file contents.
+
+On the first interactive run in a project that declares servers, meerai asks
+once:
+
+```text
+Project .mcp.json declares MCP server(s): dbx, wdio
+MCP servers can run commands and reach the network as you.
+Trust this project's MCP servers? [y/N]
+```
+
+`y` stores the hash and the servers connect on that same run. `N`, a headless
+run, and a piped stdin all deny. Until you accept, the statusline, sidebar, and
+MCP servers panel list each server as `needs trust`, so the file is never
+silently invisible.
+
+```sh
+/mcp            # list servers and their status
+/mcp trust      # accept this project's .mcp.json
+/mcp untrust    # revoke it
+/mcp reload     # re-read the file and reconnect
+```
+
+In the MCP servers panel, `t` runs `/mcp trust` and `r` runs `/mcp reload`. The same
+commands and the same panel exist in the browser client, reached from the `mcp`
+statusline chip or `/mcp`.
+
+`ready` is not a status. A server reads `configured` until a client opens it,
+`connected` once the handshake and the tool listing succeed, and `failed` with
+the error text when either step fails. `connected` with `0 tool(s)` means the
+server answered the listing with no tools, or that its `tools.allow` filter
+rejected every tool. Any other failure lists as `failed`, never as `configured`.
+A stdio server's stderr is captured, not inherited: the last 200 lines join the
+failure text, so launcher noise never reaches the terminal.
+`/mcp reload` disconnects every server, re-reads the file, and reconnects.
+
+If the file changes, the hash no longer matches and the next run asks again. A
+project file can only tighten: it can disable a server you enabled, mark one
+read-only, or narrow its tool allowlist. It cannot add a server you did not
+declare yourself.
+
+MCP tools appear to the model as `mcp__<server>__<tool>`. Policy rules use the
+`mcp` action with a `<server>/<tool>` resource:
+
+```yaml
+permissions:
+  - action: mcp
+    resource: "github/search_*"
+    effect: allow
+  - action: mcp
+    resource: "evil/*"
+    effect: deny
+```
+
+In `plan` mode only servers declared `read_only` are registered, and only tools
+that advertise `readOnlyHint`. That annotation comes from the server, so treat
+`read_only` as your own assertion, not a guarantee. A server's tool
+descriptions are untrusted text: meerai withholds a description outright when it
+detects prompt-injection patterns, and caps its length.
+
+A server's tools are admitted in full only when their schemas fit a small
+budget, currently about 2,000 tokens. Above that, meerai lists `load_tool_schema`
+instead: one line per tool, with no parameter schemas. The model calls
+`load_tool_schema` with a tool name to admit that schema, and the tool becomes
+callable from the next step. Admission is bounded so a long turn cannot refill
+the prompt: at most 12 loaded schemas and about 4,000 tokens, and loading the
+same schema twice is a no-op. A call to a tool whose schema is not loaded fails
+with a hint naming `load_tool_schema`.
+
+The TUI statusline under the composer shows `mcp <connected>/<total>`, plus a
+`<n> failed` count when any server failed. Click that counter to open the MCP
+servers panel: it lists every server with its transport, status, tool count, and
+the error text for a failed connection. Failures sort first. `r` reloads the
+config from that panel. The browser companion shows the same list with each
+error beneath its server. The sidebar shows a compact summary and the first
+failed and connected servers.
+
+MCP is not a sandbox boundary. A stdio server runs as you, outside `CodeTools`
+and `ExecutionWorld`, exactly like a hook. See
+[threat-model.md](docs/threat-model.md) §3.
+
 ### Headless exit codes
 
 | Code | Meaning |
@@ -687,7 +831,8 @@ YAML. Do not edit the database by hand.
   regenerates it from [models.dev](https://models.dev/api.json), and
   `make models-check` fails when the committed table is stale. A provider with
   more than 50 text models keeps the 50 newest plus one flagship per major
-  model family.
+  model family. Entries are rendered sorted by model id, so a sync diff shows
+  only real additions, removals, and field changes.
 - The user settings (`active_provider`, `active_model`, `providers`,
   `approval_mode`, `permissions`, `context`, `routing`, `sessions`, and
   `theme`) are stored in the database. Change them with TUI Settings or
@@ -761,6 +906,17 @@ matches, the working directory is the root. It then reads
 workspace, so running `meerai` from a subdirectory applies the repository-root
 policy. A project file can tighten permissions, but it cannot redirect the
 session or grant a new capability.
+
+A session keeps its own workspace directory in its metadata. Reopening or
+resuming a session builds its tools, permission rules, MCP project config, and
+memory scope from that stored directory, not from the directory the binary was
+started in. The model can move the workspace with the `workspace-cd` tool. A
+path inside the current workspace switches directly. A path outside it asks the
+user in the `question-ask` modal whether to move this session there or open a
+new session. A move takes effect after the current turn ends, because the
+session worker cannot be replaced while a turn runs. A move keeps the session
+and its history: only the recorded workspace directory changes. The new
+directory appears in the statusline and the browser sidebar.
 
 ```yaml
 # <project-root>/.meerai/settings.yml
@@ -988,7 +1144,10 @@ for example `OPENROUTER_API_KEY` (also `OPEN_ROUTER_API_KEY`) and
 - **Web tools are approval-gated external effects.** `web-fetch` and
   `web-search` declare `EffectClass::External` under the `webfetch` action, so
   `plan` mode hides them, `ask` mode requests an approval, and `auto` mode
-  allows them. `web-fetch` accepts http and https only, rejects URL userinfo,
+  allows them. In `auto` mode the first `Execute` or `External` tool of a turn
+  that no rule matched adds one system row: `auto mode allowed a <effect>
+  effect without asking: <tool>`. `read` and `write` effects stay silent.
+  `web-fetch` accepts http and https only, rejects URL userinfo,
   follows at most five redirects, caps the body at 2 MiB and the output at
   60,000 characters, and refuses loopback, private, link-local, CGNAT,
   broadcast, multicast, and IPv4-mapped private addresses after DNS

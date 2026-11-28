@@ -49,6 +49,7 @@ pub(super) fn render_active_modal(frame: &mut Frame<'_>, app: &mut AppState, are
         | ActiveModal::ServeDialog { .. }
         | ActiveModal::RewindMenu { .. }
         | ActiveModal::Runs { .. }
+        | ActiveModal::McpServers { .. }
         | ActiveModal::RunDetail { .. }
         | ActiveModal::SessionSelect { .. } => render_panels_modal(app, frame, area, modal),
         ActiveModal::Context(_)

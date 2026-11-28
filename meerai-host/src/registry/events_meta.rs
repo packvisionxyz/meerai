@@ -85,6 +85,31 @@ impl RegistryState {
                 );
             }
 
+            AgentEvent::AutoApproved { tool, effect } => {
+                let label = match effect {
+                    EffectClass::Execute => "shell",
+                    EffectClass::External => "external",
+                    EffectClass::Read => "read",
+                    EffectClass::Write => "write",
+                };
+                let entry = LiveEntry::System {
+                    id: state.next_entry_id(),
+                    text: format!("auto mode allowed a {label} effect without asking: {tool}"),
+                };
+                let Some(record) = state.sessions.get_mut(session_id) else {
+                    return;
+                };
+                record.entries.push(entry.clone());
+
+                state.push_event(
+                    broadcast_tx,
+                    RegistryEventKind::EntryCompleted {
+                        session_id: session_id.clone(),
+                        entry,
+                    },
+                );
+            }
+
             AgentEvent::UsageUpdated {
                 usage,
                 cumulative,

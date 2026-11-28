@@ -196,6 +196,13 @@ impl TransportClient {
         let _ = (session_id, for_overlay);
     }
 
+    pub fn switch_workspace(&self, session_id: String, path: String) {
+        #[cfg(target_arch = "wasm32")]
+        self.inner.switch_workspace(session_id, path);
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = (session_id, path);
+    }
+
     pub fn rewind_session(&self, session_id: String, turn_id: String, scope: RewindScopeDto) {
         #[cfg(target_arch = "wasm32")]
         self.inner.rewind_session(session_id, turn_id, scope);

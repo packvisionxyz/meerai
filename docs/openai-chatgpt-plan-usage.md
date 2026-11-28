@@ -606,7 +606,10 @@ round-trip, and one forced usage-limit error remain the gate before release.
   `api.openai.com` even when no cache intent is set; the plan route rejects that
   field. Plan requests keep the same endpoint with an explicit `:443`, which
   bypasses the adapter's string check, so the field is omitted.
-  `RuntimeProviderState.plan_usage` selects that endpoint. Omitting the field
+  `RuntimeProviderState.plan_usage` selects that endpoint.
+  `build_genai_client_for` derives the plan check from the provider's own
+  credential, so a per-provider client never applies it to another provider.
+  Omitting the field
   leaves OpenAI's implicit caching on; genai's `mode: "explicit"` with no
   breakpoints would disable caching on GPT-5.6 and later.
 - The running agent receives `AgentCommand::SetPlanUsage` when the credential

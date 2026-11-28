@@ -123,6 +123,10 @@ pub async fn run_tui(
     app.sandbox_kind = config.sandbox_kind;
     app.sandbox_warning = config.sandbox_warning;
     app.web_launcher = config.web_launcher;
+    if let Some(opener) = app.session_opener.clone() {
+        let info = opener.host_info().await;
+        app.apply_host_info(&info);
+    }
     let (active_rx, _keep_tx) = if let Some(reg) = config.registry.clone() {
         reg.register_opened_active(OpenedSession {
             session_id: config.initial_session_id,

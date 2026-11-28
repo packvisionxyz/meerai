@@ -270,7 +270,9 @@ impl AppState {
                         }
                         changed = false;
                     }
-                    KeyCode::PageUp => {
+                    KeyCode::PageUp | KeyCode::Char('u')
+                        if key.code == KeyCode::PageUp || has_ctrl =>
+                    {
                         if let Some(prev) = preview.as_mut() {
                             let step = (self.tab().viewport_height / 2).max(5);
                             prev.scroll = prev.scroll.saturating_sub(step);
@@ -343,6 +345,38 @@ impl AppState {
                     _ => {}
                 }
                 self.modal = Some(ActiveModal::Runs { kind, selected });
+                true
+            }
+            ActiveModal::McpServers { mut selected } => {
+                let count = self.mcp_servers.len();
+                match key.code {
+                    KeyCode::Esc => {
+                        self.modal = None;
+                        return true;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        selected = selected.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if count > 0 {
+                            selected = (selected + 1).min(count - 1);
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        self.handle_slash_command("/mcp reload");
+                        self.modal = None;
+                        return true;
+                    }
+                    KeyCode::Char('t')
+                        if self.mcp_servers.iter().any(|server| server.needs_trust()) =>
+                    {
+                        self.handle_slash_command("/mcp trust");
+                        self.modal = None;
+                        return true;
+                    }
+                    _ => {}
+                }
+                self.modal = Some(ActiveModal::McpServers { selected });
                 true
             }
             ActiveModal::RunDetail {

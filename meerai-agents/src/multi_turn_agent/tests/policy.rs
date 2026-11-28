@@ -356,6 +356,107 @@ async fn read_only_calls_run_concurrently_and_settle_in_call_order() {
 }
 
 #[tokio::test]
+async fn auto_mode_notifies_once_per_turn_for_side_effects() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![bare_call(
+            "c1",
+            "shell-run",
+        )]))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+
+    let session = memory_session();
+    let policy = PolicyEngine::new(ApprovalMode::Auto);
+    let agent = harness_agent(
+        streamer,
+        vec![Box::new(StaticToolset::new(
+            "shell",
+            "shell-run",
+            "ran",
+            EffectClass::Execute,
+        ))],
+        "",
+        &session,
+        policy,
+        HarnessConfig::default(),
+    );
+
+    let (cmd_tx, mut rx) = spawn_worker(agent);
+    cmd_tx
+        .send(AgentCommand::SubmitPrompt("go".to_string()))
+        .unwrap();
+
+    let mut notices = 0;
+    loop {
+        match rx.recv().await {
+            Some(AgentEvent::AutoApproved { tool, effect }) => {
+                notices += 1;
+                assert_eq!(tool, "shell-run");
+                assert_eq!(effect, EffectClass::Execute);
+            }
+            Some(AgentEvent::TurnCompleted { .. }) => break,
+            Some(_) => {}
+            None => panic!("worker stopped mid-turn"),
+        }
+    }
+    assert_eq!(notices, 1);
+    let _ = cmd_tx.send(AgentCommand::Quit);
+}
+
+#[tokio::test]
+async fn ask_mode_never_notifies_an_auto_approval() {
+    let streamer = Arc::new(FakeStreamer::new(vec![
+        vec![ChatStreamEvent::End(tool_end(vec![bare_call(
+            "c1",
+            "shell-run",
+        )]))],
+        vec![ChatStreamEvent::End(text_end("done"))],
+    ]));
+
+    let session = memory_session();
+    let policy = PolicyEngine::new(ApprovalMode::Ask);
+    let agent = harness_agent(
+        streamer,
+        vec![Box::new(StaticToolset::new(
+            "shell",
+            "shell-run",
+            "ran",
+            EffectClass::Execute,
+        ))],
+        "",
+        &session,
+        policy,
+        HarnessConfig::default(),
+    );
+
+    let (cmd_tx, mut rx) = spawn_worker(agent);
+    cmd_tx
+        .send(AgentCommand::SubmitPrompt("go".to_string()))
+        .unwrap();
+
+    let mut notices = 0;
+    loop {
+        match rx.recv().await {
+            Some(AgentEvent::AutoApproved { .. }) => notices += 1,
+            Some(AgentEvent::ApprovalRequested { request }) => {
+                cmd_tx
+                    .send(AgentCommand::Approve {
+                        request_id: request.request_id,
+                        decision: ApprovalDecision::Accept,
+                        scope: None,
+                    })
+                    .unwrap();
+            }
+            Some(AgentEvent::TurnCompleted { .. }) => break,
+            Some(_) => {}
+            None => panic!("worker stopped mid-turn"),
+        }
+    }
+    assert_eq!(notices, 0);
+    let _ = cmd_tx.send(AgentCommand::Quit);
+}
+
+#[tokio::test]
 async fn idle_set_permission_mode_applies_to_the_next_turn() {
     let streamer = Arc::new(FakeStreamer::new(vec![
         vec![ChatStreamEvent::End(tool_end(vec![bare_call(

@@ -349,8 +349,10 @@ pub(super) fn diff_body(
                 </div>
             </div>
             <div class="diff-toolbar">
-                <button class="btn tiny" class:active=unified on:click=move |_| set_diff_mode(store, true)>"Unified"</button>
-                <button class="btn tiny" class:active=!unified on:click=move |_| set_diff_mode(store, false)>"Split"</button>
+                <div class="mode-switch" role="group" aria-label="Diff view">
+                    <button class="mode-seg" class:active=unified on:click=move |_| set_diff_mode(store, true)>"Unified"</button>
+                    <button class="mode-seg" class:active=!unified on:click=move |_| set_diff_mode(store, false)>"Split"</button>
+                </div>
                 <span class="diff-hint">"Click a file on the left to switch."</span>
             </div>
             <div class=scroll_class>{AnyView::from(Fragment::new(rows))}</div>
@@ -605,46 +607,45 @@ pub(super) fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
         })
     });
 
-    let reload = {
-        let store = store;
-        move |tab: crate::state::WorkspacePanelTab| {
-            if tab == crate::state::WorkspacePanelTab::Loop {
-                return;
-            }
-            if let Some(transport) = crate::transport::current() {
-                match tab {
-                    crate::state::WorkspacePanelTab::Context => {
-                        transport.run_host_action("/context".to_owned())
-                    }
-                    crate::state::WorkspacePanelTab::Memory => transport.fetch_memories(),
-                    crate::state::WorkspacePanelTab::Routing => transport.fetch_routes(),
-                    crate::state::WorkspacePanelTab::Packs => {
-                        transport.fetch_packs();
-                        transport.fetch_definitions();
-                    }
-                    _ => {}
-                }
-            }
-            store.update(|state| {
-                if let Some(ActiveModal::WorkspacePanel { loading, error, .. }) =
-                    state.modal.as_mut()
-                {
-                    *loading = true;
-                    *error = None;
-                }
-            });
+    let reload = move |tab: crate::state::WorkspacePanelTab| {
+        if tab == crate::state::WorkspacePanelTab::Loop {
+            return;
         }
+        if let Some(transport) = crate::transport::current() {
+            match tab {
+                crate::state::WorkspacePanelTab::Context => {
+                    transport.run_host_action("/context".to_owned())
+                }
+                crate::state::WorkspacePanelTab::Memory => transport.fetch_memories(),
+                crate::state::WorkspacePanelTab::Routing => transport.fetch_routes(),
+                crate::state::WorkspacePanelTab::Packs => {
+                    transport.fetch_packs();
+                    transport.fetch_definitions();
+                }
+                _ => {}
+            }
+        }
+        store.update(|state| {
+            if let Some(ActiveModal::WorkspacePanel { loading, error, .. }) = state.modal.as_mut() {
+                *loading = true;
+                *error = None;
+            }
+        });
     };
 
     let reload = std::sync::Arc::new(reload);
-    let close = {
-        let store = store;
-        move |_| store.update(|state| state.modal = None)
-    };
+    let close = move |_| store.update(|state| state.modal = None);
 
     view! {
-        <div class="modal-backdrop">
-            <div class="modal modal-wide">
+        <div
+            class="modal-backdrop"
+            on:click=move |ev| {
+                if ev.target() == ev.current_target() {
+                    store.update(|s| s.modal = None);
+                }
+            }
+        >
+            <div class="modal modal-wide control-modal" role="dialog" aria-modal="true" aria-labelledby="control-panel-title" tabindex="-1">
                 {move || {
                     let Some(PanelSnapshot {
                         tab,
@@ -688,48 +689,17 @@ pub(super) fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                     let body = match tab {
                         crate::state::WorkspacePanelTab::Loop => {
                             let Some(g) = loop_state.as_ref() else {
-                                return view! { <pre class="panel-text">"No active loop. Type @goal <instruction> in the composer to start one."</pre> }.into_any();
+                                return view! {
+                                    <div class="hint">"No active loop. Type @goal <instruction> in the composer to start one."</div>
+                                }.into_any();
                             };
-                            let mut text = String::new();
-                            if let Some(objective) = g.objective.as_deref() {
-                                text.push_str(&format!("Objective: {objective}\n"));
-                            }
-                            if !g.done_when.is_empty() {
-                                text.push_str("Done when:\n");
-                                for line in &g.done_when {
-                                    text.push_str(&format!("- {line}\n"));
-                                }
-                            }
-                            if !g.constraints.is_empty() {
-                                text.push_str("Constraints:\n");
-                                for line in &g.constraints {
-                                    text.push_str(&format!("- {line}\n"));
-                                }
-                            }
-                            if g.items.is_empty() {
-                                text.push_str("\nItems: (none)\n");
-                            } else {
-                                text.push_str("\nItems:\n");
-                                for item in &g.items {
-                                    let mark = match item.status {
-                                        meerai_web_protocol::LoopItemStatusDto::Done => "x",
-                                        meerai_web_protocol::LoopItemStatusDto::Failed => "!",
-                                        meerai_web_protocol::LoopItemStatusDto::Open => " ",
-                                    };
-                                    text.push_str(&format!("- [{mark}] {}. {}", item.id, item.text));
-                                    if let Some(expect) = item.expect.as_deref() {
-                                        text.push_str(&format!(" (observe: {expect})"));
-                                    }
-                                    if let Some(action) = item.action.as_deref() {
-                                        text.push_str(&format!("\n  action: {action}"));
-                                    }
-                                    if let Some(observation) = item.observation.as_deref() {
-                                        text.push_str(&format!("\n  observation: {observation}"));
-                                    }
-                                    text.push('\n');
-                                }
-                            }
-                            let done = g
+                            let phase_label = match g.phase {
+                                meerai_web_protocol::LoopPhaseDto::Plan => "plan",
+                                meerai_web_protocol::LoopPhaseDto::Act => "act",
+                                meerai_web_protocol::LoopPhaseDto::Observe => "observe",
+                                meerai_web_protocol::LoopPhaseDto::Adjust => "adjust",
+                            };
+                            let done_count = g
                                 .items
                                 .iter()
                                 .filter(|item| {
@@ -739,39 +709,121 @@ pub(super) fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                                     )
                                 })
                                 .count();
-                            text.push_str(&format!(
-                                "\nProgress: {done}/{} done",
-                                g.items.len()
-                            ));
-                            text.push_str(&format!("\nPhase: {}", match g.phase {
-                                meerai_web_protocol::LoopPhaseDto::Plan => "plan",
-                                meerai_web_protocol::LoopPhaseDto::Act => "act",
-                                meerai_web_protocol::LoopPhaseDto::Observe => "observe",
-                                meerai_web_protocol::LoopPhaseDto::Adjust => "adjust",
-                            }));
-                            if g.rounds > 0 {
-                                text.push_str(&format!(" · round {}", g.rounds));
+                            let total_items = g.items.len();
+                            let pct = if total_items == 0 {
+                                0.0
+                            } else {
+                                (done_count as f64 * 100.0 / total_items as f64).clamp(0.0, 100.0)
+                            };
+                            let items_view = if g.items.is_empty() {
+                                view! { <div class="hint">"No items yet."</div> }.into_any()
+                            } else {
+                                let rows = g
+                                    .items
+                                    .iter()
+                                    .map(|item| {
+                                        let (badge_cls, status_text) = match item.status {
+                                            meerai_web_protocol::LoopItemStatusDto::Done => ("ok", "done"),
+                                            meerai_web_protocol::LoopItemStatusDto::Failed => ("warn", "failed"),
+                                            meerai_web_protocol::LoopItemStatusDto::Open => ("muted", "open"),
+                                        };
+                                        view! {
+                                            <div class="loop-item">
+                                                <div class="loop-item-head">
+                                                    <span class=format!("badge {badge_cls}")>{status_text}</span>
+                                                    <strong class="loop-item-title">{format!("{}. {}", item.id, item.text)}</strong>
+                                                </div>
+                                                {item.expect.as_ref().map(|e| view! {
+                                                    <div class="loop-item-meta">{format!("Observe: {e}")}</div>
+                                                })}
+                                                {item.action.as_ref().map(|a| view! {
+                                                    <div class="loop-item-meta">{format!("Action: {a}")}</div>
+                                                })}
+                                                {item.observation.as_ref().map(|o| view! {
+                                                    <div class="loop-item-meta">{format!("Observation: {o}")}</div>
+                                                })}
+                                            </div>
+                                        }
+                                        .into_any()
+                                    })
+                                    .collect::<Vec<_>>();
+                                view! { <div class="loop-items">{AnyView::from(Fragment::new(rows))}</div> }.into_any()
+                            };
+                            view! {
+                                <div class="loop-view modal-form">
+                                    <div class="loop-header">
+                                        <div class="loop-objective">
+                                            {g.objective.clone().unwrap_or_else(|| "Active goal loop".to_owned())}
+                                        </div>
+                                        <div class="loop-badges">
+                                            <span class="badge ok">{format!("phase: {phase_label}")}</span>
+                                            {(g.rounds > 0).then(|| view! { <span class="badge">{format!("round {}", g.rounds)}</span> })}
+                                            {(g.turns > 0).then(|| view! { <span class="badge">{format!("turn {}", g.turns)}</span> })}
+                                            <span class="badge">{format!("{done_count}/{total_items} done")}</span>
+                                        </div>
+                                    </div>
+                                    <div class="ctx-meter">
+                                        <div class="ctx-meter-fill ok" style=format!("width:{pct:.1}%")></div>
+                                    </div>
+                                    {(!g.done_when.is_empty()).then(|| view! {
+                                        <div class="loop-section">
+                                            <h4>"Done when"</h4>
+                                            <ul class="md-list">
+                                                {g.done_when.iter().map(|line| view! { <li>{line.clone()}</li> }).collect::<Vec<_>>()}
+                                            </ul>
+                                        </div>
+                                    })}
+                                    {(!g.constraints.is_empty()).then(|| view! {
+                                        <div class="loop-section">
+                                            <h4>"Constraints"</h4>
+                                            <ul class="md-list">
+                                                {g.constraints.iter().map(|line| view! { <li>{line.clone()}</li> }).collect::<Vec<_>>()}
+                                            </ul>
+                                        </div>
+                                    })}
+                                    <div class="loop-section">
+                                        <h4>"Items"</h4>
+                                        {items_view}
+                                    </div>
+                                </div>
                             }
-                            if g.turns > 0 {
-                                text.push_str(&format!(" · turn {}", g.turns));
-                            }
-                            view! { <pre class="panel-text">{text}</pre> }.into_any()
+                            .into_any()
                         }
                         crate::state::WorkspacePanelTab::Context => {
                             let Some(c) = context.as_ref() else {
-                                return view! { <pre class="panel-text">"No context report yet. Press Refresh."</pre> }.into_any();
+                                return view! { <div class="hint">"No context report yet. Press Refresh."</div> }.into_any();
                             };
-                            let summary = format!(
-                                "used {} / {} tokens ({:.1}%) · watermark {}\nsystem {} · tools {} · memory {} · user {} · assistant {}\ntool results {} · reasoning {} · summaries {}\npinned {} · cleared results {} · spilled {} · cached {}",
-                                c.estimated_total_tokens, c.context_window_tokens,
-                                if c.context_window_tokens == 0 { 0.0 } else { c.estimated_total_tokens as f64 * 100.0 / c.context_window_tokens as f64 },
-                                c.high_watermark_tokens, c.system_prompt_tokens, c.tool_schemas_tokens,
-                                c.memory_tokens, c.user_messages_tokens, c.assistant_tokens,
-                                c.tool_results_tokens, c.reasoning_tokens, c.compaction_summary_tokens,
-                                c.pinned_turn_ids.len(),
-                                c.cleared_tool_results_count, c.spilled_blob_count,
-                                c.last_prompt_cached_tokens.map_or_else(|| "n/a".to_owned(), |n| n.to_string())
-                            );
+                            let pct = if c.context_window_tokens == 0 {
+                                0.0
+                            } else {
+                                (c.estimated_total_tokens as f64 * 100.0 / c.context_window_tokens as f64)
+                                    .clamp(0.0, 100.0)
+                            };
+                            let meter_tone = if pct >= 90.0 {
+                                "error"
+                            } else if pct >= 75.0 {
+                                "warn"
+                            } else {
+                                "ok"
+                            };
+                            let buckets = [
+                                ("System", format_tokens(c.system_prompt_tokens)),
+                                ("Tools", format_tokens(c.tool_schemas_tokens)),
+                                ("Memory", format_tokens(c.memory_tokens)),
+                                ("User", format_tokens(c.user_messages_tokens)),
+                                ("Assistant", format_tokens(c.assistant_tokens)),
+                                ("Tool results", format_tokens(c.tool_results_tokens)),
+                                ("Reasoning", format_tokens(c.reasoning_tokens)),
+                                ("Summaries", format_tokens(c.compaction_summary_tokens)),
+                                ("Pinned", c.pinned_turn_ids.len().to_string()),
+                                ("Cleared", c.cleared_tool_results_count.to_string()),
+                                ("Spilled", c.spilled_blob_count.to_string()),
+                                (
+                                    "Cached",
+                                    c.last_prompt_cached_tokens
+                                        .map_or_else(|| "n/a".to_owned(), format_tokens),
+                                ),
+                            ];
                             let turns = c.turn_ids.clone();
                             let pinned_ids = c.pinned_turn_ids.clone();
                             let blobs = c.spilled_blobs.clone();
@@ -838,7 +890,7 @@ pub(super) fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                             let focus_actions = crate::transport::current();
                             let focus = view! {
                                 <div class="panel-form">
-                                    <input class="field" placeholder="/summarize --from <turn> [focus]"
+                                    <input class="input" placeholder="/summarize --from <turn> [focus]"
                                         prop:value=context_focus
                                         on:input=move |ev| {
                                             let value = event_target_value(&ev);
@@ -888,14 +940,34 @@ pub(super) fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                                 }.into_any()
                             }).unwrap_or_else(|| view! { <span></span> }.into_any());
                             view! {
-                                <div>
-                                    <pre class="panel-text">{summary}</pre>
-                                    <h4>"Turns"</h4>
+                                <div class="modal-form">
+                                    <div class="ctx-overview">
+                                        <div class="ctx-overview-head">
+                                            <strong>{format!(
+                                                "{} / {} tokens ({pct:.1}%)",
+                                                format_tokens(c.estimated_total_tokens),
+                                                format_tokens(c.context_window_tokens),
+                                            )}</strong>
+                                            <span class="hint">{format!("watermark {}", format_tokens(c.high_watermark_tokens))}</span>
+                                        </div>
+                                        <div class="ctx-meter">
+                                            <div class=format!("ctx-meter-fill {meter_tone}") style=format!("width:{pct:.1}%")></div>
+                                        </div>
+                                        <div class="ctx-buckets">
+                                            {buckets.into_iter().map(|(label, val)| view! {
+                                                <div class="ctx-bucket">
+                                                    <span class="side-stat-label">{label}</span>
+                                                    <strong>{val}</strong>
+                                                </div>
+                                            }).collect::<Vec<_>>()}
+                                        </div>
+                                    </div>
+                                    <h4 class="panel-subheading">"Turns"</h4>
                                     <div class="panel-list">{turn_rows}</div>
-                                    <h4>"Projection"</h4>
+                                    <h4 class="panel-subheading">"Projection"</h4>
                                     {policy}
                                     {focus}
-                                    <h4>"Spilled blobs"</h4>
+                                    <h4 class="panel-subheading">"Spilled blobs"</h4>
                                     <div class="panel-list">{blob_rows}</div>
                                     {blob_view}
                                 </div>
@@ -922,7 +994,15 @@ pub(super) fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                                     </div>
                                 }.into_any()
                             }).collect::<Vec<_>>();
-                            view! { <div class="panel-list">{rows}</div> }.into_any()
+                            view! {
+                                <div class="modal-form">
+                                    {if rows.is_empty() {
+                                        view! { <div class="hint">"No project memories stored yet."</div> }.into_any()
+                                    } else {
+                                        view! { <div class="panel-list">{rows}</div> }.into_any()
+                                    }}
+                                </div>
+                            }.into_any()
                         }
                         crate::state::WorkspacePanelTab::Routing => {
                             let rows = routes.iter().map(|route| {
@@ -930,7 +1010,7 @@ pub(super) fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                                 let actions = crate::transport::current();
                                 view! {
                                     <div class="panel-row">
-                                        <span class="panel-title">{format!("{}", route.task_type)}</span>
+                                        <span class="panel-title">{route.task_type.to_string()}</span>
                                         <span class="panel-meta">{format!("{}::{}", route.provider, route.model)}</span>
                                         <button class="btn tiny" on:click=move |_| {
                                             if let Some(t) = &actions { t.run_host_action(format!("/routing clear {task}")); t.fetch_routes(); }
@@ -942,23 +1022,25 @@ pub(super) fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                             let store_for_click = store;
                             let actions = crate::transport::current();
                             view! {
-                                <div class="panel-list">{rows}</div>
-                                <div class="panel-form">
-                                    <input class="field" placeholder="/routing set build openai::o3 1.0 20000 2"
-                                        prop:value=route_input
-                                        on:input=move |ev| {
-                                            let value = event_target_value(&ev);
-                                            store_for_input.update(|state| {
-                                                if let Some(ActiveModal::WorkspacePanel { route_input, .. }) = state.modal.as_mut() { route_input.replace_text(value); }
+                                <div class="modal-form">
+                                    <div class="panel-list">{rows}</div>
+                                    <div class="panel-form">
+                                        <input class="input" placeholder="/routing set build openai::o3 1.0 20000 2"
+                                            prop:value=route_input
+                                            on:input=move |ev| {
+                                                let value = event_target_value(&ev);
+                                                store_for_input.update(|state| {
+                                                    if let Some(ActiveModal::WorkspacePanel { route_input, .. }) = state.modal.as_mut() { route_input.replace_text(value); }
+                                                });
+                                            } />
+                                        <button class="btn primary" on:click=move |_| {
+                                            let command = store_for_click.with(|state| match &state.modal {
+                                                Some(ActiveModal::WorkspacePanel { route_input, .. }) => route_input.text.clone(),
+                                                _ => String::new(),
                                             });
-                                        } />
-                                    <button class="btn" on:click=move |_| {
-                                        let command = store_for_click.with(|state| match &state.modal {
-                                            Some(ActiveModal::WorkspacePanel { route_input, .. }) => route_input.text.clone(),
-                                            _ => String::new(),
-                                        });
-                                        if let Some(t) = &actions { t.run_host_action(command); }
-                                    }>"Set route"</button>
+                                            if let Some(t) = &actions { t.run_host_action(command); }
+                                        }>"Set route"</button>
+                                    </div>
                                 </div>
                             }.into_any()
                         }
@@ -980,7 +1062,7 @@ pub(super) fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                                         <button class="btn tiny" on:click=move |_| {
                                             if let Some(t) = crate::transport::current() { t.run_host_action(format!("/pack {} {trust_id}", if trusted { "untrust" } else { "trust" })); t.fetch_packs(); }
                                         }>{if pack.trusted { "Untrust" } else { "Trust" }}</button>
-                                        <button class="btn tiny" on:click=move |_| {
+                                        <button class="btn tiny danger" on:click=move |_| {
                                             if let Some(t) = crate::transport::current() { t.run_host_action(format!("/pack remove {remove_id}")); t.fetch_packs(); }
                                         }>"Remove"</button>
                                     </div>
@@ -1009,49 +1091,51 @@ pub(super) fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                             let pin_actions = crate::transport::current();
                             let selected_pack_for_pin = selected_pack.clone();
                             view! {
-                                <div class="panel-list">{rows}</div>
-                                <div class="panel-form">
-                                    <input class="field" placeholder="/pack add ./path or git URL"
-                                        prop:value=pack_input
-                                        on:input=move |ev| {
-                                            let value = event_target_value(&ev);
-                                            store_for_input.update(|state| {
-                                                if let Some(ActiveModal::WorkspacePanel { pack_input, .. }) = state.modal.as_mut() { pack_input.replace_text(value); }
+                                <div class="modal-form">
+                                    <div class="panel-list">{rows}</div>
+                                    <div class="panel-form">
+                                        <input class="input" placeholder="/pack add ./path or git URL"
+                                            prop:value=pack_input
+                                            on:input=move |ev| {
+                                                let value = event_target_value(&ev);
+                                                store_for_input.update(|state| {
+                                                    if let Some(ActiveModal::WorkspacePanel { pack_input, .. }) = state.modal.as_mut() { pack_input.replace_text(value); }
+                                                });
+                                            } />
+                                        <button class="btn primary" on:click=move |_| {
+                                            let command = store_for_click.with(|state| match &state.modal {
+                                                Some(ActiveModal::WorkspacePanel { pack_input, .. }) => pack_input.text.clone(),
+                                                _ => String::new(),
                                             });
-                                        } />
-                                    <button class="btn" on:click=move |_| {
-                                        let command = store_for_click.with(|state| match &state.modal {
-                                            Some(ActiveModal::WorkspacePanel { pack_input, .. }) => pack_input.text.clone(),
-                                            _ => String::new(),
-                                        });
-                                        if let Some(t) = &actions { t.run_host_action(command); }
-                                    }>"Install"</button>
-                                </div>
-                                <div class="panel-form">
-                                    <input class="field" placeholder="revision for the selected pack"
-                                        prop:value=pack_pin_input
-                                        on:input=move |ev| {
-                                            let value = event_target_value(&ev);
-                                            store_for_pin_input.update(|state| {
-                                                if let Some(ActiveModal::WorkspacePanel { pack_pin_input, .. }) = state.modal.as_mut() { pack_pin_input.replace_text(value); }
+                                            if let Some(t) = &actions { t.run_host_action(command); }
+                                        }>"Install"</button>
+                                    </div>
+                                    <div class="panel-form">
+                                        <input class="input" placeholder="revision for the selected pack"
+                                            prop:value=pack_pin_input
+                                            on:input=move |ev| {
+                                                let value = event_target_value(&ev);
+                                                store_for_pin_input.update(|state| {
+                                                    if let Some(ActiveModal::WorkspacePanel { pack_pin_input, .. }) = state.modal.as_mut() { pack_pin_input.replace_text(value); }
+                                                });
+                                            } />
+                                        <button class="btn" on:click=move |_| {
+                                            let revision = store_for_pin_click.with(|state| match &state.modal {
+                                                Some(ActiveModal::WorkspacePanel { pack_pin_input, .. }) => pack_pin_input.text.clone(),
+                                                _ => String::new(),
                                             });
-                                        } />
-                                    <button class="btn" on:click=move |_| {
-                                        let revision = store_for_pin_click.with(|state| match &state.modal {
-                                            Some(ActiveModal::WorkspacePanel { pack_pin_input, .. }) => pack_pin_input.text.clone(),
-                                            _ => String::new(),
-                                        });
-                                        if let Some(t) = &pin_actions
-                                            && !revision.trim().is_empty()
-                                            && !selected_pack_for_pin.is_empty()
-                                        {
-                                            t.run_host_action(format!("/pack pin {} {}", selected_pack_for_pin, revision.trim()));
-                                            t.fetch_packs();
-                                        }
-                                    }>"Pin selected"</button>
+                                            if let Some(t) = &pin_actions
+                                                && !revision.trim().is_empty()
+                                                && !selected_pack_for_pin.is_empty()
+                                            {
+                                                t.run_host_action(format!("/pack pin {} {}", selected_pack_for_pin, revision.trim()));
+                                                t.fetch_packs();
+                                            }
+                                        }>"Pin selected"</button>
+                                    </div>
+                                    <h4 class="panel-subheading">"Definitions"</h4>
+                                    <div class="panel-list">{defs}</div>
                                 </div>
-                                <h4>"Definitions"</h4>
-                                <div class="panel-list">{defs}</div>
                             }.into_any()
                         }
                         crate::state::WorkspacePanelTab::Subagent => {
@@ -1067,53 +1151,86 @@ pub(super) fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                             let store_spawn = store;
                             let mode_label = mode.map(|m| match m { meerai_web_protocol::ApprovalModeDto::Plan => "plan", meerai_web_protocol::ApprovalModeDto::Ask => "ask", meerai_web_protocol::ApprovalModeDto::Auto => "auto" }).unwrap_or("parent");
                             view! {
-                                <div class="panel-form column">
-                                    <label>"Name" <input class="field" placeholder="optional, one word" prop:value=subagent_name.clone() on:input=move |ev| { let v = event_target_value(&ev); store_name.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_name, .. }) = s.modal.as_mut() { subagent_name.replace_text(v); }); } /></label>
-                                    <label>"Agent" <input class="field" prop:value=agent.clone() on:input=move |ev| { let v = event_target_value(&ev); store_agent.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_agent, .. }) = s.modal.as_mut() { *subagent_agent = v; }); } /></label>
-                                    <label>"Task" <input class="field" prop:value=task.clone() on:input=move |ev| { let v = event_target_value(&ev); store_task.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_task, .. }) = s.modal.as_mut() { subagent_task.replace_text(v); }); } /></label>
-                                    <label>"Model" <input class="field" prop:value=model.clone() on:input=move |ev| { let v = event_target_value(&ev); store_model.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_model, .. }) = s.modal.as_mut() { subagent_model.replace_text(v); }); } /></label>
-                                    <label>"Mode" <button class="btn tiny" on:click=move |_| {
-                                        store_mode.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_mode, .. }) = s.modal.as_mut() {
-                                            *subagent_mode = match *subagent_mode {
-                                                None => Some(meerai_web_protocol::ApprovalModeDto::Plan),
-                                                Some(meerai_web_protocol::ApprovalModeDto::Plan) => Some(meerai_web_protocol::ApprovalModeDto::Ask),
-                                                Some(meerai_web_protocol::ApprovalModeDto::Ask) => Some(meerai_web_protocol::ApprovalModeDto::Auto),
-                                                Some(meerai_web_protocol::ApprovalModeDto::Auto) => None,
-                                            };
-                                        });
-                                    }>{mode_label}</button></label>
-                                    <label>"Steps" <input class="field" placeholder="preset" prop:value=subagent_steps.clone() on:input=move |ev| { let v = event_target_value(&ev); store_steps.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_steps, .. }) = s.modal.as_mut() { subagent_steps.replace_text(v); }); } /></label>
-                                    <label>"Tokens" <input class="field" placeholder="parent cap" prop:value=subagent_tokens.clone() on:input=move |ev| { let v = event_target_value(&ev); store_tokens.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_tokens, .. }) = s.modal.as_mut() { subagent_tokens.replace_text(v); }); } /></label>
-                                    <label>"Cost USD" <input class="field" placeholder="parent cap" prop:value=subagent_cost.clone() on:input=move |ev| { let v = event_target_value(&ev); store_cost.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_cost, .. }) = s.modal.as_mut() { subagent_cost.replace_text(v); }); } /></label>
-                                    <label>"Tools" <input class="field" placeholder="comma-separated subset" prop:value=subagent_tools.clone() on:input=move |ev| { let v = event_target_value(&ev); store_tools.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_tools, .. }) = s.modal.as_mut() { subagent_tools.replace_text(v); }); } /></label>
-                                    <button class="btn" on:click=move |_| {
-                                        let (name, agent, task, model, mode, steps, tokens, cost, tools) = store_spawn.with(|s| match &s.modal {
-                                            Some(ActiveModal::WorkspacePanel { subagent_name, subagent_agent, subagent_task, subagent_model, subagent_mode, subagent_steps, subagent_tokens, subagent_cost, subagent_tools, .. }) => (
-                                                subagent_name.text.clone(),
-                                                subagent_agent.clone(),
-                                                subagent_task.text.clone(),
-                                                subagent_model.text.clone(),
-                                                *subagent_mode,
-                                                subagent_steps.text.clone(),
-                                                subagent_tokens.text.clone(),
-                                                subagent_cost.text.clone(),
-                                                subagent_tools.text.clone(),
-                                            ),
-                                            _ => (String::new(), String::new(), String::new(), String::new(), None, String::new(), String::new(), String::new(), String::new()),
-                                        });
-                                        if let Some(t) = crate::transport::current() {
-                                            let mut command = format!("/subagent {} ", agent);
-                                            if !name.trim().is_empty() { command.push_str(&format!("--name {} ", name.trim())); }
-                                            if !model.is_empty() { command.push_str(&format!("--model {model} ")); }
-                                            if let Some(mode) = mode { command.push_str(&format!("--mode {} ", match mode { meerai_web_protocol::ApprovalModeDto::Plan => "plan", meerai_web_protocol::ApprovalModeDto::Ask => "ask", meerai_web_protocol::ApprovalModeDto::Auto => "auto" })); }
-                                            if !steps.trim().is_empty() { command.push_str(&format!("--steps {} ", steps.trim())); }
-                                            if !tokens.trim().is_empty() { command.push_str(&format!("--tokens {} ", tokens.trim())); }
-                                            if !cost.trim().is_empty() { command.push_str(&format!("--cost {} ", cost.trim())); }
-                                            if !tools.trim().is_empty() { command.push_str(&format!("--tools {} ", tools.trim())); }
-                                            command.push_str(&task);
-                                            t.run_host_action(command);
-                                        }
-                                    }>"Spawn subagent"</button>
+                                <div class="modal-form">
+                                    <div class="subagent-form-grid">
+                                        <label class="field">
+                                            <span class="field-label">"Name"</span>
+                                            <input class="input" placeholder="optional, one word" prop:value=subagent_name.clone() on:input=move |ev| { let v = event_target_value(&ev); store_name.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_name, .. }) = s.modal.as_mut() { subagent_name.replace_text(v); }); } />
+                                        </label>
+                                        <label class="field">
+                                            <span class="field-label">"Agent"</span>
+                                            <input class="input" prop:value=agent.clone() on:input=move |ev| { let v = event_target_value(&ev); store_agent.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_agent, .. }) = s.modal.as_mut() { *subagent_agent = v; }); } />
+                                        </label>
+                                    </div>
+                                    <label class="field">
+                                        <span class="field-label">"Task"</span>
+                                        <input class="input" prop:value=task.clone() on:input=move |ev| { let v = event_target_value(&ev); store_task.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_task, .. }) = s.modal.as_mut() { subagent_task.replace_text(v); }); } />
+                                    </label>
+                                    <div class="subagent-form-grid">
+                                        <label class="field">
+                                            <span class="field-label">"Model"</span>
+                                            <input class="input" placeholder="inherit parent" prop:value=model.clone() on:input=move |ev| { let v = event_target_value(&ev); store_model.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_model, .. }) = s.modal.as_mut() { subagent_model.replace_text(v); }); } />
+                                        </label>
+                                        <div class="field">
+                                            <span class="field-label">"Mode"</span>
+                                            <button type="button" class="btn" on:click=move |_| {
+                                                store_mode.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_mode, .. }) = s.modal.as_mut() {
+                                                    *subagent_mode = match *subagent_mode {
+                                                        None => Some(meerai_web_protocol::ApprovalModeDto::Plan),
+                                                        Some(meerai_web_protocol::ApprovalModeDto::Plan) => Some(meerai_web_protocol::ApprovalModeDto::Ask),
+                                                        Some(meerai_web_protocol::ApprovalModeDto::Ask) => Some(meerai_web_protocol::ApprovalModeDto::Auto),
+                                                        Some(meerai_web_protocol::ApprovalModeDto::Auto) => None,
+                                                    };
+                                                });
+                                            }>{mode_label}</button>
+                                        </div>
+                                        <label class="field">
+                                            <span class="field-label">"Steps"</span>
+                                            <input class="input" placeholder="preset" prop:value=subagent_steps.clone() on:input=move |ev| { let v = event_target_value(&ev); store_steps.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_steps, .. }) = s.modal.as_mut() { subagent_steps.replace_text(v); }); } />
+                                        </label>
+                                        <label class="field">
+                                            <span class="field-label">"Tokens"</span>
+                                            <input class="input" placeholder="parent cap" prop:value=subagent_tokens.clone() on:input=move |ev| { let v = event_target_value(&ev); store_tokens.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_tokens, .. }) = s.modal.as_mut() { subagent_tokens.replace_text(v); }); } />
+                                        </label>
+                                        <label class="field">
+                                            <span class="field-label">"Cost USD"</span>
+                                            <input class="input" placeholder="parent cap" prop:value=subagent_cost.clone() on:input=move |ev| { let v = event_target_value(&ev); store_cost.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_cost, .. }) = s.modal.as_mut() { subagent_cost.replace_text(v); }); } />
+                                        </label>
+                                        <label class="field">
+                                            <span class="field-label">"Tools"</span>
+                                            <input class="input" placeholder="comma-separated subset" prop:value=subagent_tools.clone() on:input=move |ev| { let v = event_target_value(&ev); store_tools.update(|s| if let Some(ActiveModal::WorkspacePanel { subagent_tools, .. }) = s.modal.as_mut() { subagent_tools.replace_text(v); }); } />
+                                        </label>
+                                    </div>
+                                    <div class="subagent-form-actions">
+                                        <button class="btn primary" on:click=move |_| {
+                                            let (name, agent, task, model, mode, steps, tokens, cost, tools) = store_spawn.with(|s| match &s.modal {
+                                                Some(ActiveModal::WorkspacePanel { subagent_name, subagent_agent, subagent_task, subagent_model, subagent_mode, subagent_steps, subagent_tokens, subagent_cost, subagent_tools, .. }) => (
+                                                    subagent_name.text.clone(),
+                                                    subagent_agent.clone(),
+                                                    subagent_task.text.clone(),
+                                                    subagent_model.text.clone(),
+                                                    *subagent_mode,
+                                                    subagent_steps.text.clone(),
+                                                    subagent_tokens.text.clone(),
+                                                    subagent_cost.text.clone(),
+                                                    subagent_tools.text.clone(),
+                                                ),
+                                                _ => (String::new(), String::new(), String::new(), String::new(), None, String::new(), String::new(), String::new(), String::new()),
+                                            });
+                                            if let Some(t) = crate::transport::current() {
+                                                let mut command = format!("/subagent {} ", agent);
+                                                if !name.trim().is_empty() { command.push_str(&format!("--name {} ", name.trim())); }
+                                                if !model.is_empty() { command.push_str(&format!("--model {model} ")); }
+                                                if let Some(mode) = mode { command.push_str(&format!("--mode {} ", match mode { meerai_web_protocol::ApprovalModeDto::Plan => "plan", meerai_web_protocol::ApprovalModeDto::Ask => "ask", meerai_web_protocol::ApprovalModeDto::Auto => "auto" })); }
+                                                if !steps.trim().is_empty() { command.push_str(&format!("--steps {} ", steps.trim())); }
+                                                if !tokens.trim().is_empty() { command.push_str(&format!("--tokens {} ", tokens.trim())); }
+                                                if !cost.trim().is_empty() { command.push_str(&format!("--cost {} ", cost.trim())); }
+                                                if !tools.trim().is_empty() { command.push_str(&format!("--tools {} ", tools.trim())); }
+                                                command.push_str(&task);
+                                                t.run_host_action(command);
+                                            }
+                                        }>"Spawn subagent"</button>
+                                    </div>
                                 </div>
                             }.into_any()
                         }
@@ -1129,23 +1246,29 @@ pub(super) fn WorkspacePanelModal(store: StoreHandle) -> impl IntoView {
                     let tab_buttons = tabs.into_iter().map(|(value, label)| {
                         let store_tab = store;
                         view! {
-                            <button class=format!("btn tiny {}", if value == tab { "active" } else { "" }) on:click=move |_| {
+                            <button class="mode-seg" class:active={value == tab} on:click=move |_| {
                                 store_tab.update(|s| if let Some(ActiveModal::WorkspacePanel { tab, .. }) = s.modal.as_mut() { *tab = value; });
                             }>{label}</button>
                         }
                     }).collect::<Vec<_>>();
                     view! {
                         <div class="modal-head">
-                            <h2>"Control panel"</h2>
-                            <div class="panel-tabs">{tab_buttons}</div>
-                            <button class="btn tiny" on:click={
-                                let reload = reload.clone();
-                                move |_| reload(tab)
-                            }>"Refresh"</button>
-                            <button class="btn tiny" on:click=close.clone()>"Close"</button>
+                            <h2 id="control-panel-title">"Control panel"</h2>
+                            <div class="panel-tabs mode-switch">{tab_buttons}</div>
+                            <div class="control-head-actions">
+                                <button class="btn tiny" on:click={
+                                    let reload = reload.clone();
+                                    move |_| reload(tab)
+                                }>"Refresh"</button>
+                                <button class="modal-close" aria-label="Close control panel" title="Close (Esc)" on:click=close>
+                                    <crate::views::icons::IconClose />
+                                </button>
+                            </div>
                         </div>
-                        {if loading { view! { <div class="panel-status">"Loading..."</div> }.into_any() } else if let Some(error) = error { view! { <div class="panel-status error">{error}</div> }.into_any() } else { view! { <span></span> }.into_any() }}
-                        {body}
+                        <div class="modal-body">
+                            {if loading { view! { <div class="banner notice">"Loading…"</div> }.into_any() } else if let Some(error) = error { view! { <div class="banner error">{error}</div> }.into_any() } else { view! { <span></span> }.into_any() }}
+                            {body}
+                        </div>
                     }.into_any()
                 }}
             </div>

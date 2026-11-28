@@ -357,6 +357,9 @@ impl AppState {
             KeyCode::Char('y') if !has_ctrl => {
                 return self.copy_latest_reply();
             }
+            KeyCode::Char('t') if !has_ctrl => {
+                self.toggle_reasoning_at_viewport();
+            }
             KeyCode::Char('/') if !has_ctrl => {
                 self.open_search_modal(SearchMode::Files, "");
             }

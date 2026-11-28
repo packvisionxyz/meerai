@@ -49,6 +49,7 @@ impl AppState {
                         | ActiveModal::Routing { .. }
                         | ActiveModal::Packs { .. }
                         | ActiveModal::Runs { .. }
+                        | ActiveModal::McpServers { .. }
                         | ActiveModal::RunDetail { .. }
                         | ActiveModal::RewindMenu { .. } => {}
                         ActiveModal::Context(panel) => {
@@ -224,6 +225,9 @@ impl AppState {
                         self.copy_text_to_clipboard(&server.url);
                         self.status_notice = Some(format!("Copied {}", server.url));
                     }
+                }
+                StatusHitKind::McpServers => {
+                    self.modal = Some(ActiveModal::McpServers { selected: 0 });
                 }
             }
             return true;

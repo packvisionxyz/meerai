@@ -53,6 +53,12 @@ impl AppState {
         {
             return Some(StatusHitKind::WebServer);
         }
+        if self
+            .mcp_hit
+            .is_some_and(|hit| rect_contains(hit, column, row))
+        {
+            return Some(StatusHitKind::McpServers);
+        }
         None
     }
     pub fn hovered_file_change_at(&self, column: u16, row: u16) -> Option<usize> {
@@ -247,6 +253,23 @@ impl AppState {
         let expanded = tab.turn_activity.get(&group_idx).copied().unwrap_or(false);
         tab.turn_activity.insert(group_idx, !expanded);
         true
+    }
+    pub(crate) fn toggle_reasoning_at_viewport(&mut self) -> bool {
+        let area = self.transcript_inner_area;
+        let first = self.effective_scroll();
+        let anchor = if area.height == 0 {
+            self.tab().transcript.len().saturating_sub(1)
+        } else {
+            self.thinking_hit_zones
+                .iter()
+                .find(|zone| {
+                    zone.start_line < first.saturating_add(area.height as usize)
+                        && zone.end_line > first
+                })
+                .map(|zone| zone.entry_idx)
+                .unwrap_or_else(|| self.tab().transcript.len().saturating_sub(1))
+        };
+        self.toggle_entry_index(anchor)
     }
     pub(crate) fn toggle_entry_index(&mut self, entry_idx: usize) -> bool {
         let mut load_child: Option<String> = None;

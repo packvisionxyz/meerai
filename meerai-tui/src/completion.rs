@@ -8,150 +8,14 @@ use crate::workspace::{WorkspaceQuery, local_workspace};
 
 const MAX_VISIBLE_ITEMS: usize = 50;
 
-pub const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
-    ("/help", "Show available commands and keybindings", false),
-    (
-        "/sessions",
-        "Switch to another session (or /sessions <id>)",
-        false,
-    ),
-    ("/new", "Open a new session tab", false),
-    (
-        "/fork",
-        "Fork the session at the latest closed turn into a new tab",
-        false,
-    ),
-    (
-        "/btw",
-        "Open a read-only side session seeded from this history",
-        true,
-    ),
-    ("/acp", "Start an ACP session (agy)", false),
-    ("/close", "Close the current session tab", false),
-    ("/auth", "Show active credential sources", false),
-    ("/connect", "Configure provider API key and model", false),
-    ("/provider", "Switch or configure AI provider", false),
-    ("/models", "Open model input modal", false),
-    ("/model", "Switch active LLM model", true),
-    (
-        "/effort",
-        "Set reasoning effort, or open the sampling panel with no argument",
-        true,
-    ),
-    (
-        "/sampling",
-        "Set reasoning effort and temperature together",
-        false,
-    ),
-    (
-        "/temperature",
-        "Set the sampling temperature override (0.0..2.0 or default)",
-        true,
-    ),
-    (
-        "/agent",
-        "Apply an agent by id (or mention @agent/<id>)",
-        true,
-    ),
-    ("/agents", "Choose an agent from the Mentions popup", false),
-    (
-        "/skill",
-        "Apply a skill by id (or mention @skill/<id>)",
-        true,
-    ),
-    (
-        "/skills",
-        "Show discovered skills, warnings, and token estimates",
-        false,
-    ),
-    (
-        "/loop",
-        "Show the active loop checklist (or use @goal / @orchestrate <instruction>)",
-        false,
-    ),
-    (
-        "/search",
-        "Search files by name or content (ripgrep)",
-        false,
-    ),
-    ("/grep", "Search file contents with ripgrep", false),
-    ("/diff", "View 2-pane diff of changed files", false),
-    (
-        "/sidebar",
-        "Toggle right status and file changes sidebar",
-        false,
-    ),
-    (
-        "/diagnose",
-        "Show or hide cache, context, and memory diagnostics",
-        false,
-    ),
-    ("/clear", "Clear visible chat transcript", false),
-    ("/reset", "Clear transcript and reset agent history", false),
-    ("/cancel", "Cancel the active agent turn", false),
-    ("/compact", "Compact older turns to reclaim context", false),
-    ("/mode", "Show or set approval mode (plan|ask|auto)", true),
-    (
-        "/rewind",
-        "Restore code and/or conversation for the last turn",
-        false,
-    ),
-    (
-        "/reload",
-        "Reload settings, theme, definitions, and prompt",
-        false,
-    ),
-    (
-        "/serve",
-        "Start or stop local browser UI server (/serve stop)",
-        false,
-    ),
-    (
-        "/context",
-        "Inspect the context breakdown, watermark, and headroom",
-        false,
-    ),
-    (
-        "/memory",
-        "List or search project memories (/memory <query>)",
-        true,
-    ),
-    (
-        "/remember",
-        "Save a project memory (/remember <note>)",
-        true,
-    ),
-    ("/forget", "Delete a project memory (/forget <id>)", true),
-    (
-        "/pin",
-        "Pin or unpin a project memory (/pin <id> [off])",
-        true,
-    ),
-    (
-        "/routing",
-        "List or edit task model routes (/routing set <task> <provider::model>)",
-        true,
-    ),
-    ("/packs", "List installed declarative packs", false),
-    (
-        "/pack",
-        "Install, enable, trust, pin, or remove a pack (/pack <verb> <id>)",
-        true,
-    ),
-    ("/definitions", "Show discovered agents and skills", false),
-    (
-        "/subagent",
-        "Spawn or cancel a manual subagent (/subagent <agent> <task>)",
-        true,
-    ),
-    ("/open", "Open a workspace file in $EDITOR", true),
-    (
-        "/vault-reset",
-        "Delete every saved credential and reinitialize the vault",
-        false,
-    ),
-    ("/quit", "Exit meerai", false),
-];
+pub use meerai_commands::CommandSpec as SlashCommand;
+
+pub fn slash_commands_for_tui() -> Vec<&'static SlashCommand> {
+    meerai_commands::COMMANDS
+        .iter()
+        .filter(|spec| spec.clients.has_tui())
+        .collect()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompletionKind {
@@ -501,10 +365,10 @@ fn is_exact_sole_match(trigger: &ActiveTrigger, candidates: &[CompletionItem]) -
     let only = &candidates[0];
     match trigger.kind {
         CompletionKind::SlashCommand => {
-            let takes_arg = SLASH_COMMANDS
-                .iter()
-                .find(|(name, _, _)| *name == only.label)
-                .is_some_and(|(_, _, arg)| *arg);
+            let takes_arg = slash_commands_for_tui()
+                .into_iter()
+                .find(|spec| spec.name == only.label)
+                .is_some_and(|spec| spec.takes_arg);
             !takes_arg && only.label == format!("/{}", trigger.query)
         }
         CompletionKind::Model => only.label == trigger.query,
@@ -515,22 +379,17 @@ fn is_exact_sole_match(trigger: &ActiveTrigger, candidates: &[CompletionItem]) -
 }
 
 fn build_slash_candidates(query: &str) -> Vec<CompletionItem> {
-    let mut scored: Vec<(MatchRank, CompletionItem)> = SLASH_COMMANDS
-        .iter()
-        .filter_map(|&(name, desc, takes_arg)| {
-            let target = name.trim_start_matches('/');
+    let mut scored: Vec<(MatchRank, CompletionItem)> = slash_commands_for_tui()
+        .into_iter()
+        .filter_map(|spec| {
+            let target = spec.name.trim_start_matches('/');
             let rank = score_candidate(target, query)?;
-            let insert_text = if takes_arg {
-                format!("{name} ")
-            } else {
-                name.to_string()
-            };
             Some((
                 rank,
                 CompletionItem {
-                    label: name.to_string(),
-                    description: desc.to_string(),
-                    insert_text,
+                    label: spec.name.to_string(),
+                    description: spec.desc.to_string(),
+                    insert_text: spec.insert(),
                     item_kind: CompletionItemKind::Plain,
                     search: target.to_string(),
                 },
@@ -702,6 +561,55 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[test]
+    fn every_tui_command_is_listed_once_and_dispatched() {
+        let listed: Vec<&str> = slash_commands_for_tui()
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect();
+        let mut sorted = listed.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), listed.len(), "duplicate command in the table");
+
+        let source = include_str!("app/commands.rs");
+        for name in &listed {
+            let arm = format!("\"{name}\"");
+            assert!(
+                source.contains(&arm),
+                "{name} is listed for the TUI but has no dispatch arm"
+            );
+        }
+        assert!(
+            !listed.contains(&"/settings"),
+            "/settings is a web-only command"
+        );
+    }
+
+    #[test]
+    fn command_table_flags_are_consistent() {
+        for spec in meerai_commands::COMMANDS {
+            assert!(
+                spec.name.starts_with('/'),
+                "{} must start with a slash",
+                spec.name
+            );
+            assert!(!spec.desc.is_empty(), "{} has no description", spec.name);
+            assert!(
+                spec.clients.has_tui() || spec.clients.has_web(),
+                "{} is listed for no client",
+                spec.name
+            );
+            if spec.takes_arg {
+                assert!(
+                    !spec.args.is_empty(),
+                    "{} takes an argument but shows no argument hint",
+                    spec.name
+                );
+            }
+        }
+    }
+
     struct TempWorkspace {
         root: PathBuf,
     }
@@ -743,7 +651,7 @@ mod tests {
         engine.update("/", 1);
         assert!(engine.is_active());
         assert_eq!(engine.kind(), Some(CompletionKind::SlashCommand));
-        assert_eq!(engine.items().len(), SLASH_COMMANDS.len());
+        assert_eq!(engine.items().len(), slash_commands_for_tui().len());
 
         engine.update("/he", 3);
         assert_eq!(engine.items().len(), 1);
@@ -811,8 +719,8 @@ mod tests {
 
     #[test]
     fn acp_command_is_listed_and_completes() {
-        assert!(SLASH_COMMANDS.iter().any(|(name, hint, takes_arg)| {
-            *name == "/acp" && *hint == "Start an ACP session (agy)" && !*takes_arg
+        assert!(slash_commands_for_tui().into_iter().any(|spec| {
+            spec.name == "/acp" && spec.desc == "Start an ACP session (agy)" && !spec.takes_arg
         }));
 
         let mut engine = CompletionEngine::new(PathBuf::from("."));

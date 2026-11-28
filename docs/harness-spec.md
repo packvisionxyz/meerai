@@ -925,10 +925,10 @@ process, and `plan` refuses ACP. Full specification and trust boundary:
 
 | Item | Description | Gate |
 | --- | --- | --- |
-| Progressive tool disclosure | Admit a compact tool index plus a `load_tool_schema` meta-tool when admitted schemas exceed ~2k tokens (MCP, skills growth) | Tool count growth |
+| MCP surfaces | Elicitation, sampling, and roots prompts; MCP resources and prompts; live `notifications/tools/list_changed` re-admission | MCP demand |
 | `meerai export` | Export a session log for evals and audit (`--json`) | CLI milestone |
 | TUI polish | Select mode, Space leader, `:` command mode, transcript search, `Summarize from here`, inline viewport | [tui-design.md](tui-design.md) §3 |
-| Definition mapping | Map definition `tools`/`permissions` and MCP servers | Security review |
+| Definition mapping | Map definition `tools`/`permissions` to toolsets | Security review |
 | M14 — `meerai acp` | meerai as an ACP agent for editors | [acp.md](acp.md) §3.1 |
 | ACP presets | User-config preset catalog (`acp.yml`), OpenCode/Gemini/Claude/Codex adapters | [acp.md](acp.md) §3 |
 | M15 — OpenAI plan usage | In-TUI sign-in modal, multi-account switching, live provider spike | [openai-chatgpt-plan-usage.md](openai-chatgpt-plan-usage.md) |

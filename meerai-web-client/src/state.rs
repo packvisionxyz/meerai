@@ -294,6 +294,40 @@ mod tests {
     }
 
     #[test]
+    fn mcp_command_opens_the_servers_modal() {
+        let mut state = state_with_tab();
+        execute_slash_command(&mut state, "/mcp");
+        assert!(matches!(state.modal, Some(ActiveModal::McpServers { .. })));
+        assert!(state.error_banner.is_none());
+    }
+
+    #[test]
+    fn mode_without_an_argument_reports_instead_of_cycling() {
+        let mut state = state_with_tab();
+        state.sessions[0].approval_mode = ApprovalModeDto::Plan;
+        execute_slash_command(&mut state, "/mode");
+        assert_eq!(state.sessions[0].approval_mode, ApprovalModeDto::Plan);
+        assert!(
+            state
+                .status_notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("plan"))
+        );
+    }
+
+    #[test]
+    fn web_command_list_excludes_tui_only_commands_and_is_shared() {
+        let names: Vec<&str> = slash_commands_for_web()
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect();
+        assert!(names.contains(&"/mcp"));
+        assert!(names.contains(&"/settings"));
+        assert!(!names.contains(&"/auth"), "/auth is a TUI-only command");
+        assert!(names.contains(&"/open"));
+    }
+
+    #[test]
     fn palette_actions_cover_non_command_actions() {
         let keys: Vec<&str> = PALETTE_ACTIONS.iter().map(|a| a.key).collect();
         assert!(keys.contains(&"copy-last"));

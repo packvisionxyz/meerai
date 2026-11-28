@@ -258,6 +258,10 @@ pub trait Toolset: Send + Sync {
         None
     }
 
+    fn permission_resource(&self, _fn_name: &str, _args: &str) -> Option<String> {
+        None
+    }
+
     fn should_spill_output(&self, _fn_name: &str) -> bool {
         true
     }

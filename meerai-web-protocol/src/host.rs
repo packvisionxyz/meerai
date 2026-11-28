@@ -48,7 +48,11 @@ pub struct McpServerInfoDto {
     pub kind: String,
     pub enabled: bool,
     #[serde(default)]
+    pub status: String,
+    #[serde(default)]
     pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

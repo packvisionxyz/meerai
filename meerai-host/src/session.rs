@@ -76,12 +76,46 @@ pub struct HostSkillInfo {
     pub description: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostMcpStatus {
+    #[default]
+    Disabled,
+    Unsupported,
+    Untrusted,
+    Configured,
+    Connected,
+    Failed,
+}
+
+impl HostMcpStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Unsupported => "unsupported",
+            Self::Untrusted => "needs trust",
+            Self::Configured => "configured",
+            Self::Connected => "connected",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn is_usable(self) -> bool {
+        matches!(self, Self::Configured | Self::Connected)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostMcpServerInfo {
     pub name: String,
     pub kind: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub status: HostMcpStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +346,12 @@ pub trait SessionOpener: Send + Sync {
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>>;
     async fn open_session(&self, id: &SessionId) -> Result<OpenedSession>;
     async fn create_session(&self) -> Result<OpenedSession>;
+    async fn create_session_at(&self, _cwd: &Path) -> Result<OpenedSession> {
+        self.create_session().await
+    }
+    async fn switch_workspace(&self, id: &SessionId, _cwd: &Path) -> Result<OpenedSession> {
+        self.open_session(id).await
+    }
     async fn fork_session(&self, id: &SessionId, turn: &TurnId) -> Result<OpenedSession>;
     async fn btw_session(&self, _id: &SessionId) -> Result<OpenedSession> {
         anyhow::bail!("btw sessions are not supported by this client")
@@ -472,6 +512,22 @@ pub trait SessionOpener: Send + Sync {
 
     async fn definitions_diagnostics(&self) -> Result<HostDefinitionsDiagnostics> {
         Ok(HostDefinitionsDiagnostics::default())
+    }
+
+    async fn mcp_servers(&self) -> Result<Vec<HostMcpServerInfo>> {
+        Ok(Vec::new())
+    }
+
+    async fn mcp_trust_project(&self) -> Result<String> {
+        anyhow::bail!("mcp trust is not supported by this client")
+    }
+
+    async fn mcp_revoke_project(&self) -> Result<String> {
+        anyhow::bail!("mcp trust is not supported by this client")
+    }
+
+    async fn mcp_reload(&self) -> Result<Vec<HostMcpServerInfo>> {
+        Ok(Vec::new())
     }
 
     async fn read_session_blob(&self, _id: &SessionId, _blob_key: &str) -> Result<String> {

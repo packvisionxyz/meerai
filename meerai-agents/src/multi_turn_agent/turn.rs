@@ -184,6 +184,17 @@ pub(super) fn provider_backoff_with_jitter(failures: usize) -> Duration {
 }
 
 impl MultiTurnAgent {
+    pub(super) fn tool_definitions(&self, plan_mode: bool) -> Vec<ToolDefinition> {
+        self.tools
+            .iter()
+            .flat_map(|tool| {
+                tool.definition().into_iter().filter(|definition| {
+                    !plan_mode || tool.effect_of(&definition.name) == EffectClass::Read
+                })
+            })
+            .collect()
+    }
+
     pub(super) async fn run_turn(
         &mut self,
         prompt: &str,
@@ -345,16 +356,8 @@ impl MultiTurnAgent {
             .harness
             .as_ref()
             .is_some_and(|harness| harness.policy.mode() == ApprovalMode::Plan);
-        let definitions: Vec<ToolDefinition> = self
-            .tools
-            .iter()
-            .flat_map(|tool| {
-                tool.definition().into_iter().filter(|definition| {
-                    !plan_mode || tool.effect_of(&definition.name) == EffectClass::Read
-                })
-            })
-            .collect();
-        let genai_tools: Vec<Tool> = definitions.iter().map(ToolDefinition::to_genai).collect();
+        let definitions: Vec<ToolDefinition> = self.tool_definitions(plan_mode);
+        let mut genai_tools: Vec<Tool> = definitions.iter().map(ToolDefinition::to_genai).collect();
         self.tool_schema_tokens = definitions
             .iter()
             .map(|definition| {
@@ -636,6 +639,23 @@ impl MultiTurnAgent {
             )
             .await;
             let step_started = Instant::now();
+
+            if step_index > 0 {
+                let refreshed = self.tool_definitions(plan_mode);
+                let refreshed_tools: Vec<Tool> =
+                    refreshed.iter().map(ToolDefinition::to_genai).collect();
+                if !super::tools::same_tool_names(&genai_tools, &refreshed_tools) {
+                    self.tool_schema_tokens = refreshed
+                        .iter()
+                        .map(|definition| {
+                            estimate_tokens(&definition.name)
+                                + estimate_tokens(&definition.description)
+                                + estimate_tokens(&definition.parameters.to_string())
+                        })
+                        .sum();
+                    genai_tools = refreshed_tools;
+                }
+            }
 
             let collected = match self
                 .request_step(&genai_tools, &options, final_step, event_tx, &cancel, clock)
@@ -1074,7 +1094,7 @@ impl MultiTurnAgent {
         let streamer = self.streamer.clone();
         let mut stream = tokio::select! {
             _ = cancel.cancelled() => return Err(StreamFailure::Cancelled),
-            result = streamer.stream_chat(&self.model, request, options) => {
+            result = streamer.stream_chat(self.provider.as_deref(), &self.model, request, options) => {
                 result.map_err(|error| StreamFailure::Provider { error, items: Vec::new() })?
             }
         };

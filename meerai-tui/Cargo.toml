@@ -17,6 +17,7 @@ update = ["meerai-host/update"]
 [dependencies]
 meerai-agents = { path = "../meerai-agents/" }
 meerai-common = { path = "../meerai-common/" }
+meerai-commands = { path = "../meerai-commands/" }
 meerai-core = { path = "../meerai-core/" }
 meerai-host = { path = "../meerai-host/", default-features = false }
 meerai-input = { path = "../meerai-input/" }

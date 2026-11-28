@@ -712,12 +712,12 @@ mod tests {
 
         let clear_desc = crate::state::SLASH_COMMANDS
             .iter()
-            .find(|c| c.cmd == "/clear")
+            .find(|c| c.name == "/clear")
             .unwrap()
             .desc;
         let reset_desc = crate::state::SLASH_COMMANDS
             .iter()
-            .find(|c| c.cmd == "/reset")
+            .find(|c| c.name == "/reset")
             .unwrap()
             .desc;
         assert_ne!(clear_desc, reset_desc);

@@ -19,6 +19,7 @@ enum ModalIdentity {
     QueuedEdit,
     VaultReset,
     Help,
+    McpServers,
     SubagentOverlay(String),
     Runs,
     ShellRun(String),
@@ -60,6 +61,7 @@ fn modal_identity(modal: &ActiveModal) -> ModalIdentity {
         ActiveModal::QueuedEdit { .. } => ModalIdentity::QueuedEdit,
         ActiveModal::VaultReset { .. } => ModalIdentity::VaultReset,
         ActiveModal::Help => ModalIdentity::Help,
+        ActiveModal::McpServers { .. } => ModalIdentity::McpServers,
         ActiveModal::WorkspacePanel { .. } => ModalIdentity::WorkspacePanel,
         ActiveModal::SubagentOverlay { entry_id, .. } => {
             ModalIdentity::SubagentOverlay(entry_id.clone())
@@ -146,6 +148,7 @@ pub fn ModalLayer(store: StoreHandle) -> impl IntoView {
             Some(ModalIdentity::QueuedEdit) => view! { <QueuedEditModal store=store /> }.into_any(),
             Some(ModalIdentity::VaultReset) => view! { <VaultResetModal store=store /> }.into_any(),
             Some(ModalIdentity::Help) => help_modal(store),
+            Some(ModalIdentity::McpServers) => view! { <McpServersModal store=store /> }.into_any(),
             Some(ModalIdentity::SubagentOverlay(_)) => view! { <SubagentModal store=store /> }.into_any(),
             Some(ModalIdentity::Runs) => view! { <RunsModal store=store /> }.into_any(),
             Some(ModalIdentity::ShellRun(_)) => view! { <ShellRunModal store=store /> }.into_any(),

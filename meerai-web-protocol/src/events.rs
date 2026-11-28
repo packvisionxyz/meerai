@@ -51,6 +51,11 @@ pub enum ViewEvent {
         turn_id: String,
         model: String,
     },
+    WorkspaceChanged {
+        session_id: String,
+        path: String,
+        carry: bool,
+    },
     UserPromptSubmitted {
         session_id: String,
         entry_id: String,

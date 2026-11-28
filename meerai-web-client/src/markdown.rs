@@ -271,7 +271,7 @@ fn collect_inline<'a>(node: &'a AstNode<'a>, out: &mut Vec<AnyView>) {
             match safe_url(&link.url) {
                 Some(url) => out.push(
                     view! {
-                        <a href=url target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">
+                        <a class="md-link" href=url target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">
                             {inner}
                         </a>
                     }
@@ -379,7 +379,8 @@ fn render_code_block(lang: &str, code: &str) -> AnyView {
                     title="Copy code"
                     on:click=move |_| crate::store::copy_text(code_text.clone())
                 >
-                    "Copy"
+                    <crate::views::icons::IconCopy />
+                    <span>"Copy"</span>
                 </button>
             </div>
             <pre><code>{body}</code></pre>

@@ -77,17 +77,74 @@ pub(super) fn render_sidebar_overview(frame: &mut Frame<'_>, app: &mut AppState,
             Span::styled("none", Style::default().fg(theme::p().faint)),
         ]));
     } else {
+        let failed = app.mcp_servers.iter().filter(|srv| srv.is_failed()).count();
+        let untrusted = app
+            .mcp_servers
+            .iter()
+            .filter(|srv| srv.needs_trust())
+            .count();
         lines.push(Line::from(vec![
             Span::styled("MCP ", section_style),
             Span::styled(
                 format!("({})", app.mcp_servers.len()),
                 Style::default().fg(theme::p().faint),
             ),
+            if failed > 0 {
+                Span::styled(
+                    format!(" {failed} failed"),
+                    Style::default().fg(theme::p().error),
+                )
+            } else if untrusted > 0 {
+                Span::styled(
+                    format!(" {untrusted} need trust"),
+                    Style::default().fg(theme::p().warning),
+                )
+            } else {
+                Span::raw("")
+            },
         ]));
-        for srv in &app.mcp_servers {
+        let mut ordered: Vec<&crate::app::McpServerView> = app
+            .mcp_servers
+            .iter()
+            .filter(|srv| srv.is_failed())
+            .chain(app.mcp_servers.iter().filter(|srv| srv.needs_trust()))
+            .chain(
+                app.mcp_servers
+                    .iter()
+                    .filter(|srv| !srv.is_failed() && srv.is_connected()),
+            )
+            .chain(
+                app.mcp_servers
+                    .iter()
+                    .filter(|srv| !srv.is_failed() && !srv.is_connected() && !srv.needs_trust()),
+            )
+            .collect();
+        const MAX_MCP_ROWS: usize = 2;
+        let hidden = ordered.len().saturating_sub(MAX_MCP_ROWS);
+        ordered.truncate(MAX_MCP_ROWS);
+        for srv in ordered {
+            let color = if srv.is_failed() {
+                theme::p().error
+            } else if srv.needs_trust() {
+                theme::p().warning
+            } else if srv.is_connected() {
+                theme::p().success
+            } else {
+                theme::p().muted
+            };
             lines.push(Line::from(Span::styled(
-                format!("  • {}", truncate_single_line(srv, width.saturating_sub(4))),
-                theme::muted(),
+                format!(
+                    "  • {} [{}]",
+                    truncate_single_line(&srv.name, width.saturating_sub(10)),
+                    srv.badge()
+                ),
+                Style::default().fg(color),
+            )));
+        }
+        if hidden > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("    +{hidden} more"),
+                Style::default().fg(theme::p().faint),
             )));
         }
     }

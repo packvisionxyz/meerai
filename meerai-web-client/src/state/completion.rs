@@ -84,23 +84,13 @@ pub fn update_completion(state: &mut AppState) {
         let q = text.trim().to_ascii_lowercase();
         let items = SLASH_COMMANDS
             .iter()
-            .filter(|c| c.cmd.contains(&q) || c.desc.to_ascii_lowercase().contains(&q[1..]))
-            .map(|c| {
-                let label = if c.args.is_empty() {
-                    c.cmd.to_owned()
-                } else {
-                    format!("{} {}", c.cmd, c.args)
-                };
-                CompletionItem {
-                    label,
-                    insert: if c.takes_arg {
-                        format!("{} ", c.cmd)
-                    } else {
-                        c.cmd.to_owned()
-                    },
-                    detail: c.desc.to_owned(),
-                    category: None,
-                }
+            .filter(|c| c.clients.has_web())
+            .filter(|c| c.name.contains(&q) || c.desc.to_ascii_lowercase().contains(&q[1..]))
+            .map(|c| CompletionItem {
+                label: c.label(),
+                insert: c.insert(),
+                detail: c.desc.to_owned(),
+                category: None,
             })
             .collect::<Vec<_>>();
         state.completion = CompletionState {

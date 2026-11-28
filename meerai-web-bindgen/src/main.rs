@@ -57,6 +57,7 @@ fn run() -> Result<()> {
     bindgen
         .input_path(&config.input)
         .web(true)?
+        .omit_default_module_path(false)
         .out_name(&config.out_name)
         .remove_name_section(config.remove_name_section)
         .generate(&config.out_dir)

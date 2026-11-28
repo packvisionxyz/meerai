@@ -173,7 +173,13 @@ impl SessionRegistry {
                 rx,
             };
         };
-        if after >= state.current_seq {
+        if after > state.current_seq {
+            return SubscribeResult::ResyncRequired {
+                current_seq: state.current_seq,
+                rx,
+            };
+        }
+        if after == state.current_seq {
             return SubscribeResult::Replay {
                 events: Vec::new(),
                 rx,

@@ -93,7 +93,9 @@ pub fn SettingsModal(store: StoreHandle) -> impl IntoView {
             <div class="modal modal-wide settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1">
                 <div class="modal-head">
                     <h2 id="settings-title">"Settings"</h2>
-                    <button class="modal-close" aria-label="Close settings" title="Close (Esc)" on:click=move |_| store.update(|s| s.modal = None)>"×"</button>
+                    <button class="modal-close" aria-label="Close settings" title="Close (Esc)" on:click=move |_| store.update(|s| s.modal = None)>
+                        <crate::views::icons::IconClose />
+                    </button>
                 </div>
                 <div class="settings-layout">
                     <nav class="settings-tabs" aria-label="Settings sections">

@@ -420,6 +420,15 @@ pub fn map_view_event(kind: RegistryEventKind) -> ViewEvent {
         RegistryEventKind::SessionUpdated { session } => ViewEvent::SessionUpdated {
             session: map_summary(session),
         },
+        RegistryEventKind::WorkspaceChanged {
+            session_id,
+            path,
+            carry,
+        } => ViewEvent::WorkspaceChanged {
+            session_id: session_id.to_string(),
+            path,
+            carry,
+        },
         RegistryEventKind::ContextUpdated {
             session_id,
             breakdown,
@@ -690,7 +699,9 @@ pub fn map_host_info(info: HostInfoSnapshot) -> HostInfoDto {
                 name: m.name,
                 kind: m.kind,
                 enabled: m.enabled,
+                status: m.status.label().to_string(),
                 tools: m.tools,
+                detail: m.detail,
             })
             .collect(),
         enabled_tools: info.enabled_tools,

@@ -51,7 +51,7 @@ pub(super) fn ApprovalModal(store: StoreHandle) -> impl IntoView {
                             }
                         ></textarea>
                     </Show>
-                    <div class="hint">"Shortcuts: y approve once · t allow turn · a allow session · n decline · r reason · c cancel request"</div>
+                    <div class="hint">"Shortcuts: y or Enter approve once · t allow turn · a allow session · n decline · r reason · c cancel request"</div>
                 </div>
             }
             .into_any()
@@ -159,11 +159,11 @@ pub(super) fn QuestionModal(store: StoreHandle) -> impl IntoView {
                         let label_click = label.clone();
                         let is_selected = selected.contains(&label);
                         let is_focused = idx == focused_option;
-                        let marker = match (multiple, is_selected) {
-                            (true, true) => "[x]",
-                            (true, false) => "[ ]",
-                            (false, true) => "(•)",
-                            (false, false) => "( )",
+                        let indicator_cls = match (multiple, is_selected) {
+                            (true, true) => "pick-indicator checkbox checked",
+                            (true, false) => "pick-indicator checkbox",
+                            (false, true) => "pick-indicator radio checked",
+                            (false, false) => "pick-indicator radio",
                         };
                         view! {
                             <button
@@ -189,7 +189,7 @@ pub(super) fn QuestionModal(store: StoreHandle) -> impl IntoView {
                                     });
                                 }
                             >
-                                <span class="pick-marker">{marker}</span>
+                                <span class=indicator_cls aria-hidden="true"></span>
                                 <span class="pick-title">{label}</span>
                                 {option.description.clone().map(|description| view! { <span class="pick-meta">{description}</span> }.into_any())}
                             </button>
@@ -352,14 +352,14 @@ pub(super) fn CommandPaletteModal(store: StoreHandle) -> impl IntoView {
                     .into_iter()
                     .enumerate()
                     .map(|(index, spec)| {
-                        let cmd = spec.cmd.to_owned();
+                        let cmd = spec.name.to_owned();
                         let takes_arg = spec.takes_arg;
                         let label = command_label(spec);
                         view! {
                             <button class="pick-row" class:active=index == selected on:click=move |_| {
                                 if takes_arg {
                                     store.update_with_effects(|s, fx| {
-                                        s.draft.replace_text(format!("{cmd} "));
+                                        s.draft.replace_text(spec.insert());
                                         s.modal = None;
                                         update_completion(s);
                                         fx.focus("composer");
@@ -384,6 +384,7 @@ pub(super) fn CommandPaletteModal(store: StoreHandle) -> impl IntoView {
                     .map(|(idx, action)| {
                         let key = action.key.to_owned();
                         let is_selected = cmd_len + idx == selected;
+                        let hint = action.hint;
                         view! {
                             <button class="pick-row" class:active=is_selected on:click=move |_| {
                                 let key = key.clone();
@@ -393,18 +394,31 @@ pub(super) fn CommandPaletteModal(store: StoreHandle) -> impl IntoView {
                                 });
                             }>
                                 <span class="pick-title">{action.label.to_owned()}</span>
-                                <span class="pick-meta">{action.hint.to_owned()}</span>
+                                <span class="pick-meta"></span>
+                                {(!hint.is_empty()).then(|| view! { <kbd class="palette-kbd">{hint.to_owned()}</kbd> })}
                             </button>
                         }
                         .into_any()
                     })
                     .collect::<Vec<_>>();
+                let action_len = action_rows.len();
                 view! {
-                    <div class="modal-form">
-                        <div class="palette-section">"Commands"</div>
-                        <div class="pick-list">{AnyView::from(Fragment::new(rows))}</div>
-                        <div class="palette-section">"Actions"</div>
-                        <div class="pick-list">{AnyView::from(Fragment::new(action_rows))}</div>
+                    <div class="pick-list palette-list">
+                        {(!rows.is_empty()).then(|| view! {
+                            <>
+                                <div class="palette-section">"Commands"</div>
+                                {AnyView::from(Fragment::new(rows))}
+                            </>
+                        })}
+                        {(action_len > 0).then(|| view! {
+                            <>
+                                <div class="palette-section">"Actions"</div>
+                                {AnyView::from(Fragment::new(action_rows))}
+                            </>
+                        })}
+                        {(cmd_len == 0 && action_len == 0).then(|| view! {
+                            <div class="hint">"No commands or actions match."</div>
+                        })}
                     </div>
                 }
             }}

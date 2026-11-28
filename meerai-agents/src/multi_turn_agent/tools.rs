@@ -2,6 +2,7 @@ use super::*;
 use crate::harness::HarnessConfig;
 use crate::question::{QUESTION_TOOL, format_answers, parse_questions};
 use crate::subagent::{ForwardedApproval, SUBAGENT_BRIDGE, SubagentBridge, SubagentBudgetUpdate};
+use crate::workspace::WORKSPACE_CD_TOOL;
 
 #[derive(Default)]
 pub(super) struct FailureTracker {
@@ -50,11 +51,23 @@ impl FailureTracker {
     }
 }
 
+pub(super) fn same_tool_names(left: &[genai::chat::Tool], right: &[genai::chat::Tool]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let left_names: std::collections::BTreeSet<&str> =
+        left.iter().map(|tool| tool.name.as_str()).collect();
+    let right_names: std::collections::BTreeSet<&str> =
+        right.iter().map(|tool| tool.name.as_str()).collect();
+    left_names == right_names
+}
+
 pub(super) fn permission_check(
     tool_name: &str,
     args: &str,
     effect: EffectClass,
     spec: Option<ToolPermissionSpec>,
+    explicit_resource: Option<String>,
 ) -> PermissionCheck {
     let parsed: Option<serde_json::Value> = serde_json::from_str(args).ok();
     let field = |key: &str| {
@@ -68,7 +81,10 @@ pub(super) fn permission_check(
 
     let (action, resource) = match spec {
         Some(spec) => {
-            let mut resource = spec.resource_arg.map(field).unwrap_or_default();
+            let mut resource = explicit_resource
+                .filter(|resource| !resource.is_empty())
+                .or_else(|| spec.resource_arg.map(field))
+                .unwrap_or_default();
             if resource.is_empty() && tool_name == "sac-run_script" {
                 let lang = field("language");
                 let script = field("script");
@@ -519,7 +535,12 @@ impl MultiTurnAgent {
                     .iter()
                     .find(|tool| tool.contain(&tc.fn_name))
                     .and_then(|tool| tool.permission_spec(&tc.fn_name));
-                let check = permission_check(&tc.fn_name, &args_str, effect, spec);
+                let resource = self
+                    .tools
+                    .iter()
+                    .find(|tool| tool.contain(&tc.fn_name))
+                    .and_then(|tool| tool.permission_resource(&tc.fn_name, &args_str));
+                let check = permission_check(&tc.fn_name, &args_str, effect, spec, resource);
                 self.authorize(
                     &check,
                     &args_str,
@@ -565,6 +586,22 @@ impl MultiTurnAgent {
                         cancel,
                         inbox.as_deref_mut(),
                     )
+                    .await;
+                plan.outcome = Some(CallOutcome::Run(run));
+            }
+        }
+
+        let workspace_registered = self
+            .tools
+            .iter()
+            .any(|tool| tool.contain(WORKSPACE_CD_TOOL));
+        for plan in plans.iter_mut() {
+            if workspace_registered
+                && plan.authorized()
+                && plan.tool_call.fn_name == WORKSPACE_CD_TOOL
+            {
+                let run = self
+                    .change_workspace(&plan.args, turn_id, event_tx, cancel, inbox.as_deref_mut())
                     .await;
                 plan.outcome = Some(CallOutcome::Run(run));
             }
@@ -1076,6 +1113,85 @@ impl MultiTurnAgent {
         matches!(harness.policy.decide(&check), Decision::Allow)
     }
 
+    async fn change_workspace(
+        &mut self,
+        args: &str,
+        turn_id: &TurnId,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+        cancel: &CancellationToken,
+        inbox: Option<&mut mpsc::UnboundedReceiver<AgentCommand>>,
+    ) -> ToolRun {
+        let request = match crate::workspace::parse_workspace_cd(args) {
+            Ok(request) => request,
+            Err(error) => {
+                return ToolRun::from_output(ToolOutput::Fail(format!(
+                    "invalid workspace-cd arguments: {error}"
+                )));
+            }
+        };
+        if !request.path.is_dir() {
+            return ToolRun::from_output(ToolOutput::Fail(format!(
+                "not a directory: {}",
+                request.path.display()
+            )));
+        }
+        let action = if request.action == crate::workspace::WorkspaceAction::Carry {
+            let prompts = crate::workspace::decision_question(&request.path);
+            let request_id = RequestId::new();
+            let question = QuestionRequest {
+                request_id: request_id.clone(),
+                turn_id: turn_id.clone(),
+                questions: prompts.clone(),
+            };
+            let _ = event_tx.send(AgentEvent::QuestionAsked {
+                request: question.clone(),
+            });
+            self.log_event(
+                event_tx,
+                SessionEvent::QuestionAsked {
+                    request_id: request_id.clone(),
+                    questions: prompts,
+                },
+            )
+            .await;
+            let answers = self
+                .await_answer(&request_id, event_tx, cancel, inbox)
+                .await;
+            let _ = event_tx.send(AgentEvent::QuestionResolved {
+                request_id: request_id.clone(),
+            });
+            self.log_event(
+                event_tx,
+                SessionEvent::QuestionAnswered {
+                    request_id,
+                    answers: answers.clone(),
+                },
+            )
+            .await;
+            match answers.as_deref().and_then(|list| list.first()) {
+                Some(answer) => match crate::workspace::action_from_answer(answer) {
+                    Some(action) => action,
+                    None => {
+                        return ToolRun::from_output(ToolOutput::Text(
+                            "workspace unchanged; the user kept the current directory".to_string(),
+                        ));
+                    }
+                },
+                None => {
+                    return ToolRun::from_output(ToolOutput::Text(
+                        "workspace unchanged; the user cancelled".to_string(),
+                    ));
+                }
+            }
+        } else {
+            request.action
+        };
+        ToolRun::from_output(ToolOutput::Text(crate::workspace::format_decision(
+            action,
+            &request.path,
+        )))
+    }
+
     async fn ask_questions(
         &mut self,
         tool_call: &ToolCall,
@@ -1223,6 +1339,19 @@ impl MultiTurnAgent {
                 )
                 .await;
             decision = apply_hook_decision(decision, matched, mode, outside.is_some(), &report);
+        }
+
+        if matches!(decision, Decision::Allow)
+            && mode == meerai_policy::ApprovalMode::Auto
+            && matched.is_none()
+            && matches!(check.effect, EffectClass::Execute | EffectClass::External)
+            && !self.auto_approved_notified
+        {
+            self.auto_approved_notified = true;
+            let _ = event_tx.send(AgentEvent::AutoApproved {
+                tool: check.tool_name.clone(),
+                effect: check.effect,
+            });
         }
 
         match decision {
@@ -2309,8 +2438,40 @@ mod auto_approve_tests {
                 action: meerai_core::PermissionAction::Shell,
                 resource_arg: Some("path"),
             }),
+            None,
         );
         assert_eq!(check.resource, "python: print(1)");
+    }
+
+    #[test]
+    fn an_explicit_permission_resource_wins_over_resource_arg() {
+        let check = super::permission_check(
+            "mcp__github__search_issues",
+            r#"{"query":"x"}"#,
+            meerai_core::EffectClass::External,
+            Some(meerai_core::ToolPermissionSpec {
+                action: meerai_core::PermissionAction::Mcp,
+                resource_arg: Some("query"),
+            }),
+            Some("github/search_issues".to_string()),
+        );
+        assert_eq!(check.action, meerai_core::PermissionAction::Mcp);
+        assert_eq!(check.resource, "github/search_issues");
+    }
+
+    #[test]
+    fn an_empty_explicit_resource_falls_back_to_resource_arg() {
+        let check = super::permission_check(
+            "code-read_file",
+            r#"{"path":"src/main.rs"}"#,
+            meerai_core::EffectClass::Read,
+            Some(meerai_core::ToolPermissionSpec {
+                action: meerai_core::PermissionAction::Read,
+                resource_arg: Some("path"),
+            }),
+            Some(String::new()),
+        );
+        assert_eq!(check.resource, "src/main.rs");
     }
 }
 

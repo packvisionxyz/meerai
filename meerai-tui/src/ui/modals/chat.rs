@@ -704,7 +704,7 @@ pub(super) fn render_chat_modal(
                         ApprovalClickAction::DeclineReason,
                         theme::p().muted,
                     ),
-                    ("esc cancel", ApprovalClickAction::Cancel, theme::p().error),
+                    ("c cancel", ApprovalClickAction::Cancel, theme::p().error),
                 ];
                 let mut spans = Vec::new();
                 let mut col = rows[4].x;

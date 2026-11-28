@@ -611,6 +611,115 @@ pub(super) fn render_panels_modal(
                 rows[1],
             );
         }
+        ActiveModal::McpServers { selected } => {
+            let connected = app.mcp_servers.iter().filter(|s| s.is_connected()).count();
+            let failed = app.mcp_servers.iter().filter(|s| s.is_failed()).count();
+            let untrusted = app.mcp_servers.iter().filter(|s| s.needs_trust()).count();
+            let detail = if untrusted > 0 {
+                format!("{untrusted} need trust")
+            } else {
+                format!("{failed} failed")
+            };
+            let title = format!(
+                "MCP servers ({connected} connected, {detail}, {} total)",
+                app.mcp_servers.len()
+            );
+            let popup = cap_width(centered_rect(area, 76, 60, 48, 14), 78);
+            dim_backdrop(frame, area, popup);
+            let inner = dialog_frame(frame, app, popup, &title, true);
+            let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+            let body = rows[0];
+            let hovered = app.hovered_modal_hit;
+            let mut items: Vec<ListItem<'static>> = Vec::new();
+
+            let ordered: Vec<&crate::app::McpServerView> = app
+                .mcp_servers
+                .iter()
+                .filter(|server| server.is_failed())
+                .chain(app.mcp_servers.iter().filter(|s| s.needs_trust()))
+                .chain(app.mcp_servers.iter().filter(|s| s.is_connected()))
+                .chain(
+                    app.mcp_servers
+                        .iter()
+                        .filter(|s| !s.is_failed() && !s.is_connected() && !s.needs_trust()),
+                )
+                .collect();
+
+            for (row_index, server) in ordered.iter().enumerate() {
+                let (badge, color) = if server.is_connected() {
+                    ("connected", theme::p().success)
+                } else if server.is_failed() {
+                    ("failed", theme::p().error)
+                } else if server.needs_trust() {
+                    ("needs trust", theme::p().warning)
+                } else if server.status == "disabled" {
+                    ("disabled", theme::p().faint)
+                } else if server.status == "unsupported" {
+                    ("unsupported", theme::p().warning)
+                } else {
+                    (server.badge(), theme::p().faint)
+                };
+                let name =
+                    truncate_single_line(&server.name, (body.width as usize).saturating_sub(24));
+                let tool_count = if server.tools.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {} tools", server.tools.len())
+                };
+                let mut spans = vec![
+                    Span::styled(name, Style::default().fg(theme::p().text)),
+                    Span::styled(
+                        format!(" ({})", server.kind),
+                        Style::default().fg(theme::p().faint),
+                    ),
+                    Span::styled(format!("  {badge}"), Style::default().fg(color)),
+                    Span::styled(tool_count, Style::default().fg(theme::p().faint)),
+                ];
+                if let Some(error) = &server.error {
+                    spans.push(Span::styled(
+                        format!(
+                            "  {}",
+                            truncate_single_line(error, (body.width as usize).saturating_sub(28))
+                        ),
+                        Style::default().fg(theme::p().error),
+                    ));
+                }
+                let item = ListItem::new(Line::from(spans));
+                if hovered == Some(ModalHitKind::ListItem(row_index)) && row_index != selected {
+                    items.push(item.style(hover_row_style()));
+                } else {
+                    items.push(item);
+                }
+            }
+
+            if items.is_empty() {
+                items.push(ListItem::new(Line::from(Span::styled(
+                    "No MCP servers configured. Add .mcp.json to the project root.",
+                    Style::default().fg(theme::p().faint),
+                ))));
+            }
+            let has_rows = !ordered.is_empty();
+            let mut state = ListState::default();
+            if has_rows {
+                state.select(Some(selected.min(items.len().saturating_sub(1))));
+            }
+            let list = List::new(items).highlight_style(selection_style());
+            frame.render_stateful_widget(list, body, &mut state);
+            if has_rows {
+                register_list_hit_zones(app, body, state.offset(), ordered.len());
+            }
+            let hints: Vec<(&str, &str)> = if untrusted > 0 {
+                vec![
+                    ("↑↓", "move"),
+                    ("t", "trust"),
+                    ("r", "reload"),
+                    ("Esc", "close"),
+                ]
+            } else {
+                vec![("↑↓", "move"), ("r", "reload"), ("Esc", "close")]
+            };
+            frame.render_widget(Paragraph::new(key_hints_line(&hints)), rows[1]);
+        }
         ActiveModal::RunDetail { run, scroll, .. } => match run {
             RunTarget::Subagent(index) => {
                 let (title, nested_loaded, loading, report) = {

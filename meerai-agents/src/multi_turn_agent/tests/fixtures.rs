@@ -64,6 +64,7 @@ impl FakeStreamer {
 impl ChatStreamer for FakeStreamer {
     async fn stream_chat(
         &self,
+        _provider: Option<&str>,
         model: &str,
         request: ChatRequest,
         options: &ChatOptions,
@@ -743,6 +744,7 @@ pub(super) struct GatedStreamer {
 impl ChatStreamer for GatedStreamer {
     async fn stream_chat(
         &self,
+        _provider: Option<&str>,
         _model: &str,
         request: ChatRequest,
         _options: &ChatOptions,

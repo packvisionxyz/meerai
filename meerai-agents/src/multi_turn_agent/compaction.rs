@@ -388,7 +388,7 @@ impl MultiTurnAgent {
         let streamer = self.streamer.clone();
         let mut stream = tokio::select! {
             _ = cancel.cancelled() => return Err(anyhow!("compaction cancelled")),
-            result = streamer.stream_chat(&model, request, &options) => result?,
+            result = streamer.stream_chat(self.provider.as_deref(), &model, request, &options) => result?,
         };
 
         let mut text = String::new();

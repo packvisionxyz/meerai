@@ -51,7 +51,7 @@ INDEX_HTML = f"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta name="theme-color" content="#0b0d10">
+<meta name="theme-color" content="#090b0f">
 <title>meerai</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="icon" href="favicon.ico" sizes="any">
@@ -60,18 +60,19 @@ INDEX_HTML = f"""<!doctype html>
 <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
 <link rel="stylesheet" href="styles.css">
 <style>
-html,body{{margin:0;width:100%;height:100%;overflow:hidden;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:#0a0a0a;color:#eeeeee}}
+html,body{{margin:0;width:100%;height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Inter","Segoe UI",system-ui,sans-serif;background:#090b0f;color:#eef1f6}}
 #app{{width:100%;height:100%}}
 #status{{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;height:100%;padding:24px;text-align:center;box-sizing:border-box}}
-.logo{{font-size:18px;font-weight:600;letter-spacing:-0.02em;color:#2dd4bf}}
-.spinner{{width:18px;height:18px;border-radius:50%;border:2px solid #2a2a2a;border-top-color:#2dd4bf;animation:spin .8s linear infinite}}
-.hint{{max-width:520px;font-size:13px;line-height:1.5;color:#808080}}
-.error{{max-width:560px;font-size:14px;line-height:1.55;color:#e06c75}}
+.logo{{display:inline-flex;align-items:center;gap:9px;font-size:17px;font-weight:650;letter-spacing:-0.02em;color:#eef1f6}}
+.logo svg{{color:#2dd4bf}}
+.spinner{{width:18px;height:18px;border-radius:50%;border:2px solid #222834;border-top-color:#2dd4bf;animation:spin .8s linear infinite}}
+.hint{{max-width:520px;font-size:13px;line-height:1.5;color:#939dad}}
+.error{{max-width:560px;font-size:14px;line-height:1.55;color:#f07178}}
 @keyframes spin{{to{{transform:rotate(360deg)}}}}
-@media (prefers-color-scheme:light){{html,body{{background:#fafafa;color:#111111}}.hint{{color:#666666}}.spinner{{border-color:#dddddd;border-top-color:#0f766e}}.logo{{color:#0f766e}}}}
+@media (prefers-color-scheme:light){{html,body{{background:#f7f8fa;color:#11161f}}.logo{{color:#11161f}}.logo svg{{color:#0d746b}}.hint{{color:#525d6d}}.spinner{{border-color:#dce2ea;border-top-color:#0d746b}}}}
 </style>
 <div id="app"></div>
-<div id="status"><div class="logo">meerai</div><div class="spinner"></div><div class="hint">Connecting to the local workspace…</div></div>
+<div id="status"><div class="logo"><svg viewBox="0 0 10 8" width="22" height="18" aria-hidden="true"><path fill="currentColor" d="M0 0h2v8H0z M8 0h2v8H8z M2 2h2v2H2z M6 2h2v2H6z M4 4h2v2H4z"/></svg><span>meerai</span></div><div class="spinner"></div><div class="hint">Connecting to the local workspace…</div></div>
 <script type="module" src="boot.js"></script>
 </html>
 """

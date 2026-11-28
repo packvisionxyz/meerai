@@ -66,6 +66,15 @@ enum LoopMsg {
         replaced_tab: u64,
         created: Result<OpenedSession>,
     },
+    WorkspaceSwitched {
+        tab_id: u64,
+        opened: Box<OpenedSession>,
+    },
+    WorkspaceSwitchFailed {
+        tab_id: u64,
+        message: String,
+        reopened: Result<Box<OpenedSession>>,
+    },
     SessionResolved {
         mode: SessionOpenMode,
         result: Result<SessionResolveOutcome>,
@@ -497,6 +506,24 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
                     });
                 });
             }
+            PendingSessionAction::CreateTabAt { path } => {
+                let Some(opener) = opener.clone() else {
+                    continue;
+                };
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let result = opener.create_session_at(&path).await.map(|opened| {
+                        SessionResolveOutcome::Opened {
+                            opened: Box::new(opened),
+                            draft: None,
+                        }
+                    });
+                    let _ = tx.send(LoopMsg::SessionResolved {
+                        mode: SessionOpenMode::NewTab,
+                        result,
+                    });
+                });
+            }
             PendingSessionAction::CreateAcpTab { preset } => {
                 let Some(opener) = opener.clone() else {
                     continue;
@@ -642,6 +669,36 @@ fn dispatch_pending_actions(app: &mut AppState, loop_tx: &mpsc::UnboundedSender<
                         replaced_tab,
                         created,
                     });
+                });
+            }
+            PendingSessionAction::SwitchWorkspace { session_id, path } => {
+                let Some(opener) = opener.clone() else {
+                    continue;
+                };
+                let Some(reg) = app.registry.clone() else {
+                    continue;
+                };
+                let tab_id = app.tab().tab_id;
+                let tx = loop_tx.clone();
+                tokio::spawn(async move {
+                    let _ = reg.close_and_wait_session(&session_id).await;
+                    let switched = opener.switch_workspace(&session_id, &path).await;
+                    match switched {
+                        Ok(opened) => {
+                            let _ = tx.send(LoopMsg::WorkspaceSwitched {
+                                tab_id,
+                                opened: Box::new(opened),
+                            });
+                        }
+                        Err(err) => {
+                            let reopened = opener.open_session(&session_id).await;
+                            let _ = tx.send(LoopMsg::WorkspaceSwitchFailed {
+                                tab_id,
+                                message: format!("{err:#}"),
+                                reopened: reopened.map(Box::new),
+                            });
+                        }
+                    }
                 });
             }
             PendingSessionAction::LoadMemories { query } => {
@@ -1073,6 +1130,30 @@ fn handle_loop_msg(
                     app.status_notice = Some(truncate_notice(&msg));
                 }
             }
+            true
+        }
+        LoopMsg::WorkspaceSwitched { tab_id, opened } => {
+            let opened = *opened;
+            let _ = mount_opened_session(app, opened, SessionOpenMode::ReplaceEmpty, loop_tx);
+            if let Some(idx) = app.tab_index_by_id(tab_id) {
+                app.switch_to_tab(idx);
+            }
+            app.status_notice = Some(format!("Workspace is now {}", app.workspace_root.display()));
+            true
+        }
+        LoopMsg::WorkspaceSwitchFailed {
+            tab_id,
+            message,
+            reopened,
+        } => {
+            if let Ok(opened) = reopened {
+                let _ = mount_opened_session(app, *opened, SessionOpenMode::ReplaceEmpty, loop_tx);
+                if let Some(idx) = app.tab_index_by_id(tab_id) {
+                    app.switch_to_tab(idx);
+                }
+            }
+            let msg = format!("Could not change workspace: {message}");
+            app.status_notice = Some(truncate_notice(&msg));
             true
         }
         LoopMsg::SessionResolved { mode, result } => {
@@ -1588,14 +1669,32 @@ fn handle_registry_event(app: &mut AppState, ev: RegistryEvent) -> bool {
             }
             true
         }
+        RegistryEventKind::WorkspaceChanged {
+            session_id,
+            path,
+            carry,
+        } => {
+            let path = std::path::PathBuf::from(path);
+            if carry {
+                app.pending_session_actions
+                    .push(PendingSessionAction::SwitchWorkspace { session_id, path });
+            } else {
+                let active = app
+                    .tabs
+                    .get(app.active_tab)
+                    .is_some_and(|tab| tab.session_id == session_id);
+                if active {
+                    app.workspace_root = path.clone();
+                    app.workspace = meerai_host::workspace::local_workspace(path.clone());
+                    app.completion = crate::completion::CompletionEngine::new(path.clone());
+                }
+                app.pending_session_actions
+                    .push(PendingSessionAction::CreateTabAt { path });
+            }
+            true
+        }
         RegistryEventKind::Reloaded { host_info, .. } => {
-            app.context_temperature = host_info
-                .settings
-                .context
-                .temperature
-                .and_then(meerai_common::settings::Temperature::effective);
-            app.context_effort = host_info.settings.context.effort;
-            app.explicit_context_window = host_info.settings.context.context_window_tokens;
+            app.apply_host_info(&host_info);
             if let Some(dir) = app.config_dir.as_deref()
                 && let Ok(user) = meerai_common::settings::load_settings_from(dir)
             {

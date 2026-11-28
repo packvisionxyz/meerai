@@ -867,6 +867,7 @@ struct LongTurnStreamer {
 impl ChatStreamer for LongTurnStreamer {
     async fn stream_chat(
         &self,
+        _provider: Option<&str>,
         _model: &str,
         request: ChatRequest,
         _options: &ChatOptions,
@@ -912,6 +913,7 @@ struct SummaryProbeStreamer {
 impl ChatStreamer for SummaryProbeStreamer {
     async fn stream_chat(
         &self,
+        _provider: Option<&str>,
         _model: &str,
         request: ChatRequest,
         _options: &ChatOptions,

@@ -1629,7 +1629,11 @@ async fn cli_session_host_lists_creates_and_opens_sessions() {
     let expected_model = "test-model".to_string();
     let secrets: Arc<dyn meerai_client::secrets::SecretStore> =
         Arc::new(meerai_client::secrets::MemorySecretStore::new());
-    let client = build_genai_client(runtime.clone(), secrets.clone()).unwrap();
+    let streamer = Arc::new(ProviderStreamer::new(
+        runtime.clone(),
+        secrets.clone(),
+        expected_provider.clone(),
+    ));
 
     let mut session_config = SessionConfig::new(workspace_root.clone());
     session_config.root = sessions_root.clone();
@@ -1644,7 +1648,7 @@ async fn cli_session_host_lists_creates_and_opens_sessions() {
         settings,
         config_dir: Some(config_root.clone()),
         data_dir: None,
-        client,
+        streamer,
         approval_mode: ApprovalMode::Ask,
         execution_world: Arc::new(meerai_tools::HostWorld::new()),
         sensitive_env_vars: Vec::new(),
@@ -1656,12 +1660,17 @@ async fn cli_session_host_lists_creates_and_opens_sessions() {
         launch_definitions: String::new(),
         default_provider: expected_provider.clone(),
         default_model: expected_model.clone(),
+        mcp: Arc::new(tokio::sync::Mutex::new(None)),
     };
 
     assert!(host.list_sessions().await.unwrap().is_empty());
     assert!(
         host.enabled_tool_names()
             .contains(&"skill-load".to_string())
+    );
+    assert!(
+        host.enabled_tool_names()
+            .contains(&meerai_agents::WORKSPACE_CD_TOOL.to_string())
     );
 
     let created = host.create_session().await.unwrap();
@@ -1678,6 +1687,170 @@ async fn cli_session_host_lists_creates_and_opens_sessions() {
     assert_eq!(reopened.provider, expected_provider);
     assert_eq!(reopened.model, expected_model);
     let _ = reopened.cmd_tx.send(AgentCommand::Quit);
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[cfg(any(feature = "tui", feature = "web"))]
+#[tokio::test]
+async fn reopened_session_keeps_its_own_workspace_root() {
+    let root = std::env::temp_dir().join(format!("meerai-cli-cwd-{}", SessionId::new()));
+    let config_root = root.join("config");
+    let sessions_root = root.join("sessions");
+    let launch_root = root.join("launch");
+    let session_root = root.join("elsewhere");
+    std::fs::create_dir_all(&config_root).unwrap();
+    std::fs::create_dir_all(&launch_root).unwrap();
+    std::fs::create_dir_all(&session_root).unwrap();
+
+    let settings = AppSettings::default();
+    let runtime = Arc::new(RwLock::new(RuntimeProviderState::from_settings(
+        &settings,
+        ProviderCatalog::new(),
+    )));
+    let provider = runtime.read().unwrap().active_provider.clone();
+    let secrets: Arc<dyn meerai_client::secrets::SecretStore> =
+        Arc::new(meerai_client::secrets::MemorySecretStore::new());
+    let streamer = Arc::new(ProviderStreamer::new(
+        runtime.clone(),
+        secrets.clone(),
+        provider.clone(),
+    ));
+
+    let mut session_config = SessionConfig::new(launch_root.clone());
+    session_config.root = sessions_root.clone();
+
+    let host = CliSessionHost {
+        script_runtime: None,
+        workspace_root: launch_root.clone(),
+        session_config: session_config.clone(),
+        runtime,
+        secrets,
+        user_settings: std::sync::Mutex::new(settings.clone()),
+        settings,
+        config_dir: Some(config_root.clone()),
+        data_dir: None,
+        streamer,
+        approval_mode: ApprovalMode::Ask,
+        execution_world: Arc::new(meerai_tools::HostWorld::new()),
+        sensitive_env_vars: Vec::new(),
+        hooks: Arc::new(HookEngine::default()),
+        custom_agents: Vec::new(),
+        skill_catalog: Arc::new(Vec::new()),
+        base_system: "Test system prompt".to_string(),
+        launch_system: String::new(),
+        launch_definitions: String::new(),
+        default_provider: provider.clone(),
+        default_model: "test-model".to_string(),
+        mcp: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+
+    let session = Session::open_or_create(&session_config, SessionId::new(), session_root.clone())
+        .await
+        .unwrap();
+    let id = session.id().clone();
+    drop(session);
+
+    let agent = host
+        .build_agent(
+            Session::open(&session_config, id, launch_root)
+                .await
+                .unwrap(),
+            &provider,
+            "test-model",
+            "prompt".to_string(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        agent.harness().unwrap().policy.workspace_root(),
+        session_root.as_path()
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[cfg(any(feature = "tui", feature = "web"))]
+#[tokio::test]
+async fn switching_workspace_keeps_the_session_id_and_history() {
+    use meerai_session::{ContentBlock, InputSource, SessionEvent};
+
+    let root = std::env::temp_dir().join(format!("meerai-cli-sw-{}", SessionId::new()));
+    let config_root = root.join("config");
+    let sessions_root = root.join("sessions");
+    let launch_root = root.join("launch");
+    let target = root.join("target");
+    for dir in [&config_root, &launch_root, &target] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+
+    let settings = AppSettings::default();
+    let runtime = Arc::new(RwLock::new(RuntimeProviderState::from_settings(
+        &settings,
+        ProviderCatalog::new(),
+    )));
+    let provider = runtime.read().unwrap().active_provider.clone();
+    let secrets: Arc<dyn meerai_client::secrets::SecretStore> =
+        Arc::new(meerai_client::secrets::MemorySecretStore::new());
+    let streamer = Arc::new(ProviderStreamer::new(
+        runtime.clone(),
+        secrets.clone(),
+        provider.clone(),
+    ));
+
+    let mut session_config = SessionConfig::new(launch_root.clone());
+    session_config.root = sessions_root.clone();
+
+    let host = CliSessionHost {
+        script_runtime: None,
+        workspace_root: launch_root.clone(),
+        session_config: session_config.clone(),
+        runtime,
+        secrets,
+        user_settings: std::sync::Mutex::new(settings.clone()),
+        settings,
+        config_dir: Some(config_root),
+        data_dir: None,
+        streamer,
+        approval_mode: ApprovalMode::Ask,
+        execution_world: Arc::new(meerai_tools::HostWorld::new()),
+        sensitive_env_vars: Vec::new(),
+        hooks: Arc::new(HookEngine::default()),
+        custom_agents: Vec::new(),
+        skill_catalog: Arc::new(Vec::new()),
+        base_system: "Test system prompt".to_string(),
+        launch_system: String::new(),
+        launch_definitions: String::new(),
+        default_provider: provider,
+        default_model: "test-model".to_string(),
+        mcp: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+
+    let session = Session::open_or_create(&session_config, SessionId::new(), launch_root.clone())
+        .await
+        .unwrap();
+    let id = session.id().clone();
+    session
+        .append(SessionEvent::UserMessage {
+            source: InputSource::User,
+            content: vec![ContentBlock::Text("keep me".to_string())],
+        })
+        .await
+        .unwrap();
+    drop(session);
+
+    let opened = host.switch_workspace(&id, &target).await.unwrap();
+    let _ = opened.cmd_tx.send(AgentCommand::Quit);
+    assert_eq!(opened.session_id, id);
+    assert!(opened.events.iter().any(|logged| {
+        matches!(&logged.event, SessionEvent::UserMessage { content, .. }
+            if content.iter().any(|block| matches!(block, ContentBlock::Text(text) if text == "keep me")))
+    }));
+
+    let reopened = Session::open(&session_config, id, launch_root)
+        .await
+        .unwrap();
+    assert_eq!(reopened.meta().cwd, target);
 
     std::fs::remove_dir_all(&root).ok();
 }
@@ -1701,7 +1874,11 @@ async fn btw_session_seeds_history_in_memory_and_stays_read_only() {
     let expected_provider = runtime.read().unwrap().active_provider.clone();
     let secrets: Arc<dyn meerai_client::secrets::SecretStore> =
         Arc::new(meerai_client::secrets::MemorySecretStore::new());
-    let client = build_genai_client(runtime.clone(), secrets.clone()).unwrap();
+    let streamer = Arc::new(ProviderStreamer::new(
+        runtime.clone(),
+        secrets.clone(),
+        expected_provider.clone(),
+    ));
 
     let mut session_config = SessionConfig::new(workspace_root.clone());
     session_config.root = sessions_root.clone();
@@ -1716,7 +1893,7 @@ async fn btw_session_seeds_history_in_memory_and_stays_read_only() {
         settings,
         config_dir: Some(config_root.clone()),
         data_dir: None,
-        client,
+        streamer,
         approval_mode: ApprovalMode::Ask,
         execution_world: Arc::new(meerai_tools::HostWorld::new()),
         sensitive_env_vars: Vec::new(),
@@ -1728,6 +1905,7 @@ async fn btw_session_seeds_history_in_memory_and_stays_read_only() {
         launch_definitions: String::new(),
         default_provider: expected_provider,
         default_model: "test-model".to_string(),
+        mcp: Arc::new(tokio::sync::Mutex::new(None)),
     };
 
     let source = Session::open_or_create(&session_config, SessionId::new(), workspace_root)

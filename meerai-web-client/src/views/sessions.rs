@@ -134,18 +134,42 @@ pub(super) fn SessionPanel(store: StoreHandle) -> impl IntoView {
             >
                 <div class="sessions-heading">
                     <h2 id="sessions-heading">"Sessions"</h2>
-                    <button class="btn tiny" on:click=move |_| refresh()>"Refresh"</button>
-                    <button class="modal-close" aria-label="Close Sessions" on:click=move |_| close(store)>"×"</button>
+                    <button
+                        class="icon-action"
+                        title="New session (/new)"
+                        aria-label="New session"
+                        on:click=move |_| {
+                            if let Some(transport) = crate::transport::current() {
+                                transport.create_session(None);
+                            }
+                        }
+                    >
+                        <super::icons::IconPlus />
+                    </button>
+                    <button
+                        class="icon-action"
+                        title="Refresh sessions"
+                        aria-label="Refresh sessions"
+                        on:click=move |_| refresh()
+                    >
+                        <super::icons::IconRefresh />
+                    </button>
+                    <button class="modal-close" aria-label="Close Sessions" on:click=move |_| close(store)>
+                        <super::icons::IconClose />
+                    </button>
                 </div>
-                <input
-                    id="sessions-filter"
-                    class="input"
-                    aria-label="Filter sessions by title, model, or ID"
-                    placeholder="Filter sessions"
-                    prop:value=move || filter.get()
-                    on:input=move |ev| store.update(|s| s.session_panel.set_filter(event_target_value(&ev)))
-                    on:keydown=on_filter_key
-                />
+                <div class="search-input-wrap">
+                    <span class="search-input-icon"><super::icons::IconSearch /></span>
+                    <input
+                        id="sessions-filter"
+                        class="input"
+                        aria-label="Filter sessions by title, model, or ID"
+                        placeholder="Filter sessions"
+                        prop:value=move || filter.get()
+                        on:input=move |ev| store.update(|s| s.session_panel.set_filter(event_target_value(&ev)))
+                        on:keydown=on_filter_key
+                    />
+                </div>
                 <div class="sessions-status" aria-live="polite">
                     {move || match history.get() {
                         HistoryStatus::Loading => view! { <span class="hint">"Loading sessions…"</span> }.into_any(),
@@ -182,9 +206,16 @@ pub(super) fn SessionPanel(store: StoreHandle) -> impl IntoView {
                                     aria-disabled=move || pending.get().to_string()
                                     on:click=move |_| act(SessionPanelAction::Open, open_id.clone())
                                 >
-                                    <span class="sessions-title">{title}</span>
+                                    <span class="sessions-title-row">
+                                        <span
+                                            class=format!("session-dot {}", if row.live { "live" } else { "stored" })
+                                            title=if row.live { "Live session" } else { "Stored session" }
+                                            aria-hidden="true"
+                                        ></span>
+                                        <span class="sessions-title">{title}</span>
+                                        <span class="sr-only">{if row.live { " (live)" } else { " (stored)" }}</span>
+                                    </span>
                                     <span class="sessions-detail" title=details.clone()>{details.clone()}</span>
-                                    <span class=format!("badge {}", if row.live { "ok" } else { "muted" })>{if row.live { "Live" } else { "Stored" }}</span>
                                 </button>
                                 <div class="sessions-row-actions">
                                     <button class="btn tiny" aria-disabled=move || pending.get().to_string() on:click=move |_| act(SessionPanelAction::Fork, fork_id.clone())>"Fork"</button>

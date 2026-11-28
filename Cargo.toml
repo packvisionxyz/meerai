@@ -70,6 +70,9 @@ unicode-width = "0.2"
 # Markdown
 comrak = { version = "1", default-features = false }
 
+# MCP
+rmcp = { version = "3" }
+
 # Updates
 reqwest = { version = "0.13", default-features = false, features = [
   "json",

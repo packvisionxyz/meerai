@@ -8,6 +8,7 @@ use meerai_agents::{
     QuestionAnswer, QuestionPrompt, QuestionRequest, RewindScope, SessionItem, TurnEndReason,
     TurnId, Usage,
 };
+use meerai_core::EffectClass;
 use meerai_core::env::now_millis;
 use meerai_policy::ApprovalMode;
 use meerai_session::replay::{
@@ -287,6 +288,11 @@ pub enum RegistryEventKind {
         turn_id: TurnId,
         model: String,
     },
+    WorkspaceChanged {
+        session_id: SessionId,
+        path: String,
+        carry: bool,
+    },
     UserPromptSubmitted {
         session_id: SessionId,
         entry_id: String,
@@ -551,6 +557,7 @@ fn apply_agent_event(
         | AgentEvent::LoopUpdated { .. }
         | AgentEvent::LoopContinued { .. }
         | AgentEvent::HookCompleted { .. }
+        | AgentEvent::AutoApproved { .. }
         | AgentEvent::UsageUpdated { .. }
         | AgentEvent::RewindCompleted { .. } => {
             state.apply_meta_event(broadcast_tx, session_id, event);
@@ -1410,6 +1417,14 @@ mod tests {
             panic!("expected empty Replay at head");
         };
         assert!(empty.is_empty());
+        match registry.subscribe(Some(99)) {
+            SubscribeResult::ResyncRequired { current_seq, .. } => {
+                assert_eq!(current_seq, 11);
+            }
+            SubscribeResult::Replay { .. } => {
+                panic!("expected ResyncRequired for a cursor ahead of a restarted host")
+            }
+        }
         for _ in 0..(CAPACITY + 50) {
             worker
                 .event_tx

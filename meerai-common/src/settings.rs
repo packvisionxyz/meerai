@@ -63,36 +63,15 @@ pub fn resolve_config_api_key(
 }
 
 pub fn expand_config_secret(raw: &str) -> Option<String> {
-    expand_config_secret_with(raw, &|name| std::env::var(name).ok())
+    meerai_core::expand::expand_env_reference_trimmed(raw, &meerai_core::expand::env_lookup)
 }
 
+#[cfg(test)]
 fn expand_config_secret_with(
     raw: &str,
     lookup: &impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    static ENV_BRACE_RE: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
-    static DOLLAR_BRACE_RE: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
-
-    let (Ok(env_re), Ok(dollar_re)) = (
-        ENV_BRACE_RE.get_or_init(|| Regex::new(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}")),
-        DOLLAR_BRACE_RE.get_or_init(|| Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:\|([^}]*))?\}")),
-    ) else {
-        return None;
-    };
-
-    let stage1 = env_re.replace_all(raw, |caps: &regex::Captures| {
-        lookup(&caps[1]).unwrap_or_default()
-    });
-    let stage2 = dollar_re.replace_all(&stage1, |caps: &regex::Captures| {
-        lookup(&caps[1]).unwrap_or_else(|| caps.get(2).map_or("", |m| m.as_str()).to_string())
-    });
-
-    let clean = stage2.trim();
-    if clean.is_empty() {
-        None
-    } else {
-        Some(clean.to_string())
-    }
+    meerai_core::expand::expand_env_reference_trimmed(raw, lookup)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -302,6 +281,42 @@ pub struct HooksSettings {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub trusted_projects: BTreeMap<String, String>,
+}
+
+pub fn mcp_project_trust_key(project_root: &Path) -> String {
+    std::fs::canonicalize(project_root)
+        .unwrap_or_else(|_| project_root.to_path_buf())
+        .display()
+        .to_string()
+}
+
+impl McpSettings {
+    pub fn trusted_hash(&self, project_root: &Path) -> Option<&str> {
+        self.trusted_projects
+            .get(&mcp_project_trust_key(project_root))
+            .map(String::as_str)
+    }
+
+    pub fn trust_project(&mut self, project_root: &Path, hash: &str) -> bool {
+        self.trusted_projects
+            .insert(mcp_project_trust_key(project_root), hash.to_string())
+            .as_deref()
+            != Some(hash)
+    }
+
+    pub fn revoke_project(&mut self, project_root: &Path) -> bool {
+        self.trusted_projects
+            .remove(&mcp_project_trust_key(project_root))
+            .is_some()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_for_scripts: Option<bool>,
@@ -407,6 +422,8 @@ pub struct AppSettings {
     pub sessions: Option<SessionSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<HooksSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<SandboxSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

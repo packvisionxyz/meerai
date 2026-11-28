@@ -19,7 +19,7 @@ approval gates, in-process path guards, best-effort OS sandboxing, secret
 scrubbing and redaction, heuristic injection screening, and bounded
 budgets. No single layer is a guarantee; §5 states what each layer does
 not cover. Extensions that run outside the harness (hooks, ACP backends,
-planned MCP servers) are explicitly outside policy enforcement and are
+and MCP servers) are explicitly outside policy enforcement and are
 never described as security boundaries.
 
 ## 2. Implemented controls
@@ -285,7 +285,56 @@ under its own policies. meerai's rules, path guards, `ExecutionWorld`, and
 redaction do not apply; the adapter inherits provider credentials. `plan`
 refuses `--acp` and denies `acp-run`. Full boundary: [acp.md](acp.md) §5.
 
-### 2.10 Budgets and circuit breakers
+### 2.10 MCP servers
+
+`meerai-mcp` connects external servers declared in `.mcp.json`. A server is a
+new capability and a new trust boundary, so it gets four controls.
+
+**Trust is per project and content-bound.** A project `.mcp.json` never runs on
+its own. `McpSettings::trusted_projects` stores the SHA-256 of the file bytes
+next to the project root, so editing the file drops trust and the next run asks
+again. A path-only record would let a pushed change to `command` execute
+silently. The first interactive run prompts once; a headless run, a piped stdin,
+or a declined prompt leaves the project untrusted and the servers listed as
+`needs trust` rather than silently absent. A project file can only tighten a
+user-declared server: disable it, mark it `read_only`, or narrow its tool
+allowlist. It cannot add one.
+
+**Every call is a policy decision.** MCP tools carry `PermissionAction::Mcp`
+with a `"<server>/<tool>"` resource and `EffectClass::External`. They do not
+inherit `webfetch` rules. `plan` mode is a hard gate: only servers declared
+`read_only` are registered at all, and `PolicyEngine` denies every `mcp` call in
+`plan` regardless of rules.
+
+**Server text is untrusted.** Tool schemas, descriptions, and outputs come from
+a peer. Descriptions are withheld entirely when `detect_injection_signals`
+matches, rather than wrapped, because a wrapper would become permanent prompt
+boilerplate. Length is capped at 1 KiB. Results pass the normal
+`redact`/`screen_run`/spill pipeline like any other tool output.
+
+**Admission is budgeted.** A server whose schemas exceed about 2,000 tokens is
+not admitted in full. `McpToolset` exposes `load_tool_schema` plus one line per
+tool, and a schema enters the prompt only when the model asks for it. Loaded
+schemas are capped at 12 entries and about 4,000 tokens per toolset, so a long
+turn cannot refill the prompt through repeated loads. `contain()` accepts a tool
+name only once its schema is loaded, so a tool that was never admitted cannot be
+called. Tool definitions are rebuilt between steps, which is what lets a
+mid-turn admission reach the next request.
+
+**The child is env-scrubbed.** A stdio server inherits the process environment
+minus every name from `meerai_core::redact::SENSITIVE_ENV_NAMES` and the
+sensitive suffix list. `${VAR}`/`{env:VAR}` references in `.mcp.json` expand
+only at connect time, so the parsed config, session log, and error messages
+never hold the value. A stdio server's stderr is piped into a bounded 200-line
+tail and appended to a connect failure, so launcher output never reaches the
+terminal or the alternate screen. `readOnlyHint` is a server claim: `read_only`
+in the file is the user's assertion, and the hint alone never widens policy.
+
+What these controls do not do: a stdio server runs as the user, outside
+`CodeTools` and `ExecutionWorld`. It has its own filesystem view and its own
+network access. MCP is an extension, not a sandbox boundary.
+
+### 2.11 Budgets and circuit breakers
 
 `max_steps_per_turn` can cap the turn (default `0`, unlimited; a positive value
 caps it, and `step_limit_continuations` (default 2) can extend a cap; the
@@ -322,7 +371,7 @@ approval before the next step. Manual subagents are clamped: `plan` forces a
 read-only child, the child mode cannot exceed the parent, `allowed_tools` can
 only narrow a preset, and step/token/cost caps stay within the parent.
 
-### 2.11 Session privacy and retention
+### 2.12 Session privacy and retention
 
 Session directories are `0700` and the SQLite database plus session lock files
 are `0600` on Unix, re-tightened on open. The `sessions` row records cwd, git
@@ -335,7 +384,7 @@ A project file cannot control retention. Windows has no mode enforcement (§5.4)
 processes cannot write or delete the same live session concurrently;
 `Session::fork_stored` reads events without taking the write lock.
 
-### 2.12 Browser companion server (`meerai-web`, `web` feature)
+### 2.13 Browser companion server (`meerai-web`, `web` feature)
 
 - **Loopback only:** `meerai serve` and TUI `/serve` bind strictly to
   `127.0.0.1` (default port `28860` unless overridden).
@@ -359,7 +408,7 @@ processes cannot write or delete the same live session concurrently;
   render as links, and theme values are validated before they become CSS custom
   properties. The CSP restricts scripts and network origins.
 
-### 2.13 Supply chain
+### 2.14 Supply chain
 
 - **CI audit:** `deny.toml` + `EmbarkStudios/cargo-deny-action@v2` run
   `--all-features check advisories licenses bans sources` on every
@@ -373,7 +422,7 @@ processes cannot write or delete the same live session concurrently;
   when `WINDOWS_CERTIFICATE` is set. Without those secrets, archives
   publish unsigned (§5.6).
 
-### 2.14 Web tools
+### 2.15 Web tools
 
 - **Policy.** `web-fetch` and `web-search` (`meerai-tools/src/web/`) declare
   `EffectClass::External` with the `webfetch` action. `plan` denies and
@@ -399,7 +448,6 @@ processes cannot write or delete the same live session concurrently;
 
 | Item | Description | Gate |
 | --- | --- | --- |
-| MCP server policy | External MCP servers (processes or remote endpoints) must pass `PolicyEngine` approval gates; their schemas, descriptions, and outputs are untrusted | MCP client milestone |
 | Windows sandbox | Job Objects / AppContainer for `ExecutionWorld`; today Windows always uses `HostWorld` | Platform work |
 | Linux in-process fallback | Landlock + seccomp when `bwrap` is absent | Platform work |
 | LSP sandboxing | Spawn language servers inside `ExecutionWorld`; today they are env-scrubbed only (request and write timeouts exist) | Tools work |
@@ -416,6 +464,7 @@ processes cannot write or delete the same live session concurrently;
 | Workspace code & files | Workspace root + `writable_roots` | Destructive modification, malicious injection, exfiltration |
 | Host filesystem & network | Paths outside the workspace, local services, external endpoints | Arbitrary read/write via `shell`, exfiltration, SSRF |
 | Web tools | `web-fetch` URLs and `web-search` queries | Data exfiltration through the URL or query; SSRF into local services; hostile page content |
+| MCP servers | `.mcp.json` commands and endpoints, and their tool schemas, descriptions, and results | Malicious server config in a cloned repository, prompt injection through a tool description, credential injection into a child process, unsandboxed process execution |
 | Provider API keys | Encrypted `vault_secrets` in `meerai.db`, process env | Leakage via child processes, tool output, logs, model context |
 | ChatGPT plan OAuth tokens | Encrypted `vault_secrets` in `meerai.db`, process memory | Refresh-token theft, token in an error body or log, shared-machine access |
 | Repository & user secrets | `.env*`, SSH keys, `.aws/credentials`, `.kube/config`, `.docker/config.json`, `*.pem`/`*.key` | Disclosure into prompts/transcripts or exfiltration |
@@ -437,8 +486,9 @@ processes cannot write or delete the same live session concurrently;
    `sac-run_script`, LSP servers, and file reads cross back into the model
    context and the log through scrub → redact → screen → spill.
 5. **External extensions (outside harness enforcement):** hooks, ACP
-   backends, and planned MCP servers run outside `CodeTools`/
-   `PolicyEngine` enforcement.
+   backends, and MCP servers run outside `CodeTools`/
+   `PolicyEngine` path enforcement. An MCP tool still passes a `PolicyEngine`
+   decision by action and resource, but its own process is not sandboxed.
 
 ### 4.3 Tool-output pipeline
 
@@ -501,12 +551,19 @@ emission, or model consumption: environment scrub at spawn (§2.4) →
    advisory; the adapter inherits credentials and can reach the network.
    The badge and header are an external-engine warning, not a safety
    claim.
-10. **Grants precede rules.** A grant is recorded only through an explicit
+10. **MCP servers are unsandboxed and their hints are claims.** A stdio
+    server runs as the user with its own filesystem and network access, so
+    `plan` and `read_only` restrict what meerai asks for, not what the
+    server process does. `readOnlyHint` is asserted by the server; a server
+    that lies gets a write attempt past the annotation check. MCP results
+    reach the model through the normal screening pipeline, but nothing
+    filters what a server chooses to send before that.
+11. **Grants precede rules.** A grant is recorded only through an explicit
     approval, but it is checked before rules: if rules later change (for
     example `/reload` adds a `deny`), an existing Session grant still
     allows the same literal resource until it is cleared. Grants never
     widen to globs and cannot loosen `plan`.
-11. **Browser credentials and DOM output.** Basic auth over loopback HTTP is
+12. **Browser credentials and DOM output.** Basic auth over loopback HTTP is
     not encrypted; a local root user or a process with packet-capture
     privileges can read the credential or the traffic. The browser caches the
     credential until it closes, and there is no logout; restarting the server
@@ -514,7 +571,7 @@ emission, or model consumption: environment scrub at spawn (§2.4) →
     escaping, the HTML-as-text rule, link scheme checks, and the CSP reduce the
     injection risk, but a bug in a custom renderer or a missed raw-HTML path
     could still inject markup.
-12. **Approved sandbox escape.** An accepted `SandboxEscape` reruns the
+13. **Approved sandbox escape.** An accepted `SandboxEscape` reruns the
     approved shell command with `SandboxPolicy::Unrestricted`: the command can
     read and write anything the user can and can reach the network, with no
     kernel boundary. The approval is explicit and never derived from model

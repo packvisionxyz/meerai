@@ -26,12 +26,12 @@ use web_sys::{
 };
 
 use crate::state::{
-    ActiveModal, AppState, ConnectionState, ProviderModalReturn, SessionPanelAction,
+    ActiveModal, AppState, ConnectionState, EventEffect, ProviderModalReturn, SessionPanelAction,
     SettingsSection, apply_blob, apply_created_session, apply_definitions,
     apply_host_action_result, apply_memories, apply_opened_session, apply_packs, apply_panel_error,
     apply_providers_response, apply_reload_response, apply_routes, apply_session_detail,
     apply_shell_output, apply_snapshot, apply_view_event, open_model_input_for, open_settings,
-    return_from_provider_modal, set_status_notice, sync_diff_modal_on_changes,
+    return_from_provider_modal, set_status_notice, switch_to_session, sync_diff_modal_on_changes,
 };
 
 struct PendingDelta {
@@ -245,6 +245,10 @@ impl WasmTransport {
                 Err(err) => set_error(&handle, err),
             }
         });
+    }
+
+    pub fn switch_workspace(&self, session_id: String, path: String) {
+        switch_workspace_via(self.handle, session_id, path);
     }
 
     pub fn create_session(&self, backend: Option<BackendKind>) {
@@ -1392,6 +1396,8 @@ fn open_event_stream(
         }
         let resync_handle = msg_handle;
         let resync_slot = msg_slot.clone();
+        let switch_slot = Rc::new(RefCell::new(None::<(String, String)>));
+        let switch_target = switch_slot.clone();
         msg_handle.update_with_effects(move |state, tx| {
             if let Some(id) = seq {
                 state.last_event_id = id;
@@ -1399,12 +1405,18 @@ fn open_event_stream(
             if !is_disconnect && !is_resync {
                 state.connection = ConnectionState::Connected;
             }
-            let _ = apply_view_event(state, view_event);
+            let effect = apply_view_event(state, view_event);
+            if let EventEffect::ReopenWorkspace { session_id, path } = effect {
+                *switch_target.borrow_mut() = Some((session_id, path));
+            }
             sync_title(state, tx);
             if should_scroll {
                 tx.scroll_to_bottom_if_near("messages");
             }
         });
+        if let Some((session_id, path)) = switch_slot.borrow_mut().take() {
+            switch_workspace_via(handle, session_id, path);
+        }
         if is_resync {
             spawn_bootstrap(resync_handle, resync_slot, true);
         }
@@ -1462,6 +1474,29 @@ async fn session_request(
         (200..=299, body) => Ok(body),
         (status, body) => Err(format_api_error(status, &body)),
     }
+}
+
+fn switch_workspace_via(handle: StoreHandle, session_id: String, path: String) {
+    spawn_local(async move {
+        let payload = serde_json::json!({ "path": path }).to_string();
+        let url = format!("/api/sessions/{session_id}/workspace");
+        match session_request("POST", &url, Some(&payload)).await {
+            Ok(body) => {
+                if let Ok(response) = serde_json::from_str::<CreateSessionResponse>(&body) {
+                    let id = response.session.id.clone();
+                    handle.update_with_effects(move |state, _tx| {
+                        state.host_info.workspace_root = path.clone();
+                        switch_to_session(state, &id);
+                    });
+                }
+            }
+            Err(error) => {
+                handle.update(|state| {
+                    state.status_notice = Some(format!("Could not change workspace: {error}"));
+                });
+            }
+        }
+    });
 }
 
 async fn request_opened_session(

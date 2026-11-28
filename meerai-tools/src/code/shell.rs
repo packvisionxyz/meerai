@@ -24,54 +24,6 @@ const SHELL_ARGS: [&str; 1] = ["/C"];
 #[cfg(windows)]
 const SHELL_DESCRIPTION: &str = "(`cmd /C`)";
 
-const SENSITIVE_ENV_NAMES: [&str; 25] = [
-    "MEERAI_API_KEY",
-    "OPENAI_API_KEY",
-    "OPENROUTER_API_KEY",
-    "OPEN_ROUTER_API_KEY",
-    "GEMINI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "XAI_API_KEY",
-    "MISTRAL_API_KEY",
-    "GROQ_API_KEY",
-    "AZURE_OPENAI_API_KEY",
-    "GITHUB_TOKEN",
-    "GH_TOKEN",
-    "GITLAB_TOKEN",
-    "NPM_TOKEN",
-    "PYPI_TOKEN",
-    "CARGO_REGISTRY_TOKEN",
-    "HF_TOKEN",
-    "HUGGING_FACE_HUB_TOKEN",
-    "VAULT_TOKEN",
-    "SLACK_TOKEN",
-    "DISCORD_TOKEN",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-];
-
-const SENSITIVE_ENV_SUFFIXES: [&str; 17] = [
-    "_API_KEY",
-    "_ACCESS_KEY",
-    "_API_TOKEN",
-    "_ACCESS_TOKEN",
-    "_AUTH_TOKEN",
-    "_SESSION_TOKEN",
-    "_REFRESH_TOKEN",
-    "_BEARER_TOKEN",
-    "_BOT_TOKEN",
-    "_SECRET",
-    "_SECRET_KEY",
-    "_CLIENT_SECRET",
-    "_PRIVATE_KEY",
-    "_PASSWORD",
-    "_PASSWD",
-    "_CREDENTIAL",
-    "_CREDENTIALS",
-];
-
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct ShellArgs {
     #[cfg_attr(
@@ -113,25 +65,14 @@ fn shell_invocation(command: &str) -> (&'static str, Vec<String>) {
     (SHELL_PROGRAM, args)
 }
 
-fn is_sensitive_env_with(name: &str, extra: &[String]) -> bool {
-    let upper = name.to_ascii_uppercase();
-    SENSITIVE_ENV_NAMES.contains(&upper.as_str())
-        || extra.iter().any(|item| item == &upper)
-        || SENSITIVE_ENV_SUFFIXES
-            .iter()
-            .any(|suffix| upper.ends_with(suffix))
-}
-
 #[cfg(test)]
 fn is_sensitive_env(name: &str) -> bool {
-    is_sensitive_env_with(name, &[])
+    meerai_core::redact::is_sensitive_env_with(name, &[])
 }
 
 pub(crate) fn scrub_command_env(cmd: &mut tokio::process::Command, extra_sensitive: &[String]) {
-    for (name, _) in std::env::vars() {
-        if is_sensitive_env_with(&name, extra_sensitive) {
-            cmd.env_remove(name);
-        }
+    for name in meerai_core::redact::sensitive_env_names(extra_sensitive) {
+        cmd.env_remove(name);
     }
 }
 

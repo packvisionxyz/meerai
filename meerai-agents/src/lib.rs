@@ -15,6 +15,7 @@ pub mod screen;
 pub mod shell_safety;
 pub mod subagent;
 mod tool_args;
+pub mod workspace;
 
 pub use acp_subagent::{AcpChild, AcpRunToolset, AcpSpawner};
 pub use events::{
@@ -33,7 +34,9 @@ pub use memory::{
     DEFAULT_MEMORY_PROMPT_BYTES, MEMORY_DELETE, MEMORY_SAVE, MEMORY_SEARCH, MemoryCapture,
     MemoryToolset, load_memory_prompt,
 };
-pub use multi_turn_agent::{ChatStreamer, MultiTurnAgent, MultiTurnAgentConfig, spawn_worker};
+pub use multi_turn_agent::{
+    BoxedChatStream, ChatStreamer, MultiTurnAgent, MultiTurnAgentConfig, spawn_worker,
+};
 pub use prompt::{BASE_SYSTEM_PROMPT, compose_system_prompt};
 pub use question::{QUESTION_TOOL, QuestionToolset, format_answers, parse_questions};
 pub use routing::{
@@ -42,6 +45,10 @@ pub use routing::{
 pub use subagent::{
     BuiltinAgent, READ_ONLY_SUBAGENT_TOOLS, SubagentToolFactory, SubagentToolset, builtin_agents,
     find_builtin_agent,
+};
+pub use workspace::{
+    WORKSPACE_CD_TOOL, WorkspaceAction, WorkspaceCd, WorkspaceToolset, action_from_answer,
+    decision_question, format_decision, parse_workspace_cd,
 };
 
 pub mod agents {

@@ -48,6 +48,7 @@ events. Depth lives in the owning documents: product behavior in
 | `meerai-web-bindgen` | Workspace build helper binary wrapping `wasm-bindgen-cli-support` for `scripts/build-web.py` |
 | `meerai-tui` | Modal TUI library (`ratatui` + `crossterm`): transcript replay and cached rendering, tabs, approvals, questions, rewind/fork menus, diff/search modals, mentions, palette, theme, re-exporting `meerai-host` seams |
 | `meerai-acp` | ACP client bridge: `agy` preset, handshake, typed `AcpEvent` stream, `AcpWorker` (event mapping + session log), permission replies, cancel, `session/load` |
+| `meerai-mcp` | MCP client on `rmcp`: `.mcp.json` parse and content-hash trust, stdio and streamable HTTP connect, `McpToolset` on `PermissionAction::Mcp`, and a per-server connection registry |
 | `meerai-cli` | Binary crate (`meerai`): CLI flags, headless runner, `auth`/`sessions`/`memory`/`routes`/`pack`/`config`/`hooks`/`acp doctor`/`serve` (feature `web`) subcommands, TUI launcher, host wiring |
 
 ### 2.2 Dependency direction
@@ -158,9 +159,9 @@ Field-level detail: [harness-internals.md](harness-internals.md).
 | Browser client polish | Delta coalescing, definition chips, ACP badge, browser automation, and an accessibility audit; the host, protocol, server, and Leptos client are implemented | [Browser UI](browser-ui.md) §3 |
 | Provider trait | A `ChatCompletion`-style abstraction in `meerai-providers`; today the abstraction is the genai client plus the catalog | Demand for a non-genai backend |
 | Incremental projection | Tail-incremental `derive_messages` and frozen/shared message representations; the full-result cache is implemented | Projection purity |
-| Progressive tool disclosure | Compact tool index plus a `load_tool_schema` meta-tool when admitted schemas grow (MCP, skills) | Tool count growth |
+| MCP surfaces | Elicitation, sampling, and roots prompts; MCP resources and prompts; live `tools/list_changed` re-admission | MCP demand |
 | `meerai export` | Session export for evals and audit; replay already produces the human projection | CLI milestone |
-| Definition mapping | Map definition `tools`/`permissions` and MCP servers | Security review |
+| Definition mapping | Map definition `tools`/`permissions` to toolsets | Security review |
 | M14 ACP agent | `meerai acp` on stdio for editors | [acp.md](acp.md) §3.1 |
 | Per-model budget auto-tuning | Budgets derive from catalog metadata today; automatic tuning is not built | Usage data |
 

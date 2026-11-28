@@ -9,11 +9,11 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures::future::join_all;
 use futures::{Stream, StreamExt};
+use genai::Headers;
 use genai::chat::{
     CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatStreamEvent, StopReason,
     StreamEnd, Tool, ToolCall, ToolResponse,
 };
-use genai::{Client, Headers};
 use meerai_common::hooks::HookEvent;
 use meerai_common::settings::{ContextSettings, EffortLevel};
 use meerai_core::env::{MEERAI_USER_AGENT, generate_opencode_session_id, resolve_lexical_subpath};
@@ -193,29 +193,11 @@ pub type BoxedChatStream = Pin<Box<dyn Stream<Item = Result<ChatStreamEvent>> + 
 pub trait ChatStreamer: Send + Sync {
     async fn stream_chat(
         &self,
+        provider: Option<&str>,
         model: &str,
         request: ChatRequest,
         options: &ChatOptions,
     ) -> Result<BoxedChatStream>;
-}
-
-#[async_trait]
-impl ChatStreamer for Client {
-    async fn stream_chat(
-        &self,
-        model: &str,
-        request: ChatRequest,
-        options: &ChatOptions,
-    ) -> Result<BoxedChatStream> {
-        let response = self
-            .exec_chat_stream(model, request, Some(options))
-            .await
-            .map_err(|err| anyhow::Error::new(err).context("LLM stream request failed"))?;
-        let mapped = response
-            .stream
-            .map(|item| item.map_err(|err| anyhow::Error::new(err).context("LLM stream error")));
-        Ok(Box::pin(mapped))
-    }
 }
 
 pub(super) fn start_text_item(event_tx: &mpsc::UnboundedSender<AgentEvent>) -> ItemId {
@@ -472,6 +454,7 @@ pub struct MultiTurnAgent {
     pub(super) memory_capture: Option<crate::memory::MemoryCapture>,
     pub(super) loop_state: Option<meerai_skills::LoopHandle>,
     pub(super) loop_auto_continue: bool,
+    pub(super) auto_approved_notified: bool,
 }
 
 impl std::fmt::Debug for MultiTurnAgent {
@@ -488,39 +471,6 @@ impl std::fmt::Debug for MultiTurnAgent {
 }
 
 impl MultiTurnAgent {
-    pub fn new(
-        client: Client,
-        model: impl Into<String>,
-        tools: Vec<Box<dyn Toolset>>,
-        system_prompt: impl Into<String>,
-    ) -> Self {
-        Self::new_with_config(
-            client,
-            model,
-            tools,
-            system_prompt,
-            MultiTurnAgentConfig::default(),
-        )
-    }
-
-    pub fn new_with_config(
-        client: Client,
-        model: impl Into<String>,
-        tools: Vec<Box<dyn Toolset>>,
-        system_prompt: impl Into<String>,
-        config: MultiTurnAgentConfig,
-    ) -> Self {
-        Self::with_streamer(Arc::new(client), model, tools, system_prompt, config)
-    }
-
-    pub fn new_without_tools(
-        client: Client,
-        model: impl Into<String>,
-        system_prompt: impl Into<String>,
-    ) -> Self {
-        Self::new(client, model, vec![], system_prompt)
-    }
-
     pub fn with_streamer(
         streamer: Arc<dyn ChatStreamer>,
         model: impl Into<String>,
@@ -567,6 +517,7 @@ impl MultiTurnAgent {
             memory_capture: None,
             loop_state: None,
             loop_auto_continue: true,
+            auto_approved_notified: false,
         }
     }
 
@@ -1345,6 +1296,7 @@ impl MultiTurnAgent {
         self.outside_grants.clear();
         self.sandbox_escape = None;
         self.question_cancels = 0;
+        self.auto_approved_notified = false;
     }
 
     pub fn reset(&mut self) {

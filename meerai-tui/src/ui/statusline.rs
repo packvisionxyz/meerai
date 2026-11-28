@@ -17,8 +17,10 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
     );
     app.runs_hits.clear();
     app.web_server_hit = None;
+    app.mcp_hit = None;
     let mut runs_hits: Vec<(Rect, RunKind)> = Vec::new();
     let mut web_server_hit: Option<Rect> = None;
+    let mut mcp_hit: Option<Rect> = None;
     let mut triggers: Vec<(usize, StatusHitKind)> = Vec::new();
     let tab = app.tab();
 
@@ -91,6 +93,35 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
         }
     }
 
+    if !app.mcp_servers.is_empty() {
+        let connected = app.mcp_servers.iter().filter(|s| s.is_connected()).count();
+        let failed = app.mcp_servers.iter().filter(|s| s.is_failed()).count();
+        let untrusted = app.mcp_servers.iter().filter(|s| s.needs_trust()).count();
+        let total = app.mcp_servers.len();
+        let label = if failed > 0 {
+            format!(" · mcp {connected}/{total} · {failed} failed")
+        } else if untrusted > 0 {
+            format!(" · mcp {connected}/{total} · {untrusted} needs trust")
+        } else {
+            format!(" · mcp {connected}/{total}")
+        };
+        let color = if failed > 0 || untrusted > 0 {
+            theme::p().warning
+        } else if connected > 0 {
+            theme::p().success
+        } else {
+            theme::p().faint
+        };
+        let offset: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+        let width = label.chars().count() as u16;
+        let x = area.x.saturating_add(offset as u16);
+        if x.saturating_add(width) <= area.x.saturating_add(area.width) {
+            mcp_hit = Some(Rect::new(x, area.y, width, 1));
+            triggers.push((spans.len(), StatusHitKind::McpServers));
+            spans.push(Span::styled(label, Style::default().fg(color)));
+        }
+    }
+
     if let Some(speed) = tab.metrics.last_tokens_per_sec {
         spans.push(Span::styled(
             format!(" {speed:.1} tok/s"),
@@ -130,6 +161,7 @@ pub(super) fn render_statusline(frame: &mut Frame<'_>, app: &mut AppState, area:
 
     app.runs_hits = runs_hits;
     app.web_server_hit = web_server_hit;
+    app.mcp_hit = mcp_hit;
     let hovered_status = app.hovered_status;
     let spans: Vec<Span<'static>> = spans
         .into_iter()

@@ -48,7 +48,7 @@ BUILD_TARGET := $(if $(target),$(target),$(HOST_TARGET))
 .DEFAULT_GOAL := help
 .SILENT:
 
-.PHONY: build build-debug build-web check ci clean clean-dist fmt fmt-check format help \
+.PHONY: build build-debug build-web check ci clean clean-dist dev fmt fmt-check format help \
 	install lint package run run-web serve test verify watch sync-models models-check
 
 # =============================================================================
@@ -83,9 +83,12 @@ run-web: build-web ## Build the web bundle and run meerai with web enabled (pass
 serve: build-web ## Build the web bundle and start the browser UI server (pass flags via ARGS="...")
 	cargo run -p $(BIN_PKG) --features web -- serve $(ARGS)
 
-watch: ## Watch source changes and rerun meerai (requires cargo-watch)
-	@command -v cargo-watch >/dev/null 2>&1 || { echo "Install cargo-watch first: cargo install cargo-watch"; exit 1; }
-	cargo watch -x "run -p $(BIN_PKG) -- $(ARGS)"
+watch: ## Watch source changes and rerun meerai (requires watchexec)
+	@command -v watchexec >/dev/null 2>&1 || { echo "Install watchexec first: cargo install watchexec-cli --locked"; exit 1; }
+	watchexec --exts rs,toml,yml --ignore target --ignore dist cargo run -p $(BIN_PKG) -- $(ARGS)
+
+dev: ## Watch, rebuild, and restart `meerai serve` only after a green build (requires watchexec)
+	python3 scripts/dev.py $(DEV_ARGS)
 
 fmt: ## Format all workspace Rust crates
 	cargo fmt --all

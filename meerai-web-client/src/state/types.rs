@@ -14,10 +14,11 @@ pub enum ConnectionState {
     Resyncing,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventEffect {
     None,
     Resync,
+    ReopenWorkspace { session_id: String, path: String },
 }
 
 #[derive(Clone, Debug)]
@@ -165,6 +166,9 @@ pub enum ActiveModal {
         error: Option<String>,
     },
     Help,
+    McpServers {
+        selected: usize,
+    },
     SubagentOverlay {
         entry_id: String,
         name: Option<String>,

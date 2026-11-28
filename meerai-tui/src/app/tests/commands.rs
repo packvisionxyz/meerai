@@ -735,3 +735,84 @@ fn host_action_commands_queue_and_context_is_local() {
         Some(PendingSessionAction::LoadPacks)
     ));
 }
+
+#[test]
+fn mcp_command_opens_the_panel_and_the_panel_keys_dispatch_host_actions() {
+    let (mut app, _rx, _secrets) = test_app();
+
+    type_text(&mut app, "/mcp");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(
+        matches!(app.modal, Some(ActiveModal::McpServers { .. })),
+        "bare /mcp must open the servers panel"
+    );
+
+    app.handle_key_event(key(KeyCode::Char('r')));
+    let actions = app.take_pending_session_actions();
+    assert!(
+        matches!(
+            actions.first(),
+            Some(PendingSessionAction::HostAction {
+                action: meerai_host::HostAction::McpReload,
+                ..
+            })
+        ),
+        "r in the panel must queue a reload, not an unknown-command error"
+    );
+    assert!(!app.tab().transcript.iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::Error { text, .. } if text.contains("Unknown command")
+    )));
+
+    app.mcp_servers = vec![crate::app::McpServerView {
+        name: "dbx".to_string(),
+        kind: "stdio".to_string(),
+        status: "needs trust".to_string(),
+        tools: Vec::new(),
+        error: Some("run /mcp trust".to_string()),
+    }];
+    app.modal = Some(ActiveModal::McpServers { selected: 0 });
+    app.handle_key_event(key(KeyCode::Char('t')));
+    let actions = app.take_pending_session_actions();
+    assert!(
+        matches!(
+            actions.first(),
+            Some(PendingSessionAction::HostAction {
+                action: meerai_host::HostAction::McpTrustProject,
+                ..
+            })
+        ),
+        "t in the panel must queue a trust action"
+    );
+}
+
+#[test]
+fn t_in_normal_mode_toggles_the_visible_thought_block() {
+    let (mut app, _rx, _secrets) = test_app();
+    app.mode = InputMode::Normal;
+    app.tab_mut().transcript.push(TranscriptEntry::Assistant {
+        text: "answer".to_string(),
+        reasoning: "thinking".to_string(),
+        reasoning_expanded: false,
+        streaming: false,
+    });
+    let index = app.tab().transcript.len() - 1;
+
+    app.handle_key_event(key(KeyCode::Char('t')));
+    assert!(matches!(
+        app.tab().transcript.get(index),
+        Some(TranscriptEntry::Assistant {
+            reasoning_expanded: true,
+            ..
+        })
+    ));
+
+    app.handle_key_event(key(KeyCode::Char('t')));
+    assert!(matches!(
+        app.tab().transcript.get(index),
+        Some(TranscriptEntry::Assistant {
+            reasoning_expanded: false,
+            ..
+        })
+    ));
+}

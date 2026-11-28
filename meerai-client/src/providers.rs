@@ -380,6 +380,12 @@ impl ProviderCatalog {
         &self.providers
     }
 
+    pub fn provider_or_synthesized(&self, provider_id: &str) -> ProviderInfo {
+        self.provider(provider_id)
+            .cloned()
+            .unwrap_or_else(|| synthesize_provider(provider_id))
+    }
+
     pub fn models(&self) -> &[ModelInfo] {
         &self.models
     }
@@ -576,10 +582,18 @@ impl RuntimeProviderState {
     }
 
     pub fn effective_base_url(&self, provider: &ProviderInfo) -> Option<String> {
+        self.effective_base_url_with_plan(provider, self.plan_usage)
+    }
+
+    pub fn effective_base_url_with_plan(
+        &self,
+        provider: &ProviderInfo,
+        plan_usage: bool,
+    ) -> Option<String> {
         if let Some(url) = self.base_urls.get(&provider.id) {
             return Some(url.clone());
         }
-        if self.plan_usage && provider.id == "openai" {
+        if plan_usage && provider.id == "openai" {
             // genai adds `prompt_cache_options` for gpt-6 models whenever the endpoint string
             // matches `https://api.openai.com`; the plan route rejects that field. The explicit
             // default port reaches the same endpoint and bypasses that string check.

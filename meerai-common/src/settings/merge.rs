@@ -68,6 +68,11 @@ pub fn merge_project_settings(
                 .to_string(),
         );
     }
+    if project.mcp.is_some() {
+        warnings.push(
+            "ignoring project mcp settings: only the user config controls mcp trust".to_string(),
+        );
+    }
     if project.routing.is_some() {
         warnings.push(
             "ignoring project routing: only the user config controls model routes".to_string(),

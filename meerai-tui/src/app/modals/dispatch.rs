@@ -24,6 +24,7 @@ impl AppState {
             ActiveModal::DiffView { .. }
             | ActiveModal::Search { .. }
             | ActiveModal::Runs { .. }
+            | ActiveModal::McpServers { .. }
             | ActiveModal::RunDetail { .. }
             | ActiveModal::RewindMenu { .. }
             | ActiveModal::SessionSelect { .. }
@@ -364,7 +365,12 @@ impl AppState {
             (ActiveModal::Runs { kind, .. }, ModalHitKind::ListItem(index)) => {
                 self.open_run_detail(kind, index);
             }
-            (ActiveModal::Runs { .. } | ActiveModal::RunDetail { .. }, ModalHitKind::Close) => {
+            (
+                ActiveModal::Runs { .. }
+                | ActiveModal::McpServers { .. }
+                | ActiveModal::RunDetail { .. },
+                ModalHitKind::Close,
+            ) => {
                 self.modal = None;
             }
             (ActiveModal::Terminal { running, .. }, ModalHitKind::Close) => {

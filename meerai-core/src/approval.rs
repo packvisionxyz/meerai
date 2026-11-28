@@ -10,6 +10,7 @@ pub enum PermissionAction {
     #[serde(rename = "webfetch")]
     WebFetch,
     ExternalDirectory,
+    Mcp,
 }
 
 impl PermissionAction {
@@ -21,6 +22,7 @@ impl PermissionAction {
             Self::Subagent => "subagent",
             Self::WebFetch => "webfetch",
             Self::ExternalDirectory => "external_directory",
+            Self::Mcp => "mcp",
         }
     }
 
@@ -32,6 +34,7 @@ impl PermissionAction {
             "subagent" => Some(Self::Subagent),
             "webfetch" => Some(Self::WebFetch),
             "external_directory" => Some(Self::ExternalDirectory),
+            "mcp" => Some(Self::Mcp),
             _ => None,
         }
     }
